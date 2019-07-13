@@ -63,16 +63,16 @@ defmodule Xqlite.Config do
   end
 
   @spec get_batch_size(opts()) :: size()
-  def get_batch_size(opts \\ []), do: get(opts, :batch_size)
+  def get_batch_size(opts), do: get(opts, :batch_size)
 
   @spec get_db_name(opts()) :: db_name()
-  def get_db_name(opts \\ []), do: get(opts, :db_name)
+  def get_db_name(opts), do: get(opts, :db_name)
 
   @spec get_exec_timeout(opts()) :: timeout()
-  def get_exec_timeout(opts \\ []), do: get(opts, :exec_timeout)
+  def get_exec_timeout(opts), do: get(opts, :exec_timeout)
 
   @spec get_genserver_timeout(opts()) :: timeout()
-  def get_genserver_timeout(opts \\ []), do: get(opts, :genserver_timeout)
+  def get_genserver_timeout(opts), do: get(opts, :genserver_timeout)
 
   @spec put(opts(), key(), value()) :: opts()
   def put(opts, key, value) when is_opts(opts) and is_key(key) and is_value(value) do
