@@ -4,6 +4,7 @@ defmodule XqliteConfigTest do
 
   alias Xqlite.Config, as: C
 
+  @fields Map.keys(C.default()) -- [:__struct__]
   @valid_batch_size 2000
   @valid_db_name ":memory:"
   @valid_exec_timeout :infinity
@@ -52,7 +53,7 @@ defmodule XqliteConfigTest do
   end
 
   describe "fetch options" do
-    [:batch_size, :db_name, :exec_timeout, :genserver_timeout]
+    @fields
     |> Enum.each(fn(name) ->
       test name do
         expected = unquote(Module.get_attribute(__MODULE__, String.to_atom("valid_#{name}")))
@@ -63,7 +64,7 @@ defmodule XqliteConfigTest do
   end
 
   describe "change options" do
-    [:batch_size, :db_name, :exec_timeout, :genserver_timeout]
+    @fields
     |> Enum.each(fn(name) ->
       test name, %{opts: opts} do
         field_name = unquote(name)
