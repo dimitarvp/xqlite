@@ -26,13 +26,21 @@ defmodule Xqlite.Config do
   @type opts :: keyword()
   @type key :: atom()
   @type value :: db_name() | size() | timeout()
-  @type t :: %__MODULE__{batch_size: size(), db_name: text(), exec_timeout: timeout(), genserver_timeout: timeout()}
+  @type t :: %__MODULE__{
+          batch_size: size(),
+          db_name: text(),
+          exec_timeout: timeout(),
+          genserver_timeout: timeout()
+        }
 
   defguard is_db_name(x) when is_list(x) or is_binary(x)
   defguard is_timeout(x) when (is_atom(x) and x == :infinity) or (is_integer(x) and x >= 0)
   defguard is_size(x) when is_integer(x) and x > 0
   defguard is_opts(x) when is_list(x)
-  defguard is_key(x) when is_atom(x) and x in ~w(db_name batch_size exec_timeout genserver_timeout)a
+
+  defguard is_key(x)
+           when is_atom(x) and x in ~w(db_name batch_size exec_timeout genserver_timeout)a
+
   defguard is_value(x) when is_db_name(x) or is_timeout(x) or is_size(x)
 
   @spec default_batch_size() :: size()
@@ -47,12 +55,10 @@ defmodule Xqlite.Config do
   @spec default_genserver_timeout() :: timeout()
   def default_genserver_timeout(), do: @default_genserver_timeout
 
-  defstruct [
-    batch_size: @default_batch_size,
-    db_name: @default_db_name,
-    exec_timeout: @default_exec_timeout,
-    genserver_timeout: @default_genserver_timeout
-  ]
+  defstruct batch_size: @default_batch_size,
+            db_name: @default_db_name,
+            exec_timeout: @default_exec_timeout,
+            genserver_timeout: @default_genserver_timeout
 
   @spec default() :: t()
   def default(), do: %__MODULE__{}
