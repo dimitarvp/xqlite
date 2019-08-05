@@ -54,7 +54,7 @@ defmodule XqliteConfigTest do
 
   describe "fetch options" do
     @fields
-    |> Enum.each(fn(name) ->
+    |> Enum.each(fn name ->
       test name do
         expected = unquote(Module.get_attribute(__MODULE__, String.to_atom("valid_#{name}")))
         assert C.get(@valid_opts, unquote(name)) == expected
@@ -65,7 +65,7 @@ defmodule XqliteConfigTest do
 
   describe "change options" do
     @fields
-    |> Enum.each(fn(name) ->
+    |> Enum.each(fn name ->
       test name, %{opts: opts} do
         field_name = unquote(name)
         expected = unquote(Module.get_attribute(__MODULE__, String.to_atom("another_#{name}")))
