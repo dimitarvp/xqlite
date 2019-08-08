@@ -47,7 +47,7 @@ defmodule Xqlite.MixProject do
       {:decimal, "~> 1.8"},
       {:ecto_sql, "~> 3.1"},
       {:jason, "~> 1.1", optional: true},
-      {:sqlitex, "~> 1.7"},
+      {:sqlitex, github: "elixir-sqlite/sqlitex", ref: "9c94469b862a43b7a36e31d1d295ff3d6f320491"},
 
       # dev / test dependencies.
 
