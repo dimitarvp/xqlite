@@ -6,5 +6,12 @@ defmodule Xqlite do
   TODO: Add something more useful than a summary.
   """
 
-  @type connection :: {:connection, reference(), reference()}
+  @type conn :: {:connection, reference(), reference()}
+
+  defguard is_conn(x)
+           when is_tuple(x) and elem(x, 0) == :connection and is_reference(elem(x, 1)) and
+                  (is_reference(elem(x, 2)) or is_binary(elem(x, 2)))
+
+  def boolean(0), do: false
+  def boolean(1), do: true
 end
