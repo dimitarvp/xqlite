@@ -5,7 +5,7 @@ defmodule XqlitePragmaTest do
   alias Xqlite.Pragma, as: P
 
   setup_all do
-    {:ok, db} = Sqlitex.open(":memory:")
+    {:ok, db} = Sqlitex.open(Xqlite.unnamed_memory_db())
     {:ok, db: db}
   end
 

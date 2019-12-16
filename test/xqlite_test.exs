@@ -3,7 +3,7 @@ defmodule XqliteTest do
   doctest Xqlite
 
   test "open and close" do
-    {:ok, db} = Xqlite.open(":memory:")
+    {:ok, db} = Xqlite.open(Xqlite.unnamed_memory_db())
     :ok = Xqlite.close(db)
   end
 end
