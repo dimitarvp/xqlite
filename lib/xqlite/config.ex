@@ -60,7 +60,7 @@ defmodule Xqlite.Config do
             exec_timeout: @default_exec_timeout,
             genserver_timeout: @default_genserver_timeout
 
-  @spec default() :: t()
+  @spec default() :: keyword()
   def default(), do: %__MODULE__{} |> Map.to_list()
 
   @spec get(opts(), key()) :: value()
