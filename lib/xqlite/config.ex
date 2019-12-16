@@ -61,11 +61,11 @@ defmodule Xqlite.Config do
             genserver_timeout: @default_genserver_timeout
 
   @spec default() :: t()
-  def default(), do: %__MODULE__{}
+  def default(), do: %__MODULE__{} |> Map.to_list()
 
   @spec get(opts(), key()) :: value()
   def get(opts, key) when is_opts(opts) and is_key(key) do
-    Keyword.get(opts, key, Map.get(default(), key))
+    Keyword.get(opts, key, Keyword.get(default(), key))
   end
 
   @spec get_batch_size(opts()) :: size()
