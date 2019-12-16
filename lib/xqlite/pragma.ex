@@ -132,7 +132,7 @@ defmodule Xqlite.Pragma do
   )a
 
   defguard is_pragma_key(x) when is_binary(x) or is_atom(x)
-  defguard is_pragma_value(x) when is_binary(x) or is_integer(x)
+  defguard is_pragma_value(x) when is_binary(x) or is_atom(x) or is_integer(x) or is_boolean(x)
 
   @doc ~S"""
   Returns all pragma keys except those that are deprecated, or are used with
