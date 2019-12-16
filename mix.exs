@@ -26,7 +26,10 @@ defmodule Xqlite.MixProject do
         "coveralls.post": :test,
         "coveralls.html": :test,
         "coveralls.circle": :test
-      ]
+      ],
+
+      # type checking
+      dialyzer: dialyzer(Mix.env())
     ]
   end
 
@@ -46,8 +49,10 @@ defmodule Xqlite.MixProject do
       {:db_connection, "~> 2.0"},
       {:decimal, "~> 1.8"},
       {:ecto_sql, "~> 3.1"},
+      {:floki, "~> 0.23"},
       {:jason, "~> 1.1", optional: true},
-      {:sqlitex, github: "elixir-sqlite/sqlitex", ref: "9c94469b862a43b7a36e31d1d295ff3d6f320491"},
+      {:sqlitex,
+       github: "elixir-sqlite/sqlitex", ref: "9c94469b862a43b7a36e31d1d295ff3d6f320491"},
 
       # dev / test dependencies.
 
@@ -75,5 +80,9 @@ defmodule Xqlite.MixProject do
         "Hexdocs" => "https://hexdocs.pm/xqlite"
       }
     ]
+  end
+
+  defp dialyzer(_) do
+    [plt_add_apps: [:jason]]
   end
 end
