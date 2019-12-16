@@ -8,7 +8,7 @@ defmodule Xqlite.Config do
   """
 
   # Default is an anonymous in-memory database.
-  @default_db_name ":memory:"
+  @default_db_name Xqlite.unnamed_memory_db()
 
   # Default timeout for any Sqlite3 command, including opening and closing.
   @default_exec_timeout 5_000
