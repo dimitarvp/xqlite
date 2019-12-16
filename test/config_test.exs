@@ -13,7 +13,7 @@ defmodule XqliteConfigTest do
     batch_size: @valid_batch_size,
     db_name: @valid_db_name,
     exec_timeout: @valid_exec_timeout,
-    genserver_timeoout: @valid_genserver_timeout
+    genserver_timeout: @valid_genserver_timeout
   ]
   @another_batch_size 1000
   @another_db_name "/tmp/01DFKHMKX0EDTC2AP9AEWNX0JM.db"
