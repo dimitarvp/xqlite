@@ -52,7 +52,7 @@ defmodule Xqlite.MixProject do
       {:floki, "~> 0.23"},
       {:jason, "~> 1.1", optional: true},
       {:sqlitex,
-       github: "elixir-sqlite/sqlitex", ref: "9c94469b862a43b7a36e31d1d295ff3d6f320491"},
+       github: "elixir-sqlite/sqlitex", ref: "1049a2c8cf88cd0e12e56f1f4cbed1bd4dc3283e"},
 
       # dev / test dependencies.
 
