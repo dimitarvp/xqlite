@@ -4,7 +4,7 @@ defmodule XqliteConfigTest do
 
   alias Xqlite.Config, as: C
 
-  @fields Map.keys(C.default()) -- [:__struct__]
+  @fields Keyword.keys(C.default()) -- [:__struct__]
   @valid_batch_size 2000
   @valid_db_name ":memory:"
   @valid_exec_timeout :infinity
@@ -45,10 +45,6 @@ defmodule XqliteConfigTest do
     test "default GenServer timeout is valid Erlang timeout" do
       t = C.default_exec_timeout()
       assert (is_atom(t) and t == :infinity) or (is_integer(t) and t >= 0)
-    end
-
-    test "default configuration is of the right type" do
-      assert match?(%C{}, C.default())
     end
   end
 
