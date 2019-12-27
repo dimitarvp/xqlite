@@ -5,6 +5,10 @@ defmodule Xqlite.Pragma do
 
   import Xqlite, only: [int2bool: 1, is_conn: 1]
 
+  @doc """
+  Given the contents of the `https://www.sqlite.org/pragma.html` URL passed to this
+  function, retrieve a list of supported sqlite3 pragma names.
+  """
   @spec list_of_pragmas(String.t()) :: [String.t()]
   def list_of_pragmas(html) when is_binary(html) do
     matches =
