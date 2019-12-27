@@ -9,8 +9,8 @@ defmodule Xqlite.Pragma do
   Given the contents of the `https://www.sqlite.org/pragma.html` URL passed to this
   function, retrieve a list of supported sqlite3 pragma names.
   """
-  @spec list_of_pragmas(String.t()) :: [String.t()]
-  def list_of_pragmas(html) when is_binary(html) do
+  @spec extract_supported_pragmas(String.t()) :: [String.t()]
+  def extract_supported_pragmas(html) when is_binary(html) do
     matches =
       html
       |> Floki.parse()
