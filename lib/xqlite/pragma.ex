@@ -48,7 +48,7 @@ defmodule Xqlite.Pragma do
   @type name :: String.t()
   @type pragma_key :: String.t() | atom()
   @type pragma_value :: String.t() | integer()
-  @type pragma_result :: term()
+  @type pragma_result :: any()
   @type auto_vacuum_key :: 1 | 2 | 3
   @type auto_vacuum_value :: :none | :full | :incremental
   @type secure_delete_key :: 0 | 1 | 2
