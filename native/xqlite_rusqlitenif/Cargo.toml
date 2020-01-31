@@ -1,0 +1,14 @@
+[package]
+name = "xqlite_rusqlitenif"
+version = "0.1.0"
+authors = ["Dimitar Panayotov"]
+edition = "2018"
+
+[lib]
+name = "xqlite_rusqlitenif"
+path = "src/lib.rs"
+crate-type = ["dylib"]
+
+[dependencies]
+rustler = "0.21.0"
+lazy_static = "1.0"
