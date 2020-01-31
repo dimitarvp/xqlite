@@ -13,6 +13,8 @@ defmodule Xqlite.MixProject do
       start_permanent: Mix.env() == :prod,
       docs: docs(),
       deps: deps(),
+      compilers: [:rustler] ++ Mix.compilers(),
+      rustler_crates: rustler_crates(),
 
       # hex
       description: description(),
@@ -70,6 +72,8 @@ defmodule Xqlite.MixProject do
       main: "readme",
       extras: ["README.md"]
     ]
+
+  defp rustler_crates(), do: [xqlite_rusqlitenif: [mode: :release]]
 
   defp description(), do: "SQLite3 library and an adapter for Ecto 3.1+ in one package"
 

@@ -24,3 +24,6 @@ xqlite-*.tar
 
 # Local tool versions should not be enforced on the users of the app.
 .tool-versions
+
+# Native compiled artifacts.
+/priv/native
