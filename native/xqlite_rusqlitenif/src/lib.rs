@@ -22,7 +22,7 @@ rustler::rustler_export_nifs! {
     [
         ("add", 2, add),
         ("open", 2, open, SchedulerFlags::DirtyIo),
-        ("close", 2, close, SchedulerFlags::DirtyIo)
+        ("close", 1, close, SchedulerFlags::DirtyIo)
     ],
     Some(on_load)
 }
