@@ -28,7 +28,7 @@ rustler::rustler_export_nifs! {
 }
 
 struct XqliteConnection {
-    conn: Mutex<rusqlite::Connection>
+    conn: Mutex<Option<rusqlite::Connection>>
 }
 
 fn on_load(env: Env, _info: Term) -> bool {
@@ -40,10 +40,10 @@ fn add<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
     let num1: i64 = args[0].decode()?;
     let num2: i64 = args[1].decode()?;
 
-    Ok((atoms::ok(), num1 + num2).encode(env))
+    Ok((num1 + num2).encode(env))
 }
 
-fn open<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
+fn open<'a>(env: Env<'a>, _args: &[Term<'a>]) -> Result<Term<'a>, Error> {
     // let db_name: String = args[0].decode()?;
     // let opts: Vec<(Atom, Term)> = args[1].decode()?;
 
@@ -55,13 +55,15 @@ fn open<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
 
     match rusqlite::Connection::open_in_memory() {
         Ok(conn) => {
-            let mutex = Mutex::new(conn);
+            let mutex = Mutex::new(Some(conn));
             let xconn = XqliteConnection { conn: mutex };
             let wrapper = ResourceArc::new(xconn);
-            Ok((atoms::ok(), wrapper).encode(env))
+            let result: Result<_, Term<'a>> = Ok(wrapper);
+            Ok(result.encode(env))
         },
         Err(err) => {
-            Ok((atoms::error(), format!("{}", err)).encode(env))
+            let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
+            Ok(err.encode(env))
         },
     }
 }
@@ -69,20 +71,27 @@ fn open<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
 fn close<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
     match args[0].decode::<ResourceArc<XqliteConnection>>() {
         Ok(wrapper) => {
-            let conn = wrapper.conn.lock().unwrap();
-            match conn.close() {
-                Ok(()) => {
-                    Ok(atoms::ok().encode(env))
-                },
-                Err((conn, err)) => {
-                    Ok((atoms::error(), wrapper).encode(env))
+            let mut mconn = wrapper.conn.lock().unwrap();
+            if !mconn.is_none() {
+                let conn = mconn.take().unwrap(); // Take out the connection so it becomes None in the resource as it is being closed early
+                match conn.close() {
+                    Ok(()) => {
+                        Ok(atoms::ok().encode(env))
+                    },
+                    Err((conn, err)) => {
+                        // Huh, it failed, stuff the connection back in I guess?
+                        *mconn = Some(conn);
+                        let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
+                        Ok(err.encode(env))
+                    }
                 }
+            } else {
+                let err: Result<Term<'a>, _> = Err("Already closed");
+                Ok(err.encode(env))
             }
         }
         Err(err) => {
-            unsafe {
-                Ok((atoms::error(), err).encode(env))
-            }
+            Err(err)
         }
     }
 }
