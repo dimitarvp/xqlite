@@ -20,7 +20,6 @@ mod atoms {
 rustler::rustler_export_nifs! {
     "Elixir.Xqlite.RusqliteNif",
     [
-        ("add", 2, add),
         ("open", 2, open, SchedulerFlags::DirtyIo),
         ("close", 1, close, SchedulerFlags::DirtyIo)
     ],
@@ -34,13 +33,6 @@ struct XqliteConnection {
 fn on_load(env: Env, _info: Term) -> bool {
     resource_struct_init!(XqliteConnection, env);
     true
-}
-
-fn add<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
-    let num1: i64 = args[0].decode()?;
-    let num2: i64 = args[1].decode()?;
-
-    Ok((num1 + num2).encode(env))
 }
 
 fn open<'a>(env: Env<'a>, _args: &[Term<'a>]) -> Result<Term<'a>, Error> {
