@@ -64,13 +64,15 @@ fn close<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
         Ok(wrapper) => {
             let mut mconn = wrapper.conn.lock().unwrap();
             if !mconn.is_none() {
-                let conn = mconn.take().unwrap(); // Take out the connection so it becomes None in the resource as it is being closed early
+                // Take out the connection so it becomes None in the resource
+                // as it is being closed early
+                let conn = mconn.take().unwrap();
                 match conn.close() {
                     Ok(()) => {
                         Ok(atoms::ok().encode(env))
                     },
                     Err((conn, err)) => {
-                        // Huh, it failed, stuff the connection back in I guess?
+                        // closing failed, put the connection back in the return value.
                         *mconn = Some(conn);
                         let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
                         Ok(err.encode(env))
