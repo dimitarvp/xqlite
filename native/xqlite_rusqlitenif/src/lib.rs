@@ -10,7 +10,6 @@ mod atoms {
     rustler_atoms! {
         atom ok;
         atom error;
-        atom badarg;
         //atom exec_timeout;
         //atom __true__ = "true";
         //atom __false__ = "false";
