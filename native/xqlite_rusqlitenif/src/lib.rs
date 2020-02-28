@@ -1,9 +1,10 @@
-#[macro_use] extern crate rustler;
+#[macro_use]
+extern crate rustler;
 
-use std::sync::Mutex;
-use rustler::{Encoder, Env, Error, Term};
-use rustler::schedule::SchedulerFlags;
 use rustler::resource::ResourceArc;
+use rustler::schedule::SchedulerFlags;
+use rustler::{Encoder, Env, Error, Term};
+use std::sync::Mutex;
 //use rusqlite::{params, Connection, Result};
 
 mod atoms {
@@ -26,7 +27,7 @@ rustler::rustler_export_nifs! {
 }
 
 struct XqliteConnection {
-    conn: Mutex<Option<rusqlite::Connection>>
+    conn: Mutex<Option<rusqlite::Connection>>,
 }
 
 fn on_load(env: Env, _info: Term) -> bool {
@@ -51,11 +52,11 @@ fn open<'a>(env: Env<'a>, _args: &[Term<'a>]) -> Result<Term<'a>, Error> {
             let wrapper = ResourceArc::new(xconn);
             let result: Result<_, Term<'a>> = Ok(wrapper);
             Ok(result.encode(env))
-        },
+        }
         Err(err) => {
             let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
             Ok(err.encode(env))
-        },
+        }
     }
 }
 
@@ -68,9 +69,7 @@ fn close<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
                 // as it is being closed early
                 let conn = mconn.take().unwrap();
                 match conn.close() {
-                    Ok(()) => {
-                        Ok(atoms::ok().encode(env))
-                    },
+                    Ok(()) => Ok(atoms::ok().encode(env)),
                     Err((conn, err)) => {
                         // closing failed, put the connection back in the return value.
                         *mconn = Some(conn);
@@ -83,8 +82,6 @@ fn close<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
                 Ok(err.encode(env))
             }
         }
-        Err(err) => {
-            Err(err)
-        }
+        Err(err) => Err(err),
     }
 }
