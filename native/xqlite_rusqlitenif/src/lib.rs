@@ -6,12 +6,13 @@ use rustler::schedule::SchedulerFlags;
 use rustler::{Encoder, Env, Error, Term};
 use std::sync::Mutex;
 use std::path::Path;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags};
 
 mod atoms {
     rustler_atoms! {
         atom ok;
         atom error;
+        atom already_closed;
         //atom exec_timeout;
         //atom __true__ = "true";
         //atom __false__ = "false";
@@ -22,7 +23,8 @@ rustler::rustler_export_nifs! {
     "Elixir.Xqlite.RusqliteNif",
     [
         ("open", 2, open, SchedulerFlags::DirtyIo),
-        ("close", 1, close, SchedulerFlags::DirtyIo)
+        ("close", 1, close, SchedulerFlags::DirtyIo),
+        ("exec", 2, exec, SchedulerFlags::DirtyIo),
     ],
     Some(on_load)
 }
@@ -81,10 +83,28 @@ fn close<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
                     }
                 }
             } else {
-                let err: Result<Term<'a>, _> = Err("Already closed");
-                Ok(err.encode(env))
+                Ok((atoms::error(), atoms::already_closed()).encode(env))
             }
         }
         Err(err) => Err(err),
+    }
+}
+
+fn exec<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
+    let wrapper = args[0].decode::<ResourceArc<XqliteConnection>>()?;
+    let sql = args[1].decode::<String>()?;
+
+    match *wrapper.conn.lock().unwrap() {
+        Some(conn) => {
+            match conn.execute(&sql, params![]) {
+                Ok(affected) => {
+                    Ok((atoms::ok(), ResourceArc::new(affected)).encode(env))
+                }
+                Err(err) => Err(err)
+            }
+        }
+        None => {
+            Ok((atoms::error(), atoms::already_closed()).encode(env))
+        }
     }
 }
