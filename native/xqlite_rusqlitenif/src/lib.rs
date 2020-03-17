@@ -100,7 +100,10 @@ fn exec<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
                 Ok(affected) => {
                     Ok((atoms::ok(), ResourceArc::new(affected)).encode(env))
                 }
-                Err(err) => Err(err)
+                Err(err) => {
+                    let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
+                    Ok(err.encode(env))
+                }
             }
         }
         None => {
