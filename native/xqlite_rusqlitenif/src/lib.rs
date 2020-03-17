@@ -5,7 +5,8 @@ use rustler::resource::ResourceArc;
 use rustler::schedule::SchedulerFlags;
 use rustler::{Encoder, Env, Error, Term};
 use std::sync::Mutex;
-//use rusqlite::{params, Connection, Result};
+use std::path::Path;
+use rusqlite::{Connection, OpenFlags};
 
 mod atoms {
     rustler_atoms! {
@@ -27,7 +28,7 @@ rustler::rustler_export_nifs! {
 }
 
 struct XqliteConnection {
-    conn: Mutex<Option<rusqlite::Connection>>,
+    conn: Mutex<Option<Connection>>,
 }
 
 fn on_load(env: Env, _info: Term) -> bool {
@@ -35,8 +36,9 @@ fn on_load(env: Env, _info: Term) -> bool {
     true
 }
 
-fn open<'a>(env: Env<'a>, _args: &[Term<'a>]) -> Result<Term<'a>, Error> {
-    // let db_name: String = args[0].decode()?;
+fn open<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
+    let db_name: String = args[0].decode()?;
+    let path = Path::new(&db_name);
     // let opts: Vec<(Atom, Term)> = args[1].decode()?;
 
     // for (k, v) in opts.iter() {
@@ -45,7 +47,8 @@ fn open<'a>(env: Env<'a>, _args: &[Term<'a>]) -> Result<Term<'a>, Error> {
 
     // Ok((db_name, opts).encode(env))
 
-    match rusqlite::Connection::open_in_memory() {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+    match Connection::open_with_flags(path, flags) {
         Ok(conn) => {
             let mutex = Mutex::new(Some(conn));
             let xconn = XqliteConnection { conn: mutex };
