@@ -1,12 +1,12 @@
 #[macro_use]
 extern crate rustler;
 
+use rusqlite::{params, Connection, OpenFlags};
 use rustler::resource::ResourceArc;
 use rustler::schedule::SchedulerFlags;
 use rustler::{Encoder, Env, Error, Term};
-use std::sync::Mutex;
 use std::path::Path;
-use rusqlite::{params, Connection, OpenFlags};
+use std::sync::Mutex;
 
 mod atoms {
     rustler_atoms! {
@@ -49,7 +49,9 @@ fn open<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
 
     // Ok((db_name, opts).encode(env))
 
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
     match Connection::open_with_flags(path, flags) {
         Ok(conn) => {
             let mutex = Mutex::new(Some(conn));
@@ -95,19 +97,13 @@ fn exec<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
     let sql = args[1].decode::<String>()?;
 
     match *wrapper.conn.lock().unwrap() {
-        Some(conn) => {
-            match conn.execute(&sql, params![]) {
-                Ok(affected) => {
-                    Ok((atoms::ok(), ResourceArc::new(affected)).encode(env))
-                }
-                Err(err) => {
-                    let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
-                    Ok(err.encode(env))
-                }
+        Some(conn) => match conn.execute(&sql, params![]) {
+            Ok(affected) => Ok((atoms::ok(), ResourceArc::new(affected)).encode(env)),
+            Err(err) => {
+                let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
+                Ok(err.encode(env))
             }
-        }
-        None => {
-            Ok((atoms::error(), atoms::already_closed()).encode(env))
-        }
+        },
+        None => Ok((atoms::error(), atoms::already_closed()).encode(env)),
     }
 }
