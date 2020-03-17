@@ -96,9 +96,9 @@ fn exec<'a>(env: Env<'a>, args: &[Term<'a>]) -> Result<Term<'a>, Error> {
     let wrapper = args[0].decode::<ResourceArc<XqliteConnection>>()?;
     let sql = args[1].decode::<String>()?;
 
-    match *wrapper.conn.lock().unwrap() {
+    match &*wrapper.conn.lock().unwrap() {
         Some(conn) => match conn.execute(&sql, params![]) {
-            Ok(affected) => Ok((atoms::ok(), ResourceArc::new(affected)).encode(env)),
+            Ok(affected) => Ok((atoms::ok(), affected).encode(env)),
             Err(err) => {
                 let err: Result<Term<'a>, _> = Err(format!("{:?}", err));
                 Ok(err.encode(env))
