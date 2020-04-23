@@ -49,11 +49,7 @@ defmodule Xqlite.MixProject do
     [
       # dependencies that are always included.
 
-      {:db_connection, "~> 2.0"},
-      {:decimal, "~> 1.8"},
-      {:ecto_sql, "~> 3.1"},
       {:floki, "~> 0.23"},
-      {:jason, "~> 1.1", optional: true},
       {:rustler, "~> 0.22-rc"},
 
       # dev / test dependencies.
@@ -74,7 +70,7 @@ defmodule Xqlite.MixProject do
 
   defp rustler_crates(), do: [xqlitenif: [mode: :release]]
 
-  defp description(), do: "SQLite3 library and an adapter for Ecto 3.1+ in one package"
+  defp description(), do: "SQLite DB library utilising the rusqlite Rust crate"
 
   defp package() do
     [
@@ -87,7 +83,7 @@ defmodule Xqlite.MixProject do
   end
 
   defp dialyzer(_) do
-    [plt_add_apps: [:jason]]
+    []
   end
 
   defp aliases do
