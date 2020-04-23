@@ -1,10 +1,16 @@
 use rusqlite::{params, Connection, OpenFlags};
 use rustler::resource::ResourceArc;
-use rustler::{atoms, Encoder, Env, Term};
+use rustler::{Encoder, Env, Term};
 use std::path::Path;
 use std::sync::Mutex;
 
-atoms!(already_closed, cannot_close, cannot_execute, error, ok);
+rustler::atoms! {
+    already_closed,
+    cannot_close,
+    cannot_execute,
+    error,
+    ok
+}
 
 struct XqliteConnection(Mutex<Option<Connection>>);
 
