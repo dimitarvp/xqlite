@@ -12,6 +12,7 @@ defmodule Xqlite.MixProject do
       name: @name,
       start_permanent: Mix.env() == :prod,
       docs: docs(),
+      aliases: aliases(),
       deps: deps(),
       compilers: [:rustler] ++ Mix.compilers(),
       rustler_crates: rustler_crates(),
@@ -87,5 +88,12 @@ defmodule Xqlite.MixProject do
 
   defp dialyzer(_) do
     [plt_add_apps: [:jason]]
+  end
+
+  defp aliases do
+    [
+      c: "compile",
+      f: ["format", "cmd cargo fmt --manifest-path native/xqlitenif/Cargo.toml"]
+    ]
   end
 end
