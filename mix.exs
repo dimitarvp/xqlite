@@ -2,13 +2,13 @@ defmodule Xqlite.MixProject do
   use Mix.Project
 
   @name "Xqlite"
-  @version "0.1.0"
+  @version "0.1.1"
 
   def project do
     [
       app: :xqlite,
       version: @version,
-      elixir: "~> 1.9",
+      elixir: "~> 1.7",
       name: @name,
       start_permanent: Mix.env() == :prod,
       docs: docs(),
