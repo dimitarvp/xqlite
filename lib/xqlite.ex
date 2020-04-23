@@ -8,11 +8,11 @@ defmodule Xqlite do
 
   # --- Types.
 
-  @type conn :: {:connection, reference(), reference()}
+  @type conn :: reference()
   @type opts :: keyword()
   @type db_name :: String.t()
-  @type open_result :: conn | {:error, any()}
-  @type close_result :: :ok | {:error, any()}
+  @type open_result :: {:ok, conn} | {:error, String.t()}
+  @type close_result :: :ok | {:error, :cannot_close, String.t()} | {:error, :already_closed}
 
   # --- Guards.
 
