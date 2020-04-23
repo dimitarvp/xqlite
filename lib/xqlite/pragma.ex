@@ -168,7 +168,7 @@ defmodule Xqlite.Pragma do
   @spec raw(Xqlite.conn(), pragma_key()) :: pragma_result()
   def raw(db, key)
       when is_conn(db) and is_pragma_key(key) do
-    Sqlitex.query!(db, "pragma #{key};")
+    # FIXME: Actually execute sqlite3 PRAGMA SQL command here.
   end
 
   @spec index_info(Xqlite.conn(), name(), name()) :: pragma_result()
