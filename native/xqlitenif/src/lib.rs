@@ -1,10 +1,10 @@
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags};
 use rustler::resource::ResourceArc;
 use rustler::{atoms, Encoder, Env, Term};
 use std::path::Path;
 use std::sync::Mutex;
 
-atoms!(ok, error, cannot_close, already_closed);
+atoms!(already_closed, cannot_close, cannot_execute, error, ok);
 
 struct XqliteConnection(Mutex<Option<Connection>>);
 
@@ -34,6 +34,22 @@ impl<'a> Encoder for CloseResult {
             CloseResult::Success => (ok()).encode(env),
             CloseResult::AlreadyClosed => (error(), already_closed()).encode(env),
             CloseResult::Failure(msg) => (error(), cannot_close(), msg).encode(env),
+        }
+    }
+}
+
+enum ExecResult {
+    Success(usize),
+    AlreadyClosed,
+    Failure(String),
+}
+
+impl<'a> Encoder for ExecResult {
+    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
+        match self {
+            ExecResult::Success(affected) => (ok(), affected).encode(env),
+            ExecResult::AlreadyClosed => (error(), already_closed()).encode(env),
+            ExecResult::Failure(msg) => (error(), cannot_execute(), msg).encode(env),
         }
     }
 }
@@ -86,4 +102,19 @@ fn close(arc: ResourceArc<XqliteConnection>) -> CloseResult {
     }
 }
 
-rustler::init!("Elixir.XqliteNIF", [open, close], load = on_load);
+#[rustler::nif(schedule = "DirtyIo")]
+fn exec(arc: ResourceArc<XqliteConnection>, sql: String) -> ExecResult {
+    let locked = arc.0.lock().unwrap();
+    match &*locked {
+        Some(conn) => match conn.execute(&sql, params![]) {
+            Ok(affected) => ExecResult::Success(affected),
+            Err(err) => {
+                let msg: String = format!("{:?}", err);
+                ExecResult::Failure(msg)
+            }
+        },
+        None => ExecResult::AlreadyClosed,
+    }
+}
+
+rustler::init!("Elixir.XqliteNIF", [open, close, exec], load = on_load);
