@@ -53,9 +53,7 @@ defmodule Xqlite.MixProject do
       {:ecto_sql, "~> 3.1"},
       {:floki, "~> 0.23"},
       {:jason, "~> 1.1", optional: true},
-      {:rustler, "~> 0.21"},
-      {:sqlitex,
-       github: "elixir-sqlite/sqlitex", ref: "1049a2c8cf88cd0e12e56f1f4cbed1bd4dc3283e"},
+      {:rustler, "~> 0.22-rc"},
 
       # dev / test dependencies.
 
@@ -73,7 +71,7 @@ defmodule Xqlite.MixProject do
       extras: ["README.md"]
     ]
 
-  defp rustler_crates(), do: [xqlite_rusqlitenif: [mode: :release]]
+  defp rustler_crates(), do: [xqlitenif: [mode: :release]]
 
   defp description(), do: "SQLite3 library and an adapter for Ecto 3.1+ in one package"
 
