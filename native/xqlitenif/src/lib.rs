@@ -25,7 +25,7 @@ impl<'a> Encoder for OpenResult {
 enum CloseResult {
     Success,
     AlreadyClosed,
-    Failure(String)
+    Failure(String),
 }
 
 impl<'a> Encoder for CloseResult {
