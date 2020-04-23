@@ -1,12 +1,12 @@
 use rusqlite::{Connection, OpenFlags};
 use rustler::resource::ResourceArc;
-use rustler::{atoms, Atom, Encoder, Env, Term};
+use rustler::{atoms, Encoder, Env, Term};
 use std::path::Path;
 use std::sync::Mutex;
 
 atoms!(ok, error, already_closed);
 
-struct XqliteConnection(Mutex<Option<Connection>>);
+struct XqliteConnection(Mutex<Connection>);
 
 enum OpenResult {
     Success(ResourceArc<XqliteConnection>),
@@ -37,7 +37,7 @@ fn open(db_name: String, _opts: Vec<Term>) -> OpenResult {
 
     match Connection::open_with_flags(path, flags) {
         Ok(conn) => {
-            let mutex = Mutex::new(Some(conn));
+            let mutex = Mutex::new(conn);
             let xconn = XqliteConnection(mutex);
             let wrapper = ResourceArc::new(xconn);
             OpenResult::Success(wrapper)
