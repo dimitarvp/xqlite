@@ -71,7 +71,7 @@ defmodule Xqlite.MixProject do
 
   defp rustler_crates(), do: [xqlitenif: [mode: :release]]
 
-  defp description(), do: "SQLite DB library utilising the rusqlite Rust crate"
+  defp description(), do: "An Elixir SQLite database library utilising the rusqlite Rust crate"
 
   defp package() do
     [
