@@ -27,3 +27,4 @@ xqlite-*.tar
 
 # Native compiled artifacts.
 /priv/native
+/native/xqlitenif/target
