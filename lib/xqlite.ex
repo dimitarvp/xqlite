@@ -10,20 +10,15 @@ defmodule Xqlite do
 
   @type conn :: {:connection, reference(), reference()}
   @type opts :: keyword()
-  @type db_name :: String.t() | charlist()
-  @type driver :: module()
+  @type db_name :: String.t()
   @type open_result :: conn | {:error, any()}
   @type close_result :: :ok | {:error, any()}
 
   # --- Guards.
 
-  defguard is_conn(x)
-           when is_tuple(x) and elem(x, 0) == :connection and is_reference(elem(x, 1)) and
-                  is_reference(elem(x, 2))
-
+  defguard is_conn(x) when is_reference(x)
   defguard is_opts(x) when is_list(x)
-  defguard is_db_name(x) when is_binary(x) or is_list(x)
-  defguard is_driver(x) when is_atom(x)
+  defguard is_db_name(x) when is_binary(x)
 
   # --- Functions.
 
@@ -33,18 +28,18 @@ defmodule Xqlite do
   def int2bool(0), do: false
   def int2bool(1), do: true
 
-  @spec open(db_name(), driver(), opts()) :: open_result()
-  def open(db_name, driver \\ Xqlite.Esqlite3, opts \\ [])
+  @spec open(db_name(), opts()) :: open_result()
+  def open(db_name, opts \\ [])
 
-  def open(db_name, driver, opts)
-      when is_db_name(db_name) and is_driver(driver) and is_opts(opts) do
-    driver.open(db_name, opts)
+  def open(db_name, opts)
+      when is_db_name(db_name) and is_opts(opts) do
+    XqliteNIF.open(db_name, opts)
   end
 
-  @spec close(conn(), driver(), opts()) :: close_result()
-  def close(conn, driver \\ Xqlite.Esqlite3, opts \\ [])
+  @spec close(conn()) :: close_result()
+  def close(conn)
 
-  def close(conn, driver, opts) when is_conn(conn) and is_driver(driver) and is_opts(opts) do
-    driver.close(conn, opts)
+  def close(conn) when is_conn(conn) do
+    XqliteNIF.close(conn)
   end
 end

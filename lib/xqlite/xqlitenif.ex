@@ -1,5 +1,5 @@
-defmodule Xqlite.RusqliteNif do
-  use Rustler, otp_app: :xqlite, crate: :xqlite_rusqlitenif
+defmodule XqliteNIF do
+  use Rustler, otp_app: :xqlite, crate: :xqlitenif
 
   def open(_db_name, _opts), do: err()
   def close(_conn), do: err()

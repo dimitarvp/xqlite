@@ -5,5 +5,6 @@ defmodule XqliteTest do
   test "open and close" do
     {:ok, db} = Xqlite.open(Xqlite.unnamed_memory_db())
     :ok = Xqlite.close(db)
+    {:error, :already_closed} = Xqlite.close(db)
   end
 end

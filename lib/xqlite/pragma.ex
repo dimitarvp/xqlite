@@ -13,7 +13,7 @@ defmodule Xqlite.Pragma do
   def extract_supported_pragmas(html) when is_binary(html) do
     matches =
       html
-      |> Floki.parse()
+      |> Floki.parse_document()
       |> Floki.find("/html/body/script")
       |> Enum.filter(fn {"script", [], texts} ->
         Enum.any?(texts, &Regex.match?(~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*\[\s*\{.+/misu, &1))
@@ -168,7 +168,7 @@ defmodule Xqlite.Pragma do
   @spec raw(Xqlite.conn(), pragma_key()) :: pragma_result()
   def raw(db, key)
       when is_conn(db) and is_pragma_key(key) do
-    Sqlitex.query!(db, "pragma #{key};")
+    # FIXME: Actually execute sqlite3 PRAGMA SQL command here.
   end
 
   @spec index_info(Xqlite.conn(), name(), name()) :: pragma_result()
