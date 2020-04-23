@@ -13,7 +13,7 @@ defmodule Xqlite.Pragma do
   def extract_supported_pragmas(html) when is_binary(html) do
     matches =
       html
-      |> Floki.parse()
+      |> Floki.parse_document()
       |> Floki.find("/html/body/script")
       |> Enum.filter(fn {"script", [], texts} ->
         Enum.any?(texts, &Regex.match?(~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*\[\s*\{.+/misu, &1))
