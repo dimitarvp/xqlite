@@ -2,16 +2,17 @@ defmodule Xqlite.MixProject do
   use Mix.Project
 
   @name "Xqlite"
-  @version "0.1.0"
+  @version "0.1.1"
 
   def project do
     [
       app: :xqlite,
       version: @version,
-      elixir: "~> 1.9",
+      elixir: "~> 1.7",
       name: @name,
       start_permanent: Mix.env() == :prod,
       docs: docs(),
+      aliases: aliases(),
       deps: deps(),
       compilers: [:rustler] ++ Mix.compilers(),
       rustler_crates: rustler_crates(),
@@ -48,14 +49,8 @@ defmodule Xqlite.MixProject do
     [
       # dependencies that are always included.
 
-      {:db_connection, "~> 2.0"},
-      {:decimal, "~> 1.8"},
-      {:ecto_sql, "~> 3.1"},
       {:floki, "~> 0.23"},
-      {:jason, "~> 1.1", optional: true},
-      {:rustler, "~> 0.21"},
-      {:sqlitex,
-       github: "elixir-sqlite/sqlitex", ref: "1049a2c8cf88cd0e12e56f1f4cbed1bd4dc3283e"},
+      {:rustler, "~> 0.22-rc"},
 
       # dev / test dependencies.
 
@@ -73,9 +68,9 @@ defmodule Xqlite.MixProject do
       extras: ["README.md"]
     ]
 
-  defp rustler_crates(), do: [xqlite_rusqlitenif: [mode: :release]]
+  defp rustler_crates(), do: [xqlitenif: [mode: :release]]
 
-  defp description(), do: "SQLite3 library and an adapter for Ecto 3.1+ in one package"
+  defp description(), do: "SQLite DB library utilising the rusqlite Rust crate"
 
   defp package() do
     [
@@ -88,6 +83,13 @@ defmodule Xqlite.MixProject do
   end
 
   defp dialyzer(_) do
-    [plt_add_apps: [:jason]]
+    []
+  end
+
+  defp aliases do
+    [
+      c: "compile",
+      f: ["format", "cmd cargo fmt --manifest-path native/xqlitenif/Cargo.toml"]
+    ]
   end
 end

@@ -1,0 +1,14 @@
+[package]
+name = "xqlitenif"
+version = "0.1.1"
+authors = []
+edition = "2018"
+
+[lib]
+name = "xqlitenif"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.22.0-rc.0"
+rusqlite = "0.22.0"
