@@ -12,7 +12,8 @@ rustler::atoms! {
     db_name,
     error,
     nil,
-    ok
+    ok,
+    pragma_get_failed
 }
 
 struct XqliteConnection(Mutex<Option<Connection>>);
@@ -139,13 +140,28 @@ fn exec(arc: ResourceArc<XqliteConnection>, sql: String) -> ExecResult {
     }
 }
 
+enum PragmaGetResult {
+    Success(Vec<Vec<(String, XqliteValue)>>),
+    AlreadyClosed,
+    Failure(String),
+}
+
+impl<'a> Encoder for PragmaGetResult {
+    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
+        match self {
+            PragmaGetResult::Success(results) => (ok(), results).encode(env),
+            PragmaGetResult::AlreadyClosed => (error(), already_closed()).encode(env),
+            PragmaGetResult::Failure(msg) => (error(), pragma_get_failed(), msg).encode(env),
+        }
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
-fn pragma_get<'a>(
-    env: Env<'a>,
+fn pragma_get(
     arc: ResourceArc<XqliteConnection>,
     pragma_name: &str,
     opts: Vec<Term>,
-) -> Term<'a> {
+) -> PragmaGetResult {
     let locked = arc.0.lock().unwrap();
     match &*locked {
         Some(conn) => {
@@ -186,14 +202,14 @@ fn pragma_get<'a>(
             };
 
             match conn.pragma_query(Some(database_name), pragma_name, gather_pragmas) {
-                Ok(_) => (ok(), acc).encode(env),
+                Ok(_) => PragmaGetResult::Success(acc),
                 Err(err) => {
                     let msg: String = format!("{:?}", err);
-                    (error(), msg).encode(env)
+                    PragmaGetResult::Failure(msg)
                 }
             }
         }
-        None => (error(), already_closed()).encode(env),
+        None => PragmaGetResult::AlreadyClosed,
     }
 }
 
