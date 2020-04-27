@@ -255,6 +255,9 @@ defmodule Xqlite.Pragma do
   def sval(_key, value), do: value
 
   @spec mval(pragma_key(), pragma_result()) :: pragma_result()
+  def mval(:collation_list, vv),
+    do: Enum.map(vv, fn [{"seq", i}, {"name", s}] -> {i, s} end) |> Map.new()
+
   def mval(:compile_options, vv), do: values_only(vv)
   def mval(:integrity_check, vv), do: values_only(vv)
   def mval(_, vv), do: vv
