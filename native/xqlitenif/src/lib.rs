@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, DatabaseName, OpenFlags};
 use rustler::resource::ResourceArc;
 use rustler::{Encoder, Env, Term};
 use std::path::Path;
@@ -7,12 +7,28 @@ use std::sync::Mutex;
 rustler::atoms! {
     already_closed,
     cannot_close,
+    cannot_decode,
     cannot_execute,
+    db_name,
     error,
+    nil,
     ok
 }
 
 struct XqliteConnection(Mutex<Option<Connection>>);
+struct XqliteValue(rusqlite::types::Value);
+
+impl<'a> Encoder for XqliteValue {
+    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
+        match &self.0 {
+            rusqlite::types::Value::Null => nil().encode(env),
+            rusqlite::types::Value::Integer(i) => i.encode(env),
+            rusqlite::types::Value::Real(f) => f.encode(env),
+            rusqlite::types::Value::Text(s) => s.encode(env),
+            rusqlite::types::Value::Blob(b) => b.encode(env),
+        }
+    }
+}
 
 enum OpenResult {
     Success(ResourceArc<XqliteConnection>),
@@ -123,4 +139,66 @@ fn exec(arc: ResourceArc<XqliteConnection>, sql: String) -> ExecResult {
     }
 }
 
-rustler::init!("Elixir.XqliteNIF", [open, close, exec], load = on_load);
+#[rustler::nif(schedule = "DirtyIo")]
+fn pragma_get<'a>(
+    env: Env<'a>,
+    arc: ResourceArc<XqliteConnection>,
+    pragma_name: &str,
+    opts: Vec<Term>,
+) -> Term<'a> {
+    let locked = arc.0.lock().unwrap();
+    match &*locked {
+        Some(conn) => {
+            let mut database_name = DatabaseName::Main;
+
+            // Scan for options that need to be mapped to stricter Rust types.
+            for opt in opts.iter() {
+                if let rustler::TermType::Tuple = opt.get_type() {
+                    let result: Result<(rustler::types::Atom, &str), rustler::error::Error> =
+                        opt.decode();
+                    if let Ok((key, value)) = result {
+                        if key == db_name() {
+                            // Provide mapping from string to a proper rusqlite enum.
+                            database_name = match value {
+                                "main" => DatabaseName::Main,
+                                "temp" => DatabaseName::Temp,
+                                string => DatabaseName::Attached(string),
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
+            let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
+                let column_count = row.column_count();
+                let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
+                for i in 0..column_count {
+                    if let Ok(name) = row.column_name(i) {
+                        if let Ok(value) = row.get(i) {
+                            fields.push((String::from(name), XqliteValue(value)));
+                        }
+                    }
+                }
+
+                acc.push(fields);
+                Ok(())
+            };
+
+            match conn.pragma_query(Some(database_name), pragma_name, gather_pragmas) {
+                Ok(_) => (ok(), acc).encode(env),
+                Err(err) => {
+                    let msg: String = format!("{:?}", err);
+                    (error(), msg).encode(env)
+                }
+            }
+        }
+        None => (error(), already_closed()).encode(env),
+    }
+}
+
+rustler::init!(
+    "Elixir.XqliteNIF",
+    [open, close, exec, pragma_get],
+    load = on_load
+);
