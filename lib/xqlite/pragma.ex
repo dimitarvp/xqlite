@@ -182,7 +182,7 @@ defmodule Xqlite.Pragma do
 
   def get(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
     XqliteNIF.pragma_get(conn, key, opts)
-    |> maybe_extract_single_value(key)
+    |> maybe_reshape_pragma_result(key)
   end
 
   @spec index_list(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
@@ -215,8 +215,8 @@ defmodule Xqlite.Pragma do
     get(db, "'#{schema}'.table_xinfo('#{table_name}')")
   end
 
-  @spec maybe_extract_single_value(pragma_result(), pragma_key()) :: pragma_result()
-  def maybe_extract_single_value(data, key) do
+  @spec maybe_reshape_pragma_result(pragma_result(), pragma_key()) :: pragma_result()
+  def maybe_reshape_pragma_result(data, key) do
     case data do
       {:error, _} = err ->
         err
