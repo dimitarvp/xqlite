@@ -156,6 +156,30 @@ impl<'a> Encoder for PragmaGetResult {
     }
 }
 
+fn database_name_from_opts<'a>(opts: &'a Vec<Term>) -> DatabaseName<'a> {
+    let mut database_name = DatabaseName::Main;
+
+    // Scan for options that need to be mapped to stricter Rust types.
+    for opt in opts.iter() {
+        if let rustler::TermType::Tuple = opt.get_type() {
+            let result: Result<(rustler::types::Atom, &str), rustler::error::Error> =
+                opt.decode();
+            if let Ok((key, value)) = result {
+                if key == db_name() {
+                    // Provide mapping from string to a proper rusqlite enum.
+                    database_name = match value {
+                        "main" => DatabaseName::Main,
+                        "temp" => DatabaseName::Temp,
+                        string => DatabaseName::Attached(string),
+                    }
+                }
+            }
+        }
+    }
+
+    database_name
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn pragma_get(
     arc: ResourceArc<XqliteConnection>,
@@ -165,25 +189,7 @@ fn pragma_get(
     let locked = arc.0.lock().unwrap();
     match &*locked {
         Some(conn) => {
-            let mut database_name = DatabaseName::Main;
-
-            // Scan for options that need to be mapped to stricter Rust types.
-            for opt in opts.iter() {
-                if let rustler::TermType::Tuple = opt.get_type() {
-                    let result: Result<(rustler::types::Atom, &str), rustler::error::Error> =
-                        opt.decode();
-                    if let Ok((key, value)) = result {
-                        if key == db_name() {
-                            // Provide mapping from string to a proper rusqlite enum.
-                            database_name = match value {
-                                "main" => DatabaseName::Main,
-                                "temp" => DatabaseName::Temp,
-                                string => DatabaseName::Attached(string),
-                            }
-                        }
-                    }
-                }
-            }
+            let database_name = database_name_from_opts(&opts);
 
             let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
             let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
