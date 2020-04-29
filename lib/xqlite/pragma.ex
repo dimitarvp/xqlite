@@ -243,8 +243,13 @@ defmodule Xqlite.Pragma do
   """
   @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: pragma_result()
   def put(db, key, val)
-      when is_conn(db) and is_pragma_key(key) and is_pragma_value(val) do
-    raise(ArgumentError, "Not yet implemented")
+      when is_conn(db) and is_atom(key) and is_pragma_value(val) do
+    put(db, Atom.to_string(key), val)
+  end
+
+  def put(db, key, val)
+      when is_conn(db) and is_binary(key) and is_pragma_value(val) do
+    XqliteNIF.pragma_put(db, key, val, [])
   end
 
   # Generate pragma getter functions that convert a 0/1 integer result
