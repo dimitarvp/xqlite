@@ -223,9 +223,7 @@ fn pragma_get(
 
 // Transforms an Erlang term to rusqlite value, limited to what the pragma updating
 // functions are willing to accept.
-fn term_to_pragma_value<'a>(
-    input: Term<'a>,
-) -> Result<rusqlite::types::Value, Term<'a>> {
+fn term_to_pragma_value<'a>(input: Term<'a>) -> Result<rusqlite::types::Value, Term<'a>> {
     match input.get_type() {
         rustler::TermType::Atom => {
             let decoded: Result<rustler::types::Atom, rustler::error::Error> = input.decode();
@@ -277,8 +275,8 @@ fn term_to_pragma_value<'a>(
 }
 
 enum PragmaPutAndGetResult<'a> {
-    Success(Vec<Vec<(String, XqliteValue)>>),
-    DecodedValue(rusqlite::types::Value),
+    SuccessWithoutValue,
+    SuccessWithValue(Vec<Vec<(String, XqliteValue)>>),
     UnsupportedValue(Term<'a>),
     AlreadyClosed,
     Failure(String),
@@ -287,8 +285,8 @@ enum PragmaPutAndGetResult<'a> {
 impl<'a> Encoder for PragmaPutAndGetResult<'_> {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         match self {
-            PragmaPutAndGetResult::Success(results) => (ok(), results).encode(env),
-            PragmaPutAndGetResult::DecodedValue(_value) => (ok()).encode(env),
+            PragmaPutAndGetResult::SuccessWithoutValue => (ok()).encode(env),
+            PragmaPutAndGetResult::SuccessWithValue(result) => (ok(), result).encode(env),
             PragmaPutAndGetResult::UnsupportedValue(term) => {
                 (error(), unsupported_pragma_put_value(), term).encode(env)
             }
@@ -310,43 +308,50 @@ fn pragma_put_and_get<'a>(
     let locked = arc.0.lock().unwrap();
     match &*locked {
         Some(conn) => {
+            let native_pragma_value: rusqlite::types::Value;
+
             match term_to_pragma_value(pragma_value) {
                 Ok(value) => {
-                    println!("DECODED VALUE: {:#?}", value);
-                    return PragmaPutAndGetResult::DecodedValue(value);
+                    native_pragma_value = value;
                 }
-                Err(term) => {
-                    return PragmaPutAndGetResult::UnsupportedValue(term)
-                }
+                Err(term) => return PragmaPutAndGetResult::UnsupportedValue(term),
             }
 
-            //let pragma_native_value = term_to_pragma_value(pragma_value);
+            let database_name = database_name_from_opts(&opts);
 
-            // let database_name = database_name_from_opts(&opts);
+            let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
+            let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
+                let column_count = row.column_count();
+                let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
+                for i in 0..column_count {
+                    if let Ok(name) = row.column_name(i) {
+                        if let Ok(value) = row.get(i) {
+                            fields.push((String::from(name), XqliteValue(value)));
+                        }
+                    }
+                }
 
-            // let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
-            // let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
-            //     let column_count = row.column_count();
-            //     let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
-            //     for i in 0..column_count {
-            //         if let Ok(name) = row.column_name(i) {
-            //             if let Ok(value) = row.get(i) {
-            //                 fields.push((String::from(name), XqliteValue(value)));
-            //             }
-            //         }
-            //     }
+                acc.push(fields);
+                Ok(())
+            };
 
-            //     acc.push(fields);
-            //     Ok(())
-            // };
-
-            // match conn.pragma_update_and_check(Some(database_name), pragma_name, &pragma_native_value, gather_pragmas) {
-            //     Ok(_) => PragmaPutAndGetResult::Success(acc),
-            //     Err(err) => {
-            //         let msg: String = format!("{:?}", err);
-            //         PragmaPutAndGetResult::Failure(msg)
-            //     }
-            // }
+            match conn.pragma_update_and_check(
+                Some(database_name),
+                pragma_name,
+                &native_pragma_value,
+                gather_pragmas,
+            ) {
+                Ok(_) => PragmaPutAndGetResult::SuccessWithValue(acc),
+                Err(err) => match err {
+                    rusqlite::Error::QueryReturnedNoRows => {
+                        PragmaPutAndGetResult::SuccessWithoutValue
+                    }
+                    _ => {
+                        let msg: String = format!("{:?}", err);
+                        PragmaPutAndGetResult::Failure(msg)
+                    }
+                },
+            }
         }
         None => PragmaPutAndGetResult::AlreadyClosed,
     }
