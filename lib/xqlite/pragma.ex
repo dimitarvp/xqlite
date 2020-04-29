@@ -173,20 +173,61 @@ defmodule Xqlite.Pragma do
   def get_temp_store(1), do: :file
   def get_temp_store(2), do: :memory
 
-  @spec get(Xqlite.Conn.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
-  def get(conn, name, opts \\ [])
+  @doc ~S"""
+  Polls a PRAGMA, optionally specifying an extra parameter:
+  - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra parameter.
+  - `get(db, :table_info, :users)` is a PRAGMA that does require an extra parameter.
 
-  def get(conn, name, opts) when is_conn(conn) and is_atom(name) and is_pragma_opts(opts) do
-    get(conn, Atom.to_string(name), opts)
+  The last parameter are options:
+  - `:db_name` - must be a string. The values `"main"` and `"temp"` are treated specially,
+    as in  instruct sqlite to use the main (originally opened) database or a temporary DB
+    respectively. Any other value refers to a name of an ATTACH-ed database. This function
+    will fail if there is no ATTACH-ed database with the specified name.
+  """
+  @spec get(Xqlite.Conn.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
+          pragma_get_result()
+  def get(db, key, param_or_opts \\ [], opts \\ [])
+
+  def get(db, key, param_or_opts, _opts)
+      when is_conn(db) and is_pragma_key(key) and is_list(param_or_opts) do
+    get0(db, key, param_or_opts)
   end
 
-  def get(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
+  def get(db, key, param_or_opts, opts)
+      when is_conn(db) and is_pragma_key(key) and is_pragma_key(param_or_opts) and
+             is_list(opts) do
+    get1(db, key, param_or_opts, opts)
+  end
+
+  @spec get0(Xqlite.Conn.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
+  defp get0(conn, key, opts) when is_conn(conn) and is_atom(key) and is_pragma_opts(opts) do
+    get0(conn, Atom.to_string(key), opts)
+  end
+
+  defp get0(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
     XqliteNIF.pragma_get0(conn, key, opts)
     |> maybe_reshape_pragma_result(key)
   end
 
-  def get(conn, key, param, opts)
-      when is_conn(conn) and is_binary(key) and is_binary(param) and is_pragma_opts(opts) do
+  @spec get1(Xqlite.Conn.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
+          pragma_get_result()
+  defp get1(conn, key, param, opts)
+       when is_conn(conn) and is_atom(key) and is_atom(param) and is_pragma_opts(opts) do
+    get1(conn, Atom.to_string(key), Atom.to_string(param), opts)
+  end
+
+  defp get1(conn, key, param, opts)
+       when is_conn(conn) and is_atom(key) and is_binary(param) and is_pragma_opts(opts) do
+    get1(conn, Atom.to_string(key), param, opts)
+  end
+
+  defp get1(conn, key, param, opts)
+       when is_conn(conn) and is_binary(key) and is_atom(param) and is_pragma_opts(opts) do
+    get1(conn, key, Atom.to_string(param), opts)
+  end
+
+  defp get1(conn, key, param, opts)
+       when is_conn(conn) and is_binary(key) and is_binary(param) and is_pragma_opts(opts) do
     XqliteNIF.pragma_get1(conn, key, param, opts)
     |> maybe_reshape_pragma_result(key)
   end
