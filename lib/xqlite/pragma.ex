@@ -218,17 +218,17 @@ defmodule Xqlite.Pragma do
   @spec maybe_reshape_pragma_result(pragma_result(), pragma_key()) :: pragma_result()
   def maybe_reshape_pragma_result(data, key) do
     case data do
-      {:error, :already_closed} = err ->
+      {:error, _} = err ->
         err
 
-      {:error, :pragma_get_failed, _msg} = err ->
+      {:error, _, _} = err ->
         err
 
       {:ok, [[{^key, value}]]} ->
-        sval(String.to_atom(key), value)
+        {:ok, sval(String.to_atom(key), value)}
 
       {:ok, values} when is_list(values) ->
-        mval(String.to_atom(key), values)
+        {:ok, mval(String.to_atom(key), values)}
     end
   end
 
