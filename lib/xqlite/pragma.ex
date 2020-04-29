@@ -185,6 +185,12 @@ defmodule Xqlite.Pragma do
     |> maybe_reshape_pragma_result(key)
   end
 
+  def get(conn, key, param, opts)
+      when is_conn(conn) and is_binary(key) and is_binary(param) and is_pragma_opts(opts) do
+    XqliteNIF.pragma_get1(conn, key, param, opts)
+    |> maybe_reshape_pragma_result(key)
+  end
+
   @spec index_list(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
   def index_list(db, schema, table_name, opts \\ [])
       when is_conn(db) and is_binary(schema) and is_binary(table_name) and is_pragma_opts(opts) do
