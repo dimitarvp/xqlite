@@ -12,7 +12,7 @@ defmodule XqlitePragmaTest do
   end
 
   describe "pragma getting through our wrapper" do
-    P.supported_with_zero_params()
+    P.readable_with_zero_params()
     |> Enum.each(fn name ->
       test name, %{db: db} do
         assert valid_pragma(P.get(db, unquote(name)))
@@ -21,7 +21,7 @@ defmodule XqlitePragmaTest do
   end
 
   describe "pragma getting through the NIF" do
-    P.supported_with_zero_params()
+    P.readable_with_zero_params()
     |> Enum.each(fn name ->
       test name, %{db: db} do
         assert valid_pragma(NIF.pragma_get0(db, Atom.to_string(unquote(name)), []))
