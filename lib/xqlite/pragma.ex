@@ -302,7 +302,7 @@ defmodule Xqlite.Pragma do
 
   @spec multiple(pragma_key(), pragma_result()) :: pragma_result()
   def multiple(:collation_list, vv),
-    do: Enum.map(vv, fn [{"seq", i}, {"name", s}] -> {i, s} end) |> Map.new()
+    do: Enum.map(vv, fn [{"seq", i}, {"name", s}] -> [{:seq, i}, {:name, s}] |> Map.new() end)
 
   def multiple(:compile_options, vv), do: values_only(vv)
   def multiple(:integrity_check, vv), do: values_only(vv)
