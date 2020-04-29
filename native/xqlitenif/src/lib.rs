@@ -14,7 +14,7 @@ rustler::atoms! {
     nil,
     ok,
     pragma_get_failed,
-    pragma_put_and_get_failed,
+    pragma_put_failed,
     unsupported_pragma_put_value
 }
 
@@ -274,7 +274,7 @@ fn term_to_pragma_value<'a>(input: Term<'a>) -> Result<rusqlite::types::Value, T
     }
 }
 
-enum PragmaPutAndGetResult<'a> {
+enum PragmaPutResult<'a> {
     SuccessWithoutValue,
     SuccessWithValue(Vec<Vec<(String, XqliteValue)>>),
     UnsupportedValue(Term<'a>),
@@ -282,29 +282,27 @@ enum PragmaPutAndGetResult<'a> {
     Failure(String),
 }
 
-impl<'a> Encoder for PragmaPutAndGetResult<'_> {
+impl<'a> Encoder for PragmaPutResult<'_> {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         match self {
-            PragmaPutAndGetResult::SuccessWithoutValue => (ok()).encode(env),
-            PragmaPutAndGetResult::SuccessWithValue(result) => (ok(), result).encode(env),
-            PragmaPutAndGetResult::UnsupportedValue(term) => {
+            PragmaPutResult::SuccessWithoutValue => (ok()).encode(env),
+            PragmaPutResult::SuccessWithValue(result) => (ok(), result).encode(env),
+            PragmaPutResult::UnsupportedValue(term) => {
                 (error(), unsupported_pragma_put_value(), term).encode(env)
             }
-            PragmaPutAndGetResult::AlreadyClosed => (error(), already_closed()).encode(env),
-            PragmaPutAndGetResult::Failure(msg) => {
-                (error(), pragma_put_and_get_failed(), msg).encode(env)
-            }
+            PragmaPutResult::AlreadyClosed => (error(), already_closed()).encode(env),
+            PragmaPutResult::Failure(msg) => (error(), pragma_put_failed(), msg).encode(env),
         }
     }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn pragma_put_and_get<'a>(
+fn pragma_put<'a>(
     arc: ResourceArc<XqliteConnection>,
     pragma_name: &str,
     pragma_value: Term<'a>,
     opts: Vec<Term>,
-) -> PragmaPutAndGetResult<'a> {
+) -> PragmaPutResult<'a> {
     let locked = arc.0.lock().unwrap();
     match &*locked {
         Some(conn) => {
@@ -314,7 +312,7 @@ fn pragma_put_and_get<'a>(
                 Ok(value) => {
                     native_pragma_value = value;
                 }
-                Err(term) => return PragmaPutAndGetResult::UnsupportedValue(term),
+                Err(term) => return PragmaPutResult::UnsupportedValue(term),
             }
 
             let database_name = database_name_from_opts(&opts);
@@ -341,24 +339,24 @@ fn pragma_put_and_get<'a>(
                 &native_pragma_value,
                 gather_pragmas,
             ) {
-                Ok(_) => PragmaPutAndGetResult::SuccessWithValue(acc),
+                Ok(_) => PragmaPutResult::SuccessWithValue(acc),
                 Err(err) => match err {
                     rusqlite::Error::QueryReturnedNoRows => {
-                        PragmaPutAndGetResult::SuccessWithoutValue
+                        PragmaPutResult::SuccessWithoutValue
                     }
                     _ => {
                         let msg: String = format!("{:?}", err);
-                        PragmaPutAndGetResult::Failure(msg)
+                        PragmaPutResult::Failure(msg)
                     }
                 },
             }
         }
-        None => PragmaPutAndGetResult::AlreadyClosed,
+        None => PragmaPutResult::AlreadyClosed,
     }
 }
 
 rustler::init!(
     "Elixir.XqliteNIF",
-    [open, close, exec, pragma_get, pragma_put_and_get],
+    [open, close, exec, pragma_get, pragma_put],
     load = on_load
 );
