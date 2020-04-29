@@ -144,11 +144,11 @@ defmodule Xqlite.Pragma do
     shrink_memory: [r: {0, false, :nothing}],
     soft_heap_limit: [r: {0, false, :int}, w: {false, :int, :int}],
     stats: [r: {0, false, :list}],
-    # Int and text can be passed as parameter, query always returns int
+    # Int and text can be passed as parameter when setting, query always returns int
     synchronous: [r: {0, true, :int}, w: {true, :int, :nothing}, w: {true, :text, :nothing}],
     table_info: [r: {1, true, :text, :list}],
     table_xinfo: [r: {1, true, :text, :list}],
-    # Int and text can be passed as parameter, query always returns int
+    # Int and text can be passed as parameter when setting, query always returns int
     temp_store: [r: {0, false, :int}, w: {false, :int, :nothing}, w: {false, :text, :nothing}],
     temp_store_directory: [r: {0, false, :text}, w: {false, :text, :nothing}],
     threads: [r: {0, false, :int}, w: {false, :int, :int}],
