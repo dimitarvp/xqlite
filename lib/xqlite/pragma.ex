@@ -206,7 +206,7 @@ defmodule Xqlite.Pragma do
 
   defp get0(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
     XqliteNIF.pragma_get0(conn, key, opts)
-    |> maybe_reshape_pragma_result(key)
+    |> result(key)
   end
 
   @spec get1(Xqlite.Conn.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
@@ -229,7 +229,7 @@ defmodule Xqlite.Pragma do
   defp get1(conn, key, param, opts)
        when is_conn(conn) and is_binary(key) and is_binary(param) and is_pragma_opts(opts) do
     XqliteNIF.pragma_get1(conn, key, param, opts)
-    |> maybe_reshape_pragma_result(key)
+    |> result(key)
   end
 
   @spec index_list(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
@@ -274,11 +274,11 @@ defmodule Xqlite.Pragma do
   def put(db, key, val)
       when is_conn(db) and is_binary(key) and is_pragma_value(val) do
     XqliteNIF.pragma_put(db, key, val, [])
-    |> maybe_reshape_pragma_result(key)
+    |> result(key)
   end
 
-  @spec maybe_reshape_pragma_result(pragma_result(), pragma_key()) :: pragma_result()
-  defp maybe_reshape_pragma_result(data, key) do
+  @spec result(pragma_result(), pragma_key()) :: pragma_result()
+  defp result(data, key) do
     case data do
       {:error, _} = err ->
         err
