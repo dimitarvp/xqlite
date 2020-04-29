@@ -278,11 +278,11 @@ defmodule Xqlite.Pragma do
   end
 
   @spec result(pragma_result(), pragma_key()) :: pragma_result()
-  def result({:error, _} = e, _k), do: e
-  def result({:error, _, _} = e, _k), do: e
-  def result(:ok, _k), do: :ok
-  def result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
-  def result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
+  defp result({:error, _} = e, _k), do: e
+  defp result({:error, _, _} = e, _k), do: e
+  defp result(:ok, _k), do: :ok
+  defp result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
+  defp result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
 
   # Generate pragma getter functions that convert a 0/1 integer result
   # to a boolean.
