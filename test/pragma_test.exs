@@ -2,12 +2,12 @@ defmodule XqlitePragmaTest do
   use ExUnit.Case
   doctest Xqlite.Pragma
 
-  alias Xqlite.Conn, as: C
+  alias Xqlite.Conn
   alias Xqlite.Pragma, as: P
   alias XqliteNIF, as: NIF
 
   setup_all do
-    {:ok, db} = C.open(Xqlite.unnamed_memory_db())
+    {:ok, db} = Conn.open(Xqlite.unnamed_memory_db())
     {:ok, db: db}
   end
 
