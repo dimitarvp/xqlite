@@ -181,7 +181,7 @@ defmodule Xqlite.Pragma do
   end
 
   def get(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
-    XqliteNIF.pragma_get(conn, key, opts)
+    XqliteNIF.pragma_get0(conn, key, opts)
     |> maybe_reshape_pragma_result(key)
   end
 

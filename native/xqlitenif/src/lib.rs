@@ -183,7 +183,7 @@ fn database_name_from_opts<'a>(opts: &'a Vec<Term>) -> DatabaseName<'a> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn pragma_get(
+fn pragma_get0(
     arc: ResourceArc<XqliteConnection>,
     pragma_name: &str,
     opts: Vec<Term>,
@@ -222,10 +222,10 @@ fn pragma_get(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn pragma(
+fn pragma_get1(
     arc: ResourceArc<XqliteConnection>,
     pragma_name: &str,
-    table_name: &str,
+    param: &str,
     opts: Vec<Term>,
 ) -> PragmaGetResult {
     let locked = arc.0.lock().unwrap();
@@ -252,7 +252,7 @@ fn pragma(
             match conn.pragma(
                 Some(database_name),
                 pragma_name,
-                &String::from(table_name),
+                &String::from(param),
                 gather_pragmas,
             ) {
                 Ok(_) => PragmaGetResult::Success(acc),
@@ -402,6 +402,6 @@ fn pragma_put<'a>(
 
 rustler::init!(
     "Elixir.XqliteNIF",
-    [open, close, exec, pragma_get, pragma_put, pragma],
+    [open, close, exec, pragma_get0, pragma_get1, pragma_put],
     load = on_load
 );

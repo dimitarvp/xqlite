@@ -24,7 +24,7 @@ defmodule XqlitePragmaTest do
     P.supported()
     |> Enum.each(fn name ->
       test name, %{db: db} do
-        assert valid_pragma(NIF.pragma_get(db, Atom.to_string(unquote(name)), []))
+        assert valid_pragma(NIF.pragma_get0(db, Atom.to_string(unquote(name)), []))
       end
     end)
   end
