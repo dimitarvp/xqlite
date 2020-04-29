@@ -262,8 +262,23 @@ defmodule Xqlite.Pragma do
     get(db, "'#{schema}'.table_xinfo('#{table_name}')")
   end
 
+  @doc ~S"""
+  Changes a PRAGMA's value.
+  """
+  @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: pragma_result()
+  def put(db, key, val)
+      when is_conn(db) and is_atom(key) and is_pragma_value(val) do
+    put(db, Atom.to_string(key), val)
+  end
+
+  def put(db, key, val)
+      when is_conn(db) and is_binary(key) and is_pragma_value(val) do
+    XqliteNIF.pragma_put(db, key, val, [])
+    |> maybe_reshape_pragma_result(key)
+  end
+
   @spec maybe_reshape_pragma_result(pragma_result(), pragma_key()) :: pragma_result()
-  def maybe_reshape_pragma_result(data, key) do
+  defp maybe_reshape_pragma_result(data, key) do
     case data do
       {:error, _} = err ->
         err
@@ -280,21 +295,6 @@ defmodule Xqlite.Pragma do
       {:ok, values} when is_list(values) ->
         {:ok, mval(String.to_atom(key), values)}
     end
-  end
-
-  @doc ~S"""
-  Changes a PRAGMA's value.
-  """
-  @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: pragma_result()
-  def put(db, key, val)
-      when is_conn(db) and is_atom(key) and is_pragma_value(val) do
-    put(db, Atom.to_string(key), val)
-  end
-
-  def put(db, key, val)
-      when is_conn(db) and is_binary(key) and is_pragma_value(val) do
-    XqliteNIF.pragma_put(db, key, val, [])
-    |> maybe_reshape_pragma_result(key)
   end
 
   # Generate pragma getter functions that convert a 0/1 integer result
