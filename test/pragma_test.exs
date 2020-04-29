@@ -2,23 +2,34 @@ defmodule XqlitePragmaTest do
   use ExUnit.Case
   doctest Xqlite.Pragma
 
+  alias Xqlite.Conn, as: C
   alias Xqlite.Pragma, as: P
+  alias XqliteNIF, as: NIF
 
   setup_all do
-    {:ok, db} = Sqlitex.open(Xqlite.unnamed_memory_db())
+    {:ok, db} = C.open(Xqlite.unnamed_memory_db())
     {:ok, db: db}
   end
 
-  describe "getting raw pragma" do
+  describe "pragma getting through our wrapper" do
     P.supported()
     |> Enum.each(fn name ->
       test name, %{db: db} do
-        assert valid_pragma(P.raw(db, unquote(name)))
+        assert valid_pragma(P.get(db, unquote(name)))
       end
     end)
   end
 
-  defp valid_pragma([]), do: true
-  defp valid_pragma([kw | _rest_kws]) when is_list(kw), do: true
-  defp valid_pragma(_), do: false
+  describe "pragma getting through the NIF" do
+    P.supported()
+    |> Enum.each(fn name ->
+      test name, %{db: db} do
+        assert valid_pragma(NIF.pragma_get(db, Atom.to_string(unquote(name)), []))
+      end
+    end)
+  end
+
+  defp valid_pragma({:error, _, _}), do: false
+  defp valid_pragma({:error, _}), do: false
+  defp valid_pragma({:ok, _}), do: true
 end
