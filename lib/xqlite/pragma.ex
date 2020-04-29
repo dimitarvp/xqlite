@@ -174,7 +174,7 @@ defmodule Xqlite.Pragma do
   def get_temp_store(2), do: :memory
 
   @doc ~S"""
-  Polls a PRAGMA, optionally specifying an extra parameter:
+  Fetches a PRAGMA's value, optionally specifying an extra parameter:
   - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra parameter.
   - `get(db, :table_info, :users)` is a PRAGMA that does require an extra parameter.
 
