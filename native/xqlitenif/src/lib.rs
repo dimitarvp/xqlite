@@ -13,7 +13,9 @@ rustler::atoms! {
     error,
     nil,
     ok,
-    pragma_get_failed
+    pragma_get_failed,
+    pragma_put_and_get_failed,
+    unsupported_pragma_put_value
 }
 
 struct XqliteConnection(Mutex<Option<Connection>>);
@@ -219,8 +221,139 @@ fn pragma_get(
     }
 }
 
+// Transforms an Erlang term to rusqlite value, limited to what the pragma updating
+// functions are willing to accept.
+fn term_to_pragma_value<'a>(
+    input: Term<'a>,
+) -> Result<rusqlite::types::Value, Term<'a>> {
+    match input.get_type() {
+        rustler::TermType::Atom => {
+            let decoded: Result<rustler::types::Atom, rustler::error::Error> = input.decode();
+            if let Ok(atom_value) = decoded {
+                if atom_value == nil() {
+                    // Only the `nil` Erlang atom is accepted.
+                    return Ok(rusqlite::types::Value::Null);
+                }
+            }
+
+            // All other atoms except `nil` are rejected.
+            Err(input)
+        }
+        rustler::TermType::Number => {
+            // Attempt to decode a 64-bit signed integer or a 64-bit floating point number.
+            let decoded_i64: Result<i64, rustler::error::Error> = input.decode();
+            if let Ok(an_i64) = decoded_i64 {
+                return Ok(rusqlite::types::Value::Integer(an_i64));
+            } else {
+                let decoded_f64: Result<f64, rustler::error::Error> = input.decode();
+                if let Ok(an_f64) = decoded_f64 {
+                    return Ok(rusqlite::types::Value::Real(an_f64));
+                }
+            }
+
+            Err(input)
+        }
+        rustler::TermType::Binary => {
+            // Anything that's a valid string (including e.g. [0, 0, 0, 0]) is going
+            // to be decoded into a Rust string.
+            // Everything else (f.ex. [255, 255]) is going to be decoded to `&[u8]`
+            // (a byte array slice) and then turned into a `Vec<u8>`.
+            let decoded_string: Result<String, rustler::error::Error> = input.decode();
+            if let Ok(string) = decoded_string {
+                return Ok(rusqlite::types::Value::Text(string));
+            } else {
+                let decoded_blob: Result<rustler::types::Binary, rustler::error::Error> =
+                    rustler::types::Binary::from_term(input);
+                if let Ok(blob) = decoded_blob {
+                    let slice: &'a [u8] = blob.as_slice();
+                    return Ok(rusqlite::types::Value::Blob(slice.to_vec()));
+                }
+            }
+
+            Err(input)
+        }
+        _ => Err(input),
+    }
+}
+
+enum PragmaPutAndGetResult<'a> {
+    Success(Vec<Vec<(String, XqliteValue)>>),
+    DecodedValue(rusqlite::types::Value),
+    UnsupportedValue(Term<'a>),
+    AlreadyClosed,
+    Failure(String),
+}
+
+impl<'a> Encoder for PragmaPutAndGetResult<'_> {
+    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
+        match self {
+            PragmaPutAndGetResult::Success(results) => (ok(), results).encode(env),
+            PragmaPutAndGetResult::DecodedValue(_value) => (ok()).encode(env),
+            PragmaPutAndGetResult::UnsupportedValue(term) => {
+                (error(), unsupported_pragma_put_value(), term).encode(env)
+            }
+            PragmaPutAndGetResult::AlreadyClosed => (error(), already_closed()).encode(env),
+            PragmaPutAndGetResult::Failure(msg) => {
+                (error(), pragma_put_and_get_failed(), msg).encode(env)
+            }
+        }
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn pragma_put_and_get<'a>(
+    arc: ResourceArc<XqliteConnection>,
+    pragma_name: &str,
+    pragma_value: Term<'a>,
+    opts: Vec<Term>,
+) -> PragmaPutAndGetResult<'a> {
+    let locked = arc.0.lock().unwrap();
+    match &*locked {
+        Some(conn) => {
+            match term_to_pragma_value(pragma_value) {
+                Ok(value) => {
+                    println!("DECODED VALUE: {:#?}", value);
+                    return PragmaPutAndGetResult::DecodedValue(value);
+                }
+                Err(term) => {
+                    return PragmaPutAndGetResult::UnsupportedValue(term)
+                }
+            }
+
+            //let pragma_native_value = term_to_pragma_value(pragma_value);
+
+            // let database_name = database_name_from_opts(&opts);
+
+            // let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
+            // let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
+            //     let column_count = row.column_count();
+            //     let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
+            //     for i in 0..column_count {
+            //         if let Ok(name) = row.column_name(i) {
+            //             if let Ok(value) = row.get(i) {
+            //                 fields.push((String::from(name), XqliteValue(value)));
+            //             }
+            //         }
+            //     }
+
+            //     acc.push(fields);
+            //     Ok(())
+            // };
+
+            // match conn.pragma_update_and_check(Some(database_name), pragma_name, &pragma_native_value, gather_pragmas) {
+            //     Ok(_) => PragmaPutAndGetResult::Success(acc),
+            //     Err(err) => {
+            //         let msg: String = format!("{:?}", err);
+            //         PragmaPutAndGetResult::Failure(msg)
+            //     }
+            // }
+        }
+        None => PragmaPutAndGetResult::AlreadyClosed,
+    }
+}
+
 rustler::init!(
     "Elixir.XqliteNIF",
-    [open, close, exec, pragma_get],
+    [open, close, exec, pragma_get, pragma_put_and_get],
     load = on_load
 );
