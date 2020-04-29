@@ -221,6 +221,51 @@ fn pragma_get(
     }
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+fn pragma(
+    arc: ResourceArc<XqliteConnection>,
+    pragma_name: &str,
+    table_name: &str,
+    opts: Vec<Term>,
+) -> PragmaGetResult {
+    let locked = arc.0.lock().unwrap();
+    match &*locked {
+        Some(conn) => {
+            let database_name = database_name_from_opts(&opts);
+
+            let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
+            let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
+                let column_count = row.column_count();
+                let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
+                for i in 0..column_count {
+                    if let Ok(name) = row.column_name(i) {
+                        if let Ok(value) = row.get(i) {
+                            fields.push((String::from(name), XqliteValue(value)));
+                        }
+                    }
+                }
+
+                acc.push(fields);
+                Ok(())
+            };
+
+            match conn.pragma(
+                Some(database_name),
+                pragma_name,
+                &String::from(table_name),
+                gather_pragmas,
+            ) {
+                Ok(_) => PragmaGetResult::Success(acc),
+                Err(err) => {
+                    let msg: String = format!("{:?}", err);
+                    PragmaGetResult::Failure(msg)
+                }
+            }
+        }
+        None => PragmaGetResult::AlreadyClosed,
+    }
+}
+
 // Transforms an Erlang term to rusqlite value, limited to what the pragma updating
 // functions are willing to accept.
 fn term_to_pragma_value<'a>(input: Term<'a>) -> Result<rusqlite::types::Value, Term<'a>> {
@@ -357,6 +402,6 @@ fn pragma_put<'a>(
 
 rustler::init!(
     "Elixir.XqliteNIF",
-    [open, close, exec, pragma_get, pragma_put],
+    [open, close, exec, pragma_get, pragma_put, pragma],
     load = on_load
 );
