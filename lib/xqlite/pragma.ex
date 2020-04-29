@@ -289,24 +289,24 @@ defmodule Xqlite.Pragma do
   @spec single(pragma_key(), pragma_result()) :: pragma_result()
   @booleans
   |> Enum.each(fn key ->
-    def single(unquote(key), value) do
+    defp single(unquote(key), value) do
       int2bool(value)
     end
   end)
 
-  def single(:auto_vacuum, v), do: get_auto_vacuum(v)
-  def single(:secure_delete, v), do: get_secure_delete(v)
-  def single(:synchronous, v), do: get_synchronous(v)
-  def single(:temp_store, v), do: get_temp_store(v)
-  def single(_key, value), do: value
+  defp single(:auto_vacuum, v), do: get_auto_vacuum(v)
+  defp single(:secure_delete, v), do: get_secure_delete(v)
+  defp single(:synchronous, v), do: get_synchronous(v)
+  defp single(:temp_store, v), do: get_temp_store(v)
+  defp single(_key, value), do: value
 
   @spec multiple(pragma_key(), pragma_result()) :: pragma_result()
-  def multiple(:collation_list, vv),
+  defp multiple(:collation_list, vv),
     do: Enum.map(vv, fn [{"seq", i}, {"name", s}] -> [{:seq, i}, {:name, s}] |> Map.new() end)
 
-  def multiple(:compile_options, vv), do: values_only(vv)
-  def multiple(:integrity_check, vv), do: values_only(vv)
-  def multiple(_, vv), do: vv
+  defp multiple(:compile_options, vv), do: values_only(vv)
+  defp multiple(:integrity_check, vv), do: values_only(vv)
+  defp multiple(_, vv), do: vv
 
   defp values_only(r), do: r |> Enum.map(fn [{_k, v}] -> v end)
 end
