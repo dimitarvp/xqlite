@@ -195,6 +195,58 @@ defmodule Xqlite.Pragma do
                      |> Stream.map(fn {name, _kw} -> name end)
                      |> Enum.sort()
 
+  @returning_int @schema
+                 |> Stream.filter(fn {_name, kw} ->
+                   kw
+                   |> Enum.any?(fn
+                     {:r, {0, _, :int}} -> true
+                     {:r, {1, _, _, :int}} -> true
+                     {:w, {_, _, :int}} -> true
+                     _ -> false
+                   end)
+                 end)
+                 |> Stream.map(fn {name, _kw} -> name end)
+                 |> Enum.sort()
+
+  @returning_text @schema
+                  |> Stream.filter(fn {_name, kw} ->
+                    kw
+                    |> Enum.any?(fn
+                      {:r, {0, _, :text}} -> true
+                      {:r, {1, _, _, :text}} -> true
+                      {:w, {_, _, :text}} -> true
+                      _ -> false
+                    end)
+                  end)
+                  |> Stream.map(fn {name, _kw} -> name end)
+                  |> Enum.sort()
+
+  @returning_list @schema
+                  |> Stream.filter(fn {_name, kw} ->
+                    kw
+                    |> Enum.any?(fn
+                      {:r, {0, _, :list}} -> true
+                      {:r, {1, _, _, :list}} -> true
+                      {:w, {_, _, :list}} -> true
+                      _ -> false
+                    end)
+                  end)
+                  |> Stream.map(fn {name, _kw} -> name end)
+                  |> Enum.sort()
+
+  @returning_nothing @schema
+                     |> Stream.filter(fn {_name, kw} ->
+                       kw
+                       |> Enum.any?(fn
+                         {:r, {0, _, :nothing}} -> true
+                         {:r, {1, _, _, :nothing}} -> true
+                         {:w, {_, _, :nothing}} -> true
+                         _ -> false
+                       end)
+                     end)
+                     |> Stream.map(fn {name, _kw} -> name end)
+                     |> Enum.sort()
+
   @doc ~S"""
   Returns a map with keys equal to all supported PRAGMAs, and the values being detailed
   machine description of the read/write modes of each PRAGMA (contains number of read
@@ -224,9 +276,29 @@ defmodule Xqlite.Pragma do
   def writable_with_one_param(), do: @writable_with_one_param
 
   @doc ~S"""
-  Returns the names of all pragmas, readable and writable, that are of boolean type.
+  Returns the names of all pragmas, readable and writable, that return a boolean.
   """
   def returning_boolean(), do: @returning_boolean
+
+  @doc ~S"""
+  Returns the names of all pragmas, readable and writable, that return an integer.
+  """
+  def returning_int(), do: @returning_int
+
+  @doc ~S"""
+  Returns the names of all pragmas, readable and writable, that return a text.
+  """
+  def returning_text(), do: @returning_text
+
+  @doc ~S"""
+  Returns the names of all pragmas, readable and writable, that return a list.
+  """
+  def returning_list(), do: @returning_list
+
+  @doc ~S"""
+  Returns the names of all pragmas, readable and writable, that return nothing.
+  """
+  def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra parameter:
