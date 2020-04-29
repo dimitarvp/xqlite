@@ -233,33 +233,38 @@ defmodule Xqlite.Pragma do
   end
 
   @spec index_list(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
-  def index_list(db, schema, table_name, opts \\ [])
-      when is_conn(db) and is_binary(schema) and is_binary(table_name) and is_pragma_opts(opts) do
-    get(db, "'#{schema}'.index_list('#{table_name}')")
+  def index_list(db, schema, name, opts \\ [])
+      when is_conn(db) and is_binary(schema) and is_binary(name) and is_pragma_opts(opts) do
+    directive = maybe_prefix_with_schema(schema, "index_list")
+    get1(db, directive, name, opts)
   end
 
   @spec index_info(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
-  def index_info(db, schema, index_name, opts \\ [])
-      when is_conn(db) and is_binary(schema) and is_binary(index_name) and is_pragma_opts(opts) do
-    get(db, "'#{schema}'.index_info('#{index_name}')")
+  def index_info(db, schema, name, opts \\ [])
+      when is_conn(db) and is_binary(schema) and is_binary(name) and is_pragma_opts(opts) do
+    directive = maybe_prefix_with_schema(schema, "index_info")
+    get1(db, directive, name, opts)
   end
 
   @spec index_xinfo(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
-  def index_xinfo(db, schema, index_name, opts \\ [])
-      when is_conn(db) and is_binary(schema) and is_binary(index_name) and is_pragma_opts(opts) do
-    get(db, "'#{schema}'.index_xinfo('#{index_name}')")
+  def index_xinfo(db, schema, name, opts \\ [])
+      when is_conn(db) and is_binary(schema) and is_binary(name) and is_pragma_opts(opts) do
+    directive = maybe_prefix_with_schema(schema, "index_xinfo")
+    get1(db, directive, name, opts)
   end
 
   @spec table_info(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
-  def table_info(db, schema, table_name, opts \\ [])
-      when is_conn(db) and is_binary(schema) and is_binary(table_name) and is_pragma_opts(opts) do
-    get(db, "'#{schema}'.table_info('#{table_name}')")
+  def table_info(db, schema, name, opts \\ [])
+      when is_conn(db) and is_binary(schema) and is_binary(name) and is_pragma_opts(opts) do
+    directive = maybe_prefix_with_schema(schema, "table_info")
+    get1(db, directive, name, opts)
   end
 
   @spec table_xinfo(Xqlite.conn(), name(), name(), pragma_opts()) :: pragma_result()
-  def table_xinfo(db, schema, table_name, opts \\ [])
-      when is_conn(db) and is_binary(schema) and is_binary(table_name) and is_pragma_opts(opts) do
-    get(db, "'#{schema}'.table_xinfo('#{table_name}')")
+  def table_xinfo(db, schema, name, opts \\ [])
+      when is_conn(db) and is_binary(schema) and is_binary(name) and is_pragma_opts(opts) do
+    directive = maybe_prefix_with_schema(schema, "table_xinfo")
+    get1(db, directive, name, opts)
   end
 
   @doc ~S"""
@@ -283,6 +288,9 @@ defmodule Xqlite.Pragma do
   defp result(:ok, _k), do: :ok
   defp result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
   defp result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
+
+  defp maybe_prefix_with_schema("", t) when is_binary(t), do: t
+  defp maybe_prefix_with_schema(s, t) when is_binary(s) and is_binary(t), do: "'#{s}'.#{t}"
 
   # Generate pragma getter functions that convert a 0/1 integer result
   # to a boolean.
