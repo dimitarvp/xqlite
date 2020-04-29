@@ -106,8 +106,12 @@ defmodule Xqlite.Pragma do
     index_info: [r: {1, true, :text, :list}],
     index_list: [r: {1, true, :text, :list}],
     index_xinfo: [r: {1, true, :text, :list}],
-    # Can also return a single string "ok"; list is returned only when errors are found
-    integrity_check: [r: {0, true, :list}, r: {1, true, :int, :list}],
+    integrity_check: [
+      r: {0, true, :text},
+      r: {0, true, :list},
+      r: {1, true, :int, :text},
+      r: {1, true, :int, :list}
+    ],
     journal_mode: [r: {0, true, :text}, w: {true, :text, :text}],
     journal_size_limit: [r: {0, true, :int}, w: {true, :int, :int}],
     legacy_alter_table: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
@@ -116,14 +120,22 @@ defmodule Xqlite.Pragma do
     max_page_count: [r: {0, true, :int}, w: {true, :int, :int}],
     mmap_size: [r: {0, true, :int}, w: {true, :int, :int}],
     module_list: [r: {0, false, :list}],
-    # Can also return nothing
-    optimize: [r: {0, true, :list}, r: {1, true, :int, :list}],
+    optimize: [
+      r: {0, true, :list},
+      r: {0, true, :nothing},
+      r: {1, true, :int, :list},
+      r: {1, true, :int, :nothing}
+    ],
     page_count: [r: {0, true, :int}],
     page_size: [r: {0, true, :int}, w: {true, :int, :nothing}],
     pragma_list: [r: {0, false, :list}],
     query_only: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
-    # Can also return a single string "ok"; list is returned only when errors are found
-    quick_check: [r: {0, true, :list}, r: {1, true, :int, :list}],
+    quick_check: [
+      r: {0, true, :text},
+      r: {0, true, :list},
+      r: {1, true, :int, :text},
+      r: {1, true, :int, :list}
+    ],
     read_uncommitted: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     recursive_triggers: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     reverse_unordered_selects: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
