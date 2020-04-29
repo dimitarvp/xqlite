@@ -271,6 +271,9 @@ defmodule Xqlite.Pragma do
       {:error, _, _} = err ->
         err
 
+      :ok ->
+        :ok
+
       {:ok, [[{^key, value}]]} ->
         {:ok, sval(String.to_atom(key), value)}
 
@@ -280,7 +283,7 @@ defmodule Xqlite.Pragma do
   end
 
   @doc ~S"""
-  Changes a pragma's value.
+  Changes a PRAGMA's value.
   """
   @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: pragma_result()
   def put(db, key, val)
@@ -291,6 +294,7 @@ defmodule Xqlite.Pragma do
   def put(db, key, val)
       when is_conn(db) and is_binary(key) and is_pragma_value(val) do
     XqliteNIF.pragma_put(db, key, val, [])
+    |> maybe_reshape_pragma_result(key)
   end
 
   # Generate pragma getter functions that convert a 0/1 integer result
