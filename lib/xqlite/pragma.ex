@@ -69,7 +69,7 @@ defmodule Xqlite.Pragma do
   defguard is_pragma_key(x) when is_binary(x) or is_atom(x)
   defguard is_pragma_value(x) when is_binary(x) or is_atom(x) or is_integer(x) or is_boolean(x)
 
-  @supported ~w(
+  @supported_with_zero_params ~w(
     application_id
     auto_vacuum
     automatic_index
@@ -150,7 +150,7 @@ defmodule Xqlite.Pragma do
   Returns all pragma keys except those that are deprecated, or are used with
   non-standard Sqlite compile options, or are intended for testing Sqlite.
   """
-  def supported(), do: @supported
+  def supported_with_zero_params(), do: @supported_with_zero_params
 
   @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
   def get_auto_vacuum(0), do: :none
