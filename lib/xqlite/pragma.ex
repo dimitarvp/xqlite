@@ -75,12 +75,7 @@ defmodule Xqlite.Pragma do
 
   @schema %{
     application_id: [r: {0, true, :int}, w: {true, :int, :nothing}],
-    auto_vacuum: [
-      r: {0, true, :int},
-      r: {0, true, :text},
-      w: {true, :int, :nothing},
-      w: {true, :text, :nothing}
-    ],
+    auto_vacuum: [r: {0, true, :int}, w: {true, :int, :nothing}],
     automatic_index: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     busy_timeout: [r: {0, false, :int}, w: {false, :int, :int}],
     cache_size: [r: {0, true, :int}, w: {true, :int, :nothing}],
