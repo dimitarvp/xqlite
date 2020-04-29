@@ -1,6 +1,9 @@
 defmodule Xqlite.Pragma do
   @moduledoc ~S"""
   Deals with [Sqlite pragmas](https://www.sqlite.org/pragma.html).
+
+  This module deliberately omits the PRAGMAs that are deprecated, or are used with non-standard
+  sqlite compile options, or are intended for testing sqlite.
   """
 
   import Xqlite, only: [int2bool: 1]
@@ -69,7 +72,7 @@ defmodule Xqlite.Pragma do
   defguard is_pragma_key(x) when is_binary(x) or is_atom(x)
   defguard is_pragma_value(x) when is_binary(x) or is_atom(x) or is_integer(x) or is_boolean(x)
 
-  @supported_with_zero_params ~w(
+  @readable_with_zero_params ~w(
     application_id
     auto_vacuum
     automatic_index
@@ -127,6 +130,47 @@ defmodule Xqlite.Pragma do
     wal_checkpoint
   )a
 
+  @writeable_with_one_param ~w(
+    application_id
+    auto_vacuum
+    automatic_index
+    busy_timeout
+    cache_size
+    cache_spill
+    case_sensitive_like
+    cell_size_check
+    checkpoint_fullfsync
+    count_changes
+    defer_foreign_keys
+    encoding
+    foreign_key_check
+    foreign_keys
+    fullfsync
+    hard_heap_limit
+    ignore_check_constraints
+    journal_mode
+    journal_size_limit
+    legacy_alter_table
+    locking_mode
+    max_page_count
+    mmap_size
+    page_size
+    query_only
+    read_uncommitted
+    recursive_triggers
+    reverse_unordered_selects
+    schema_version
+    secure_delete
+    soft_heap_limit
+    synchronous
+    temp_store
+    threads
+    trusted_schema
+    user_version
+    wal_autocheckpoint
+    writable_schema
+  )a
+
   @booleans ~w(
     automatic_index
     case_sensitive_like
@@ -147,10 +191,14 @@ defmodule Xqlite.Pragma do
   )a
 
   @doc ~S"""
-  Returns all pragma keys except those that are deprecated, or are used with
-  non-standard Sqlite compile options, or are intended for testing Sqlite.
+  Returns all readable PRAGMAs that don't require parameters.
   """
-  def supported_with_zero_params(), do: @supported_with_zero_params
+  def readable_with_zero_params(), do: @readable_with_zero_params
+
+  @doc ~S"""
+  Returns all writeable PRAGMAs that require one parameter.
+  """
+  def writeable_with_one_param(), do: @writeable_with_one_param
 
   @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
   def get_auto_vacuum(0), do: :none
