@@ -281,32 +281,32 @@ defmodule Xqlite.Pragma do
   def result({:error, _} = e, _k), do: e
   def result({:error, _, _} = e, _k), do: e
   def result(:ok, _k), do: :ok
-  def result({:ok, [[{k, v}]]}, k), do: {:ok, sval(String.to_atom(k), v)}
-  def result({:ok, vv}, k) when is_list(vv), do: {:ok, mval(String.to_atom(k), vv)}
+  def result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
+  def result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
 
   # Generate pragma getter functions that convert a 0/1 integer result
   # to a boolean.
-  @spec sval(pragma_key(), pragma_result()) :: pragma_result()
+  @spec single(pragma_key(), pragma_result()) :: pragma_result()
   @booleans
   |> Enum.each(fn key ->
-    def sval(unquote(key), value) do
+    def single(unquote(key), value) do
       int2bool(value)
     end
   end)
 
-  def sval(:auto_vacuum, v), do: get_auto_vacuum(v)
-  def sval(:secure_delete, v), do: get_secure_delete(v)
-  def sval(:synchronous, v), do: get_synchronous(v)
-  def sval(:temp_store, v), do: get_temp_store(v)
-  def sval(_key, value), do: value
+  def single(:auto_vacuum, v), do: get_auto_vacuum(v)
+  def single(:secure_delete, v), do: get_secure_delete(v)
+  def single(:synchronous, v), do: get_synchronous(v)
+  def single(:temp_store, v), do: get_temp_store(v)
+  def single(_key, value), do: value
 
-  @spec mval(pragma_key(), pragma_result()) :: pragma_result()
-  def mval(:collation_list, vv),
+  @spec multiple(pragma_key(), pragma_result()) :: pragma_result()
+  def multiple(:collation_list, vv),
     do: Enum.map(vv, fn [{"seq", i}, {"name", s}] -> {i, s} end) |> Map.new()
 
-  def mval(:compile_options, vv), do: values_only(vv)
-  def mval(:integrity_check, vv), do: values_only(vv)
-  def mval(_, vv), do: vv
+  def multiple(:compile_options, vv), do: values_only(vv)
+  def multiple(:integrity_check, vv), do: values_only(vv)
+  def multiple(_, vv), do: vv
 
   defp values_only(r), do: r |> Enum.map(fn [{_k, v}] -> v end)
 end
