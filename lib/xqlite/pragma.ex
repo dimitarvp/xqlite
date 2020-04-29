@@ -57,6 +57,7 @@ defmodule Xqlite.Pragma do
   @type pragma_value :: String.t() | integer()
   @type pragma_result :: any()
   @type pragma_get_result :: {:ok, list()} | {:error, String.t()}
+  @type pragma_arg_type :: :blob | :bool | :int | :list | :nothing | :real | :text
   @type auto_vacuum_key :: 1 | 2 | 3
   @type auto_vacuum_value :: :none | :full | :incremental
   @type secure_delete_key :: 0 | 1 | 2
@@ -72,154 +73,153 @@ defmodule Xqlite.Pragma do
   defguard is_pragma_key(x) when is_binary(x) or is_atom(x)
   defguard is_pragma_value(x) when is_binary(x) or is_atom(x) or is_integer(x) or is_boolean(x)
 
-  @readable_with_zero_params ~w(
-    application_id
-    auto_vacuum
-    automatic_index
-    busy_timeout
-    cache_size
-    cache_spill
-    case_sensitive_like
-    cell_size_check
-    checkpoint_fullfsync
-    collation_list
-    compile_options
-    data_version
-    database_list
-    defer_foreign_keys
-    encoding
-    foreign_key_check
-    foreign_key_list
-    foreign_keys
-    freelist_count
-    fullfsync
-    function_list
-    ignore_check_constraints
-    incremental_vacuum
-    index_info
-    index_list
-    index_xinfo
-    integrity_check
-    journal_mode
-    journal_size_limit
-    legacy_alter_table
-    legacy_file_format
-    locking_mode
-    max_page_count
-    mmap_size
-    module_list
-    optimize
-    page_count
-    page_size
-    pragma_list
-    query_only
-    quick_check
-    read_uncommitted
-    recursive_triggers
-    reverse_unordered_selects
-    secure_delete
-    shrink_memory
-    soft_heap_limit
-    synchronous
-    table_info
-    table_xinfo
-    temp_store
-    threads
-    user_version
-    wal_autocheckpoint
-    wal_checkpoint
-  )a
+  @schema %{
+    application_id: [r: {0, true, :int}, w: {true, :int, :nothing}],
+    auto_vacuum: [
+      r: {0, true, :int},
+      r: {0, true, :text},
+      w: {true, :int, :nothing},
+      w: {true, :text, :nothing}
+    ],
+    automatic_index: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    busy_timeout: [r: {0, false, :int}, w: {false, :int, :int}],
+    cache_size: [r: {0, true, :int}, w: {true, :int, :nothing}],
+    cache_spill: [r: {0, false, :int}, w: {false, :bool, :nothing}, w: {true, :int, :nothing}],
+    case_sensitive_like: [w: {false, :bool, :nothing}],
+    cell_size_check: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    checkpoint_fullfsync: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    collation_list: [r: {0, false, :list}],
+    compile_options: [r: {0, false, :list}],
+    data_version: [r: {0, false, :int}],
+    database_list: [r: {0, false, :list}],
+    defer_foreign_keys: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    encoding: [r: {0, false, :text}, w: {false, :text, :nothing}],
+    foreign_key_check: [r: {0, true, :list}, r: {1, true, :text, :list}],
+    foreign_key_list: [r: {1, false, :text, :list}],
+    foreign_keys: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    freelist_count: [r: {0, true, :int}],
+    fullfsync: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    function_list: [r: {0, false, :list}],
+    hard_heap_limit: [w: {false, :int, :nothing}],
+    ignore_check_constraints: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    incremental_vacuum: [r: {0, true, :int}, r: {1, true, :int, :int}],
+    index_info: [r: {1, true, :text, :list}],
+    index_list: [r: {1, true, :text, :list}],
+    index_xinfo: [r: {1, true, :text, :list}],
+    # Can also return a single string "ok"; list is returned only when errors are found
+    integrity_check: [r: {0, true, :list}, r: {1, true, :int, :list}],
+    journal_mode: [r: {0, true, :text}, w: {true, :text, :text}],
+    journal_size_limit: [r: {0, true, :int}, w: {true, :int, :int}],
+    legacy_alter_table: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    legacy_file_format: [r: {0, false, :int}],
+    locking_mode: [r: {0, true, :text}, w: {true, :text, :text}],
+    max_page_count: [r: {0, true, :int}, w: {true, :int, :int}],
+    mmap_size: [r: {0, true, :int}, w: {true, :int, :int}],
+    module_list: [r: {0, false, :list}],
+    # Can also return nothing
+    optimize: [r: {0, true, :list}, r: {1, true, :int, :list}],
+    page_count: [r: {0, true, :int}],
+    page_size: [r: {0, true, :int}, w: {true, :int, :nothing}],
+    pragma_list: [r: {0, false, :list}],
+    query_only: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    # Can also return a single string "ok"; list is returned only when errors are found
+    quick_check: [r: {0, true, :list}, r: {1, true, :int, :list}],
+    read_uncommitted: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    recursive_triggers: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    reverse_unordered_selects: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    schema_version: [r: {0, true, :int}, w: {true, :int, :nothing}],
+    secure_delete: [r: {0, true, :int}, w: {true, :int, :int}],
+    shrink_memory: [r: {0, false, :nothing}],
+    soft_heap_limit: [r: {0, false, :int}, w: {false, :int, :int}],
+    stats: [r: {0, false, :list}],
+    # Int and text can be passed as parameter, query always returns int
+    synchronous: [r: {0, true, :int}, w: {true, :int, :nothing}, w: {true, :text, :nothing}],
+    table_info: [r: {1, true, :text, :list}],
+    table_xinfo: [r: {1, true, :text, :list}],
+    # Int and text can be passed as parameter, query always returns int
+    temp_store: [r: {0, false, :int}, w: {false, :int, :nothing}, w: {false, :text, :nothing}],
+    temp_store_directory: [r: {0, false, :text}, w: {false, :text, :nothing}],
+    threads: [r: {0, false, :int}, w: {false, :int, :int}],
+    trusted_schema: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
+    user_version: [r: {0, true, :int}, w: {true, :int, :nothing}],
+    wal_autocheckpoint: [r: {0, false, :int}, w: {false, :int, :int}],
+    wal_checkpoint: [r: {0, true, :list}, r: {1, true, :text, :list}],
+    writable_schema: [r: {0, false, :bool}, w: {false, :bool, :nothing}]
+  }
 
-  @writeable_with_one_param ~w(
-    application_id
-    auto_vacuum
-    automatic_index
-    busy_timeout
-    cache_size
-    cache_spill
-    case_sensitive_like
-    cell_size_check
-    checkpoint_fullfsync
-    count_changes
-    defer_foreign_keys
-    encoding
-    foreign_key_check
-    foreign_keys
-    fullfsync
-    hard_heap_limit
-    ignore_check_constraints
-    journal_mode
-    journal_size_limit
-    legacy_alter_table
-    locking_mode
-    max_page_count
-    mmap_size
-    page_size
-    query_only
-    read_uncommitted
-    recursive_triggers
-    reverse_unordered_selects
-    schema_version
-    secure_delete
-    soft_heap_limit
-    synchronous
-    temp_store
-    threads
-    trusted_schema
-    user_version
-    wal_autocheckpoint
-    writable_schema
-  )a
+  @readable_with_zero_params @schema
+                             |> Stream.filter(fn {_name, kw} ->
+                               kw
+                               |> Keyword.get_values(:r)
+                               |> Enum.any?(fn x -> match?({0, _, _}, x) end)
+                             end)
+                             |> Stream.map(fn {name, _kw} -> name end)
+                             |> Enum.sort()
 
-  @booleans ~w(
-    automatic_index
-    case_sensitive_like
-    cell_size_check
-    checkpoint_fullfsync
-    defer_foreign_keys
-    foreign_keys
-    full_column_names
-    fullfsync
-    ignore_check_constraints
-    legacy_alter_table
-    legacy_file_format
-    query_only
-    read_uncommitted
-    recursive_triggers
-    reverse_unordered_selects
-    writable_schema
-  )a
+  @readable_with_one_param @schema
+                           |> Stream.filter(fn {_name, kw} ->
+                             kw
+                             |> Keyword.get_values(:r)
+                             |> Enum.any?(fn x -> match?({1, _, _, _}, x) end)
+                           end)
+                           |> Stream.map(fn {name, _kw} -> name end)
+                           |> Enum.sort()
+
+  @writable_with_one_param @schema
+                           |> Stream.filter(fn {_name, kw} ->
+                             kw
+                             |> Keyword.has_key?(:w)
+                           end)
+                           |> Stream.map(fn {name, _kw} -> name end)
+                           |> Enum.sort()
+
+  @all @schema |> Map.keys() |> Enum.sort()
+
+  @returning_boolean @schema
+                     |> Stream.filter(fn {_name, kw} ->
+                       kw
+                       |> Enum.any?(fn
+                         {:r, {0, _, :bool}} -> true
+                         {:r, {1, _, _, :bool}} -> true
+                         {:w, {_, _, :bool}} -> true
+                         _ -> false
+                       end)
+                     end)
+                     |> Stream.map(fn {name, _kw} -> name end)
+                     |> Enum.sort()
 
   @doc ~S"""
-  Returns all readable PRAGMAs that don't require parameters.
+  Returns a map with keys equal to all supported PRAGMAs, and the values being detailed
+  machine description of the read/write modes of each PRAGMA (contains number of read
+  parameters, read/write parameter types, whether a schema/database prefix is allowed,
+  and the return type).
+  """
+  def schema(), do: @schema
+
+  @doc ~S"""
+  Returns the names of all PRAGMAs that are supported by this library.
+  """
+  def all(), do: @all
+
+  @doc ~S"""
+  Returns the names of all readable PRAGMAs that don't require parameters.
   """
   def readable_with_zero_params(), do: @readable_with_zero_params
 
   @doc ~S"""
-  Returns all writeable PRAGMAs that require one parameter.
+  Returns the names of all readable PRAGMAs that require one parameter.
   """
-  def writeable_with_one_param(), do: @writeable_with_one_param
+  def readable_with_one_param(), do: @readable_with_one_param
 
-  @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
-  def get_auto_vacuum(0), do: :none
-  def get_auto_vacuum(1), do: :full
-  def get_auto_vacuum(2), do: :incremental
+  @doc ~S"""
+  Returns the names of all writable PRAGMAs that require one parameter.
+  """
+  def writable_with_one_param(), do: @writable_with_one_param
 
-  @spec get_secure_delete(secure_delete_key()) :: secure_delete_value()
-  def get_secure_delete(0), do: false
-  def get_secure_delete(1), do: true
-  def get_secure_delete(2), do: :fast
-
-  @spec get_synchronous(synchronous_key()) :: synchronous_value()
-  def get_synchronous(0), do: :off
-  def get_synchronous(1), do: :normal
-  def get_synchronous(2), do: :full
-  def get_synchronous(3), do: :extra
-
-  @spec get_temp_store(temp_store_key()) :: temp_store_value()
-  def get_temp_store(0), do: :default
-  def get_temp_store(1), do: :file
-  def get_temp_store(2), do: :memory
+  @doc ~S"""
+  Returns the names of all pragmas, readable and writable, that are of boolean type.
+  """
+  def returning_boolean(), do: @returning_boolean
 
   @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra parameter:
@@ -325,6 +325,27 @@ defmodule Xqlite.Pragma do
     |> result(key)
   end
 
+  @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
+  def get_auto_vacuum(0), do: :none
+  def get_auto_vacuum(1), do: :full
+  def get_auto_vacuum(2), do: :incremental
+
+  @spec get_secure_delete(secure_delete_key()) :: secure_delete_value()
+  def get_secure_delete(0), do: false
+  def get_secure_delete(1), do: true
+  def get_secure_delete(2), do: :fast
+
+  @spec get_synchronous(synchronous_key()) :: synchronous_value()
+  def get_synchronous(0), do: :off
+  def get_synchronous(1), do: :normal
+  def get_synchronous(2), do: :full
+  def get_synchronous(3), do: :extra
+
+  @spec get_temp_store(temp_store_key()) :: temp_store_value()
+  def get_temp_store(0), do: :default
+  def get_temp_store(1), do: :file
+  def get_temp_store(2), do: :memory
+
   @spec result(pragma_result(), pragma_key()) :: pragma_result()
   defp result({:error, _} = e, _k), do: e
   defp result({:error, _, _} = e, _k), do: e
@@ -332,10 +353,10 @@ defmodule Xqlite.Pragma do
   defp result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
   defp result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
 
-  # Generate pragma getter functions that convert a 0/1 integer result
-  # to a boolean.
+  # Generate pragma getter functions that convert a 0/1 integer result to a boolean
+  # or transform special integer values to atoms.
   @spec single(pragma_key(), pragma_result()) :: pragma_result()
-  @booleans
+  @returning_boolean
   |> Enum.each(fn key ->
     defp single(unquote(key), value) do
       int2bool(value)
