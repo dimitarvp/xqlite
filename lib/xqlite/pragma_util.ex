@@ -1,4 +1,9 @@
 defmodule Xqlite.PragmaUtil do
+  @moduledoc ~S"""
+  A module with zero dependencies on the rest of the modules in this library.
+  Used to reduce boilerplate and slice and dice the pragmas collection (also used in tests).
+  """
+
   @type name :: atom()
   @type spec :: keyword()
   @type arg_type :: :blob | :bool | :int | :list | :nothing | :real | :text
