@@ -148,11 +148,11 @@ defmodule Xqlite.Pragma do
     shrink_memory: [r: {0, false, :nothing}],
     soft_heap_limit: [r: {0, false, :int}, w: {false, :int, :int}],
     stats: [r: {0, false, :list}],
-    # Int and text can be passed as parameter when setting, query always returns int
+    # Int and text can be passed as argument when setting, query always returns int
     synchronous: [r: {0, true, :int}, w: {true, :int, :nothing}, w: {true, :text, :nothing}],
     table_info: [r: {1, true, :text, :list}],
     table_xinfo: [r: {1, true, :text, :list}],
-    # Int and text can be passed as parameter when setting, query always returns int
+    # Int and text can be passed as argument when setting, query always returns int
     temp_store: [r: {0, false, :int}, w: {false, :int, :nothing}, w: {false, :text, :nothing}],
     temp_store_directory: [r: {0, false, :text}, w: {false, :text, :nothing}],
     threads: [r: {0, false, :int}, w: {false, :int, :int}],
@@ -164,9 +164,9 @@ defmodule Xqlite.Pragma do
   }
 
   @all @schema |> Map.keys() |> Enum.sort()
-  @readable_with_zero_params filter_pragmas(@schema, &readable_pragma_with_zero_args?/1)
-  @readable_with_one_param filter_pragmas(@schema, &readable_pragma_with_one_arg?/1)
-  @writable_with_one_param filter_pragmas(@schema, &writable_pragma_with_one_arg?/1)
+  @readable_with_zero_args filter_pragmas(@schema, &readable_pragma_with_zero_args?/1)
+  @readable_with_one_arg filter_pragmas(@schema, &readable_pragma_with_one_arg?/1)
+  @writable_with_one_arg filter_pragmas(@schema, &writable_pragma_with_one_arg?/1)
   @returning_boolean pragmas_of_type(@schema, :bool)
   @returning_int pragmas_of_type(@schema, :int)
   @returning_text pragmas_of_type(@schema, :text)
@@ -176,7 +176,7 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Returns a map with keys equal to all supported PRAGMAs, and the values being detailed
   machine description of the read/write modes of each PRAGMA (contains number of read
-  parameters, read/write parameter types, whether a schema/database prefix is allowed,
+  arguments, read/write argument types, whether a schema/database prefix is allowed,
   and the return type).
   """
   def schema(), do: @schema
@@ -187,19 +187,19 @@ defmodule Xqlite.Pragma do
   def all(), do: @all
 
   @doc ~S"""
-  Returns the names of all readable PRAGMAs that don't require parameters.
+  Returns the names of all readable PRAGMAs that don't require argument.
   """
-  def readable_with_zero_params(), do: @readable_with_zero_params
+  def readable_with_zero_args(), do: @readable_with_zero_args
 
   @doc ~S"""
-  Returns the names of all readable PRAGMAs that require one parameter.
+  Returns the names of all readable PRAGMAs that require one argument.
   """
-  def readable_with_one_param(), do: @readable_with_one_param
+  def readable_with_one_arg(), do: @readable_with_one_arg
 
   @doc ~S"""
-  Returns the names of all writable PRAGMAs that require one parameter.
+  Returns the names of all writable PRAGMAs that require one argument.
   """
-  def writable_with_one_param(), do: @writable_with_one_param
+  def writable_with_one_arg(), do: @writable_with_one_arg
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return a boolean.
@@ -227,11 +227,11 @@ defmodule Xqlite.Pragma do
   def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
-  Fetches a PRAGMA's value, optionally specifying an extra parameter:
-  - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra parameter.
-  - `get(db, :table_info, :users)` is a PRAGMA that does require an extra parameter.
+  Fetches a PRAGMA's value, optionally specifying an extra argument:
+  - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra argument.
+  - `get(db, :table_info, :users)` is a PRAGMA that does require an extra argument.
 
-  The last parameter are options:
+  The last argument is a list of options:
   - `:db_name` - must be a string. The values `"main"` and `"temp"` are treated specially,
     as in  instruct sqlite to use the main (originally opened) database or a temporary DB
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
@@ -239,17 +239,17 @@ defmodule Xqlite.Pragma do
   """
   @spec get(Xqlite.Conn.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
           pragma_get_result()
-  def get(db, key, param_or_opts \\ [], opts \\ [])
+  def get(db, key, arg_or_opts \\ [], opts \\ [])
 
-  def get(db, key, param_or_opts, _opts)
-      when is_conn(db) and is_pragma_key(key) and is_list(param_or_opts) do
-    get0(db, key, param_or_opts)
+  def get(db, key, arg_or_opts, _opts)
+      when is_conn(db) and is_pragma_key(key) and is_list(arg_or_opts) do
+    get0(db, key, arg_or_opts)
   end
 
-  def get(db, key, param_or_opts, opts)
-      when is_conn(db) and is_pragma_key(key) and is_pragma_key(param_or_opts) and
+  def get(db, key, arg_or_opts, opts)
+      when is_conn(db) and is_pragma_key(key) and is_pragma_key(arg_or_opts) and
              is_list(opts) do
-    get1(db, key, param_or_opts, opts)
+    get1(db, key, arg_or_opts, opts)
   end
 
   @spec get0(Xqlite.Conn.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
@@ -264,24 +264,24 @@ defmodule Xqlite.Pragma do
 
   @spec get1(Xqlite.Conn.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
           pragma_get_result()
-  defp get1(conn, key, param, opts)
-       when is_conn(conn) and is_atom(key) and is_atom(param) and is_pragma_opts(opts) do
-    get1(conn, Atom.to_string(key), Atom.to_string(param), opts)
+  defp get1(conn, key, arg, opts)
+       when is_conn(conn) and is_atom(key) and is_atom(arg) and is_pragma_opts(opts) do
+    get1(conn, Atom.to_string(key), Atom.to_string(arg), opts)
   end
 
-  defp get1(conn, key, param, opts)
-       when is_conn(conn) and is_atom(key) and is_binary(param) and is_pragma_opts(opts) do
-    get1(conn, Atom.to_string(key), param, opts)
+  defp get1(conn, key, arg, opts)
+       when is_conn(conn) and is_atom(key) and is_binary(arg) and is_pragma_opts(opts) do
+    get1(conn, Atom.to_string(key), arg, opts)
   end
 
-  defp get1(conn, key, param, opts)
-       when is_conn(conn) and is_binary(key) and is_atom(param) and is_pragma_opts(opts) do
-    get1(conn, key, Atom.to_string(param), opts)
+  defp get1(conn, key, arg, opts)
+       when is_conn(conn) and is_binary(key) and is_atom(arg) and is_pragma_opts(opts) do
+    get1(conn, key, Atom.to_string(arg), opts)
   end
 
-  defp get1(conn, key, param, opts)
-       when is_conn(conn) and is_binary(key) and is_binary(param) and is_pragma_opts(opts) do
-    XqliteNIF.pragma_get1(conn, key, param, opts)
+  defp get1(conn, key, arg, opts)
+       when is_conn(conn) and is_binary(key) and is_binary(arg) and is_pragma_opts(opts) do
+    XqliteNIF.pragma_get1(conn, key, arg, opts)
     |> result(key)
   end
 
