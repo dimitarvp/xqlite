@@ -9,6 +9,15 @@ defmodule Xqlite.Pragma do
   import Xqlite, only: [int2bool: 1]
   import Xqlite.Conn, only: [is_conn: 1]
 
+  import Xqlite.Util,
+    only: [
+      filter_pragmas: 2,
+      pragmas_of_type: 2,
+      readable_pragma_with_one_arg?: 1,
+      readable_pragma_with_zero_args?: 1,
+      writable_pragma_with_one_arg?: 1
+    ]
+
   @doc """
   Given the contents of the `https://www.sqlite.org/pragma.html` URL passed to this
   function, retrieve a list of supported sqlite3 pragma names.
@@ -154,98 +163,15 @@ defmodule Xqlite.Pragma do
     writable_schema: [r: {0, false, :bool}, w: {false, :bool, :nothing}]
   }
 
-  @readable_with_zero_params @schema
-                             |> Stream.filter(fn {_name, kw} ->
-                               kw
-                               |> Keyword.get_values(:r)
-                               |> Enum.any?(fn x -> match?({0, _, _}, x) end)
-                             end)
-                             |> Stream.map(fn {name, _kw} -> name end)
-                             |> Enum.sort()
-
-  @readable_with_one_param @schema
-                           |> Stream.filter(fn {_name, kw} ->
-                             kw
-                             |> Keyword.get_values(:r)
-                             |> Enum.any?(fn x -> match?({1, _, _, _}, x) end)
-                           end)
-                           |> Stream.map(fn {name, _kw} -> name end)
-                           |> Enum.sort()
-
-  @writable_with_one_param @schema
-                           |> Stream.filter(fn {_name, kw} ->
-                             kw
-                             |> Keyword.has_key?(:w)
-                           end)
-                           |> Stream.map(fn {name, _kw} -> name end)
-                           |> Enum.sort()
-
   @all @schema |> Map.keys() |> Enum.sort()
-
-  @returning_boolean @schema
-                     |> Stream.filter(fn {_name, kw} ->
-                       kw
-                       |> Enum.any?(fn
-                         {:r, {0, _, :bool}} -> true
-                         {:r, {1, _, _, :bool}} -> true
-                         {:w, {_, _, :bool}} -> true
-                         _ -> false
-                       end)
-                     end)
-                     |> Stream.map(fn {name, _kw} -> name end)
-                     |> Enum.sort()
-
-  @returning_int @schema
-                 |> Stream.filter(fn {_name, kw} ->
-                   kw
-                   |> Enum.any?(fn
-                     {:r, {0, _, :int}} -> true
-                     {:r, {1, _, _, :int}} -> true
-                     {:w, {_, _, :int}} -> true
-                     _ -> false
-                   end)
-                 end)
-                 |> Stream.map(fn {name, _kw} -> name end)
-                 |> Enum.sort()
-
-  @returning_text @schema
-                  |> Stream.filter(fn {_name, kw} ->
-                    kw
-                    |> Enum.any?(fn
-                      {:r, {0, _, :text}} -> true
-                      {:r, {1, _, _, :text}} -> true
-                      {:w, {_, _, :text}} -> true
-                      _ -> false
-                    end)
-                  end)
-                  |> Stream.map(fn {name, _kw} -> name end)
-                  |> Enum.sort()
-
-  @returning_list @schema
-                  |> Stream.filter(fn {_name, kw} ->
-                    kw
-                    |> Enum.any?(fn
-                      {:r, {0, _, :list}} -> true
-                      {:r, {1, _, _, :list}} -> true
-                      {:w, {_, _, :list}} -> true
-                      _ -> false
-                    end)
-                  end)
-                  |> Stream.map(fn {name, _kw} -> name end)
-                  |> Enum.sort()
-
-  @returning_nothing @schema
-                     |> Stream.filter(fn {_name, kw} ->
-                       kw
-                       |> Enum.any?(fn
-                         {:r, {0, _, :nothing}} -> true
-                         {:r, {1, _, _, :nothing}} -> true
-                         {:w, {_, _, :nothing}} -> true
-                         _ -> false
-                       end)
-                     end)
-                     |> Stream.map(fn {name, _kw} -> name end)
-                     |> Enum.sort()
+  @readable_with_zero_params filter_pragmas(@schema, &readable_pragma_with_zero_args?/1)
+  @readable_with_one_param filter_pragmas(@schema, &readable_pragma_with_one_arg?/1)
+  @writable_with_one_param filter_pragmas(@schema, &writable_pragma_with_one_arg?/1)
+  @returning_boolean pragmas_of_type(@schema, :bool)
+  @returning_int pragmas_of_type(@schema, :int)
+  @returning_text pragmas_of_type(@schema, :text)
+  @returning_list pragmas_of_type(@schema, :list)
+  @returning_nothing pragmas_of_type(@schema, :nothing)
 
   @doc ~S"""
   Returns a map with keys equal to all supported PRAGMAs, and the values being detailed
