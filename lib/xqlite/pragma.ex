@@ -9,13 +9,13 @@ defmodule Xqlite.Pragma do
   import Xqlite, only: [int2bool: 1]
   import Xqlite.Conn, only: [is_conn: 1]
 
-  import Xqlite.Util,
+  import Xqlite.PragmaUtil,
     only: [
-      filter_pragmas: 2,
-      pragmas_of_type: 2,
-      readable_pragma_with_one_arg?: 1,
-      readable_pragma_with_zero_args?: 1,
-      writable_pragma_with_one_arg?: 1
+      filter: 2,
+      of_type: 2,
+      readable_with_one_arg?: 1,
+      readable_with_zero_args?: 1,
+      writable_with_one_arg?: 1
     ]
 
   @doc """
@@ -66,7 +66,6 @@ defmodule Xqlite.Pragma do
   @type pragma_value :: String.t() | integer()
   @type pragma_result :: any()
   @type pragma_get_result :: {:ok, list()} | {:error, String.t()}
-  @type pragma_arg_type :: :blob | :bool | :int | :list | :nothing | :real | :text
   @type auto_vacuum_key :: 1 | 2 | 3
   @type auto_vacuum_value :: :none | :full | :incremental
   @type secure_delete_key :: 0 | 1 | 2
@@ -164,14 +163,14 @@ defmodule Xqlite.Pragma do
   }
 
   @all @schema |> Map.keys() |> Enum.sort()
-  @readable_with_zero_args filter_pragmas(@schema, &readable_pragma_with_zero_args?/1)
-  @readable_with_one_arg filter_pragmas(@schema, &readable_pragma_with_one_arg?/1)
-  @writable_with_one_arg filter_pragmas(@schema, &writable_pragma_with_one_arg?/1)
-  @returning_boolean pragmas_of_type(@schema, :bool)
-  @returning_int pragmas_of_type(@schema, :int)
-  @returning_text pragmas_of_type(@schema, :text)
-  @returning_list pragmas_of_type(@schema, :list)
-  @returning_nothing pragmas_of_type(@schema, :nothing)
+  @readable_with_zero_args filter(@schema, &readable_with_zero_args?/1)
+  @readable_with_one_arg filter(@schema, &readable_with_one_arg?/1)
+  @writable_with_one_arg filter(@schema, &writable_with_one_arg?/1)
+  @returning_boolean of_type(@schema, :bool)
+  @returning_int of_type(@schema, :int)
+  @returning_text of_type(@schema, :text)
+  @returning_list of_type(@schema, :list)
+  @returning_nothing of_type(@schema, :nothing)
 
   @doc ~S"""
   Returns a map with keys equal to all supported PRAGMAs, and the values being detailed
