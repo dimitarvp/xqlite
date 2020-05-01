@@ -161,6 +161,63 @@ defmodule Xqlite.Pragma do
     writable_schema: [r: {0, false, :bool}, w: {false, :bool, :nothing}]
   }
 
+  @i32 0..0xFFFFFFFF
+  @u32 0..0x7FFFFFFF
+  @nonzero_u32 1..0x7FFFFFFF
+  @bool 0..1
+  @encoding ~w(UTF-8 UTF-16 UTF-16le UTF-16be)
+  @journal_mode ~w(DELETE TRUNCATE PERSIST MEMORY WAL OFF)
+  @locking_mode ~w(NORMAL EXCLUSIVE)
+  @page_size [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+  @secure_delete 0..2
+  @synchronous [0, 1, 2, 3, "OFF", "NORMAL", "FULL", "EXTRA"]
+  @temp_store [0, 1, 2, "DEFAULT", "FILE", "MEMORY"]
+  @directory [System.tmp_dir()]
+
+  @valid_writes %{
+    application_id: @i32,
+    auto_vacuum: 0..2,
+    automatic_index: @bool,
+    busy_timeout: @u32,
+    cache_size: @i32,
+    # u32 includes the 0/1 bool values that this PRAGMA allows.
+    cache_spill: @u32,
+    case_sensitive_like: @bool,
+    cell_size_check: @bool,
+    checkpoint_fullfsync: @bool,
+    defer_foreign_keys: @bool,
+    encoding: @encoding,
+    foreign_keys: @bool,
+    fullfsync: @bool,
+    hard_heap_limit: @u32,
+    ignore_check_constraints: @bool,
+    integrity_check: @nonzero_u32,
+    journal_mode: @journal_mode,
+    journal_size_limit: @i32,
+    legacy_alter_table: @bool,
+    locking_mode: @locking_mode,
+    max_page_count: @nonzero_u32,
+    mmap_size: @i32,
+    page_size: @page_size,
+    query_only: @bool,
+    read_uncommitted: @bool,
+    recursive_triggers: @bool,
+    reverse_unordered_selects: @bool,
+    schema_version: @i32,
+    secure_delete: @secure_delete,
+    soft_heap_limit: @u32,
+    # Int and text can be passed as argument when setting, query always returns int
+    synchronous: @synchronous,
+    # Int and text can be passed as argument when setting, query always returns int
+    temp_store: @temp_store,
+    temp_store_directory: @directory,
+    threads: @u32,
+    trusted_schema: @bool,
+    user_version: @i32,
+    wal_autocheckpoint: @i32,
+    writable_schema: @bool
+  }
+
   @all @schema |> Map.keys() |> Enum.sort()
   @readable_with_zero_args filter(@schema, &readable_with_zero_args?/1)
   @readable_with_one_arg filter(@schema, &readable_with_one_arg?/1)
@@ -178,6 +235,12 @@ defmodule Xqlite.Pragma do
   and the return type).
   """
   def schema(), do: @schema
+
+  @doc ~S"""
+  Returns a map with keys equal to all writable PRAGMAs, and the values being a mini
+  specification of allowed values.
+  """
+  def valid_writes(), do: @valid_writes
 
   @doc ~S"""
   Returns the names of all PRAGMAs that are supported by this library.
