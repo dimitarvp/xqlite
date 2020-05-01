@@ -22,7 +22,7 @@ defmodule XqlitePragmaTest do
 
   # All writable PRAGMAs with one arg.
   describe "write pragma with one argument" do
-    P.valid_writes()
+    P.valid_write_arg_values()
     |> Enum.each(fn {name, arg_spec} ->
       test name, %{db: db} do
         assert valid_pragma_write(db, unquote(name), unquote(Macro.escape(arg_spec)))
