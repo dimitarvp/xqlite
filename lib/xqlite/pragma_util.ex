@@ -74,4 +74,9 @@ defmodule Xqlite.PragmaUtil do
     |> Stream.map(fn {n, _s} -> n end)
     |> Enum.sort()
   end
+
+  @spec filter(pragmas(), filter(), filter()) :: [name()]
+  def filter(m, f1, f2) when is_pragmas(m) and is_filter(f1) and is_filter(f2) do
+    filter(m, fn p -> f1.(p) && f2.(p) end)
+  end
 end
