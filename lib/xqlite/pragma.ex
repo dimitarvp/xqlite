@@ -195,7 +195,7 @@ defmodule Xqlite.Pragma do
     recursive_triggers: @bool,
     reverse_unordered_selects: @bool,
     schema_version: @i32,
-    secure_delete: @secure_delete,
+    secure_delete: 0..2,
     soft_heap_limit: @u32,
     synchronous: [0, 1, 2, 3, "OFF", "NORMAL", "FULL", "EXTRA"],
     temp_store: [0, 1, 2, "DEFAULT", "FILE", "MEMORY"],
