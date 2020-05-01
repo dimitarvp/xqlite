@@ -15,7 +15,7 @@ defmodule XqlitePragmaTest do
     P.readable_with_zero_args()
     |> Enum.each(fn name ->
       test name, %{db: db} do
-        assert valid_pragma(P.get(db, unquote(name)))
+        assert valid_get_result(P.get(db, unquote(name)))
       end
     end)
   end
@@ -30,9 +30,9 @@ defmodule XqlitePragmaTest do
     end)
   end
 
-  defp valid_pragma({:error, _, _}), do: false
-  defp valid_pragma({:error, _}), do: false
-  defp valid_pragma({:ok, _}), do: true
+  defp valid_get_result({:error, _, _}), do: false
+  defp valid_get_result({:error, _}), do: false
+  defp valid_get_result({:ok, _}), do: true
 
   defp valid_put_result(_name, :ok), do: true
   defp valid_put_result(_name, {:ok, _result}), do: true
