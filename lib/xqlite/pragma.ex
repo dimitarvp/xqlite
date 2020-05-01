@@ -146,7 +146,6 @@ defmodule Xqlite.Pragma do
     secure_delete: [r: {0, true, :int}, w: {true, :int, :int}],
     shrink_memory: [r: {0, false, :nothing}],
     soft_heap_limit: [r: {0, false, :int}, w: {false, :int, :int}],
-    stats: [r: {0, false, :list}],
     # Int and text can be passed as argument when setting, query always returns int
     synchronous: [r: {0, true, :int}, w: {true, :int, :nothing}, w: {true, :text, :nothing}],
     table_info: [r: {1, true, :text, :list}],
