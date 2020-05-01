@@ -143,7 +143,6 @@ defmodule Xqlite.Pragma do
     read_uncommitted: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     recursive_triggers: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     reverse_unordered_selects: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
-    schema_version: [r: {0, true, :int}, w: {true, :int, :nothing}],
     secure_delete: [r: {0, true, :int}, w: {true, :int, :int}],
     shrink_memory: [r: {0, false, :nothing}],
     soft_heap_limit: [r: {0, false, :int}, w: {false, :int, :int}],
@@ -153,13 +152,11 @@ defmodule Xqlite.Pragma do
     table_xinfo: [r: {1, true, :text, :list}],
     # Int and text can be passed as argument when setting, query always returns int
     temp_store: [r: {0, false, :int}, w: {false, :int, :nothing}, w: {false, :text, :nothing}],
-    temp_store_directory: [r: {0, false, :text}, w: {false, :text, :nothing}],
     threads: [r: {0, false, :int}, w: {false, :int, :int}],
     trusted_schema: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     user_version: [r: {0, true, :int}, w: {true, :int, :nothing}],
     wal_autocheckpoint: [r: {0, false, :int}, w: {false, :int, :int}],
-    wal_checkpoint: [r: {0, true, :list}, r: {1, true, :text, :list}],
-    writable_schema: [r: {0, false, :bool}, w: {false, :bool, :nothing}]
+    wal_checkpoint: [r: {0, true, :list}, r: {1, true, :text, :list}]
   }
 
   @i32 0..0xFFFFFFFF
@@ -195,17 +192,14 @@ defmodule Xqlite.Pragma do
     read_uncommitted: @bool,
     recursive_triggers: @bool,
     reverse_unordered_selects: @bool,
-    schema_version: @i32,
     secure_delete: 0..2,
     soft_heap_limit: @u32,
     synchronous: [0, 1, 2, 3, "OFF", "NORMAL", "FULL", "EXTRA"],
     temp_store: [0, 1, 2, "DEFAULT", "FILE", "MEMORY"],
-    temp_store_directory: [System.tmp_dir()],
     threads: @u32,
     trusted_schema: @bool,
     user_version: @i32,
-    wal_autocheckpoint: @i32,
-    writable_schema: @bool
+    wal_autocheckpoint: @i32
   }
 
   @all @schema |> Map.keys() |> Enum.sort()
