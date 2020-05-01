@@ -111,9 +111,9 @@ defmodule Xqlite.Pragma do
     index_list: [r: {1, true, :text, :list}],
     index_xinfo: [r: {1, true, :text, :list}],
     integrity_check: [
-      r: {0, true, :text},
+      r: {0, true, :text}, # only returns "ok" in this case.
       r: {0, true, :list},
-      r: {1, true, :int, :text},
+      r: {1, true, :int, :text}, # only returns "ok" in this case.
       r: {1, true, :int, :list}
     ],
     journal_mode: [r: {0, true, :text}, w: {true, :text, :text}],
@@ -135,9 +135,9 @@ defmodule Xqlite.Pragma do
     pragma_list: [r: {0, false, :list}],
     query_only: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     quick_check: [
-      r: {0, true, :text},
+      r: {0, true, :text}, # only returns "ok" in this case.
       r: {0, true, :list},
-      r: {1, true, :int, :text},
+      r: {1, true, :int, :text}, # only returns "ok" in this case.
       r: {1, true, :int, :list}
     ],
     read_uncommitted: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
