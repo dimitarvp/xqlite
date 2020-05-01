@@ -40,6 +40,12 @@ defmodule Xqlite.PragmaUtil do
 
   defdelegate writable_with_one_arg?(p), to: __MODULE__, as: :writable?
 
+  def one_write_variant?({_n, s} = p) when is_pragma(p),
+    do: length(Keyword.get_values(s, :w)) == 1
+
+  def many_write_variants?({_n, s} = p) when is_pragma(p),
+    do: length(Keyword.get_values(s, :w)) > 1
+
   @spec returns_type?(pragma(), arg_type()) :: boolean()
   def returns_type?({_n, s} = p, t) when is_pragma(p) and is_arg_type(t) do
     Enum.any?(s, fn
