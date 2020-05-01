@@ -27,6 +27,7 @@ defmodule Xqlite.Pragma do
     matches =
       html
       |> Floki.parse_document()
+      |> elem(1)
       |> Floki.find("/html/body/script")
       |> Enum.filter(fn {"script", [], texts} ->
         Enum.any?(texts, &Regex.match?(~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*\[\s*\{.+/misu, &1))
