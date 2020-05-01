@@ -15,7 +15,7 @@ defmodule Xqlite.Pragma do
       of_type: 2,
       readable_with_one_arg?: 1,
       readable_with_zero_args?: 1,
-      writable_with_one_arg?: 1
+      writable?: 1
     ]
 
   @doc """
@@ -205,7 +205,7 @@ defmodule Xqlite.Pragma do
   @all @schema |> Map.keys() |> Enum.sort()
   @readable_with_zero_args filter(@schema, &readable_with_zero_args?/1)
   @readable_with_one_arg filter(@schema, &readable_with_one_arg?/1)
-  @writable_with_one_arg filter(@schema, &writable_with_one_arg?/1)
+  @writable filter(@schema, &writable?/1)
   @returning_boolean of_type(@schema, :bool)
   @returning_int of_type(@schema, :int)
   @returning_text of_type(@schema, :text)
@@ -244,7 +244,7 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Returns the names of all writable PRAGMAs that require one argument.
   """
-  def writable_with_one_arg(), do: @writable_with_one_arg
+  def writable(), do: @writable
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return a boolean.

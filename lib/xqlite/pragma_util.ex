@@ -38,8 +38,6 @@ defmodule Xqlite.PragmaUtil do
   @spec writable?(pragma()) :: boolean()
   def writable?({_n, s} = p) when is_pragma(p), do: Keyword.has_key?(s, :w)
 
-  defdelegate writable_with_one_arg?(p), to: __MODULE__, as: :writable?
-
   @spec one_write_variant?(pragma()) :: boolean()
   def one_write_variant?({_n, s} = p) when is_pragma(p),
     do: length(Keyword.get_values(s, :w)) == 1
