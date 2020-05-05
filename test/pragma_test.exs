@@ -20,6 +20,9 @@ defmodule XqlitePragmaTest do
     end)
   end
 
+  # All of the readable PRAGMAs with one arg are actually instructions that change the DB.
+  # We are not going to test those for now.
+
   # All writable PRAGMAs with one arg.
   describe "write pragma with one argument" do
     P.valid_write_arg_values()
