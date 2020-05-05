@@ -7,7 +7,7 @@ defmodule Xqlite.Config do
   - Provides functions to modify a keyword list of options.
   """
 
-  import Xqlite
+  import Xqlite.Conn, only: [is_db_name: 1]
 
   # Default is an anonymous in-memory database.
   @default_db_name Xqlite.unnamed_memory_db()
@@ -32,6 +32,7 @@ defmodule Xqlite.Config do
           genserver_timeout: timeout()
         }
 
+  defguard is_config_opts(x) when is_list(x)
   defguard is_timeout(x) when (is_atom(x) and x == :infinity) or (is_integer(x) and x >= 0)
   defguard is_size(x) when is_integer(x) and x > 0
 
@@ -61,7 +62,7 @@ defmodule Xqlite.Config do
   def default(), do: %__MODULE__{} |> Map.to_list()
 
   @spec get(Xqlite.opts(), key()) :: value()
-  def get(opts, key) when is_opts(opts) and is_key(key) do
+  def get(opts, key) when is_config_opts(opts) and is_key(key) do
     Keyword.get(opts, key, Keyword.get(default(), key))
   end
 
@@ -78,27 +79,27 @@ defmodule Xqlite.Config do
   def get_genserver_timeout(opts), do: get(opts, :genserver_timeout)
 
   @spec put(Xqlite.opts(), key(), value()) :: Xqlite.opts()
-  def put(opts, key, value) when is_opts(opts) and is_key(key) and is_value(value) do
+  def put(opts, key, value) when is_config_opts(opts) and is_key(key) and is_value(value) do
     Keyword.put(opts, key, value)
   end
 
   @spec put_batch_size(Xqlite.opts(), size()) :: Xqlite.opts()
-  def put_batch_size(opts, n) when is_opts(opts) and is_size(n) do
+  def put_batch_size(opts, n) when is_config_opts(opts) and is_size(n) do
     put(opts, :batch_size, n)
   end
 
   @spec put_db_name(Xqlite.opts(), Xqlite.db_name()) :: Xqlite.opts()
-  def put_db_name(opts, db_name) when is_opts(opts) and is_db_name(db_name) do
+  def put_db_name(opts, db_name) when is_config_opts(opts) and is_db_name(db_name) do
     put(opts, :db_name, db_name)
   end
 
   @spec put_exec_timeout(Xqlite.opts(), timeout()) :: Xqlite.opts()
-  def put_exec_timeout(opts, t) when is_opts(opts) and is_timeout(t) do
+  def put_exec_timeout(opts, t) when is_config_opts(opts) and is_timeout(t) do
     put(opts, :exec_timeout, t)
   end
 
   @spec put_genserver_timeout(Xqlite.opts(), timeout()) :: Xqlite.opts()
-  def put_genserver_timeout(opts, t) when is_opts(opts) and is_timeout(t) do
+  def put_genserver_timeout(opts, t) when is_config_opts(opts) and is_timeout(t) do
     put(opts, :genserver_timeout, t)
   end
 end
