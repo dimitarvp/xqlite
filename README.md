@@ -1,49 +1,48 @@
 # Description
 
-SQLite3 library and an adapter for Ecto 3.1+ in one package.
+SQLite3 library and an adapter for Ecto 3.x in one package (the minimum Ecto 3 version is still TBD).
 
-**WARNING**: Not ready for use yet, still in development.
+**WARNING**: Not fully ready for use yet.
 
 # Current status
 
-- Can open and close sqlite connections.
-- Can retrieve and set PRAGMA properties.
-- **UP NEXT**: Support all SQL operations (insert, select, update etc.). This will likely involve a lot of copy-paste from [sqlitex](https://github.com/elixir-sqlite/sqlitex) since this author's goal is to marry sqlite and Ecto 3.1+. Any functional refinements and shaking of external dependencies are a secondary priority.
+- [x] Can open and close sqlite connections.
+- [x] Can retrieve and set PRAGMA properties.
+- [x] Can execute any arbitrary SQL statements but it does not return any records; only a number of records / tables / triggers / etc. which were affected by the statement.
+- [ ] **Currently worked on**: Support all SQL operations -- insert, select, update, delete and all others (like creating triggers).
+- [ ] Integrate with Ecto 3.x.
+- [ ] Provide first-class support for the [session extension](https://www.sqlite.org/sessionintro.html) so the users of the library can snapshot and isolate batches of changes (which are coincidentally also named changesets and patchsets; **not** to be mistaken with Ecto's [Changeset](https://hexdocs.pm/ecto/Ecto.Changeset.html#content)).
 
 # Roadmap and goals
 
 - To provide enough functions and options for working with sqlite so as to make a wide variety of sqlite work in Elixir easy to achieve. This includes but is not limited to: application databases, caches, one-file backups, transformed public data sets like Wikipedia or Common Crawl.
 
-- The main module has to work with sqlite via an opaque connection handle (identical to the one that the Erlang library [esqlite](https://github.com/mmzeeman/esqlite) returns since this library uses it).
+- The main module has to work with sqlite via an opaque connection handle (reference-counted from the Rust code side).
 
-- To provide OTP wiring, namely a [GenServer](https://hexdocs.pm/elixir/GenServer.html) that can be inserted in the library user's supervision tree. Or simply to centralise the access to an sqlite database if the user so desires (note that this is not mandated by sqlite since by default it allows concurrent read access; using the `GenServer` would mostly be helpful if you want to avoid concurrent write access which is not supported).
+- To provide OTP wiring ([GenServer](https://hexdocs.pm/elixir/GenServer.html)) to centralise and serialise writes to the  sqlite DB. This can be achieved even now without a `GenServer` but the order of the write operations cannot be guaranteed. The `GenServer` will help with that.
 
-- To provide an [Ecto](https://hexdocs.pm/ecto/Ecto.html) 3.1+ adapter.
+- To provide an [Ecto](https://hexdocs.pm/ecto/Ecto.html) 3.x adapter, complete with connection pooling and everything that the PostgreSQL and MySQL adapters offer (exact goals TBD).
 
 # Future, possibly non-doable goals
 
-- To provide as strict as possible typing mode which is mostly going to involve installing sqlite triggers in the database, combined with runtime type checks (pattern-matching and guards) in the Elixir code. It's probably going to be clunky and not provide 100% guarantee but the author feels it's still going to be a huge improvement over the basically untyped raw sqlite.
-
-- Stop integrating with Erlang's [esqlite](https://github.com/mmzeeman/esqlite) library (and by extension, Elixir's [sqlitex](https://github.com/elixir-sqlite/sqlitex) library), and move to Rust's [rusqlite](https://github.com/jgallagher/rusqlite) and utilise [Rustler](https://github.com/rusterlium/rustler) to facilitate the connection.
+- To provide an optional strict mode with guidelines borrowed [from sqlite itself](https://sqlite.org/src/wiki?name=StrictMode). Additionally, this is going to involve automatically injecting sqlite triggers in the database that enforce proper types in every column (a la PostgreSQL), combined with runtime type checks -- pattern-matching and guards -- in the Elixir code. It's probably going to be clunky and not provide 100% guarantee but the author feels it's still going to be a huge improvement over the basically almost untyped raw sqlite.
 
 # Installation
 
-This package can be installed by adding `xqlite` to your list of dependencies in `mix.exs`:
+This package is not yet published on Hex.PM. To use it, add this to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:xqlite, "~> 0.1"}
+    {:xqlite, github: "dimitarvp/xqlite"}
   ]
 end
 ```
 
-Documentation: [https://hexdocs.pm/xqlite](https://hexdocs.pm/xqlite).
-
 # Technical notes
 
-- `Mix.Config` will not be used to configure this library since it's deprecated in Elixir 1.9.
+- `Mix.Config` will not be used to configure this library. Every needed configuration will be provided to the library's function directly. Additionally, the future `GenServer` will likely be made to also carry configuration for convenience.
 
 - Elixir 1.9's `Config` will not be used either. See [Avoid application configuration](https://hexdocs.pm/elixir/library-guidelines.html#avoid-application-configuration) by Elixir's authors.
 
-- The library is configured via the `Xqlite.Config` structure which is going to be passed around in the raw sqlite functions and also stored as a `GenServer` state in the OTP wiring part of the library. _No application configuration will ever be involved_. You either carry your configuration and pass it around, or make a `GenServer` remember it for you.
+- The `Xqlite.Config` module has been created but for now it's not used anywhere for now.
