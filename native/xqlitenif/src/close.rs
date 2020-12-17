@@ -30,11 +30,10 @@ fn close(arc: ResourceArc<XqliteConnection>) -> CloseResult {
         let conn: Connection = mconn.take().unwrap();
         match conn.close() {
             Ok(()) => CloseResult::Success,
-            Err((conn, err)) => {
+            Err((conn, e)) => {
                 // Closing failed, put the connection back in the original container.
                 *mconn = Some(conn);
-                let msg: String = format!("{:?}", err);
-                CloseResult::Failure(msg)
+                CloseResult::Failure(e.to_string())
             }
         }
     } else {

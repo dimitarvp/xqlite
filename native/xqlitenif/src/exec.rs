@@ -27,10 +27,7 @@ fn exec(arc: ResourceArc<XqliteConnection>, sql: String) -> ExecResult {
     match &*locked {
         Some(conn) => match conn.execute(&sql, params![]) {
             Ok(affected) => ExecResult::Success(affected),
-            Err(err) => {
-                let msg: String = format!("{:?}", err);
-                ExecResult::Failure(msg)
-            }
+            Err(e) => ExecResult::Failure(e.to_string()),
         },
         None => ExecResult::AlreadyClosed,
     }

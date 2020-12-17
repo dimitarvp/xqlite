@@ -49,10 +49,7 @@ fn pragma_get0(
 
             match conn.pragma_query(Some(database_name), pragma_name, gather_pragmas) {
                 Ok(_) => PragmaGetResult::Success(acc),
-                Err(err) => {
-                    let msg: String = format!("{:?}", err);
-                    PragmaGetResult::Failure(msg)
-                }
+                Err(e) => PragmaGetResult::Failure(e.to_string()),
             }
         }
         None => PragmaGetResult::AlreadyClosed,
@@ -94,10 +91,7 @@ fn pragma_get1(
                 gather_pragmas,
             ) {
                 Ok(_) => PragmaGetResult::Success(acc),
-                Err(err) => {
-                    let msg: String = format!("{:?}", err);
-                    PragmaGetResult::Failure(msg)
-                }
+                Err(e) => PragmaGetResult::Failure(e.to_string()),
             }
         }
         None => PragmaGetResult::AlreadyClosed,
