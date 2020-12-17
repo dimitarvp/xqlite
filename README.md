@@ -9,6 +9,7 @@ SQLite3 library and an adapter for Ecto 3.x in one package (the minimum Ecto 3 v
 - [x] Can open and close sqlite connections.
 - [x] Can retrieve and set PRAGMA properties.
 - [x] Can execute any arbitrary SQL statements but it does not return any records; only a number of records / tables / triggers / etc. which were affected by the statement.
+- [x] Can execute SELECT statements without arguments (arguments must be already in the query string, SQL injection I know, hey, I am just trying to arrive at a first working version).
 - [ ] **Currently worked on**: Support all SQL operations -- insert, select, update, delete and all others (like creating triggers).
 - [ ] Integrate with Ecto 3.x.
 - [ ] Provide first-class support for the [session extension](https://www.sqlite.org/sessionintro.html) so the users of the library can snapshot and isolate batches of changes (which are coincidentally also named changesets and patchsets; **not** to be mistaken with Ecto's [Changeset](https://hexdocs.pm/ecto/Ecto.Changeset.html#content)).
