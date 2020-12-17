@@ -6,7 +6,7 @@ defmodule XqliteConfigTest do
 
   @fields Keyword.keys(C.default()) -- [:__struct__]
   @valid_batch_size 2000
-  @valid_db_name Xqlite.unnamed_memory_db()
+  @valid_db_name Xqlite.anon_db()
   @valid_exec_timeout :infinity
   @valid_genserver_timeout 5000
   @valid_opts [

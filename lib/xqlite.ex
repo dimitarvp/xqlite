@@ -4,7 +4,7 @@ defmodule Xqlite do
   Note that they delegate to other modules which you can also use directly.
   """
 
-  def unnamed_memory_db(), do: ":memory:"
+  def anon_db(), do: ":memory:"
 
   @spec int2bool(0 | 1) :: true | false
   def int2bool(0), do: false

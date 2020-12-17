@@ -6,7 +6,7 @@ defmodule XqlitePragmaTest do
   alias Xqlite.Pragma, as: P
 
   setup do
-    {:ok, db} = Conn.open(Xqlite.unnamed_memory_db())
+    {:ok, db} = Conn.open(Xqlite.anon_db())
     {:ok, db: db}
   end
 
