@@ -6,6 +6,7 @@ mod exec;
 mod open;
 mod pragma_get;
 mod pragma_put;
+mod query;
 mod shared;
 
 use crate::shared::XqliteConnection;
@@ -23,7 +24,8 @@ rustler::init!(
         exec::exec,
         pragma_get::pragma_get0,
         pragma_get::pragma_get1,
-        pragma_put::pragma_put
+        pragma_put::pragma_put,
+        query::query,
     ],
     load = on_load
 );
