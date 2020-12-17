@@ -17,6 +17,8 @@ defmodule Xqlite.Conn do
   defguard is_conn_opts(x) when is_list(x)
   defguard is_db_name(x) when is_binary(x)
 
+  # --- Functions.
+
   @spec open(db_name(), opts()) :: open_result()
   def open(db_name, opts \\ [])
 
