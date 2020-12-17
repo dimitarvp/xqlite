@@ -28,7 +28,8 @@ defmodule Xqlite.MixProject do
         "coveralls.detail": :test,
         "coveralls.post": :test,
         "coveralls.html": :test,
-        "coveralls.circle": :test
+        "coveralls.circle": :test,
+        t: :test
       ],
 
       # type checking
@@ -88,7 +89,8 @@ defmodule Xqlite.MixProject do
   defp aliases do
     [
       c: "compile",
-      f: ["format", "cmd cargo fmt --manifest-path native/xqlitenif/Cargo.toml"]
+      f: ["format", "cmd cargo fmt --manifest-path native/xqlitenif/Cargo.toml"],
+      t: "test"
     ]
   end
 end
