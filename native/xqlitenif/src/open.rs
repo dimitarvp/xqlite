@@ -36,9 +36,6 @@ fn open(db_name: String, _opts: Vec<Term>) -> OpenResult {
             let wrapper = ResourceArc::new(xconn);
             OpenResult::Success(wrapper)
         }
-        Err(err) => {
-            let msg: String = format!("{:?}", err);
-            OpenResult::Failure(msg)
-        }
+        Err(e) => OpenResult::Failure(e.to_string()),
     }
 }

@@ -74,14 +74,11 @@ fn pragma_put<'a>(
                 gather_pragmas,
             ) {
                 Ok(_) => PragmaPutResult::SuccessWithValue(acc),
-                Err(err) => match err {
+                Err(e) => match e {
                     rusqlite::Error::QueryReturnedNoRows => {
                         PragmaPutResult::SuccessWithoutValue
                     }
-                    _ => {
-                        let msg: String = format!("{:?}", err);
-                        PragmaPutResult::Failure(msg)
-                    }
+                    _ => PragmaPutResult::Failure(e.to_string()),
                 },
             }
         }
