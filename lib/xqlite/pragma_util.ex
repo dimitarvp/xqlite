@@ -62,7 +62,7 @@ defmodule Xqlite.PragmaUtil do
   def returns_text?(p) when is_pragma(p), do: returns_type?(p, :text)
   def returns_nothing?(p) when is_pragma(p), do: returns_type?(p, :nothing)
 
-  @spec of_type(pragmas(), filter()) :: [name()]
+  @spec of_type(pragmas(), arg_type()) :: [name()]
   def of_type(m, t) when is_pragmas(m) and is_arg_type(t) do
     filter(m, fn p -> returns_type?(p, t) end)
   end
