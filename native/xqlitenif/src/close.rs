@@ -22,8 +22,8 @@ impl<'a> Encoder for CloseResult {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn close(arc: ResourceArc<XqliteConnection>) -> CloseResult {
-    let mut mconn = arc.0.lock().unwrap();
+fn close(container: ResourceArc<XqliteConnection>) -> CloseResult {
+    let mut mconn = container.0.lock().unwrap();
     if !mconn.is_none() {
         // Take out the connection so it becomes None in the resource
         // as it is being closed early.
