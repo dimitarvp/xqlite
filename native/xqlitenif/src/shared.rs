@@ -1,11 +1,52 @@
+use crate::atoms::{already_closed, cannot_execute, db_name, unsupported_value};
 use rusqlite::{Connection, DatabaseName};
+use rustler::resource::ResourceArc;
+use rustler::types::atom::{error, nil, ok};
 use rustler::{Encoder, Env, Term};
 use std::sync::Mutex;
 
-use crate::atoms::{db_name, nil};
-
 pub struct XqliteConnection(pub Mutex<Option<Connection>>);
 pub struct XqliteValue(pub rusqlite::types::Value);
+
+pub enum SharedResult<'a, T> {
+    Success(T),
+    SuccessWithoutValue,
+    UnsupportedValue(Term<'a>),
+    AlreadyClosed,
+    Failure(String),
+}
+
+impl<'a, T> Encoder for SharedResult<'_, T>
+where
+    T: Encoder,
+{
+    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
+        match self {
+            SharedResult::Success(value) => (ok(), value).encode(env),
+            SharedResult::SuccessWithoutValue => (ok()).encode(env),
+            SharedResult::UnsupportedValue(term) => {
+                (error(), unsupported_value(), term).encode(env)
+            }
+            SharedResult::AlreadyClosed => (error(), already_closed()).encode(env),
+            SharedResult::Failure(msg) => (error(), cannot_execute(), msg).encode(env),
+        }
+    }
+}
+
+pub fn use_conn<'a, F, T>(
+    container: ResourceArc<XqliteConnection>,
+    consume: F,
+) -> SharedResult<'a, T>
+where
+    F: FnOnce(&Connection) -> SharedResult<'a, T>,
+    T: Encoder,
+{
+    let locked = container.0.lock().unwrap();
+    match &*locked {
+        Some(conn) => consume(conn),
+        None => SharedResult::AlreadyClosed,
+    }
+}
 
 impl<'a> Encoder for XqliteValue {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
