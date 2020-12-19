@@ -10,5 +10,5 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.22.0-rc.0"
 rusqlite = "0.24"
+rustler = "0.22.0-rc.0"
