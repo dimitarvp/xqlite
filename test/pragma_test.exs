@@ -40,7 +40,7 @@ defmodule XqlitePragmaTest do
   defp valid_put_result(_name, :ok), do: true
   defp valid_put_result(_name, {:ok, _result}), do: true
 
-  defp valid_put_result(name, {:error, :unsupported_pragma_put_value, val}) do
+  defp valid_put_result(name, {:error, :unsupported_value, val}) do
     flunk("PRAGMA put #{name} failed: unsupported value: #{val}")
   end
 

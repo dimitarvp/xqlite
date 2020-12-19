@@ -9,5 +9,5 @@ rustler::atoms! {
     ok,
     pragma_get_failed,
     pragma_put_failed,
-    unsupported_pragma_put_value
+    unsupported_value
 }
