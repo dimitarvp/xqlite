@@ -8,7 +8,7 @@ SQLite3 library and an adapter for Ecto 3.x in one package (the minimum Ecto 3.x
 
 I am looking for the best Rust primitives and 3rd party libraries to use as less locks as possible when working with sqlite since it itself uses enough of them and I don't want the Rust code to do superfluous synchronization.
 
-Apparently there are some sqlite operations that aren't threadsafe in serialized mode (the so-called "full mutex sqlite mode"). Context: https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109. And a link to the official sqlite3 docs: https://sqlite.org/threadsafe.html
+Apparently there are some sqlite operations that aren't threadsafe in serialized mode (the so-called "full mutex" sqlite mode). Context: https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109. And a link to the official sqlite3 docs: https://sqlite.org/threadsafe.html
 
 For these reasons, this library will always open sqlite connections in the so-called "no mutex" mode -- meaning that every time an sqlite operation is issued on the Elixir side, the Rust code will get a new sqlite connection from an internal pool so as to never share a single internal sqlite database handle between OTP processes. I haven't figured out how to balance the publicly exposed Erlang/Elixir pool with that internal Rust pool just yet, that's a high-prio task for the near future.
 
