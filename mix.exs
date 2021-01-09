@@ -68,7 +68,11 @@ defmodule Xqlite.MixProject do
       extras: ["README.md"]
     ]
 
-  defp rustler_crates(), do: [xqlitenif: [mode: :release]]
+  defp rustler_crates(),
+    do: [xqlitenif: [mode: cargo_env(Mix.env())]]
+
+  defp cargo_env(:prod), do: :release
+  defp cargo_env(_), do: :release
 
   defp description(), do: "An Elixir SQLite database library utilising the rusqlite Rust crate"
 
