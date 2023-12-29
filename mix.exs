@@ -14,8 +14,7 @@ defmodule Xqlite.MixProject do
       docs: docs(),
       aliases: aliases(),
       deps: deps(),
-      compilers: [:rustler] ++ Mix.compilers(),
-      rustler_crates: rustler_crates(),
+      compilers: Mix.compilers(),
 
       # hex
       description: description(),
@@ -50,7 +49,7 @@ defmodule Xqlite.MixProject do
 
       {:floki, "~> 0.23"},
       {:jason, "~> 1.2"},
-      {:rustler, "~> 0.22-rc"},
+      {:rustler, "~> 0.30"},
 
       # dev / test dependencies.
 
@@ -67,12 +66,6 @@ defmodule Xqlite.MixProject do
       main: "readme",
       extras: ["README.md"]
     ]
-
-  defp rustler_crates(),
-    do: [xqlitenif: [mode: cargo_env(Mix.env())]]
-
-  defp cargo_env(:prod), do: :release
-  defp cargo_env(_), do: :release
 
   defp description(), do: "An Elixir SQLite database library utilising the rusqlite Rust crate"
 

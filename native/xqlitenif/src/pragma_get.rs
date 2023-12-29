@@ -4,7 +4,7 @@ use crate::shared::{
 use rustler::resource::ResourceArc;
 use rustler::Term;
 
-type PragmaGetResults = Vec<Vec<(String, XqliteValue)>>;
+type PragmaGetResults = Vec<Vec<XqliteValue>>;
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn pragma_get0<'a>(
@@ -15,16 +15,16 @@ fn pragma_get0<'a>(
     use_conn(container, |conn| {
         let database_name = database_name_from_opts(&opts);
 
-        let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
+        let mut acc: Vec<Vec<XqliteValue>> = Vec::new();
         let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
-            let column_count = row.column_count();
-            let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
-            for i in 0..column_count {
-                if let Ok(name) = row.column_name(i) {
-                    if let Ok(value) = row.get(i) {
-                        fields.push((String::from(name), XqliteValue(value)));
-                    }
-                }
+            let mut i: usize = 0;
+
+            // Pragmas don't return a lot of results, so 4 is adequate.
+            let mut fields: Vec<XqliteValue> = Vec::with_capacity(4);
+
+            while let Ok(value) = row.get(i) {
+                fields.push(XqliteValue(value));
+                i += 1;
             }
 
             acc.push(fields);
@@ -48,16 +48,16 @@ fn pragma_get1<'a>(
     use_conn(container, |conn| {
         let database_name = database_name_from_opts(&opts);
 
-        let mut acc: Vec<Vec<(String, XqliteValue)>> = Vec::new();
+        let mut acc: Vec<Vec<XqliteValue>> = Vec::new();
         let gather_pragmas = |row: &rusqlite::Row| -> rusqlite::Result<()> {
-            let column_count = row.column_count();
-            let mut fields: Vec<(String, XqliteValue)> = Vec::with_capacity(column_count);
-            for i in 0..column_count {
-                if let Ok(name) = row.column_name(i) {
-                    if let Ok(value) = row.get(i) {
-                        fields.push((String::from(name), XqliteValue(value)));
-                    }
-                }
+            let mut i: usize = 0;
+
+            // Pragmas don't return a lot of results, so 4 is adequate.
+            let mut fields: Vec<XqliteValue> = Vec::with_capacity(4);
+
+            while let Ok(value) = row.get(i) {
+                fields.push(XqliteValue(value));
+                i += 1;
             }
 
             acc.push(fields);
@@ -67,7 +67,7 @@ fn pragma_get1<'a>(
         match conn.pragma(
             Some(database_name),
             pragma_name,
-            &String::from(param),
+            String::from(param),
             gather_pragmas,
         ) {
             Ok(_) => SharedResult::Success(acc),
