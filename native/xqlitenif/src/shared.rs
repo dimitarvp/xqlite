@@ -16,7 +16,7 @@ pub enum SharedResult<'a, T> {
     Failure(String),
 }
 
-impl<'a, T> Encoder for SharedResult<'_, T>
+impl<T> Encoder for SharedResult<'_, T>
 where
     T: Encoder,
 {
@@ -48,7 +48,7 @@ where
     }
 }
 
-impl<'a> Encoder for XqliteValue {
+impl Encoder for XqliteValue {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         match &self.0 {
             rusqlite::types::Value::Null => nil().encode(env),
@@ -60,7 +60,7 @@ impl<'a> Encoder for XqliteValue {
     }
 }
 
-pub fn database_name_from_opts<'a>(opts: &'a Vec<Term>) -> DatabaseName<'a> {
+pub fn database_name_from_opts<'a>(opts: &'a [Term]) -> DatabaseName<'a> {
     let mut database_name = DatabaseName::Main;
 
     // Scan for options that need to be mapped to stricter Rust types.

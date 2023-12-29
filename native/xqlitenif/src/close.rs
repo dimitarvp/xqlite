@@ -11,7 +11,7 @@ enum CloseResult {
     Failure(String),
 }
 
-impl<'a> Encoder for CloseResult {
+impl Encoder for CloseResult {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         match self {
             CloseResult::Success => (ok()).encode(env),

@@ -43,7 +43,7 @@ fn pragma_put<'a>(
         match conn.pragma_update_and_check(
             Some(database_name),
             pragma_name,
-            &native_pragma_value,
+            native_pragma_value,
             gather_pragmas,
         ) {
             Ok(_) => SharedResult::Success(acc),
