@@ -11,7 +11,7 @@ enum OpenResult {
     Failure(String),
 }
 
-impl<'a> Encoder for OpenResult {
+impl Encoder for OpenResult {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         match self {
             OpenResult::Success(arc) => (ok(), arc).encode(env),
