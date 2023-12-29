@@ -100,16 +100,18 @@ pub fn term_to_pragma_value<'a>(input: Term<'a>) -> Result<rusqlite::types::Valu
             // All other atoms except `nil` are rejected.
             Err(input)
         }
-        rustler::TermType::Number => {
-            // Attempt to decode a 64-bit signed integer or a 64-bit floating point number.
+        rustler::TermType::Integer => {
             let decoded_i64: Result<i64, rustler::error::Error> = input.decode();
             if let Ok(an_i64) = decoded_i64 {
                 return Ok(rusqlite::types::Value::Integer(an_i64));
-            } else {
-                let decoded_f64: Result<f64, rustler::error::Error> = input.decode();
-                if let Ok(an_f64) = decoded_f64 {
-                    return Ok(rusqlite::types::Value::Real(an_f64));
-                }
+            }
+
+            Err(input)
+        }
+        rustler::TermType::Float => {
+            let decoded_f64: Result<f64, rustler::error::Error> = input.decode();
+            if let Ok(an_f64) = decoded_f64 {
+                return Ok(rusqlite::types::Value::Real(an_f64));
             }
 
             Err(input)

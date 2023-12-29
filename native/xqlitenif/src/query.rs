@@ -1,5 +1,4 @@
 use crate::shared::{use_conn, SharedResult, XqliteConnection, XqliteValue};
-use rusqlite::NO_PARAMS;
 use rustler::resource::ResourceArc;
 
 type QueryResults = Vec<Vec<XqliteValue>>;
@@ -16,8 +15,10 @@ fn query<'a>(
             Err(e) => return SharedResult::Failure(e.to_string()),
         };
 
+        let column_count = stmt.column_count();
+
         // Execute query.
-        let mut rows = match stmt.query(NO_PARAMS) {
+        let mut rows = match stmt.query([]) {
             Ok(x) => x,
             Err(e) => return SharedResult::Failure(e.to_string()),
         };
@@ -30,7 +31,6 @@ fn query<'a>(
                 Err(e) => return SharedResult::Failure(e.to_string()),
                 Ok(None) => break,
                 Ok(Some(row)) => {
-                    let column_count = row.column_count();
                     let mut record = Vec::with_capacity(column_count);
                     for i in 0..column_count {
                         match row.get(i) {
