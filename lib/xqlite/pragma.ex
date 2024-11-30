@@ -424,12 +424,22 @@ defmodule Xqlite.Pragma do
   defp single(_key, value), do: value
 
   @spec multiple(pragma_key(), pragma_result()) :: pragma_result()
-  defp multiple(:collation_list, vv),
-    do: Enum.map(vv, fn [{"seq", i}, {"name", s}] -> [{:seq, i}, {:name, s}] |> Map.new() end)
+  defp multiple(:collation_list, vv) do
+    Enum.map(vv, fn
+      [{"seq", i}, {"name", s}] -> [{:seq, i}, {:name, s}] |> Map.new()
+      [i, s] -> Map.new([{i, s}])
+    end)
+  end
 
   defp multiple(:compile_options, vv), do: values_only(vv)
   defp multiple(:integrity_check, vv), do: values_only(vv)
   defp multiple(_, vv), do: vv
 
-  defp values_only(r), do: r |> Enum.map(fn [{_k, v}] -> v end)
+  defp values_only(r) do
+    r
+    |> Enum.map(fn
+      [{_k, v}] -> v
+      [v] -> v
+    end)
+  end
 end
