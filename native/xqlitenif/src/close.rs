@@ -1,5 +1,5 @@
 use rusqlite::Connection;
-use rustler::resource::ResourceArc;
+use rustler::ResourceArc;
 use rustler::{Encoder, Env, Term};
 
 use crate::atoms::{already_closed, cannot_close, error, ok};

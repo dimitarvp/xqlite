@@ -1,5 +1,5 @@
 use crate::shared::{use_conn, SharedResult, XqliteConnection, XqliteValue};
-use rustler::resource::ResourceArc;
+use rustler::ResourceArc;
 
 type QueryResults = Vec<Vec<XqliteValue>>;
 
