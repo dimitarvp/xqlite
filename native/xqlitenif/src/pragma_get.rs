@@ -1,7 +1,7 @@
 use crate::shared::{
     database_name_from_opts, use_conn, SharedResult, XqliteConnection, XqliteValue,
 };
-use rustler::resource::ResourceArc;
+use rustler::ResourceArc;
 use rustler::Term;
 
 type PragmaGetResults = Vec<Vec<XqliteValue>>;

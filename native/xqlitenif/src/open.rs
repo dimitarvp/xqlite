@@ -1,7 +1,7 @@
 use crate::atoms::{error, ok};
 use crate::shared::XqliteConnection;
 use rusqlite::{Connection, OpenFlags};
-use rustler::resource::ResourceArc;
+use rustler::ResourceArc;
 use rustler::{Encoder, Env, Term};
 use std::path::Path;
 use std::sync::Mutex;

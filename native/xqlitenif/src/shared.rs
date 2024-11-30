@@ -1,11 +1,13 @@
 use crate::atoms::{already_closed, cannot_execute, db_name, unsupported_value};
 use rusqlite::{Connection, DatabaseName};
-use rustler::resource::ResourceArc;
 use rustler::types::atom::{error, nil, ok};
 use rustler::{Encoder, Env, Term};
+use rustler::{Resource, ResourceArc};
 use std::sync::Mutex;
 
 pub struct XqliteConnection(pub Mutex<Option<Connection>>);
+impl Resource for XqliteConnection {}
+
 pub struct XqliteValue(pub rusqlite::types::Value);
 
 pub enum SharedResult<'a, T> {

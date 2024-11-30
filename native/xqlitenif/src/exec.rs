@@ -1,6 +1,6 @@
 use crate::shared::{use_conn, SharedResult, XqliteConnection};
 use rusqlite::params;
-use rustler::resource::ResourceArc;
+use rustler::ResourceArc;
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn exec<'a>(container: ResourceArc<XqliteConnection>, sql: String) -> SharedResult<'a, usize> {

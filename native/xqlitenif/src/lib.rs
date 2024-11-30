@@ -12,20 +12,7 @@ mod shared;
 use crate::shared::XqliteConnection;
 
 fn on_load(env: Env, _info: Term) -> bool {
-    rustler::resource!(XqliteConnection, env);
-    true
+    env.register::<XqliteConnection>().is_ok()
 }
 
-rustler::init!(
-    "Elixir.XqliteNIF",
-    [
-        open::open,
-        close::close,
-        exec::exec,
-        pragma_get::pragma_get0,
-        pragma_get::pragma_get1,
-        pragma_put::pragma_put,
-        query::query,
-    ],
-    load = on_load
-);
+rustler::init!("Elixir.XqliteNIF", load = on_load);
