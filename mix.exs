@@ -49,7 +49,7 @@ defmodule Xqlite.MixProject do
 
       {:floki, "~> 0.23"},
       {:jason, "~> 1.2"},
-      {:rustler, "~> 0.30"},
+      {:rustler, "~> 0.36"},
 
       # dev / test dependencies.
 
