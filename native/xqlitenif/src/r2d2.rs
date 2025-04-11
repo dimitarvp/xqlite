@@ -16,6 +16,7 @@ type XqlitePools = DashMap<u64, XqlitePool>;
 
 #[derive(Debug)]
 pub(crate) struct XqliteConn(u64);
+#[resource_impl]
 impl Resource for XqliteConn {}
 impl Copy for XqliteConn {}
 impl Clone for XqliteConn {
