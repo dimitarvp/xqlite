@@ -6,6 +6,7 @@ use crate::atoms::{
 use dashmap::DashMap;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rustler::resource_impl;
 use rustler::types::atom::{error, nil, ok};
 use rustler::{Encoder, Env, OwnedBinary, Resource, ResourceArc, Term};
 use std::sync::atomic::{AtomicU64, Ordering};
