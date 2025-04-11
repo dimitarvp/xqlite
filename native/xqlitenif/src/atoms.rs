@@ -1,13 +1,22 @@
 rustler::atoms! {
     already_closed,
+    cannot_allocate_binary,
     cannot_close,
+    cannot_close_connection,
     cannot_decode,
+    cannot_encode,
     cannot_execute,
+    cannot_fetch_row,
+    cannot_open_database,
+    cannot_prepare_statement,
+    connection_not_found,
     db_name,
     error,
     nil,
     ok,
     pragma_get_failed,
     pragma_put_failed,
+    timeout,
+    unknown,
     unsupported_value
 }

@@ -9,5 +9,9 @@ defmodule XqliteNIF do
   def pragma_put(_conn, _pragma_name, _pragma_value, _opts), do: err()
   def query(_conn, _sql), do: err()
 
+  def nif_open(_path), do: err()
+  def nif_exec(_conn, _sql), do: err()
+  def nif_close(_conn), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
