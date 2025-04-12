@@ -54,7 +54,6 @@ impl Encoder for XqliteVal {
         }
     }
 }
-impl RefUnwindSafe for XqliteVal {}
 
 #[derive(Debug)]
 enum XqliteError<'a> {
