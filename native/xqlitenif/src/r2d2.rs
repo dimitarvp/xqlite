@@ -97,24 +97,6 @@ impl Encoder for XqliteError<'_> {
 
 impl RefUnwindSafe for XqliteError<'_> {}
 
-#[derive(Debug)]
-enum XqliteOk<T> {
-    WithValue(T),
-    WithoutValue,
-}
-
-impl<T> Encoder for XqliteOk<T>
-where
-    T: Encoder,
-{
-    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
-        match self {
-            XqliteOk::WithValue(value) => value.encode(env),
-            XqliteOk::WithoutValue => ().encode(env),
-        }
-    }
-}
-
 // Initialize only once: global map of SQLite connection pools.
 static POOLS: OnceLock<XqlitePools> = OnceLock::new();
 
@@ -145,10 +127,10 @@ fn remove_pool(id: u64) -> bool {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_open<'a>(path: String) -> Result<XqliteOk<ResourceArc<XqliteConn>>, XqliteError<'a>> {
+fn nif_open<'a>(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError<'a>> {
     create_pool(&path).map_or_else(
         |e| Err(XqliteError::CannotOpenDatabase(path, e)),
-        |id| Ok(XqliteOk::WithValue(ResourceArc::new(XqliteConn(id)))),
+        |id| Ok(ResourceArc::new(XqliteConn(id))),
     )
 }
 
@@ -156,7 +138,7 @@ fn nif_open<'a>(path: String) -> Result<XqliteOk<ResourceArc<XqliteConn>>, Xqlit
 fn nif_exec<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
-) -> Result<Vec<Vec<Result<XqliteOk<XqliteVal>, XqliteError<'a>>>>, XqliteError<'a>> {
+) -> Result<Vec<Vec<Result<XqliteVal, XqliteError<'a>>>>, XqliteError<'a>> {
     let pool = match get_pool(handle.0) {
         Some(pool) => pool,
         None => return Err(XqliteError::ConnectionNotFound(*handle)),
@@ -173,14 +155,14 @@ fn nif_exec<'a>(
     };
 
     let column_count = stmt.column_count();
-    let mut results: Vec<Vec<Result<XqliteOk<XqliteVal>, XqliteError>>> = Vec::new();
+    let mut results: Vec<Vec<Result<XqliteVal, XqliteError>>> = Vec::new();
 
     let rows = match stmt.query_map([], |row| {
-        let mut row_values: Vec<Result<XqliteOk<XqliteVal>, XqliteError>> =
+        let mut row_values: Vec<Result<XqliteVal, XqliteError>> =
             Vec::with_capacity(column_count);
         for i in 0..column_count {
-            let value: Result<XqliteOk<XqliteVal>, XqliteError> = match row.get(i) {
-                Ok(val) => Ok(XqliteOk::WithValue(XqliteVal(val))),
+            let value: Result<XqliteVal, XqliteError> = match row.get(i) {
+                Ok(val) => Ok(XqliteVal(val)),
                 Err(e) => Err(XqliteError::CannotEncodeValue(i, e)),
             };
             row_values.push(value);
@@ -202,9 +184,9 @@ fn nif_exec<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_close<'a>(handle: ResourceArc<XqliteConn>) -> Result<XqliteOk<()>, XqliteError<'a>> {
+fn nif_close<'a>(handle: ResourceArc<XqliteConn>) -> Result<(), XqliteError<'a>> {
     if remove_pool(handle.0) {
-        Ok(XqliteOk::WithoutValue)
+        Ok(())
     } else {
         Err(XqliteError::ConnectionNotFound(*handle))
     }
