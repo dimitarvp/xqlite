@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rustler::resource_impl;
-use rustler::types::atom::nil;
+use rustler::types::atom::{error, nil, ok};
 use rustler::{Encoder, Env, OwnedBinary, Resource, ResourceArc, Term};
 use std::panic::RefUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -184,10 +184,10 @@ fn nif_exec<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_close<'a>(handle: ResourceArc<XqliteConn>) -> Result<(), XqliteError<'a>> {
+fn nif_close(env: Env, handle: ResourceArc<XqliteConn>) -> Term {
     if remove_pool(handle.0) {
-        Ok(())
+        ok().encode(env)
     } else {
-        Err(XqliteError::ConnectionNotFound(*handle))
+        (error(), (XqliteError::ConnectionNotFound(*handle))).encode(env)
     }
 }
