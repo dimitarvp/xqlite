@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rustler::resource_impl;
-use rustler::types::atom::{error, nil, ok};
+use rustler::types::atom::nil;
 use rustler::{Encoder, Env, OwnedBinary, Resource, ResourceArc, Term};
 use std::panic::RefUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,12 +44,7 @@ impl Encoder for XqliteVal {
             rusqlite::types::Value::Blob(b) => {
                 let mut owned_binary = match OwnedBinary::new(b.len()) {
                     Some(owned_binary) => owned_binary,
-                    None => {
-                        return XqliteResult::<XqliteError>::Err(
-                            XqliteError::CannotAllocateBinary,
-                        )
-                        .encode(env)
-                    }
+                    None => return XqliteError::CannotAllocateBinary.encode(env),
                 };
 
                 owned_binary.as_mut_slice().copy_from_slice(b);
@@ -77,30 +72,24 @@ enum XqliteError<'a> {
 impl Encoder for XqliteError<'_> {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
-            XqliteError::UnsupportedValue(term) => {
-                (error(), unsupported_value(), term).encode(env)
-            }
+            XqliteError::UnsupportedValue(term) => (unsupported_value(), term).encode(env),
             XqliteError::ConnectionNotFound(conn) => {
-                (error(), connection_not_found(), conn).encode(env)
+                (connection_not_found(), conn).encode(env)
             }
-            XqliteError::Timeout(err) => (error(), timeout(), err.to_string()).encode(env),
+            XqliteError::Timeout(err) => (timeout(), err.to_string()).encode(env),
             XqliteError::CannotPrepareStatement(sql, err) => {
-                (error(), cannot_prepare_statement(), sql, err.to_string()).encode(env)
+                (cannot_prepare_statement(), sql, err.to_string()).encode(env)
             }
             XqliteError::CannotEncodeValue(index, err) => {
-                (error(), cannot_encode(), index, err.to_string()).encode(env)
+                (cannot_encode(), index, err.to_string()).encode(env)
             }
-            XqliteError::CannotExecute(err) => {
-                (error(), cannot_execute(), err.to_string()).encode(env)
-            }
+            XqliteError::CannotExecute(err) => (cannot_execute(), err.to_string()).encode(env),
             XqliteError::CannotFetchRow(err) => {
-                (error(), cannot_fetch_row(), err.to_string()).encode(env)
+                (cannot_fetch_row(), err.to_string()).encode(env)
             }
-            XqliteError::CannotAllocateBinary => {
-                (error(), cannot_allocate_binary()).encode(env)
-            }
+            XqliteError::CannotAllocateBinary => (cannot_allocate_binary()).encode(env),
             XqliteError::CannotOpenDatabase(path, err) => {
-                (error(), cannot_open_database(), path, err.to_string()).encode(env)
+                (cannot_open_database(), path, err.to_string()).encode(env)
             }
         }
     }
@@ -120,26 +109,8 @@ where
 {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
-            XqliteOk::WithValue(value) => (ok(), value).encode(env),
-            XqliteOk::WithoutValue => (ok()).encode(env),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum XqliteResult<'a, T> {
-    Ok(XqliteOk<T>),
-    Err(XqliteError<'a>),
-}
-
-impl<T> Encoder for XqliteResult<'_, T>
-where
-    T: Encoder,
-{
-    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
-        match self {
-            XqliteResult::Ok(ok) => ok.encode(env),
-            XqliteResult::Err(err) => err.encode(env),
+            XqliteOk::WithValue(value) => value.encode(env),
+            XqliteOk::WithoutValue => ().encode(env),
         }
     }
 }
@@ -174,15 +145,10 @@ fn remove_pool(id: u64) -> bool {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_open(env: Env, path: String) -> Term {
+fn nif_open<'a>(path: String) -> Result<XqliteOk<ResourceArc<XqliteConn>>, XqliteError<'a>> {
     create_pool(&path).map_or_else(
-        |e| {
-            XqliteResult::<XqliteError>::Err(XqliteError::CannotOpenDatabase(path, e))
-                .encode(env)
-        },
-        |id| {
-            XqliteResult::Ok(XqliteOk::WithValue(ResourceArc::new(XqliteConn(id)))).encode(env)
-        },
+        |e| Err(XqliteError::CannotOpenDatabase(path, e)),
+        |id| Ok(XqliteOk::WithValue(ResourceArc::new(XqliteConn(id)))),
     )
 }
 
@@ -190,7 +156,7 @@ fn nif_open(env: Env, path: String) -> Term {
 fn nif_exec<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
-) -> Result<Vec<Vec<XqliteResult<'a, XqliteVal>>>, XqliteError<'a>> {
+) -> Result<Vec<Vec<Result<XqliteOk<XqliteVal>, XqliteError<'a>>>>, XqliteError<'a>> {
     let pool = match get_pool(handle.0) {
         Some(pool) => pool,
         None => return Err(XqliteError::ConnectionNotFound(*handle)),
@@ -207,14 +173,15 @@ fn nif_exec<'a>(
     };
 
     let column_count = stmt.column_count();
-    let mut results: Vec<Vec<XqliteResult<XqliteVal>>> = Vec::new();
+    let mut results: Vec<Vec<Result<XqliteOk<XqliteVal>, XqliteError>>> = Vec::new();
 
     let rows = match stmt.query_map([], |row| {
-        let mut row_values: Vec<XqliteResult<XqliteVal>> = Vec::with_capacity(column_count);
+        let mut row_values: Vec<Result<XqliteOk<XqliteVal>, XqliteError>> =
+            Vec::with_capacity(column_count);
         for i in 0..column_count {
-            let value: XqliteResult<XqliteVal> = match row.get(i) {
-                Ok(val) => XqliteResult::Ok(XqliteOk::WithValue(XqliteVal(val))),
-                Err(e) => XqliteResult::Err(XqliteError::CannotEncodeValue(i, e)),
+            let value: Result<XqliteOk<XqliteVal>, XqliteError> = match row.get(i) {
+                Ok(val) => Ok(XqliteOk::WithValue(XqliteVal(val))),
+                Err(e) => Err(XqliteError::CannotEncodeValue(i, e)),
             };
             row_values.push(value);
         }
@@ -235,11 +202,10 @@ fn nif_exec<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_close(env: Env, handle: ResourceArc<XqliteConn>) -> Term {
+fn nif_close<'a>(handle: ResourceArc<XqliteConn>) -> Result<XqliteOk<()>, XqliteError<'a>> {
     if remove_pool(handle.0) {
-        return XqliteResult::<XqliteOk<XqliteConn>>::Ok(XqliteOk::WithoutValue).encode(env);
+        Ok(XqliteOk::WithoutValue)
     } else {
-        return XqliteResult::<XqliteError>::Err(XqliteError::ConnectionNotFound(*handle))
-            .encode(env);
+        Err(XqliteError::ConnectionNotFound(*handle))
     }
 }
