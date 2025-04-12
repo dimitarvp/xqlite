@@ -9,6 +9,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rustler::resource_impl;
 use rustler::types::atom::{error, nil, ok};
 use rustler::{Encoder, Env, OwnedBinary, Resource, ResourceArc, Term};
+use std::panic::RefUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -58,6 +59,7 @@ impl Encoder for XqliteVal {
         }
     }
 }
+impl RefUnwindSafe for XqliteVal {}
 
 #[derive(Debug)]
 enum XqliteError<'a> {
@@ -103,6 +105,8 @@ impl Encoder for XqliteError<'_> {
         }
     }
 }
+
+impl RefUnwindSafe for XqliteError<'_> {}
 
 #[derive(Debug)]
 enum XqliteOk<T> {
@@ -183,30 +187,23 @@ fn nif_open(env: Env, path: String) -> Term {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn nif_exec(env: Env, handle: ResourceArc<XqliteConn>, sql: String) -> Term {
+fn nif_exec<'a>(
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+) -> Result<Vec<Vec<XqliteResult<'a, XqliteVal>>>, XqliteError<'a>> {
     let pool = match get_pool(handle.0) {
         Some(pool) => pool,
-        None => {
-            return XqliteResult::<XqliteError>::Err(XqliteError::ConnectionNotFound(*handle))
-                .encode(env)
-        }
+        None => return Err(XqliteError::ConnectionNotFound(*handle)),
     };
 
     let conn = match pool.get() {
         Ok(conn) => conn,
-        Err(e) => {
-            return XqliteResult::<XqliteError>::Err(XqliteError::Timeout(e)).encode(env)
-        }
+        Err(e) => return Err(XqliteError::Timeout(e)),
     };
 
     let mut stmt = match conn.prepare(&sql) {
         Ok(stmt) => stmt,
-        Err(e) => {
-            return XqliteResult::<XqliteError>::Err(XqliteError::CannotPrepareStatement(
-                sql, e,
-            ))
-            .encode(env)
-        }
+        Err(e) => return Err(XqliteError::CannotPrepareStatement(sql, e)),
     };
 
     let column_count = stmt.column_count();
@@ -224,23 +221,17 @@ fn nif_exec(env: Env, handle: ResourceArc<XqliteConn>, sql: String) -> Term {
         Ok(row_values)
     }) {
         Ok(mapped_rows) => mapped_rows,
-        Err(err) => {
-            return XqliteResult::<XqliteError>::Err(XqliteError::CannotExecute(err))
-                .encode(env)
-        }
+        Err(err) => return Err(XqliteError::CannotExecute(err)),
     };
 
     for row_result in rows {
         match row_result {
             Ok(row) => results.push(row),
-            Err(e) => {
-                return XqliteResult::<XqliteError>::Err(XqliteError::CannotFetchRow(e))
-                    .encode(env)
-            }
+            Err(e) => return Err(XqliteError::CannotFetchRow(e)),
         }
     }
 
-    XqliteResult::Ok(XqliteOk::WithValue(results)).encode(env)
+    Ok(results)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
