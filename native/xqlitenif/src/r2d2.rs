@@ -1,9 +1,10 @@
 use crate::atoms::{
     atom, binary, cannot_allocate_binary, cannot_convert_atom_to_string,
-    cannot_convert_to_sqlite_value, cannot_execute, cannot_fetch_row, cannot_open_database,
-    cannot_prepare_statement, cannot_read_column, connection_not_found, expected_keyword_list,
-    expected_keyword_tuple, float, fun, integer, list, map, pid, port, r#false, r#true,
-    reference, timeout, tuple, unknown, unsupported_atom, unsupported_data_type,
+    cannot_convert_to_sqlite_value, cannot_execute, cannot_execute_pragma, cannot_fetch_row,
+    cannot_open_database, cannot_prepare_statement, cannot_read_column, connection_not_found,
+    expected_keyword_list, expected_keyword_tuple, float, fun, integer, list, map, pid, port,
+    r#false, r#true, reference, timeout, tuple, unknown, unsupported_atom,
+    unsupported_data_type,
 };
 use dashmap::DashMap;
 use r2d2::Pool;
@@ -103,6 +104,7 @@ pub(crate) enum XqliteError {
     CannotPrepareStatement(String, String),
     CannotReadColumn(usize, String),
     CannotExecute(String),
+    CannotExecutePragma { pragma: String, reason: String },
     CannotFetchRow(String),
     CannotAllocateBinary,
     CannotOpenDatabase(String, String),
@@ -154,6 +156,9 @@ impl Display for XqliteError {
             XqliteError::CannotExecute(reason) => {
                 write!(f, "Cannot execute query: {}", reason)
             }
+            XqliteError::CannotExecutePragma { pragma, reason } => {
+                write!(f, "Cannot execute PRAGMA '{}': {}", pragma, reason)
+            }
             XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {}", reason),
             XqliteError::CannotAllocateBinary => write!(f, "Cannot allocate binary for blob"),
             XqliteError::CannotOpenDatabase(path, reason) => {
@@ -193,6 +198,9 @@ impl Encoder for XqliteError {
                 (cannot_read_column(), index, reason).encode(env)
             }
             XqliteError::CannotExecute(reason) => (cannot_execute(), reason).encode(env),
+            XqliteError::CannotExecutePragma { pragma, reason } => {
+                (cannot_execute_pragma(), pragma, reason).encode(env)
+            }
             XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
             XqliteError::CannotAllocateBinary => cannot_allocate_binary().encode(env),
             XqliteError::CannotOpenDatabase(path, reason) => {
@@ -376,6 +384,17 @@ fn xqlite_exec<'a>(
     Ok(results)
 }
 
+fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
+    let pool = get_pool(handle.0).ok_or(XqliteError::ConnectionNotFound(*handle))?;
+    let conn = pool.get()?;
+
+    conn.execute(pragma_sql, [])
+        .map_err(|e| XqliteError::CannotExecutePragma {
+            pragma: pragma_sql.to_string(),
+            reason: e.to_string(),
+        })
+}
+
 fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
     if remove_pool(handle.0) {
         Ok(())
@@ -401,6 +420,18 @@ fn raw_exec<'a>(
 ) -> Term<'a> {
     match xqlite_exec(env, &handle, &sql, params_term) {
         Ok(results) => (ok(), results).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_pragma_write(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pragma_sql: String, // Accept the full PRAGMA string
+) -> Term<'_> {
+    match xqlite_pragma_write(&handle, &pragma_sql) {
+        Ok(rows_affected) => (ok(), rows_affected).encode(env),
         Err(err) => (error(), err).encode(env),
     }
 }

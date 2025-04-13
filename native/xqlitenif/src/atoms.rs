@@ -10,6 +10,7 @@ rustler::atoms! {
     cannot_decode,
     cannot_encode,
     cannot_execute,
+    cannot_execute_pragma,
     cannot_fetch_row,
     cannot_open_database,
     cannot_prepare_statement,
