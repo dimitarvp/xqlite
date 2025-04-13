@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use r2d2::{ManageConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{types::Value, ToSql};
-use rustler::types::atom::{error, nil, ok};
+use rustler::types::atom::{error, nil};
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, OwnedBinary, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
@@ -315,11 +315,6 @@ fn pools() -> &'static XqlitePools {
     POOLS.get_or_init(|| DashMap::<u64, XqlitePool>::with_capacity(16))
 }
 
-fn create_pool(path: &str) -> Result<XqlitePool, r2d2::Error> {
-    let manager = SqliteConnectionManager::file(path);
-    Pool::builder().build(manager)
-}
-
 fn get_pool(id: u64) -> Option<XqlitePool> {
     pools().get(&id).map(|x| x.value().clone())
 }
@@ -328,7 +323,8 @@ fn remove_pool(id: u64) -> bool {
     pools().remove(&id).is_some()
 }
 
-fn xqlite_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let path_clone = path.to_string();
 
     // 1. Create the connection manager
@@ -361,7 +357,8 @@ fn xqlite_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     }
 }
 
-fn xqlite_exec<'a>(
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_exec<'a>(
     env: Env<'a>,
     handle: &XqliteConn,
     sql: &str,
@@ -404,7 +401,8 @@ fn xqlite_exec<'a>(
     Ok(results)
 }
 
-fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
     let pool = get_pool(handle.0).ok_or(XqliteError::ConnectionNotFound(*handle))?;
     let conn = pool.get()?;
 
@@ -415,51 +413,11 @@ fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, X
         })
 }
 
-fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_close(handle: &XqliteConn) -> Result<bool, XqliteError> {
     if remove_pool(handle.0) {
-        Ok(())
+        Ok(true)
     } else {
         Err(XqliteError::ConnectionNotFound(*handle))
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_open(env: Env, path: String) -> Term {
-    match xqlite_open(&path) {
-        Ok(resource) => (ok(), resource).encode(env),
-        Err(err) => (error(), err).encode(env),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_exec<'a>(
-    env: Env<'a>,
-    handle: ResourceArc<XqliteConn>,
-    sql: String,
-    params_term: Term<'a>,
-) -> Term<'a> {
-    match xqlite_exec(env, &handle, &sql, params_term) {
-        Ok(results) => (ok(), results).encode(env),
-        Err(err) => (error(), err).encode(env),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_pragma_write(
-    env: Env<'_>,
-    handle: ResourceArc<XqliteConn>,
-    pragma_sql: String, // Should be a full PRAGMA string
-) -> Term<'_> {
-    match xqlite_pragma_write(&handle, &pragma_sql) {
-        Ok(rows_affected) => (ok(), rows_affected).encode(env),
-        Err(err) => (error(), err).encode(env),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_close(env: Env, handle: ResourceArc<XqliteConn>) -> Term {
-    match xqlite_close(&handle) {
-        Ok(()) => ok().encode(env),
-        Err(err) => (error(), err).encode(env),
     }
 }
