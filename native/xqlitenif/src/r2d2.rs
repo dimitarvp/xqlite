@@ -7,7 +7,7 @@ use crate::atoms::{
     unsupported_data_type,
 };
 use dashmap::DashMap;
-use r2d2::Pool;
+use r2d2::{ManageConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{types::Value, ToSql};
 use rustler::types::atom::{error, nil, ok};
@@ -315,12 +315,9 @@ fn pools() -> &'static XqlitePools {
     POOLS.get_or_init(|| DashMap::<u64, XqlitePool>::with_capacity(16))
 }
 
-fn create_pool(path: &str) -> Result<u64, r2d2::Error> {
+fn create_pool(path: &str) -> Result<XqlitePool, r2d2::Error> {
     let manager = SqliteConnectionManager::file(path);
-    let pool = Pool::builder().build(manager)?;
-    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    pools().insert(id, pool);
-    Ok(id)
+    Pool::builder().build(manager)
 }
 
 fn get_pool(id: u64) -> Option<XqlitePool> {
@@ -333,12 +330,35 @@ fn remove_pool(id: u64) -> bool {
 
 fn xqlite_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let path_clone = path.to_string();
-    let pool_id = create_pool(path)
-        .map_err(|e| XqliteError::CannotOpenDatabase(path_clone, e.to_string()))?;
 
-    let conn_handle = XqliteConn(pool_id);
-    let resource = ResourceArc::new(conn_handle);
-    Ok(resource)
+    // 1. Create the connection manager
+    let manager = SqliteConnectionManager::file(path);
+
+    // 2. Attempt a direct connection using the manager to validate path/permissions immediately.
+    //    This bypasses r2d2's pool logic for the initial check.
+    match manager.connect() {
+        Ok(_conn) => {
+            // Initial connection succeeded. Drop `_conn` before the block finishes.
+            // Now, it's safe to build the actual pool.
+            let pool = Pool::builder()
+                .build(manager)
+                // Pool building itself can fail for config reasons (rare with defaults)
+                .map_err(|e| XqliteError::CannotOpenDatabase(path_clone, e.to_string()))?;
+
+            // Add the successfully validated and built pool to the global map.
+            let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+            pools().insert(id, pool);
+            let conn_handle = XqliteConn(id);
+            let resource = ResourceArc::new(conn_handle);
+            Ok(resource)
+        }
+        Err(e) => {
+            // The direct manager.connect() failed. This is the fast failure.
+            // Map the rusqlite::Error (contained within r2d2::Error::ConnectionError)
+            // or other r2d2::Error directly.
+            Err(XqliteError::CannotOpenDatabase(path_clone, e.to_string()))
+        }
+    }
 }
 
 fn xqlite_exec<'a>(
@@ -428,7 +448,7 @@ fn raw_exec<'a>(
 fn raw_pragma_write(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
-    pragma_sql: String, // Accept the full PRAGMA string
+    pragma_sql: String, // Should be a full PRAGMA string
 ) -> Term<'_> {
     match xqlite_pragma_write(&handle, &pragma_sql) {
         Ok(rows_affected) => (ok(), rows_affected).encode(env),
