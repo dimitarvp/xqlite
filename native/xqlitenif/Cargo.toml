@@ -14,7 +14,7 @@ dashmap = { version = "6.1.0", default-features = false }
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.27.0"
 rusqlite = "0.34"
-rustler = { version = "0.36.1", features = ["nif_version_2_17"] }
+rustler = { version = "0.36.1" }
 
 [profile.release]
 lto = true
