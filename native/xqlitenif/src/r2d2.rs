@@ -1,7 +1,9 @@
 use crate::atoms::{
-    cannot_allocate_binary, cannot_convert_atom_to_string, cannot_decode, cannot_execute,
-    cannot_fetch_row, cannot_open_database, cannot_prepare_statement, cannot_read_column,
-    connection_not_found, r#false, r#true, timeout, unsupported_value,
+    atom, binary, cannot_allocate_binary, cannot_convert_atom_to_string,
+    cannot_convert_to_sqlite_value, cannot_execute, cannot_fetch_row, cannot_open_database,
+    cannot_prepare_statement, cannot_read_column, connection_not_found, expected_keyword_list,
+    expected_keyword_tuple, float, fun, integer, list, map, pid, port, r#false, r#true,
+    reference, timeout, tuple, unknown, unsupported_atom, unsupported_data_type,
 };
 use dashmap::DashMap;
 use r2d2::Pool;
@@ -55,10 +57,47 @@ impl Encoder for XqliteVal {
     }
 }
 
+fn term_type_to_string(term_type: TermType) -> &'static str {
+    match term_type {
+        TermType::Atom => "atom",
+        TermType::Binary => "binary",
+        TermType::Float => "float",
+        TermType::Fun => "function",
+        TermType::Integer => "integer",
+        TermType::List => "list",
+        TermType::Map => "map",
+        TermType::Pid => "pid",
+        TermType::Port => "port",
+        TermType::Ref => "reference",
+        TermType::Tuple => "tuple",
+        TermType::Unknown => "unknown",
+    }
+}
+
+fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
+    match term_type {
+        TermType::Atom => atom(),
+        TermType::Binary => binary(),
+        TermType::Float => float(),
+        TermType::Fun => fun(),
+        TermType::Integer => integer(),
+        TermType::List => list(),
+        TermType::Map => map(),
+        TermType::Pid => pid(),
+        TermType::Port => port(),
+        TermType::Ref => reference(),
+        TermType::Tuple => tuple(),
+        TermType::Unknown => unknown(),
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum XqliteError {
-    UnsupportedValue { value_str: String },
-    CannotDecodeValue { value_str: String, reason: String },
+    CannotConvertToSqliteValue { value_str: String, reason: String },
+    ExpectedKeywordList { value_str: String },
+    ExpectedKeywordTuple { value_str: String },
+    UnsupportedAtom { atom_value: String },
+    UnsupportedDataType { term_type: TermType },
     ConnectionNotFound(XqliteConn),
     Timeout(String),
     CannotPrepareStatement(String, String),
@@ -73,11 +112,32 @@ pub(crate) enum XqliteError {
 impl Display for XqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            XqliteError::UnsupportedValue { value_str } => {
-                write!(f, "Unsupported value: {}", value_str)
+            XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
+                write!(
+                    f,
+                    "Cannot convert value '{}' to SQLite type: {}",
+                    value_str, reason
+                )
             }
-            XqliteError::CannotDecodeValue { value_str, reason } => {
-                write!(f, "Cannot decode value '{}': {}", value_str, reason)
+            XqliteError::ExpectedKeywordList { value_str } => {
+                write!(f, "Expected a keyword list, got: {}", value_str)
+            }
+            XqliteError::ExpectedKeywordTuple { value_str } => {
+                write!(f, "Expected a {{atom, value}} tuple, got: {}", value_str)
+            }
+            XqliteError::UnsupportedAtom { atom_value } => {
+                write!(
+                    f,
+                    "Unsupported atom value '{}'. Allowed values: nil, true, false",
+                    atom_value
+                )
+            }
+            XqliteError::UnsupportedDataType { term_type } => {
+                write!(
+                    f,
+                    "Unsupported data type {}. Allowed types: atom, integer, float, binary",
+                    term_type_to_string(*term_type)
+                )
             }
             XqliteError::ConnectionNotFound(conn) => {
                 write!(f, "Connection not found: {:?}", conn)
@@ -109,8 +169,18 @@ impl Display for XqliteError {
 impl Encoder for XqliteError {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
-            XqliteError::UnsupportedValue { value_str } => {
-                (unsupported_value(), value_str).encode(env)
+            XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
+                (cannot_convert_to_sqlite_value(), value_str, reason).encode(env)
+            }
+            XqliteError::ExpectedKeywordList { value_str } => {
+                (expected_keyword_list(), value_str).encode(env)
+            }
+            XqliteError::ExpectedKeywordTuple { value_str } => {
+                (expected_keyword_tuple(), value_str).encode(env)
+            }
+            XqliteError::UnsupportedAtom { atom_value: _ } => unsupported_atom().encode(env),
+            XqliteError::UnsupportedDataType { term_type } => {
+                (unsupported_data_type(), term_type_to_atom(env, *term_type)).encode(env)
             }
             XqliteError::ConnectionNotFound(conn) => {
                 (connection_not_found(), conn).encode(env)
@@ -121,9 +191,6 @@ impl Encoder for XqliteError {
             }
             XqliteError::CannotReadColumn(index, reason) => {
                 (cannot_read_column(), index, reason).encode(env)
-            }
-            XqliteError::CannotDecodeValue { value_str, reason } => {
-                (cannot_decode(), value_str, reason).encode(env)
             }
             XqliteError::CannotExecute(reason) => (cannot_execute(), reason).encode(env),
             XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
@@ -156,19 +223,15 @@ fn elixir_term_to_rusqlite_value<'a>(
     env: Env<'a>,
     term: Term<'a>,
 ) -> Result<Value, XqliteError> {
-    let make_decode_error = |term: Term<'a>, err: RustlerError| -> XqliteError {
-        XqliteError::CannotDecodeValue {
+    let make_convert_error = |term: Term<'a>, err: RustlerError| -> XqliteError {
+        XqliteError::CannotConvertToSqliteValue {
             value_str: format!("{:?}", term),
             reason: format!("{:?}", err),
         }
     };
-    let make_unsupported_error = |term: Term<'a>| -> XqliteError {
-        XqliteError::UnsupportedValue {
-            value_str: format!("{:?}", term),
-        }
-    };
 
-    match term.get_type() {
+    let term_type = term.get_type();
+    match term_type {
         TermType::Atom => {
             if term == nil().to_term(env) {
                 Ok(Value::Null)
@@ -177,36 +240,29 @@ fn elixir_term_to_rusqlite_value<'a>(
             } else if term == r#false().to_term(env) {
                 Ok(Value::Integer(0))
             } else {
-                Err(make_unsupported_error(term))
+                Err(XqliteError::UnsupportedAtom {
+                    atom_value: term
+                        .atom_to_string()
+                        .unwrap_or_else(|_| format!("{:?}", term)),
+                })
             }
         }
         TermType::Integer => term
             .decode::<i64>()
             .map(Value::Integer)
-            .map_err(|e| make_decode_error(term, e)),
+            .map_err(|e| make_convert_error(term, e)),
         TermType::Float => term
             .decode::<f64>()
             .map(Value::Real)
-            .map_err(|e| make_decode_error(term, e)),
+            .map_err(|e| make_convert_error(term, e)),
         TermType::Binary => match term.decode::<String>() {
             Ok(s) => Ok(Value::Text(s)),
-            // NOTE: We are not interested in the details of what failed when decoding to a String
-            // as it's most likely that the binary is not a valid UTF-8 string.
-            // We want to fall back to an Erlang binary if decoding to String fails and as such
-            // we are discarding the String decoding error.
             Err(_string_decode_err) => match term.decode::<Binary>() {
                 Ok(bin) => Ok(Value::Blob(bin.as_slice().to_vec())),
-                Err(binary_decode_err) => Err(make_decode_error(term, binary_decode_err)),
+                Err(binary_decode_err) => Err(make_convert_error(term, binary_decode_err)),
             },
         },
-        TermType::List
-        | TermType::Map
-        | TermType::Tuple
-        | TermType::Fun
-        | TermType::Pid
-        | TermType::Port
-        | TermType::Ref
-        | TermType::Unknown => Err(make_unsupported_error(term)),
+        _ => Err(XqliteError::UnsupportedDataType { term_type }),
     }
 }
 
@@ -214,24 +270,22 @@ fn decode_keyword_params<'a>(
     env: Env<'a>,
     list_term: Term<'a>,
 ) -> Result<Vec<(String, Value)>, XqliteError> {
-    let make_decode_error =
-        |term: Term<'a>, err: RustlerError, context: &str| -> XqliteError {
-            XqliteError::CannotDecodeValue {
-                value_str: format!("{:?}", term),
-                reason: format!("{} error: {:?}", context, err),
-            }
-        };
-
-    let iter: ListIterator<'a> = list_term
-        .decode()
-        .map_err(|e| make_decode_error(list_term, e, "Expected keyword list"))?;
+    let iter: ListIterator<'a> =
+        list_term
+            .decode()
+            .map_err(|_| XqliteError::ExpectedKeywordList {
+                value_str: format!("{:?}", list_term),
+            })?;
 
     let mut params: Vec<(String, Value)> = Vec::new();
 
     for term_item in iter {
-        let (key_atom, value_term): (Atom, Term<'a>) = term_item.decode().map_err(|e| {
-            make_decode_error(term_item, e, "Keyword element not {atom, value} tuple")
-        })?;
+        let (key_atom, value_term): (Atom, Term<'a>) =
+            term_item
+                .decode()
+                .map_err(|_| XqliteError::ExpectedKeywordTuple {
+                    value_str: format!("{:?}", term_item),
+                })?;
 
         let mut key_string: String = key_atom
             .to_term(env)
