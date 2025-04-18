@@ -1,18 +1,17 @@
 use crate::atoms::{
-    atom, binary, cannot_allocate_binary, cannot_convert_atom_to_string,
-    cannot_convert_to_sqlite_value, cannot_execute, cannot_execute_pragma, cannot_fetch_row,
-    cannot_open_database, cannot_prepare_statement, cannot_read_column, connection_not_found,
-    expected_keyword_list, expected_keyword_tuple, float, fun, integer, list, map, pid, port,
-    r#false, r#true, reference, timeout, tuple, unknown, unsupported_atom,
-    unsupported_data_type,
+    atom, binary, cannot_convert_atom_to_string, cannot_convert_to_sqlite_value,
+    cannot_execute, cannot_execute_pragma, cannot_fetch_row, cannot_open_database,
+    cannot_prepare_statement, cannot_read_column, connection_not_found, expected_keyword_list,
+    expected_keyword_tuple, float, fun, integer, list, map, pid, port, r#false, r#true,
+    reference, timeout, tuple, unknown, unsupported_atom, unsupported_data_type,
 };
 use dashmap::DashMap;
 use r2d2::{ManageConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{types::Value, ToSql};
-use rustler::types::atom::{error, nil};
+use rustler::types::atom::nil;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
-use rustler::{Encoder, Env, Error as RustlerError, OwnedBinary, Resource, ResourceArc, Term};
+use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
 use std::panic::RefUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,25 +37,10 @@ impl Encoder for XqliteConn {
 }
 
 #[derive(Debug)]
-pub(crate) struct XqliteVal(rusqlite::types::Value);
+struct BlobResource(Vec<u8>);
 
-impl Encoder for XqliteVal {
-    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
-        match &self.0 {
-            rusqlite::types::Value::Null => nil().encode(env),
-            rusqlite::types::Value::Integer(i) => i.encode(env),
-            rusqlite::types::Value::Real(f) => f.encode(env),
-            rusqlite::types::Value::Text(s) => s.encode(env),
-            rusqlite::types::Value::Blob(b) => match OwnedBinary::new(b.len()) {
-                Some(mut owned_binary) => {
-                    owned_binary.as_mut_slice().copy_from_slice(b);
-                    owned_binary.release(env).encode(env)
-                }
-                None => (error(), XqliteError::CannotAllocateBinary).encode(env),
-            },
-        }
-    }
-}
+#[resource_impl]
+impl Resource for BlobResource {}
 
 fn term_type_to_string(term_type: TermType) -> &'static str {
     match term_type {
@@ -92,6 +76,24 @@ fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
     }
 }
 
+fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
+    // Takes ownership of val
+    match val {
+        Value::Null => nil().encode(env),
+        Value::Integer(i) => i.encode(env),
+        Value::Real(f) => f.encode(env),
+        Value::Text(s) => s.encode(env), // Moves s
+        Value::Blob(owned_vec) => {
+            // Moves owned_vec
+            let resource = ResourceArc::new(BlobResource(owned_vec));
+            // Create a binary term referencing the resource (no copy or clone)
+            resource
+                .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
+                .encode(env)
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum XqliteError {
     CannotConvertToSqliteValue { value_str: String, reason: String },
@@ -106,7 +108,6 @@ pub(crate) enum XqliteError {
     CannotExecute(String),
     CannotExecutePragma { pragma: String, reason: String },
     CannotFetchRow(String),
-    CannotAllocateBinary,
     CannotOpenDatabase(String, String),
     CannotConvertAtomToString(String),
 }
@@ -160,7 +161,6 @@ impl Display for XqliteError {
                 write!(f, "Cannot execute PRAGMA '{}': {}", pragma, reason)
             }
             XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {}", reason),
-            XqliteError::CannotAllocateBinary => write!(f, "Cannot allocate binary for blob"),
             XqliteError::CannotOpenDatabase(path, reason) => {
                 write!(f, "Cannot open database '{}': {}", path, reason)
             }
@@ -202,7 +202,6 @@ impl Encoder for XqliteError {
                 (cannot_execute_pragma(), pragma, reason).encode(env)
             }
             XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
-            XqliteError::CannotAllocateBinary => cannot_allocate_binary().encode(env),
             XqliteError::CannotOpenDatabase(path, reason) => {
                 (cannot_open_database(), path, reason).encode(env)
             }
@@ -323,8 +322,7 @@ fn remove_pool(id: u64) -> bool {
     pools().remove(&id).is_some()
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn xqlite_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let path_clone = path.to_string();
 
     // 1. Create the connection manager
@@ -338,10 +336,9 @@ fn raw_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
             // Now, it's safe to build the actual pool.
             let pool = Pool::builder()
                 .build(manager)
-                // Pool building itself can fail for config reasons (rare with defaults)
+                // Pool building itself can fail for config reasons
                 .map_err(|e| XqliteError::CannotOpenDatabase(path_clone, e.to_string()))?;
 
-            // Add the successfully validated and built pool to the global map.
             let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
             pools().insert(id, pool);
             let conn_handle = XqliteConn(id);
@@ -357,13 +354,12 @@ fn raw_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     }
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_exec<'a>(
+fn xqlite_exec<'a>(
     env: Env<'a>,
     handle: &XqliteConn,
     sql: &str,
     params_term: Term<'a>,
-) -> Result<Vec<Vec<XqliteVal>>, XqliteError> {
+) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
     let pool = get_pool(handle.0).ok_or(XqliteError::ConnectionNotFound(*handle))?;
     let conn = pool.get()?;
     let named_params_vec = decode_keyword_params(env, params_term)?;
@@ -382,18 +378,23 @@ fn raw_exec<'a>(
 
     let mut rows = stmt.query(params_for_rusqlite.as_slice())?;
 
-    let mut results: Vec<Vec<XqliteVal>> = Vec::new();
+    // Outer Vec now holds Vec<Term<'a>>>
+    let mut results: Vec<Vec<Term<'a>>> = Vec::new();
 
     while let Some(row) = rows
         .next()
         .map_err(|e| XqliteError::CannotFetchRow(e.to_string()))?
     {
-        let mut row_values: Vec<XqliteVal> = Vec::with_capacity(column_count);
+        // Inner Vec now holds Term<'a>
+        let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
         for i in 0..column_count {
-            let value = row
+            // Get owned `Value`
+            let value: Value = row
                 .get::<usize, Value>(i)
                 .map_err(|e| XqliteError::CannotReadColumn(i, e.to_string()))?;
-            row_values.push(XqliteVal(value));
+
+            let term = encode_val(env, value);
+            row_values.push(term);
         }
         results.push(row_values);
     }
@@ -401,8 +402,7 @@ fn raw_exec<'a>(
     Ok(results)
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
+fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
     let pool = get_pool(handle.0).ok_or(XqliteError::ConnectionNotFound(*handle))?;
     let conn = pool.get()?;
 
@@ -413,11 +413,38 @@ fn raw_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, Xqli
         })
 }
 
-#[rustler::nif(schedule = "DirtyIo")]
-fn raw_close(handle: &XqliteConn) -> Result<bool, XqliteError> {
+fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
     if remove_pool(handle.0) {
-        Ok(true)
+        Ok(())
     } else {
         Err(XqliteError::ConnectionNotFound(*handle))
     }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    xqlite_open(&path)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_exec<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
+    xqlite_exec(env, &handle, &sql, params_term)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_pragma_write(
+    handle: ResourceArc<XqliteConn>,
+    pragma_sql: String,
+) -> Result<usize, XqliteError> {
+    xqlite_pragma_write(&handle, &pragma_sql)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_close(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+    xqlite_close(&handle).map(|_| true)
 }
