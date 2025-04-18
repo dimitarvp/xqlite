@@ -340,7 +340,7 @@ fn elixir_term_to_rusqlite_value<'a>(
     }
 }
 
-fn decode_keyword_params<'a>(
+fn decode_exec_keyword_params<'a>(
     env: Env<'a>,
     list_term: Term<'a>,
 ) -> Result<Vec<(String, Value)>, XqliteError> {
@@ -544,7 +544,7 @@ fn xqlite_exec<'a>(
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
     let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
     let conn = pool.get()?;
-    let named_params_vec = decode_keyword_params(env, params_term)?;
+    let named_params_vec = decode_exec_keyword_params(env, params_term)?;
 
     let sql_string = sql.to_string();
     let mut stmt = conn
