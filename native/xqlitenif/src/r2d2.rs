@@ -1,9 +1,11 @@
 use crate::atoms::{
     atom, binary, cannot_convert_atom_to_string, cannot_convert_to_sqlite_value,
-    cannot_execute, cannot_execute_pragma, cannot_fetch_row, cannot_open_database,
-    cannot_prepare_statement, cannot_read_column, connection_not_found, expected_keyword_list,
-    expected_keyword_tuple, float, fun, integer, list, map, pid, port, r#false, r#true,
-    reference, timeout, tuple, unknown, unsupported_atom, unsupported_data_type,
+    cannot_decode_pool_option, cannot_execute, cannot_execute_pragma, cannot_fetch_row,
+    cannot_open_database, cannot_prepare_statement, cannot_read_column, connection_not_found,
+    expected_keyword_list, expected_keyword_tuple, float, fun, integer,
+    invalid_idle_connection_count, invalid_pool_size, invalid_time_value, list, map, pid,
+    port, r#false, r#true, reference, timeout, tuple, unknown, unsupported_atom,
+    unsupported_data_type,
 };
 use dashmap::DashMap;
 use r2d2::{ManageConnection, Pool};
@@ -15,9 +17,12 @@ use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
 use std::panic::RefUnwindSafe;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 type XqlitePool = Pool<SqliteConnectionManager>;
 type XqlitePools = DashMap<String, XqlitePool>;
+
+const DEFAULT_MAX_POOL_SIZE: u32 = 10;
 
 #[derive(Debug, Clone)]
 pub(crate) struct XqliteConn(String);
@@ -34,6 +39,15 @@ struct BlobResource(Vec<u8>);
 
 #[resource_impl]
 impl Resource for BlobResource {}
+
+#[derive(Debug, Default)]
+struct PoolOptions {
+    connection_timeout_ms: Option<u64>,
+    idle_timeout_ms: Option<u64>,
+    max_lifetime_ms: Option<u64>,
+    max_size: Option<u32>,
+    min_idle: Option<u32>,
+}
 
 fn term_type_to_string(term_type: TermType) -> &'static str {
     match term_type {
@@ -70,12 +84,11 @@ fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
 }
 
 fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
-    // Takes ownership of val
     match val {
         Value::Null => nil().encode(env),
         Value::Integer(i) => i.encode(env),
         Value::Real(f) => f.encode(env),
-        Value::Text(s) => s.encode(env), // Moves s
+        Value::Text(s) => s.encode(env), // Moves `s` ownership
         Value::Blob(owned_vec) => {
             // Moves owned_vec
             let resource = ResourceArc::new(BlobResource(owned_vec));
@@ -87,54 +100,81 @@ fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
     }
 }
 
+fn ms_to_duration(ms: u64) -> Result<Duration, XqliteError> {
+    if ms == 0 {
+        Err(XqliteError::InvalidTimeValue(ms))
+    } else {
+        Ok(Duration::from_millis(ms))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum XqliteError {
-    CannotConvertToSqliteValue { value_str: String, reason: String },
-    ExpectedKeywordList { value_str: String },
-    ExpectedKeywordTuple { value_str: String },
-    UnsupportedAtom { atom_value: String },
-    UnsupportedDataType { term_type: TermType },
+    CannotConvertToSqliteValue {
+        value_str: String,
+        reason: String,
+    },
+    ExpectedKeywordList {
+        value_str: String,
+    },
+    ExpectedKeywordTuple {
+        value_str: String,
+    },
+    UnsupportedAtom {
+        atom_value: String,
+    },
+    UnsupportedDataType {
+        term_type: TermType,
+    },
     ConnectionNotFound(XqliteConn),
     Timeout(String),
     CannotPrepareStatement(String, String),
     CannotReadColumn(usize, String),
     CannotExecute(String),
-    CannotExecutePragma { pragma: String, reason: String },
+    CannotExecutePragma {
+        pragma: String,
+        reason: String,
+    },
     CannotFetchRow(String),
     CannotOpenDatabase(String, String),
     CannotConvertAtomToString(String),
+    CannotDecodePoolOption {
+        option_name: String,
+        value_str: String,
+        reason: String,
+    },
+    InvalidTimeValue(u64),
+    InvalidPoolSize(u32),
+    InvalidIdleConnectionCount {
+        min_idle: u32,
+        max_size: u32,
+    },
 }
 
 impl Display for XqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
-                write!(
-                    f,
-                    "Cannot convert value '{}' to SQLite type: {}",
-                    value_str, reason
-                )
-            }
+            XqliteError::CannotConvertToSqliteValue { value_str, reason } => write!(
+                f,
+                "Cannot convert value '{}' to SQLite type: {}",
+                value_str, reason
+            ),
             XqliteError::ExpectedKeywordList { value_str } => {
                 write!(f, "Expected a keyword list, got: {}", value_str)
             }
             XqliteError::ExpectedKeywordTuple { value_str } => {
                 write!(f, "Expected a {{atom, value}} tuple, got: {}", value_str)
             }
-            XqliteError::UnsupportedAtom { atom_value } => {
-                write!(
-                    f,
-                    "Unsupported atom value '{}'. Allowed values: nil, true, false",
-                    atom_value
-                )
-            }
-            XqliteError::UnsupportedDataType { term_type } => {
-                write!(
-                    f,
-                    "Unsupported data type {}. Allowed types: atom, integer, float, binary",
-                    term_type_to_string(*term_type)
-                )
-            }
+            XqliteError::UnsupportedAtom { atom_value } => write!(
+                f,
+                "Unsupported atom value '{}'. Allowed values: nil, true, false",
+                atom_value
+            ),
+            XqliteError::UnsupportedDataType { term_type } => write!(
+                f,
+                "Unsupported data type {}. Allowed types: atom, integer, float, binary",
+                term_type_to_string(*term_type)
+            ),
             XqliteError::ConnectionNotFound(conn) => {
                 write!(f, "Connection pool not found for path: '{}'", conn.0)
             }
@@ -160,6 +200,30 @@ impl Display for XqliteError {
             XqliteError::CannotConvertAtomToString(reason) => {
                 write!(f, "Cannot convert Elixir atom to string: {}", reason)
             }
+            XqliteError::CannotDecodePoolOption {
+                option_name,
+                value_str,
+                reason,
+            } => write!(
+                f,
+                "Cannot decode value '{}' for pool option '{}': {}",
+                value_str, option_name, reason
+            ),
+            XqliteError::InvalidTimeValue(value) => write!(
+                f,
+                "Invalid time value '{}ms'. Timeouts and lifetimes must be greater than zero.",
+                value
+            ),
+            XqliteError::InvalidPoolSize(value) => write!(
+                f,
+                "Invalid pool size '{}'. Pool size must be greater than zero.",
+                value
+            ),
+            XqliteError::InvalidIdleConnectionCount { min_idle, max_size } => write!(
+                f,
+                "Invalid configuration: min_idle ({}) cannot be greater than max_size ({}).",
+                min_idle, max_size
+            ),
         }
     }
 }
@@ -200,6 +264,16 @@ impl Encoder for XqliteError {
             }
             XqliteError::CannotConvertAtomToString(reason) => {
                 (cannot_convert_atom_to_string(), reason).encode(env)
+            }
+            XqliteError::CannotDecodePoolOption {
+                option_name,
+                value_str,
+                reason,
+            } => (cannot_decode_pool_option(), option_name, value_str, reason).encode(env),
+            XqliteError::InvalidTimeValue(value) => (invalid_time_value(), value).encode(env),
+            XqliteError::InvalidPoolSize(value) => (invalid_pool_size(), value).encode(env),
+            XqliteError::InvalidIdleConnectionCount { min_idle, max_size } => {
+                (invalid_idle_connection_count(), *min_idle, *max_size).encode(env)
             }
         }
     }
@@ -300,6 +374,90 @@ fn decode_keyword_params<'a>(
     Ok(params)
 }
 
+fn decode_pool_options<'a>(
+    env: Env<'a>,
+    list_term: Term<'a>,
+) -> Result<PoolOptions, XqliteError> {
+    let iter: ListIterator<'a> =
+        list_term
+            .decode()
+            .map_err(|_| XqliteError::ExpectedKeywordList {
+                value_str: format!("{:?}", list_term),
+            })?;
+
+    let mut options = PoolOptions::default();
+
+    for term_item in iter {
+        let (key_atom, value_term): (Atom, Term<'a>) =
+            term_item
+                .decode()
+                .map_err(|_| XqliteError::ExpectedKeywordTuple {
+                    value_str: format!("{:?}", term_item),
+                })?;
+        let key_str = key_atom
+            .to_term(env)
+            .atom_to_string()
+            .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{:?}", e)))?;
+
+        // Helper closure for decoding errors
+        let make_option_decode_error =
+            |opt_name: &str, term: Term<'a>, err: RustlerError| -> XqliteError {
+                XqliteError::CannotDecodePoolOption {
+                    option_name: opt_name.to_string(),
+                    value_str: format!("{:?}", term),
+                    reason: format!("{:?}", err),
+                }
+            };
+
+        match key_str.as_str() {
+            "connection_timeout" => {
+                let val = value_term
+                    .decode::<u64>()
+                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
+                options.connection_timeout_ms = Some(val);
+            }
+            "idle_timeout" => {
+                let val = value_term
+                    .decode::<u64>()
+                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
+                options.idle_timeout_ms = Some(val);
+            }
+            "max_lifetime" => {
+                let val = value_term
+                    .decode::<u64>()
+                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
+                options.max_lifetime_ms = Some(val);
+            }
+            "max_size" => {
+                let val = value_term
+                    .decode::<u32>()
+                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
+                if val == 0 {
+                    return Err(XqliteError::InvalidPoolSize(val));
+                }
+                options.max_size = Some(val);
+            }
+            "min_idle" => {
+                let val = value_term
+                    .decode::<u32>()
+                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
+                options.min_idle = Some(val);
+            }
+            // Ignore unknown keys
+            _ => {}
+        }
+    }
+
+    if let Some(min_idle) = options.min_idle {
+        let max_size = options.max_size.unwrap_or(DEFAULT_MAX_POOL_SIZE);
+        if min_idle > max_size {
+            return Err(XqliteError::InvalidIdleConnectionCount { min_idle, max_size });
+        }
+    }
+
+    Ok(options)
+}
+
 static POOLS: OnceLock<XqlitePools> = OnceLock::new();
 
 fn pools() -> &'static XqlitePools {
@@ -314,7 +472,10 @@ fn remove_pool(path: &str) -> bool {
     pools().remove(path).is_some()
 }
 
-fn xqlite_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn xqlite_open(
+    path: String,
+    options: PoolOptions,
+) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     // Use DashMap's entry API for atomic get-or-insert logic.
     // Clones the path string once here to use as the map key if insertion happens.
     let entry = pools().entry(path.clone());
@@ -331,12 +492,31 @@ fn xqlite_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
             Ok(_conn) => {
                 // Initial connection succeeded. Drop the connection (`_conn`).
                 // Now, it's safe to build the actual pool for the map.
-                Pool::builder().build(manager).map_err(|e| {
+
+                // Apply pool options
+                let mut builder = Pool::builder();
+                if let Some(ms) = options.connection_timeout_ms {
+                    builder = builder.connection_timeout(ms_to_duration(ms)?);
+                }
+                if let Some(ms) = options.idle_timeout_ms {
+                    builder = builder.idle_timeout(Some(ms_to_duration(ms)?));
+                }
+                if let Some(ms) = options.max_lifetime_ms {
+                    builder = builder.max_lifetime(Some(ms_to_duration(ms)?));
+                }
+                if let Some(size) = options.max_size {
+                    builder = builder.max_size(size);
+                }
+                if let Some(min) = options.min_idle {
+                    builder = builder.min_idle(Some(min));
+                }
+
+                builder.build(manager).map_err(|e| {
                     XqliteError::CannotOpenDatabase(path_for_error, e.to_string())
                 })
             }
             Err(e) => {
-                // The direct manager.connect() failed. Return the error immediately.
+                // The direct manager.connect() failed. Return the error immediately
                 Err(XqliteError::CannotOpenDatabase(
                     path_for_error,
                     e.to_string(),
@@ -421,9 +601,13 @@ fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    // Ownership of path is moved into xqlite_open
-    xqlite_open(path)
+fn raw_open<'a>(
+    env: Env<'a>,
+    path: String,
+    options_term: Term<'a>,
+) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let options = decode_pool_options(env, options_term)?;
+    xqlite_open(path, options)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
