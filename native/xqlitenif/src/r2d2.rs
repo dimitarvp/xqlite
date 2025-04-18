@@ -14,22 +14,15 @@ use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
 use std::panic::RefUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 type XqlitePool = Pool<SqliteConnectionManager>;
-type XqlitePools = DashMap<u64, XqlitePool>;
+type XqlitePools = DashMap<String, XqlitePool>;
 
-#[derive(Debug)]
-pub(crate) struct XqliteConn(u64);
+#[derive(Debug, Clone)]
+pub(crate) struct XqliteConn(String);
 #[resource_impl]
 impl Resource for XqliteConn {}
-impl Copy for XqliteConn {}
-impl Clone for XqliteConn {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
 impl Encoder for XqliteConn {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         self.0.encode(env)
@@ -143,7 +136,7 @@ impl Display for XqliteError {
                 )
             }
             XqliteError::ConnectionNotFound(conn) => {
-                write!(f, "Connection not found: {:?}", conn)
+                write!(f, "Connection pool not found for path: '{}'", conn.0)
             }
             XqliteError::Timeout(reason) => {
                 write!(f, "Timeout getting connection: {}", reason)
@@ -188,7 +181,7 @@ impl Encoder for XqliteError {
                 (unsupported_data_type(), term_type_to_atom(env, *term_type)).encode(env)
             }
             XqliteError::ConnectionNotFound(conn) => {
-                (connection_not_found(), conn).encode(env)
+                (connection_not_found(), conn.0.clone()).encode(env)
             }
             XqliteError::Timeout(reason) => (timeout(), reason).encode(env),
             XqliteError::CannotPrepareStatement(sql, reason) => {
@@ -308,50 +301,59 @@ fn decode_keyword_params<'a>(
 }
 
 static POOLS: OnceLock<XqlitePools> = OnceLock::new();
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 fn pools() -> &'static XqlitePools {
-    POOLS.get_or_init(|| DashMap::<u64, XqlitePool>::with_capacity(16))
+    POOLS.get_or_init(|| DashMap::<String, XqlitePool>::with_capacity(16))
 }
 
-fn get_pool(id: u64) -> Option<XqlitePool> {
-    pools().get(&id).map(|x| x.value().clone())
+fn get_pool(path: &str) -> Option<XqlitePool> {
+    pools().get(path).map(|x| x.value().clone())
 }
 
-fn remove_pool(id: u64) -> bool {
-    pools().remove(&id).is_some()
+fn remove_pool(path: &str) -> bool {
+    pools().remove(path).is_some()
 }
 
-fn xqlite_open(path: &str) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let path_clone = path.to_string();
+fn xqlite_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    // Use DashMap's entry API for atomic get-or-insert logic.
+    // Clones the path string once here to use as the map key if insertion happens.
+    let entry = pools().entry(path.clone());
 
-    // 1. Create the connection manager
-    let manager = SqliteConnectionManager::file(path);
+    // Attempt to insert a new pool only if the entry is vacant.
+    // Meaning that the closure runs only if `path` is not already a key.
+    entry.or_try_insert_with(|| {
+        // Clone path again only for error reporting within this closure scope.
+        let path_for_error = path.clone();
+        let manager = SqliteConnectionManager::file(&path);
 
-    // 2. Attempt a direct connection using the manager to validate path/permissions immediately.
-    //    This bypasses r2d2's pool logic for the initial check.
-    match manager.connect() {
-        Ok(_conn) => {
-            // Initial connection succeeded. Drop `_conn` before the block finishes.
-            // Now, it's safe to build the actual pool.
-            let pool = Pool::builder()
-                .build(manager)
-                // Pool building itself can fail for config reasons
-                .map_err(|e| XqliteError::CannotOpenDatabase(path_clone, e.to_string()))?;
-
-            let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-            pools().insert(id, pool);
-            let conn_handle = XqliteConn(id);
-            let resource = ResourceArc::new(conn_handle);
-            Ok(resource)
+        // 1. Direct connection check *before* building the pool.
+        match manager.connect() {
+            Ok(_conn) => {
+                // Initial connection succeeded. Drop the connection (`_conn`).
+                // Now, it's safe to build the actual pool for the map.
+                Pool::builder().build(manager).map_err(|e| {
+                    XqliteError::CannotOpenDatabase(path_for_error, e.to_string())
+                })
+            }
+            Err(e) => {
+                // The direct manager.connect() failed. Return the error immediately.
+                Err(XqliteError::CannotOpenDatabase(
+                    path_for_error,
+                    e.to_string(),
+                ))
+            }
         }
-        Err(e) => {
-            // The direct manager.connect() failed. This is the fast failure.
-            // Map the rusqlite::Error (contained within r2d2::Error::ConnectionError)
-            // or other r2d2::Error directly.
-            Err(XqliteError::CannotOpenDatabase(path_clone, e.to_string()))
-        }
-    }
+    })?; // Propagate any error returned from the closure (connection or pool build error).
+
+    // If we reach here, the entry exists (was already present or was successfully inserted).
+    // The `entry` variable holds a reference to the occupied entry.
+
+    // Create the resource handle containing the path string.
+    // The original `path` String is moved into the handle here.
+    let conn_handle = XqliteConn(path);
+    let resource = ResourceArc::new(conn_handle);
+
+    Ok(resource)
 }
 
 fn xqlite_exec<'a>(
@@ -360,7 +362,7 @@ fn xqlite_exec<'a>(
     sql: &str,
     params_term: Term<'a>,
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
-    let pool = get_pool(handle.0).ok_or(XqliteError::ConnectionNotFound(*handle))?;
+    let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
     let conn = pool.get()?;
     let named_params_vec = decode_keyword_params(env, params_term)?;
 
@@ -378,17 +380,14 @@ fn xqlite_exec<'a>(
 
     let mut rows = stmt.query(params_for_rusqlite.as_slice())?;
 
-    // Outer Vec now holds Vec<Term<'a>>>
     let mut results: Vec<Vec<Term<'a>>> = Vec::new();
 
     while let Some(row) = rows
         .next()
         .map_err(|e| XqliteError::CannotFetchRow(e.to_string()))?
     {
-        // Inner Vec now holds Term<'a>
         let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
         for i in 0..column_count {
-            // Get owned `Value`
             let value: Value = row
                 .get::<usize, Value>(i)
                 .map_err(|e| XqliteError::CannotReadColumn(i, e.to_string()))?;
@@ -403,7 +402,7 @@ fn xqlite_exec<'a>(
 }
 
 fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
-    let pool = get_pool(handle.0).ok_or(XqliteError::ConnectionNotFound(*handle))?;
+    let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
     let conn = pool.get()?;
 
     conn.execute(pragma_sql, [])
@@ -414,16 +413,17 @@ fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, X
 }
 
 fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
-    if remove_pool(handle.0) {
+    if remove_pool(&handle.0) {
         Ok(())
     } else {
-        Err(XqliteError::ConnectionNotFound(*handle))
+        Err(XqliteError::ConnectionNotFound(handle.clone()))
     }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    xqlite_open(&path)
+    // Ownership of path is moved into xqlite_open
+    xqlite_open(path)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
