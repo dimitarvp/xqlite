@@ -10,7 +10,7 @@ use crate::atoms::{
 use dashmap::DashMap;
 use r2d2::{ManageConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{types::Value, ToSql};
+use rusqlite::{types::Value, Row, ToSql};
 use rustler::types::atom::nil;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
@@ -592,6 +592,30 @@ fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, X
         })
 }
 
+fn xqlite_pragma_write_and_read(
+    handle: &XqliteConn,
+    pragma_name: &str,
+    pragma_value_to_set: Value, // Value obtained from Elixir term
+) -> Result<Value, XqliteError> {
+    // Return the read-back value
+    let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
+    let conn = pool.get()?;
+
+    conn.pragma_update_and_check(
+        None, // No specific schema
+        pragma_name,
+        &pragma_value_to_set, // Pass the value to set
+        // Closure to extract the read-back value from the first column as a rusqlite::Value
+        |row: &Row<'_>| -> rusqlite::Result<Value> {
+            row.get(0) // Get column 0 and try to convert to rusqlite::Value
+        },
+    )
+    .map_err(|e| XqliteError::CannotExecutePragma {
+        pragma: format!("PRAGMA {} = {:?};", pragma_name, pragma_value_to_set),
+        reason: e.to_string(),
+    })
+}
+
 fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
     if remove_pool(&handle.0) {
         Ok(())
@@ -626,6 +650,22 @@ fn raw_pragma_write(
     pragma_sql: String,
 ) -> Result<usize, XqliteError> {
     xqlite_pragma_write(&handle, &pragma_sql)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_pragma_write_and_read<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    pragma_name: String,
+    value_term: Term<'a>, // The Elixir term for the value to set
+) -> Result<Term<'a>, XqliteError> {
+    let pragma_value_to_set = elixir_term_to_rusqlite_value(env, value_term)?;
+    let read_back_value: Value = xqlite_pragma_write_and_read(
+        &handle,
+        &pragma_name,
+        pragma_value_to_set, // Move the value into the helper
+    )?;
+    Ok(encode_val(env, read_back_value))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

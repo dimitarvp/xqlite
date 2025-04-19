@@ -13,6 +13,7 @@ defmodule XqliteNIF do
   def raw_exec(_conn, _sql, _params \\ []), do: err()
   def raw_close(_conn), do: err()
   def raw_pragma_write(_conn, _sql), do: err()
+  def raw_pragma_write_and_read(_conn, _name, _value), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
