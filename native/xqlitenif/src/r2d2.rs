@@ -3,8 +3,8 @@ use crate::atoms::{
     cannot_decode_pool_option, cannot_execute, cannot_execute_pragma, cannot_fetch_row,
     cannot_open_database, cannot_prepare_statement, cannot_read_column, connection_not_found,
     expected_keyword_list, expected_keyword_tuple, float, fun, integer,
-    invalid_idle_connection_count, invalid_pool_size, invalid_time_value, list, map, pid,
-    port, r#false, r#true, reference, timeout, tuple, unknown, unsupported_atom,
+    invalid_idle_connection_count, invalid_pool_size, invalid_time_value, list, map, no_value,
+    pid, port, r#false, r#true, reference, timeout, tuple, unknown, unsupported_atom,
     unsupported_data_type,
 };
 use dashmap::DashMap;
@@ -595,25 +595,32 @@ fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, X
 fn xqlite_pragma_write_and_read(
     handle: &XqliteConn,
     pragma_name: &str,
-    pragma_value_to_set: Value, // Value obtained from Elixir term
-) -> Result<Value, XqliteError> {
-    // Return the read-back value
+    pragma_value_to_set: Value,
+) -> Result<Option<Value>, XqliteError> {
     let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
     let conn = pool.get()?;
 
-    conn.pragma_update_and_check(
+    let result = conn.pragma_update_and_check(
         None, // No specific schema
         pragma_name,
-        &pragma_value_to_set, // Pass the value to set
-        // Closure to extract the read-back value from the first column as a rusqlite::Value
-        |row: &Row<'_>| -> rusqlite::Result<Value> {
-            row.get(0) // Get column 0 and try to convert to rusqlite::Value
-        },
-    )
-    .map_err(|e| XqliteError::CannotExecutePragma {
-        pragma: format!("PRAGMA {} = {:?};", pragma_name, pragma_value_to_set),
-        reason: e.to_string(),
-    })
+        &pragma_value_to_set,
+        |row: &Row<'_>| row.get(0), // Attempt to get the value
+    );
+
+    match result {
+        Ok(value) => Ok(Some(value)), // Got a value back
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // Treat "no rows" as success, returning None
+            Ok(None)
+        }
+        Err(other_err) => {
+            // Map all other rusqlite errors
+            Err(XqliteError::CannotExecutePragma {
+                pragma: format!("PRAGMA {} = {:?};", pragma_name, pragma_value_to_set),
+                reason: other_err.to_string(),
+            })
+        }
+    }
 }
 
 fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
@@ -657,15 +664,16 @@ fn raw_pragma_write_and_read<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
-    value_term: Term<'a>, // The Elixir term for the value to set
+    value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
     let pragma_value_to_set = elixir_term_to_rusqlite_value(env, value_term)?;
-    let read_back_value: Value = xqlite_pragma_write_and_read(
-        &handle,
-        &pragma_name,
-        pragma_value_to_set, // Move the value into the helper
-    )?;
-    Ok(encode_val(env, read_back_value))
+    let read_back_option: Option<Value> =
+        xqlite_pragma_write_and_read(&handle, &pragma_name, pragma_value_to_set)?;
+
+    match read_back_option {
+        Some(value) => Ok(encode_val(env, value)),
+        None => Ok(no_value().encode(env)), // Encode :no_value atom
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

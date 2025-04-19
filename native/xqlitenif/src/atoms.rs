@@ -31,6 +31,7 @@ rustler::atoms! {
     list,
     map,
     nil,
+    no_value,
     ok,
     pid,
     port,
