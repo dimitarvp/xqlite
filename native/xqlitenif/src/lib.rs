@@ -7,6 +7,7 @@ mod open;
 mod pragma_get;
 mod pragma_put;
 mod query;
+mod r2d2;
 mod shared;
 
 use crate::shared::XqliteConnection;
