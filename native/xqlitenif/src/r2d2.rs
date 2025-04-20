@@ -10,7 +10,7 @@ use crate::atoms::{
 use dashmap::DashMap;
 use r2d2::{ManageConnection, Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{types::Value, Connection, Row, ToSql};
+use rusqlite::{types::Value, Connection, Row, Rows, ToSql};
 use rustler::types::atom::nil;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
@@ -152,6 +152,9 @@ pub(crate) enum XqliteError {
         max_size: u32,
     },
     LockError(String),
+    InvalidParameters {
+        value_str: String,
+    },
 }
 
 impl Display for XqliteError {
@@ -165,9 +168,11 @@ impl Display for XqliteError {
             XqliteError::ExpectedKeywordList { value_str } => {
                 write!(f, "Expected a keyword list, got: {}", value_str)
             }
-            XqliteError::ExpectedKeywordTuple { value_str } => {
-                write!(f, "Expected a {{atom, value}} tuple, got: {}", value_str)
-            }
+            XqliteError::ExpectedKeywordTuple { value_str } => write!(
+                f,
+                "Expected a {{atom, value}} tuple inside keyword list, got: {}",
+                value_str
+            ),
             XqliteError::UnsupportedAtom { atom_value } => write!(
                 f,
                 "Unsupported atom value '{}'. Allowed values: nil, true, false",
@@ -230,6 +235,11 @@ impl Display for XqliteError {
             XqliteError::LockError(reason) => {
                 write!(f, "Failed to lock connection mutex: {}", reason)
             }
+            XqliteError::InvalidParameters { value_str } => write!(
+                f,
+                "Invalid parameter type provided, expected a List, got: {}",
+                value_str
+            ),
         }
     }
 }
@@ -282,6 +292,9 @@ impl Encoder for XqliteError {
                 (invalid_idle_connection_count(), *min_idle, *max_size).encode(env)
             }
             XqliteError::LockError(reason) => (crate::atoms::lock_error(), reason).encode(env),
+            XqliteError::InvalidParameters { value_str } => {
+                (crate::atoms::invalid_parameters(), value_str).encode(env)
+            }
         }
     }
 }
@@ -381,6 +394,24 @@ fn decode_exec_keyword_params<'a>(
     Ok(params)
 }
 
+fn decode_plain_list_params<'a>(
+    env: Env<'a>,
+    list_term: Term<'a>,
+) -> Result<Vec<Value>, XqliteError> {
+    // Use a more specific error if list decoding fails
+    let iter: ListIterator<'a> =
+        list_term
+            .decode()
+            .map_err(|_| XqliteError::InvalidParameters {
+                value_str: format!("{:?}", list_term),
+            })?;
+    let mut values = Vec::new();
+    for term in iter {
+        values.push(elixir_term_to_rusqlite_value(env, term)?);
+    }
+    Ok(values)
+}
+
 fn decode_pool_options<'a>(
     env: Env<'a>,
     list_term: Term<'a>,
@@ -469,21 +500,13 @@ fn decode_pool_options<'a>(
     Ok(options)
 }
 
-fn process_rows<'a, 'conn>(
+// 'a: Lifetime of the Elixir environment and returned Terms.
+// 'rows: Lifetime associated with the Rows object, ensuring it lives long enough.
+fn process_rows<'a, 'rows>(
     env: Env<'a>,
-    conn: &'conn Connection,
-    sql: &str,
-    params: &[(&str, &dyn ToSql)],
+    mut rows: Rows<'rows>, // Takes ownership of Rows
+    column_count: usize,
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
-    let sql_string = sql.to_string(); // For error reporting
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| XqliteError::CannotPrepareStatement(sql_string, e.to_string()))?;
-    let column_count = stmt.column_count();
-    let mut rows = stmt
-        .query(params)
-        .map_err(|e| XqliteError::CannotExecute(e.to_string()))?; // Use CannotExecute
-
     let mut results: Vec<Vec<Term<'a>>> = Vec::new();
     while let Some(row) = rows
         .next()
@@ -517,7 +540,6 @@ fn remove_pool(path: &str) -> bool {
 }
 
 // Helper for getting a connection reference/guard.
-// Needs a lifetime that lives at least as long as the guard or the pooled conn ref.
 enum ConnRef<'b> {
     Pooled(PooledConnection<SqliteConnectionManager>),
     Unpooled(MutexGuard<'b, Connection>),
@@ -536,7 +558,6 @@ impl Deref for ConnRef<'_> {
 }
 
 // Helper to get the appropriate connection reference/guard based on ConnType
-// Needs to take a mutable reference to handle to potentially hold the MutexGuard lock
 fn get_conn_ref(handle: &XqliteConn) -> Result<ConnRef<'_>, XqliteError> {
     match &handle.0 {
         ConnType::Pooled(path) => {
@@ -643,13 +664,53 @@ fn xqlite_exec<'a>(
     params_term: Term<'a>,
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
     let conn_ref = get_conn_ref(handle)?; // Get pooled conn or mutex guard
-    let named_params_vec = decode_exec_keyword_params(env, params_term)?;
-    let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-        .iter()
-        .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-        .collect();
 
-    process_rows(env, &conn_ref, sql, params_for_rusqlite.as_slice())
+    // Prepare statement first to get column count before potentially moving stmt
+    let sql_string_for_prepare = sql.to_string();
+    let mut stmt = conn_ref.prepare(sql).map_err(|e| {
+        XqliteError::CannotPrepareStatement(sql_string_for_prepare, e.to_string())
+    })?;
+    let column_count = stmt.column_count(); // Get count *before* query consumes/borrows stmt
+
+    // Branch based on parameter type
+    let rows_result = match params_term.get_type() {
+        TermType::List => {
+            // Use helper to check if it looks like a keyword list
+            if is_keyword(params_term) {
+                let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                    .collect();
+                // Pass stmt by mutable reference if query doesn't consume it
+                stmt.query(params_for_rusqlite.as_slice())
+            } else {
+                // Decode as plain list for positional params
+                let positional_values: Vec<Value> =
+                    decode_plain_list_params(env, params_term)?;
+                let params_slice: Vec<&dyn ToSql> =
+                    positional_values.iter().map(|v| v as &dyn ToSql).collect();
+                // Pass stmt by mutable reference
+                stmt.query(params_slice.as_slice())
+            }
+        }
+        // <<< Corrected check for nil or empty list >>>
+        _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
+            // Pass stmt by mutable reference
+            stmt.query([]) // Query with empty params
+        }
+        _ => {
+            // Parameter type is not nil, empty list, or keyword list/plain list handled above
+            return Err(XqliteError::InvalidParameters {
+                value_str: format!("{:?}", params_term),
+            });
+        }
+    };
+
+    let rows = rows_result.map_err(|e| XqliteError::CannotExecute(e.to_string()))?;
+
+    // Use helper to process rows
+    process_rows(env, rows, column_count)
 }
 
 fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
@@ -668,27 +729,19 @@ fn xqlite_pragma_write_and_read(
     pragma_value_to_set: Value,
 ) -> Result<Option<Value>, XqliteError> {
     let conn_ref = get_conn_ref(handle)?;
-
     let result = conn_ref.pragma_update_and_check(
         None,
         pragma_name,
         &pragma_value_to_set,
         |row: &Row<'_>| row.get(0),
     );
-
     match result {
-        Ok(value) => Ok(Some(value)), // Got a value back
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            // Treat "no rows" as success, returning None
-            Ok(None)
-        }
-        Err(other_err) => {
-            // Map all other rusqlite errors
-            Err(XqliteError::CannotExecutePragma {
-                pragma: format!("PRAGMA {} = {:?};", pragma_name, pragma_value_to_set),
-                reason: other_err.to_string(),
-            })
-        }
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(other_err) => Err(XqliteError::CannotExecutePragma {
+            pragma: format!("PRAGMA {} = {:?};", pragma_name, pragma_value_to_set),
+            reason: other_err.to_string(),
+        }),
     }
 }
 
@@ -768,4 +821,16 @@ fn raw_pragma_write_and_read<'a>(
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_close(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     xqlite_close(&handle).map(|_| true)
+}
+
+// Checks if the argument is a keyword list.
+// Heuristic: check if the list is non-empty and the first element is a {atom, _} tuple.
+fn is_keyword<'a>(list_term: Term<'a>) -> bool {
+    match list_term.decode::<ListIterator<'a>>() {
+        Ok(mut iter) => match iter.next() {
+            Some(first_el) => first_el.decode::<(Atom, Term<'a>)>().is_ok(),
+            None => false, // Empty list is not keyword
+        },
+        Err(_) => false, // Not a list
+    }
 }

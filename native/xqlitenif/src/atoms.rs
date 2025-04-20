@@ -26,6 +26,7 @@ rustler::atoms! {
     fun,
     integer,
     invalid_idle_connection_count,
+    invalid_parameters,
     invalid_pool_size,
     invalid_time_value,
     list,
