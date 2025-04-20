@@ -29,6 +29,7 @@ rustler::atoms! {
     invalid_pool_size,
     invalid_time_value,
     list,
+    lock_error,
     map,
     nil,
     no_value,

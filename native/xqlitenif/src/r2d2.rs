@@ -8,15 +8,16 @@ use crate::atoms::{
     unsupported_data_type,
 };
 use dashmap::DashMap;
-use r2d2::{ManageConnection, Pool};
+use r2d2::{ManageConnection, Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{types::Value, Row, ToSql};
+use rusqlite::{types::Value, Connection, Row, ToSql};
 use rustler::types::atom::nil;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
+use std::ops::Deref;
 use std::panic::RefUnwindSafe;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 type XqlitePool = Pool<SqliteConnectionManager>;
@@ -24,15 +25,16 @@ type XqlitePools = DashMap<String, XqlitePool>;
 
 const DEFAULT_MAX_POOL_SIZE: u32 = 10;
 
-#[derive(Debug, Clone)]
-pub(crate) struct XqliteConn(String);
+#[derive(Debug)]
+enum ConnType {
+    Pooled(String),                             // Holds path used as key in POOLS map
+    Unpooled(Arc<Mutex<rusqlite::Connection>>), // Holds the direct connection under mutex
+}
+
+#[derive(Debug)]
+pub(crate) struct XqliteConn(ConnType);
 #[resource_impl]
 impl Resource for XqliteConn {}
-impl Encoder for XqliteConn {
-    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
-        self.0.encode(env)
-    }
-}
 
 #[derive(Debug)]
 struct BlobResource(Vec<u8>);
@@ -126,7 +128,7 @@ pub(crate) enum XqliteError {
     UnsupportedDataType {
         term_type: TermType,
     },
-    ConnectionNotFound(XqliteConn),
+    ConnectionNotFound(String),
     Timeout(String),
     CannotPrepareStatement(String, String),
     CannotReadColumn(usize, String),
@@ -149,6 +151,7 @@ pub(crate) enum XqliteError {
         min_idle: u32,
         max_size: u32,
     },
+    LockError(String),
 }
 
 impl Display for XqliteError {
@@ -175,8 +178,8 @@ impl Display for XqliteError {
                 "Unsupported data type {}. Allowed types: atom, integer, float, binary",
                 term_type_to_string(*term_type)
             ),
-            XqliteError::ConnectionNotFound(conn) => {
-                write!(f, "Connection pool not found for path: '{}'", conn.0)
+            XqliteError::ConnectionNotFound(path) => {
+                write!(f, "Connection pool not found for path: '{}'", path)
             }
             XqliteError::Timeout(reason) => {
                 write!(f, "Timeout getting connection: {}", reason)
@@ -224,6 +227,9 @@ impl Display for XqliteError {
                 "Invalid configuration: min_idle ({}) cannot be greater than max_size ({}).",
                 min_idle, max_size
             ),
+            XqliteError::LockError(reason) => {
+                write!(f, "Failed to lock connection mutex: {}", reason)
+            }
         }
     }
 }
@@ -244,8 +250,8 @@ impl Encoder for XqliteError {
             XqliteError::UnsupportedDataType { term_type } => {
                 (unsupported_data_type(), term_type_to_atom(env, *term_type)).encode(env)
             }
-            XqliteError::ConnectionNotFound(conn) => {
-                (connection_not_found(), conn.0.clone()).encode(env)
+            XqliteError::ConnectionNotFound(path) => {
+                (connection_not_found(), path).encode(env)
             }
             XqliteError::Timeout(reason) => (timeout(), reason).encode(env),
             XqliteError::CannotPrepareStatement(sql, reason) => {
@@ -275,6 +281,7 @@ impl Encoder for XqliteError {
             XqliteError::InvalidIdleConnectionCount { min_idle, max_size } => {
                 (invalid_idle_connection_count(), *min_idle, *max_size).encode(env)
             }
+            XqliteError::LockError(reason) => (crate::atoms::lock_error(), reason).encode(env),
         }
     }
 }
@@ -411,22 +418,25 @@ fn decode_pool_options<'a>(
 
         match key_str.as_str() {
             "connection_timeout" => {
-                let val = value_term
-                    .decode::<u64>()
-                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
-                options.connection_timeout_ms = Some(val);
+                options.connection_timeout_ms = Some(
+                    value_term
+                        .decode::<u64>()
+                        .map_err(|e| make_option_decode_error(&key_str, value_term, e))?,
+                );
             }
             "idle_timeout" => {
-                let val = value_term
-                    .decode::<u64>()
-                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
-                options.idle_timeout_ms = Some(val);
+                options.idle_timeout_ms = Some(
+                    value_term
+                        .decode::<u64>()
+                        .map_err(|e| make_option_decode_error(&key_str, value_term, e))?,
+                );
             }
             "max_lifetime" => {
-                let val = value_term
-                    .decode::<u64>()
-                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
-                options.max_lifetime_ms = Some(val);
+                options.max_lifetime_ms = Some(
+                    value_term
+                        .decode::<u64>()
+                        .map_err(|e| make_option_decode_error(&key_str, value_term, e))?,
+                );
             }
             "max_size" => {
                 let val = value_term
@@ -438,10 +448,11 @@ fn decode_pool_options<'a>(
                 options.max_size = Some(val);
             }
             "min_idle" => {
-                let val = value_term
-                    .decode::<u32>()
-                    .map_err(|e| make_option_decode_error(&key_str, value_term, e))?;
-                options.min_idle = Some(val);
+                options.min_idle = Some(
+                    value_term
+                        .decode::<u32>()
+                        .map_err(|e| make_option_decode_error(&key_str, value_term, e))?,
+                );
             }
             // Ignore unknown keys
             _ => {}
@@ -458,6 +469,39 @@ fn decode_pool_options<'a>(
     Ok(options)
 }
 
+fn process_rows<'a, 'conn>(
+    env: Env<'a>,
+    conn: &'conn Connection,
+    sql: &str,
+    params: &[(&str, &dyn ToSql)],
+) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
+    let sql_string = sql.to_string(); // For error reporting
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| XqliteError::CannotPrepareStatement(sql_string, e.to_string()))?;
+    let column_count = stmt.column_count();
+    let mut rows = stmt
+        .query(params)
+        .map_err(|e| XqliteError::CannotExecute(e.to_string()))?; // Use CannotExecute
+
+    let mut results: Vec<Vec<Term<'a>>> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| XqliteError::CannotFetchRow(e.to_string()))?
+    {
+        let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
+        for i in 0..column_count {
+            let value: Value = row
+                .get::<usize, Value>(i)
+                .map_err(|e| XqliteError::CannotReadColumn(i, e.to_string()))?;
+            let term = encode_val(env, value);
+            row_values.push(term);
+        }
+        results.push(row_values);
+    }
+    Ok(results)
+}
+
 static POOLS: OnceLock<XqlitePools> = OnceLock::new();
 
 fn pools() -> &'static XqlitePools {
@@ -470,6 +514,46 @@ fn get_pool(path: &str) -> Option<XqlitePool> {
 
 fn remove_pool(path: &str) -> bool {
     pools().remove(path).is_some()
+}
+
+// Helper for getting a connection reference/guard.
+// Needs a lifetime that lives at least as long as the guard or the pooled conn ref.
+enum ConnRef<'b> {
+    Pooled(PooledConnection<SqliteConnectionManager>),
+    Unpooled(MutexGuard<'b, Connection>),
+}
+
+// Implement Deref to allow using .prepare(), .execute() etc. directly on ConnRef
+impl Deref for ConnRef<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            ConnRef::Pooled(pooled_conn) => pooled_conn,
+            ConnRef::Unpooled(guard) => guard,
+        }
+    }
+}
+
+// Helper to get the appropriate connection reference/guard based on ConnType
+// Needs to take a mutable reference to handle to potentially hold the MutexGuard lock
+fn get_conn_ref(handle: &XqliteConn) -> Result<ConnRef<'_>, XqliteError> {
+    match &handle.0 {
+        ConnType::Pooled(path) => {
+            let pool =
+                get_pool(path).ok_or_else(|| XqliteError::ConnectionNotFound(path.clone()))?;
+            let pooled_conn = pool
+                .get()
+                .map_err(|e| XqliteError::Timeout(e.to_string()))?;
+            Ok(ConnRef::Pooled(pooled_conn))
+        }
+        ConnType::Unpooled(arc_mutex_conn) => {
+            let guard = arc_mutex_conn
+                .lock()
+                .map_err(|e| XqliteError::LockError(e.to_string()))?;
+            Ok(ConnRef::Unpooled(guard))
+        }
+    }
 }
 
 fn xqlite_open(
@@ -530,10 +614,26 @@ fn xqlite_open(
 
     // Create the resource handle containing the path string.
     // The original `path` String is moved into the handle here.
-    let conn_handle = XqliteConn(path);
+    let conn_handle = XqliteConn(ConnType::Pooled(path));
     let resource = ResourceArc::new(conn_handle);
 
     Ok(resource)
+}
+
+fn xqlite_open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let conn = Connection::open(&uri)
+        .map_err(|e| XqliteError::CannotOpenDatabase(uri, e.to_string()))?;
+    let arc_mutex_conn = Arc::new(Mutex::new(conn));
+    let conn_handle = XqliteConn(ConnType::Unpooled(arc_mutex_conn));
+    Ok(ResourceArc::new(conn_handle))
+}
+
+fn xqlite_open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let conn = Connection::open("")
+        .map_err(|e| XqliteError::CannotOpenDatabase("".to_string(), e.to_string()))?;
+    let arc_mutex_conn = Arc::new(Mutex::new(conn));
+    let conn_handle = XqliteConn(ConnType::Unpooled(arc_mutex_conn));
+    Ok(ResourceArc::new(conn_handle))
 }
 
 fn xqlite_exec<'a>(
@@ -542,50 +642,20 @@ fn xqlite_exec<'a>(
     sql: &str,
     params_term: Term<'a>,
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
-    let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
-    let conn = pool.get()?;
+    let conn_ref = get_conn_ref(handle)?; // Get pooled conn or mutex guard
     let named_params_vec = decode_exec_keyword_params(env, params_term)?;
-
-    let sql_string = sql.to_string();
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| XqliteError::CannotPrepareStatement(sql_string, e.to_string()))?;
-
-    let column_count = stmt.column_count();
-
     let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
         .iter()
         .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
         .collect();
 
-    let mut rows = stmt.query(params_for_rusqlite.as_slice())?;
-
-    let mut results: Vec<Vec<Term<'a>>> = Vec::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| XqliteError::CannotFetchRow(e.to_string()))?
-    {
-        let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
-        for i in 0..column_count {
-            let value: Value = row
-                .get::<usize, Value>(i)
-                .map_err(|e| XqliteError::CannotReadColumn(i, e.to_string()))?;
-
-            let term = encode_val(env, value);
-            row_values.push(term);
-        }
-        results.push(row_values);
-    }
-
-    Ok(results)
+    process_rows(env, &conn_ref, sql, params_for_rusqlite.as_slice())
 }
 
 fn xqlite_pragma_write(handle: &XqliteConn, pragma_sql: &str) -> Result<usize, XqliteError> {
-    let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
-    let conn = pool.get()?;
-
-    conn.execute(pragma_sql, [])
+    let conn_ref = get_conn_ref(handle)?;
+    conn_ref
+        .execute(pragma_sql, [])
         .map_err(|e| XqliteError::CannotExecutePragma {
             pragma: pragma_sql.to_string(),
             reason: e.to_string(),
@@ -597,14 +667,13 @@ fn xqlite_pragma_write_and_read(
     pragma_name: &str,
     pragma_value_to_set: Value,
 ) -> Result<Option<Value>, XqliteError> {
-    let pool = get_pool(&handle.0).ok_or(XqliteError::ConnectionNotFound(handle.clone()))?;
-    let conn = pool.get()?;
+    let conn_ref = get_conn_ref(handle)?;
 
-    let result = conn.pragma_update_and_check(
-        None, // No specific schema
+    let result = conn_ref.pragma_update_and_check(
+        None,
         pragma_name,
         &pragma_value_to_set,
-        |row: &Row<'_>| row.get(0), // Attempt to get the value
+        |row: &Row<'_>| row.get(0),
     );
 
     match result {
@@ -624,10 +693,21 @@ fn xqlite_pragma_write_and_read(
 }
 
 fn xqlite_close(handle: &XqliteConn) -> Result<(), XqliteError> {
-    if remove_pool(&handle.0) {
-        Ok(())
-    } else {
-        Err(XqliteError::ConnectionNotFound(handle.clone()))
+    match &handle.0 {
+        ConnType::Pooled(path) => {
+            if remove_pool(path) {
+                Ok(())
+            } else {
+                // Trying to close a pool that doesn't exist
+                Err(XqliteError::ConnectionNotFound(path.clone()))
+            }
+        }
+        ConnType::Unpooled(_) => {
+            // No explicit action needed. The Arc/Mutex/Connection will be dropped
+            // when the ResourceArc reference count reaches zero.
+            // This operation conceptually always succeeds from the closer's perspective.
+            Ok(())
+        }
     }
 }
 
@@ -639,6 +719,16 @@ fn raw_open<'a>(
 ) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let options = decode_pool_options(env, options_term)?;
     xqlite_open(path, options)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    xqlite_open_in_memory(uri)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    xqlite_open_temporary()
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -669,10 +759,9 @@ fn raw_pragma_write_and_read<'a>(
     let pragma_value_to_set = elixir_term_to_rusqlite_value(env, value_term)?;
     let read_back_option: Option<Value> =
         xqlite_pragma_write_and_read(&handle, &pragma_name, pragma_value_to_set)?;
-
     match read_back_option {
         Some(value) => Ok(encode_val(env, value)),
-        None => Ok(no_value().encode(env)), // Encode :no_value atom
+        None => Ok(no_value().encode(env)),
     }
 }
 
