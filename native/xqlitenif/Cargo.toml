@@ -10,7 +10,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rusqlite = "0.34"
+rusqlite = "0.35"
 rustler = { version = "0.36.1" }
 
 [profile.release]
