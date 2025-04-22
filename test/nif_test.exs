@@ -15,7 +15,7 @@ defmodule XqliteNifTest do
       raise("Invalid DB path '#{@invalid_db_path}' exists, please remove it.")
     end
 
-    # No shared state needed between tests for now.
+    # No shared state needed between test.
     :ok
   end
 
@@ -50,7 +50,6 @@ defmodule XqliteNifTest do
     # end of describe "raw_open/2 and raw_close/1"
   end
 
-  # Minimal test to ensure PRAGMA write NIF exists and accepts args
   describe "raw_pragma_write/2" do
     test "can execute a simple PRAGMA" do
       {:ok, conn} = NIF.raw_open(@valid_db_path)
@@ -59,7 +58,6 @@ defmodule XqliteNifTest do
     end
   end
 
-  # Minimal test to ensure exec NIF exists and accepts args
   describe "raw_exec/3" do
     test "can execute a simple query" do
       {:ok, conn} = NIF.raw_open(@valid_db_path)
