@@ -2,10 +2,11 @@ use crate::atoms::{
     atom, binary, cannot_convert_atom_to_string, cannot_convert_to_sqlite_value,
     cannot_execute, cannot_execute_pragma, cannot_fetch_row, cannot_open_database,
     cannot_prepare_statement, cannot_read_column, expected_keyword_list,
-    expected_keyword_tuple, float, fun, integer, invalid_parameters, list, lock_error, map,
+    expected_keyword_tuple, expected_list, float, fun, integer, list, lock_error, map,
     no_value, pid, port, r#false, r#true, reference, tuple, unknown, unsupported_atom,
     unsupported_data_type,
 };
+
 use rusqlite::{types::Value, Connection, Row, Rows, ToSql};
 use rustler::types::atom::nil;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
@@ -13,6 +14,7 @@ use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
 use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
+
 #[derive(Debug)]
 pub(crate) struct XqliteConn(Arc<Mutex<Connection>>);
 #[resource_impl]
@@ -75,8 +77,9 @@ fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
 #[derive(Debug)]
 pub(crate) enum XqliteError {
     CannotConvertToSqliteValue { value_str: String, reason: String },
-    ExpectedKeywordList { value_str: String }, // Used by parameter decoders
-    ExpectedKeywordTuple { value_str: String }, // Used by parameter decoders
+    ExpectedKeywordList { value_str: String },
+    ExpectedKeywordTuple { value_str: String },
+    ExpectedList { value_str: String },
     UnsupportedAtom { atom_value: String },
     UnsupportedDataType { term_type: TermType },
     CannotPrepareStatement(String, String),
@@ -87,7 +90,6 @@ pub(crate) enum XqliteError {
     CannotOpenDatabase(String, String),
     CannotConvertAtomToString(String),
     LockError(String),
-    InvalidParameters { value_str: String },
 }
 
 impl Display for XqliteError {
@@ -106,6 +108,9 @@ impl Display for XqliteError {
                 "Expected a {{atom, value}} tuple inside keyword list, got: {}",
                 value_str
             ),
+            XqliteError::ExpectedList { value_str } => {
+                write!(f, "Expected a list, got: {}", value_str)
+            }
             XqliteError::UnsupportedAtom { atom_value } => write!(
                 f,
                 "Unsupported atom value '{}'. Allowed values: nil, true, false",
@@ -138,11 +143,6 @@ impl Display for XqliteError {
             XqliteError::LockError(reason) => {
                 write!(f, "Failed to lock connection mutex: {}", reason)
             }
-            XqliteError::InvalidParameters { value_str } => write!(
-                f,
-                "Invalid parameter type provided, expected a List, got: {}",
-                value_str
-            ),
         }
     }
 }
@@ -158,6 +158,9 @@ impl Encoder for XqliteError {
             }
             XqliteError::ExpectedKeywordTuple { value_str } => {
                 (expected_keyword_tuple(), value_str).encode(env)
+            }
+            XqliteError::ExpectedList { value_str } => {
+                (expected_list(), value_str).encode(env)
             }
             XqliteError::UnsupportedAtom { atom_value: _ } => unsupported_atom().encode(env),
             XqliteError::UnsupportedDataType { term_type } => {
@@ -181,9 +184,6 @@ impl Encoder for XqliteError {
                 (cannot_convert_atom_to_string(), reason).encode(env)
             }
             XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
-            XqliteError::InvalidParameters { value_str } => {
-                (invalid_parameters(), value_str).encode(env)
-            }
         }
     }
 }
@@ -276,11 +276,9 @@ fn decode_plain_list_params<'a>(
     list_term: Term<'a>,
 ) -> Result<Vec<Value>, XqliteError> {
     let iter: ListIterator<'a> =
-        list_term
-            .decode()
-            .map_err(|_| XqliteError::InvalidParameters {
-                value_str: format!("{:?}", list_term),
-            })?;
+        list_term.decode().map_err(|_| XqliteError::ExpectedList {
+            value_str: format!("{:?}", list_term),
+        })?;
     let mut values = Vec::new();
     for term in iter {
         values.push(elixir_term_to_rusqlite_value(env, term)?);
@@ -375,7 +373,7 @@ fn raw_exec<'a>(
             stmt.query([])
         }
         _ => {
-            return Err(XqliteError::InvalidParameters {
+            return Err(XqliteError::ExpectedList {
                 value_str: format!("{:?}", params_term),
             });
         }
@@ -383,9 +381,7 @@ fn raw_exec<'a>(
 
     let rows = rows_result.map_err(|e| XqliteError::CannotExecute(e.to_string()))?;
 
-    // Pass the Rows object which borrows from stmt, which borrows from conn_guard
     process_rows(env, rows, column_count)
-    // MutexGuard (conn_guard) is dropped here, releasing the lock
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -403,7 +399,6 @@ fn raw_pragma_write(
             pragma: pragma_sql,
             reason: e.to_string(),
         })
-    // MutexGuard dropped here
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -427,7 +422,6 @@ fn raw_pragma_write_and_read<'a>(
         |row: &Row<'_>| row.get(0),
     );
 
-    // Drop the guard explicitly before encoding to avoid holding lock during encode
     drop(conn_guard);
 
     match result {
@@ -449,8 +443,8 @@ fn is_keyword<'a>(list_term: Term<'a>) -> bool {
     match list_term.decode::<ListIterator<'a>>() {
         Ok(mut iter) => match iter.next() {
             Some(first_el) => first_el.decode::<(Atom, Term<'a>)>().is_ok(),
-            None => false, // Empty list is not keyword
+            None => false,
         },
-        Err(_) => false, // Not a list
+        Err(_) => false,
     }
 }
