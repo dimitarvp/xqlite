@@ -289,28 +289,31 @@ defmodule Xqlite.Pragma do
           pragma_get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
-  def get(db, key, arg_or_opts, _opts)
-      when is_conn(db) and is_pragma_key(key) and is_list(arg_or_opts) do
-    get0(db, key, arg_or_opts)
+  def get(db, key, list, _opts)
+      when is_conn(db) and is_pragma_key(key) and is_list(list) do
+    get0(db, key, list)
   end
 
-  def get(db, key, arg_or_opts, opts)
-      when is_conn(db) and is_pragma_key(key) and is_pragma_key(arg_or_opts) and
+  def get(db, key, arg, opts)
+      when is_conn(db) and is_pragma_key(key) and is_pragma_key(arg) and
              is_list(opts) do
-    get1(db, key, arg_or_opts, opts)
+    get1(db, key, arg, opts)
   end
 
   @spec get0(Xqlite.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
   defp get0(conn, key, opts) when is_conn(conn) and is_atom(key) and is_pragma_opts(opts) do
-    get0(conn, Atom.to_string(key), opts)
-  end
-
-  defp get0(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
-    XqliteNIF.pragma_get0(conn, key, opts)
+    XqliteNIF.raw_exec(conn, "PRAGMA #{key};")
+    |> IO.inspect(label: "get0(list): '#{key}' pragma_get_result")
     |> result(key)
   end
 
-  @spec get1(Xqlite.Conn.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
+  defp get0(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
+    XqliteNIF.raw_exec(conn, "PRAGMA #{key};")
+    |> IO.inspect(label: "get0(arg): '#{key}' pragma_get_result")
+    |> result(key)
+  end
+
+  @spec get1(Xqlite.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
           pragma_get_result()
   defp get1(conn, key, arg, opts)
        when is_conn(conn) and is_atom(key) and is_atom(arg) and is_pragma_opts(opts) do
@@ -329,7 +332,8 @@ defmodule Xqlite.Pragma do
 
   defp get1(conn, key, arg, opts)
        when is_conn(conn) and is_binary(key) and is_binary(arg) and is_pragma_opts(opts) do
-    XqliteNIF.pragma_get1(conn, key, arg, opts)
+    XqliteNIF.raw_exec(conn, "PRAGMA #{key}(#{arg});")
+    |> IO.inspect(label: "get1: '#{key}' pragma_get_result")
     |> result(key)
   end
 
@@ -374,7 +378,8 @@ defmodule Xqlite.Pragma do
 
   def put(db, key, val)
       when is_conn(db) and is_binary(key) and is_pragma_value(val) do
-    XqliteNIF.pragma_put(db, key, val, [])
+    XqliteNIF.raw_pragma_write_and_read(db, key, val)
+    |> IO.inspect(label: "put: '#{key}', '#{val}' pragma_put_result")
     |> result(key)
   end
 
@@ -402,9 +407,21 @@ defmodule Xqlite.Pragma do
   @spec result(pragma_result(), pragma_key()) :: pragma_result()
   defp result({:error, _} = e, _k), do: e
   defp result({:error, _, _} = e, _k), do: e
-  defp result(:ok, _k), do: :ok
+  defp result({:ok, :no_value}, _k), do: :ok
+  defp result({:ok, "ok"}, _k), do: :ok
+
+  defp result({:ok, v}, _k) when is_integer(v) or is_float(v) or is_binary(v),
+    do: {:ok, v}
+
   defp result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
-  defp result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
+  defp result({:ok, [[v]]}, k) when is_atom(k), do: {:ok, single(k, v)}
+  defp result({:ok, [[v]]}, k) when is_binary(k), do: {:ok, single(String.to_atom(k), v)}
+  defp result({:ok, vv}, k) when is_atom(k) and is_list(vv), do: {:ok, multiple(k, vv)}
+
+  defp result({:ok, vv}, k) when is_binary(k) and is_list(vv),
+    do: {:ok, multiple(String.to_atom(k), vv)}
+
+  defp result(:ok, _k), do: :ok
 
   # Generate pragma getter functions that convert a 0/1 integer result to a boolean
   # or transform special integer values to atoms.
