@@ -47,8 +47,6 @@ defmodule Xqlite.MixProject do
     [
       # dependencies that are always included.
 
-      {:floki, "~> 0.23"},
-      {:jason, "~> 1.2"},
       {:rustler, "~> 0.36.1", runtime: false},
 
       # dev / test dependencies.

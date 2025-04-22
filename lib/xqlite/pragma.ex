@@ -17,47 +17,6 @@ defmodule Xqlite.Pragma do
       writable?: 1
     ]
 
-  @doc """
-  Given the contents of the `https://www.sqlite.org/pragma.html` URL passed to this
-  function, retrieve a list of supported sqlite3 pragma names.
-  """
-  @spec extract_supported_pragmas(String.t()) :: [String.t()]
-  def extract_supported_pragmas(html) when is_binary(html) do
-    matches =
-      html
-      |> Floki.parse_document()
-      |> elem(1)
-      |> Floki.find("/html/body/script")
-      |> Enum.filter(fn {"script", [], texts} ->
-        Enum.any?(texts, &Regex.match?(~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*\[\s*\{.+/misu, &1))
-      end)
-
-    case matches do
-      [] ->
-        []
-
-      [{"script", [], texts}] ->
-        text = Enum.join(texts, "\n")
-
-        results =
-          Regex.named_captures(
-            ~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*(?<json>\[\s*\{.+\}\s*\])\s*;/misu,
-            text
-          )
-
-        results
-        |> Map.get("json")
-        |> Jason.decode!()
-        |> Enum.filter(fn
-          # The pragmas with %{s: 0} are the ones that are recommended to be used;
-          # the rest are either deprecated, used for debugging, or require special builds.
-          %{"s" => 0, "u" => _, "x" => _} -> true
-          _ -> false
-        end)
-        |> Enum.map(fn %{"s" => 0, "u" => _, "x" => name} -> name end)
-    end
-  end
-
   # --- Types.
 
   @type name :: String.t()
