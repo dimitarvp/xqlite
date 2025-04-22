@@ -6,8 +6,7 @@ defmodule Xqlite.Pragma do
   sqlite compile options, or are intended for testing sqlite.
   """
 
-  import Xqlite, only: [int2bool: 1]
-  import Xqlite.Conn, only: [is_conn: 1]
+  import Xqlite, only: [int2bool: 1, is_conn: 1]
 
   import Xqlite.PragmaUtil,
     only: [
@@ -286,7 +285,7 @@ defmodule Xqlite.Pragma do
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
   """
-  @spec get(Xqlite.Conn.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
+  @spec get(Xqlite.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
           pragma_get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
@@ -301,7 +300,7 @@ defmodule Xqlite.Pragma do
     get1(db, key, arg_or_opts, opts)
   end
 
-  @spec get0(Xqlite.Conn.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
+  @spec get0(Xqlite.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
   defp get0(conn, key, opts) when is_conn(conn) and is_atom(key) and is_pragma_opts(opts) do
     get0(conn, Atom.to_string(key), opts)
   end
@@ -334,31 +333,31 @@ defmodule Xqlite.Pragma do
     |> result(key)
   end
 
-  @spec index_list(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
   def index_list(db, name, opts \\ [])
       when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
     get1(db, "index_list", name, opts)
   end
 
-  @spec index_info(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec index_info(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
   def index_info(db, name, opts \\ [])
       when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
     get1(db, "index_info", name, opts)
   end
 
-  @spec index_xinfo(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec index_xinfo(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
   def index_xinfo(db, name, opts \\ [])
       when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
     get1(db, "index_xinfo", name, opts)
   end
 
-  @spec table_info(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec table_info(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
   def table_info(db, name, opts \\ [])
       when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
     get1(db, "table_info", name, opts)
   end
 
-  @spec table_xinfo(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
   def table_xinfo(db, name, opts \\ [])
       when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
     get1(db, "table_xinfo", name, opts)
@@ -367,7 +366,7 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Changes a PRAGMA's value.
   """
-  @spec put(Xqlite.Conn.conn(), pragma_key(), pragma_value()) :: pragma_result()
+  @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: pragma_result()
   def put(db, key, val)
       when is_conn(db) and is_atom(key) and is_pragma_value(val) do
     put(db, Atom.to_string(key), val)

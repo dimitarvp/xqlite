@@ -12,6 +12,7 @@ defmodule Xqlite do
 
   @type conn :: reference()
   @type db_name :: String.t()
+  @type opts :: keyword()
   @type open_result :: {:ok, conn} | {:error, String.t()}
   @type close_result :: {:ok, true}
 end
