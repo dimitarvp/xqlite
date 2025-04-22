@@ -24,7 +24,7 @@ rustler::atoms! {
     expected_list,
     r#false,
     float,
-    fun,
+    function,
     integer,
     invalid_idle_connection_count,
     invalid_pool_size,

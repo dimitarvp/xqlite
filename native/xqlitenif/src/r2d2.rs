@@ -2,7 +2,7 @@ use crate::atoms::{
     atom, binary, cannot_convert_atom_to_string, cannot_convert_to_sqlite_value,
     cannot_execute, cannot_execute_pragma, cannot_fetch_row, cannot_open_database,
     cannot_prepare_statement, cannot_read_column, expected_keyword_list,
-    expected_keyword_tuple, expected_list, float, fun, integer, list, lock_error, map,
+    expected_keyword_tuple, expected_list, float, function, integer, list, lock_error, map,
     no_value, pid, port, r#false, r#true, reference, tuple, unknown, unsupported_atom,
     unsupported_data_type,
 };
@@ -47,7 +47,7 @@ fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
         TermType::Atom => atom(),
         TermType::Binary => binary(),
         TermType::Float => float(),
-        TermType::Fun => fun(),
+        TermType::Fun => function(),
         TermType::Integer => integer(),
         TermType::List => list(),
         TermType::Map => map(),
