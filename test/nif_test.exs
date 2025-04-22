@@ -23,11 +23,7 @@ defmodule XqliteNifTest do
     test "opens a valid in-memory database, closes it, and fails on second close" do
       assert {:ok, conn} = NIF.raw_open(@valid_db_path)
       assert {:ok, true} = NIF.raw_close(conn)
-
-      assert match?(
-               {:error, {:connection_not_found, db_path}} when is_binary(db_path),
-               NIF.raw_close(conn)
-             )
+      assert {:ok, true} = NIF.raw_close(conn)
     end
 
     test "fails to open an invalid database path immediately" do
@@ -45,84 +41,13 @@ defmodule XqliteNifTest do
 
       assert {:ok, true} = NIF.raw_close(conn1)
 
-      # Closing via conn2 should now fail as the pool for @valid_db_path was removed
-      assert {:error, {:connection_not_found, @valid_db_path}} = NIF.raw_close(conn2)
+      # Closing via conn2 should still succeed because it's no-op on the Rust side
+      # as we are relying on the reference-counted Rust `Arc` to ultimately garbage-collect
+      # the connection, which leads to actually closing it.
+      assert {:ok, true} = NIF.raw_close(conn2)
     end
 
     # end of describe "raw_open/2 and raw_close/1"
-  end
-
-  describe "raw_open/2 with options" do
-    test "opens successfully with valid and extraneous options" do
-      valid_options = [
-        connection_timeout: 5000,
-        idle_timeout: 60_000,
-        max_size: 5,
-        min_idle: 1,
-        # These should be ignored by the Rust code.
-        some_other_key: :foo,
-        pool_name: "bar"
-      ]
-
-      assert {:ok, conn} = NIF.raw_open(@valid_db_path, valid_options)
-      assert {:ok, true} = NIF.raw_close(conn)
-    end
-
-    test "fails with invalid zero connection_timeout" do
-      opts = [connection_timeout: 0]
-      assert {:error, {:invalid_time_value, 0}} = NIF.raw_open(@valid_db_path, opts)
-    end
-
-    test "fails with invalid zero idle_timeout" do
-      opts = [idle_timeout: 0]
-      assert {:error, {:invalid_time_value, 0}} = NIF.raw_open(@valid_db_path, opts)
-    end
-
-    test "fails with invalid zero max_lifetime" do
-      opts = [max_lifetime: 0]
-      assert {:error, {:invalid_time_value, 0}} = NIF.raw_open(@valid_db_path, opts)
-    end
-
-    test "fails with invalid zero max_size" do
-      opts = [max_size: 0]
-      assert {:error, {:invalid_pool_size, 0}} = NIF.raw_open(@valid_db_path, opts)
-    end
-
-    test "fails when min_idle > explicit max_size" do
-      opts = [min_idle: 11, max_size: 10]
-
-      assert {:error, {:invalid_idle_connection_count, 11, 10}} =
-               NIF.raw_open(@valid_db_path, opts)
-    end
-
-    test "fails when min_idle > default max_size" do
-      # NOTE: Assumes DEFAULT_MAX_POOL_SIZE is 10
-      opts = [min_idle: 11]
-
-      assert {:error, {:invalid_idle_connection_count, 11, 10}} =
-               NIF.raw_open(@valid_db_path, opts)
-    end
-
-    test "succeeds when min_idle = max_size" do
-      opts = [min_idle: 5, max_size: 5]
-      assert {:ok, conn} = NIF.raw_open(@valid_db_path, opts)
-      assert {:ok, true} = NIF.raw_close(conn)
-    end
-
-    test "succeeds when min_idle < max_size" do
-      opts = [min_idle: 3, max_size: 5]
-      assert {:ok, conn} = NIF.raw_open(@valid_db_path, opts)
-      assert {:ok, true} = NIF.raw_close(conn)
-    end
-
-    test "succeeds when min_idle < default max_size" do
-      # NOTE: Assumes DEFAULT_MAX_POOL_SIZE is 10
-      opts = [min_idle: 9]
-      assert {:ok, conn} = NIF.raw_open(@valid_db_path, opts)
-      assert {:ok, true} = NIF.raw_close(conn)
-    end
-
-    # end of describe "raw_open/2 with options"
   end
 
   # Minimal test to ensure PRAGMA write NIF exists and accepts args
