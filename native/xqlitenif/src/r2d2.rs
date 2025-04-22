@@ -309,6 +309,16 @@ fn process_rows<'a, 'rows>(
     Ok(results)
 }
 
+fn is_keyword<'a>(list_term: Term<'a>) -> bool {
+    match list_term.decode::<ListIterator<'a>>() {
+        Ok(mut iter) => match iter.next() {
+            Some(first_el) => first_el.decode::<(Atom, Term<'a>)>().is_ok(),
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let conn = Connection::open(&path)
@@ -437,14 +447,4 @@ fn raw_pragma_write_and_read<'a>(
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     Ok(true)
-}
-
-fn is_keyword<'a>(list_term: Term<'a>) -> bool {
-    match list_term.decode::<ListIterator<'a>>() {
-        Ok(mut iter) => match iter.next() {
-            Some(first_el) => first_el.decode::<(Atom, Term<'a>)>().is_ok(),
-            None => false,
-        },
-        Err(_) => false,
-    }
 }
