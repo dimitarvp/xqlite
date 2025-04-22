@@ -9,4 +9,9 @@ defmodule Xqlite do
   @spec int2bool(0 | 1) :: true | false
   def int2bool(0), do: false
   def int2bool(1), do: true
+
+  @type conn :: reference()
+  @type db_name :: String.t()
+  @type open_result :: {:ok, conn} | {:error, String.t()}
+  @type close_result :: {:ok, true}
 end

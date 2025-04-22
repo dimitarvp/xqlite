@@ -7,7 +7,7 @@ defmodule Xqlite.Config do
   - Provides functions to modify a keyword list of options.
   """
 
-  import Xqlite.Conn, only: [is_db_name: 1]
+  import Xqlite, only: [is_db_name: 1]
 
   # Default is an anonymous in-memory database.
   @default_db_name Xqlite.anon_db()
