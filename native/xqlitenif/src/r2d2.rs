@@ -434,7 +434,7 @@ fn raw_pragma_write_and_read<'a>(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn raw_close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     Ok(true)
 }
