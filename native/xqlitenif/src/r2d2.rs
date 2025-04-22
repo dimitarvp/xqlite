@@ -397,7 +397,7 @@ fn raw_pragma_write(
         .0
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &*conn_guard;
+    let conn: &Connection = &conn_guard;
     conn.execute(&pragma_sql, [])
         .map_err(|e| XqliteError::CannotExecutePragma {
             pragma: pragma_sql,
