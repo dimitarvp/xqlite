@@ -13,7 +13,6 @@ rustler::atoms! {
     expected_keyword_list,
     expected_keyword_tuple,
     expected_list,
-    r#false,
     float,
     function,
     integer,
@@ -25,7 +24,6 @@ rustler::atoms! {
     pid,
     port,
     reference,
-    r#true,
     tuple,
     unknown,
     unsupported_atom,
@@ -33,7 +31,7 @@ rustler::atoms! {
 }
 
 use rusqlite::{types::Value, Connection, Row, Rows, ToSql};
-use rustler::types::atom::nil;
+use rustler::types::atom::{false_, nil, true_};
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
@@ -236,9 +234,9 @@ fn elixir_term_to_rusqlite_value<'a>(
         TermType::Atom => {
             if term == nil().to_term(env) {
                 Ok(Value::Null)
-            } else if term == r#true().to_term(env) {
+            } else if term == true_().to_term(env) {
                 Ok(Value::Integer(1))
-            } else if term == r#false().to_term(env) {
+            } else if term == false_().to_term(env) {
                 Ok(Value::Integer(0))
             } else {
                 Err(XqliteError::UnsupportedAtom {
