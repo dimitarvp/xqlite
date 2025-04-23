@@ -1,7 +1,7 @@
 defmodule Xqlite.PragmaUtil do
   @moduledoc ~S"""
   A module with zero dependencies on the rest of the modules in this library.
-  Used to reduce boilerplate and slice and dice the pragma collection.
+  Its functions are useful for being invoked in module definitions of other modules.
   """
 
   @type name :: atom()
