@@ -262,13 +262,11 @@ defmodule Xqlite.Pragma do
   @spec get0(Xqlite.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
   defp get0(conn, key, opts) when is_conn(conn) and is_atom(key) and is_pragma_opts(opts) do
     XqliteNIF.raw_exec(conn, "PRAGMA #{key};")
-    |> IO.inspect(label: "get0(list): '#{key}' pragma_get_result")
     |> result(key)
   end
 
   defp get0(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
     XqliteNIF.raw_exec(conn, "PRAGMA #{key};")
-    |> IO.inspect(label: "get0(arg): '#{key}' pragma_get_result")
     |> result(key)
   end
 
@@ -292,7 +290,6 @@ defmodule Xqlite.Pragma do
   defp get1(conn, key, arg, opts)
        when is_conn(conn) and is_binary(key) and is_binary(arg) and is_pragma_opts(opts) do
     XqliteNIF.raw_exec(conn, "PRAGMA #{key}(#{arg});")
-    |> IO.inspect(label: "get1: '#{key}' pragma_get_result")
     |> result(key)
   end
 
@@ -338,7 +335,6 @@ defmodule Xqlite.Pragma do
   def put(db, key, val)
       when is_conn(db) and is_binary(key) and is_pragma_value(val) do
     XqliteNIF.raw_pragma_write_and_read(db, key, val)
-    |> IO.inspect(label: "put: '#{key}', '#{val}' pragma_put_result")
     |> result(key)
   end
 
