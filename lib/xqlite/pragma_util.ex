@@ -63,15 +63,15 @@ defmodule Xqlite.PragmaUtil do
   def returns_nothing?(p) when is_pragma(p), do: returns_type?(p, :nothing)
 
   @spec of_type(pragmas(), arg_type()) :: [name()]
-  def of_type(m, t) when is_pragmas(m) and is_arg_type(t) do
-    filter(m, fn p -> returns_type?(p, t) end)
+  def of_type(pragmas, type) when is_pragmas(pragmas) and is_arg_type(type) do
+    filter(pragmas, fn pragma -> returns_type?(pragma, type) end)
   end
 
   @spec filter(pragmas(), filter()) :: [name()]
-  def filter(m, f1) when is_pragmas(m) and is_filter(f1) do
-    m
-    |> Stream.filter(fn p -> f1.(p) end)
-    |> Stream.map(fn {n, _s} -> n end)
+  def filter(pragmas, func) when is_pragmas(pragmas) and is_filter(func) do
+    pragmas
+    |> Stream.filter(fn pragma -> func.(pragma) end)
+    |> Stream.map(fn {name, _spec} -> name end)
     |> Enum.sort()
   end
 end
