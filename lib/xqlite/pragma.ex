@@ -8,6 +8,9 @@ defmodule Xqlite.Pragma do
 
   import Xqlite, only: [int2bool: 1, is_conn: 1]
 
+  # We need those called in module attribute definitions
+  # and that cannot be done with functions in the same module.
+  # They have to be in another module.
   import Xqlite.PragmaUtil,
     only: [
       filter: 2,
