@@ -1,5 +1,5 @@
 defmodule XqliteNifTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias XqliteNIF, as: NIF
 
