@@ -20,8 +20,6 @@ defmodule Xqlite.Pragma do
       writable?: 1
     ]
 
-  # --- Types.
-
   @type name :: String.t()
   @type pragma_opts :: keyword()
   @type pragma_key :: String.t() | atom()
@@ -36,8 +34,6 @@ defmodule Xqlite.Pragma do
   @type synchronous_value :: :off | :normal | :full | :extra
   @type temp_store_key :: 0 | 1 | 2
   @type temp_store_value :: :default | :file | :memory
-
-  # --- Guards.
 
   defguard is_pragma_opts(x) when is_list(x)
   defguard is_pragma_key(x) when is_binary(x) or is_atom(x)
