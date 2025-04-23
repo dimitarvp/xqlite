@@ -31,8 +31,9 @@ defmodule Xqlite.Config do
         }
 
   defguard is_config_opts(x) when is_list(x)
-  defguard is_timeout(x) when (is_atom(x) and x == :infinity) or (is_integer(x) and x >= 0)
   defguard is_size(x) when is_integer(x) and x > 0
+  defguard is_timeout_number(x) when is_integer(x) and x > 0
+  defguard is_timeout(x) when x == :infinity or is_timeout_number(x)
 
   defguard is_key(x)
            when is_atom(x) and x in ~w(db_name batch_size exec_timeout genserver_timeout)a
