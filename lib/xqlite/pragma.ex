@@ -239,7 +239,7 @@ defmodule Xqlite.Pragma do
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
   """
-  @spec get(Xqlite.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
+  @spec get(reference(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
           pragma_get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
@@ -251,13 +251,13 @@ defmodule Xqlite.Pragma do
     get1(db, key, arg, opts)
   end
 
-  @spec get0(Xqlite.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
+  @spec get0(reference(), pragma_key(), pragma_opts()) :: pragma_get_result()
   defp get0(conn, key, _opts) do
     XqliteNIF.raw_exec(conn, "PRAGMA #{key};")
     |> result(key)
   end
 
-  @spec get1(Xqlite.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
+  @spec get1(reference(), pragma_key(), pragma_key(), pragma_opts()) ::
           pragma_get_result()
   defp get1(conn, key, arg, opts) when is_atom(key) and is_atom(arg) do
     get1(conn, Atom.to_string(key), Atom.to_string(arg), opts)
@@ -276,27 +276,27 @@ defmodule Xqlite.Pragma do
     |> result(key)
   end
 
-  @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec index_list(reference(), name(), pragma_opts()) :: pragma_result()
   def index_list(db, name, opts \\ []) do
     get1(db, "index_list", name, opts)
   end
 
-  @spec index_info(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec index_info(reference(), name(), pragma_opts()) :: pragma_result()
   def index_info(db, name, opts \\ []) do
     get1(db, "index_info", name, opts)
   end
 
-  @spec index_xinfo(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec index_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
   def index_xinfo(db, name, opts \\ []) do
     get1(db, "index_xinfo", name, opts)
   end
 
-  @spec table_info(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec table_info(reference(), name(), pragma_opts()) :: pragma_result()
   def table_info(db, name, opts \\ []) do
     get1(db, "table_info", name, opts)
   end
 
-  @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: pragma_result()
+  @spec table_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
   def table_xinfo(db, name, opts \\ []) do
     get1(db, "table_xinfo", name, opts)
   end
@@ -304,7 +304,7 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Changes a PRAGMA's value.
   """
-  @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: pragma_result()
+  @spec put(reference(), pragma_key(), pragma_value()) :: pragma_result()
   def put(db, key, val) when is_atom(key) do
     put(db, Atom.to_string(key), val)
   end
