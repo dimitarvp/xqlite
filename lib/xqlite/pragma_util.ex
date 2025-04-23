@@ -4,17 +4,15 @@ defmodule Xqlite.PragmaUtil do
   Its functions are useful for being invoked in module definitions of other modules.
   """
 
-  @type name :: atom()
   @type spec :: keyword()
   @type arg_type :: :blob | :bool | :int | :list | :nothing | :real | :text
-  @type pragma :: {name(), spec()}
-  @type pragma_specs :: %{required(name()) => spec()}
+  @type pragma :: {atom(), spec()}
+  @type pragma_specs :: %{required(atom()) => spec()}
   @type filter :: (pragma() -> boolean())
 
-  defguard is_name(x) when is_atom(x)
   defguard is_spec(x) when is_list(x)
   defguard is_arg_type(x) when x in [:blob, :bool, :int, :list, :nothing, :real, :text]
-  defguard is_pragma(x) when is_tuple(x) and is_name(elem(x, 0)) and is_spec(elem(x, 1))
+  defguard is_pragma(x) when is_tuple(x) and is_atom(elem(x, 0)) and is_spec(elem(x, 1))
   defguard is_pragma_specs(x) when is_map(x)
   defguard is_filter(x) when is_function(x, 1)
 
@@ -49,12 +47,12 @@ defmodule Xqlite.PragmaUtil do
     end)
   end
 
-  @spec of_type(pragma_specs(), arg_type()) :: [name()]
+  @spec of_type(pragma_specs(), arg_type()) :: [atom()]
   def of_type(pragma_specs, type) when is_pragma_specs(pragma_specs) and is_arg_type(type) do
     filter(pragma_specs, fn pragma -> returns_type?(pragma, type) end)
   end
 
-  @spec filter(pragma_specs(), filter()) :: [name()]
+  @spec filter(pragma_specs(), filter()) :: [atom()]
   def filter(pragma_specs, func) when is_pragma_specs(pragma_specs) and is_filter(func) do
     pragma_specs
     |> Stream.filter(fn pragma -> func.(pragma) end)
