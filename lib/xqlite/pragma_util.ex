@@ -38,14 +38,6 @@ defmodule Xqlite.PragmaUtil do
   @spec writable?(pragma()) :: boolean()
   def writable?({_n, s} = p) when is_pragma(p), do: Keyword.has_key?(s, :w)
 
-  @spec one_write_variant?(pragma()) :: boolean()
-  def one_write_variant?({_n, s} = p) when is_pragma(p),
-    do: length(Keyword.get_values(s, :w)) == 1
-
-  @spec many_write_variants?(pragma()) :: boolean()
-  def many_write_variants?({_n, s} = p) when is_pragma(p),
-    do: length(Keyword.get_values(s, :w)) > 1
-
   @spec returns_type?(pragma(), arg_type()) :: boolean()
   def returns_type?({_n, s} = p, t) when is_pragma(p) and is_arg_type(t) do
     Enum.any?(s, fn
