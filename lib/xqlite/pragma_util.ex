@@ -19,31 +19,32 @@ defmodule Xqlite.PragmaUtil do
   defguard is_filter(x) when is_function(x, 1)
 
   @spec readable?(pragma()) :: boolean()
-  def readable?({_n, s} = p) when is_pragma(p), do: Keyword.has_key?(s, :r)
+  def readable?({_name, spec} = pragma) when is_pragma(pragma), do: Keyword.has_key?(spec, :r)
 
   @spec readable_with_zero_args?(pragma()) :: boolean()
-  def readable_with_zero_args?({_n, s} = p) when is_pragma(p) do
-    s
+  def readable_with_zero_args?({_name, spec} = pragma) when is_pragma(pragma) do
+    spec
     |> Keyword.get_values(:r)
-    |> Enum.any?(fn x -> match?({0, _, _}, x) end)
+    |> Enum.any?(fn pragma_return -> match?({0, _, _}, pragma_return) end)
   end
 
   @spec readable_with_one_arg?(pragma()) :: boolean()
-  def readable_with_one_arg?({_n, s} = p) when is_pragma(p) do
-    s
+  def readable_with_one_arg?({_name, spec} = pragma) when is_pragma(pragma) do
+    spec
     |> Keyword.get_values(:r)
-    |> Enum.any?(fn x -> match?({1, _, _, _}, x) end)
+    |> Enum.any?(fn pragma_return -> match?({1, _, _, _}, pragma_return) end)
   end
 
   @spec writable?(pragma()) :: boolean()
-  def writable?({_n, s} = p) when is_pragma(p), do: Keyword.has_key?(s, :w)
+  def writable?({_name, spec} = pragma) when is_pragma(pragma), do: Keyword.has_key?(spec, :w)
 
   @spec returns_type?(pragma(), arg_type()) :: boolean()
-  def returns_type?({_n, s} = p, t) when is_pragma(p) and is_arg_type(t) do
-    Enum.any?(s, fn
-      {:r, {0, _, ^t}} -> true
-      {:r, {1, _, _, ^t}} -> true
-      {:w, {_, _, ^t}} -> true
+  def returns_type?({_name, spec} = pragma, type)
+      when is_pragma(pragma) and is_arg_type(type) do
+    Enum.any?(spec, fn
+      {:r, {0, _, ^type}} -> true
+      {:r, {1, _, _, ^type}} -> true
+      {:w, {_, _, ^type}} -> true
       _ -> false
     end)
   end
