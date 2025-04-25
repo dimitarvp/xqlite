@@ -387,6 +387,19 @@ fn is_keyword<'a>(list_term: Term<'a>) -> bool {
     }
 }
 
+fn with_conn<F, R>(handle: &ResourceArc<XqliteConn>, func: F) -> Result<R, XqliteError>
+where
+    F: FnOnce(&Connection) -> Result<R, XqliteError>,
+{
+    let conn_guard = handle
+        .0
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    // Execute the closure with the locked connection
+    func(&*conn_guard)
+    // Lock is released when conn_guard goes out of scope here
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let conn = Connection::open(&path)
@@ -418,62 +431,55 @@ fn raw_query<'a>(
     sql: String,
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
+    // Clone sql string once for potential error reporting within the closure
+    let sql_for_err = sql.clone();
 
-    let sql_string_for_prepare = sql.to_string();
-    let mut stmt = conn.prepare(sql.as_str()).map_err(|e| {
-        XqliteError::CannotPrepareStatement(sql_string_for_prepare, e.to_string())
-    })?;
+    with_conn(&handle, |conn| {
+        let mut stmt = conn.prepare(sql.as_str()).map_err(|e| {
+            XqliteError::CannotPrepareStatement(sql_for_err, e.to_string()) // Use cloned sql
+        })?;
 
-    let column_names: Vec<String> =
-        stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let column_count = column_names.len();
+        let column_names: Vec<String> =
+            stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let column_count = column_names.len();
 
-    // Branch based on parameter type
-    let rows_result = match params_term.get_type() {
-        TermType::List => {
-            if is_keyword(params_term) {
-                // keyword list: named arguments.
-                let named_params_vec = decode_exec_keyword_params(env, params_term)?;
-                let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                    .collect();
-                stmt.query(params_for_rusqlite.as_slice())
-            } else {
-                // (assumed) list: positional arguments.
-                let positional_values: Vec<Value> =
-                    decode_plain_list_params(env, params_term)?;
-                let params_slice: Vec<&dyn ToSql> =
-                    positional_values.iter().map(|v| v as &dyn ToSql).collect();
-                stmt.query(params_slice.as_slice())
+        let rows_result = match params_term.get_type() {
+            TermType::List => {
+                if is_keyword(params_term) {
+                    let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                    let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                        .collect();
+                    stmt.query(params_for_rusqlite.as_slice())
+                } else {
+                    let positional_values: Vec<Value> =
+                        decode_plain_list_params(env, params_term)?;
+                    let params_slice: Vec<&dyn ToSql> =
+                        positional_values.iter().map(|v| v as &dyn ToSql).collect();
+                    stmt.query(params_slice.as_slice())
+                }
             }
-        }
-        _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
-            stmt.query([])
-        }
-        _ => {
-            return Err(XqliteError::ExpectedList {
-                value_str: format!("{:?}", params_term),
-            });
-        }
-    };
+            _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
+                stmt.query([])
+            }
+            _ => {
+                return Err(XqliteError::ExpectedList {
+                    value_str: format!("{:?}", params_term),
+                });
+            }
+        };
 
-    let rows = rows_result.map_err(|e| XqliteError::CannotExecute(e.to_string()))?;
+        let rows = rows_result.map_err(|e| XqliteError::CannotExecute(e.to_string()))?;
+        let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
+        let num_rows = results_vec.len();
 
-    let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
-
-    let num_rows = results_vec.len();
-    Ok(XqliteQueryResult {
-        columns: column_names,
-        rows: results_vec,
-        num_rows,
+        Ok(XqliteQueryResult {
+            columns: column_names,
+            rows: results_vec,
+            num_rows,
+        })
     })
-    // MutexGuard (conn_guard) is implicitly dropped here, releasing the lock
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -483,24 +489,15 @@ fn raw_execute<'a>(
     sql: String,
     params_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
+    with_conn(&handle, |conn| {
+        // Use helper
+        let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
+        let params_slice: Vec<&dyn ToSql> =
+            positional_values.iter().map(|v| v as &dyn ToSql).collect();
 
-    // Decode parameters - MUST be a plain list for execute
-    // decode_plain_list_params already returns ExpectedList if it's not a list term
-    let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
-    let params_slice: Vec<&dyn ToSql> =
-        positional_values.iter().map(|v| v as &dyn ToSql).collect();
-
-    // Use conn.execute for INSERT/UPDATE/DELETE etc.
-    conn.execute(sql.as_str(), params_slice.as_slice())
-        // Map rusqlite error to our generic execution error
-        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
-
-    // MutexGuard (conn_guard) is implicitly dropped here, releasing the lock
+        conn.execute(sql.as_str(), params_slice.as_slice())
+            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -508,16 +505,15 @@ fn raw_pragma_write(
     handle: ResourceArc<XqliteConn>,
     pragma_sql: String,
 ) -> Result<usize, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
-    conn.execute(&pragma_sql, [])
-        .map_err(|e| XqliteError::CannotExecutePragma {
-            pragma: pragma_sql,
-            reason: e.to_string(),
-        })
+    let pragma_sql_for_err = pragma_sql.clone();
+    with_conn(&handle, |conn| {
+        // Use helper
+        conn.execute(&pragma_sql, [])
+            .map_err(|e| XqliteError::CannotExecutePragma {
+                pragma: pragma_sql_for_err, // Use cloned string
+                reason: e.to_string(),
+            })
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -527,69 +523,69 @@ fn raw_pragma_write_and_read<'a>(
     pragma_name: String,
     value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
+    // Clone pragma_name for potential error reporting
+    let pragma_name_for_err = pragma_name.clone();
     let pragma_value_to_set = elixir_term_to_rusqlite_value(env, value_term)?;
+    // Clone value too for error reporting
+    let value_for_err = pragma_value_to_set.clone();
 
-    let result = conn.pragma_update_and_check(
-        None,
-        &pragma_name,
-        &pragma_value_to_set,
-        |row: &Row<'_>| row.get(0),
-    );
+    // Use with_conn helper. The closure now returns Result<Option<Value>, XqliteError>
+    // by handling rusqlite::Error internally.
+    let read_back_option = with_conn(&handle, |conn| {
+        let result = conn.pragma_update_and_check(
+            None,
+            &pragma_name,                               // Borrow original string
+            &pragma_value_to_set,                       // Borrow original value
+            |row: &Row<'_>| row.get::<usize, Value>(0), // Explicit type for row.get() -> Value
+        );
 
-    drop(conn_guard);
+        // Match on the rusqlite::Result *inside* the closure
+        match result {
+            Ok(value) => Ok(Some(value)), // Success, wrap value in Some
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), // Specific case, return None
+            Err(other_err) => {
+                // Map other rusqlite errors to our specific Pragma error
+                Err(XqliteError::CannotExecutePragma {
+                    // Use cloned values for the error context
+                    pragma: format!("PRAGMA {} = {:?};", pragma_name_for_err, value_for_err),
+                    reason: other_err.to_string(),
+                })
+            }
+        }
+    })?; // Propagate LockError or the mapped Pragma error from with_conn
 
-    match result {
-        Ok(value) => Ok(encode_val(env, value)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(no_value().encode(env)),
-        Err(other_err) => Err(XqliteError::CannotExecutePragma {
-            pragma: format!("PRAGMA {} = {:?};", pragma_name, pragma_value_to_set),
-            reason: other_err.to_string(),
-        }),
+    // Encode the Option<Value> result after the lock is released
+    match read_back_option {
+        Some(value) => Ok(encode_val(env, value)),
+        None => Ok(no_value().encode(env)),
     }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
-
-    conn.execute("BEGIN;", [])
-        .map(|_| true) // Map Ok(0) to Ok(true)
-        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    with_conn(&handle, |conn| {
+        conn.execute("BEGIN;", [])
+            .map(|_| true)
+            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
-
-    conn.execute("COMMIT;", [])
-        .map(|_| true) // Map Ok(0) to Ok(true)
-        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    with_conn(&handle, |conn| {
+        conn.execute("COMMIT;", [])
+            .map(|_| true)
+            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    let conn: &Connection = &conn_guard;
-
-    conn.execute("ROLLBACK;", [])
-        .map(|_| true) // Map Ok(0) to Ok(true)
-        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    with_conn(&handle, |conn| {
+        conn.execute("ROLLBACK;", [])
+            .map(|_| true)
+            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
