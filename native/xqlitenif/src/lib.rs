@@ -554,6 +554,45 @@ fn raw_pragma_write_and_read<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn raw_begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+    let conn_guard = handle
+        .0
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn: &Connection = &conn_guard;
+
+    conn.execute("BEGIN;", [])
+        .map(|_| true) // Map Ok(0) to Ok(true)
+        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+    let conn_guard = handle
+        .0
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn: &Connection = &conn_guard;
+
+    conn.execute("COMMIT;", [])
+        .map(|_| true) // Map Ok(0) to Ok(true)
+        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+    let conn_guard = handle
+        .0
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn: &Connection = &conn_guard;
+
+    conn.execute("ROLLBACK;", [])
+        .map(|_| true) // Map Ok(0) to Ok(true)
+        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn raw_close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     Ok(true)
 }

@@ -139,6 +139,46 @@ defmodule XqliteNifTest do
       {:ok, conn: conn}
     end
 
+    test "insert a record and commit transaction", %{conn: conn} do
+      assert {:ok, true} == NIF.raw_begin(conn)
+
+      assert {:ok, 1} ==
+               NIF.raw_execute(conn, ~S"""
+               INSERT INTO test1 (id, int_col, real_col, string_col, blob_col)
+               VALUES (100, 101, 5.19, 'Some row', x'FF00FF');
+               """)
+
+      assert {:ok, true} == NIF.raw_commit(conn)
+
+      assert {:ok,
+              %{
+                columns: ["id", "int_col", "real_col", "string_col", "blob_col"],
+                rows: [
+                  [100, 101, 5.19, "Some row", <<255, 0, 255>>]
+                ],
+                num_rows: 1
+              }} == NIF.raw_query(conn, "SELECT * FROM test1 where id = 100;")
+    end
+
+    test "insert a record and rollback transaction", %{conn: conn} do
+      assert {:ok, true} == NIF.raw_begin(conn)
+
+      assert {:ok, 1} ==
+               NIF.raw_execute(conn, ~S"""
+               INSERT INTO test1 (id, int_col, real_col, string_col, blob_col)
+               VALUES (100, 101, 5.19, 'Some row', x'FF00FF');
+               """)
+
+      assert {:ok, true} == NIF.raw_rollback(conn)
+
+      assert {:ok,
+              %{
+                columns: ["id", "int_col", "real_col", "string_col", "blob_col"],
+                rows: [],
+                num_rows: 0
+              }} == NIF.raw_query(conn, "SELECT * FROM test1 where id = 100;")
+    end
+
     test "fetch all records", %{conn: conn} do
       assert {:ok,
               %{
