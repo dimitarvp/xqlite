@@ -5,6 +5,7 @@ defmodule XqliteNIF do
   def raw_open_in_memory(_path), do: err()
   def raw_open_temporary(), do: err()
   def raw_query(_conn, _sql, _params \\ []), do: err()
+  def raw_execute(_conn, _sql, _params \\ []), do: err()
   def raw_close(_conn), do: err()
   def raw_pragma_write(_conn, _sql), do: err()
   def raw_pragma_write_and_read(_conn, _name, _value), do: err()

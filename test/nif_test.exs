@@ -131,8 +131,10 @@ defmodule XqliteNifTest do
   describe "various tests with a single table:" do
     setup do
       {:ok, conn} = NIF.raw_open(":memory:")
-      {:ok, %{columns: [], rows: [], num_rows: 0}} = NIF.raw_query(conn, @test_1_create)
-      {:ok, %{columns: [], rows: [], num_rows: 0}} = NIF.raw_query(conn, @test_1_insert)
+      # DDL statements don't return tables created / modified / dropped.
+      {:ok, 0} = NIF.raw_execute(conn, @test_1_create)
+      # Modifying statements -- INSERT, DELETE, UPDATE -- do return a number of affected rows.
+      {:ok, 7} = NIF.raw_execute(conn, @test_1_insert)
       on_exit(fn -> NIF.raw_close(conn) end)
       {:ok, conn: conn}
     end

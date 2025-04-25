@@ -477,6 +477,33 @@ fn raw_query<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn raw_execute<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+) -> Result<usize, XqliteError> {
+    let conn_guard = handle
+        .0
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn: &Connection = &conn_guard;
+
+    // Decode parameters - MUST be a plain list for execute
+    // decode_plain_list_params already returns ExpectedList if it's not a list term
+    let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
+    let params_slice: Vec<&dyn ToSql> =
+        positional_values.iter().map(|v| v as &dyn ToSql).collect();
+
+    // Use conn.execute for INSERT/UPDATE/DELETE etc.
+    conn.execute(sql.as_str(), params_slice.as_slice())
+        // Map rusqlite error to our generic execution error
+        .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+
+    // MutexGuard (conn_guard) is implicitly dropped here, releasing the lock
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn raw_pragma_write(
     handle: ResourceArc<XqliteConn>,
     pragma_sql: String,
