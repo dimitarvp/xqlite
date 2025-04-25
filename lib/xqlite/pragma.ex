@@ -229,6 +229,18 @@ defmodule Xqlite.Pragma do
   def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
+  A convenience wrapper to make the result of a `XqliteNIF.raw_query/3` call to
+  a format that is required by the `result` processor function.
+  Note that we deliberately assert strongly on the type of success value as
+  any other would be a critical bug in this library.
+  """
+  def raw_query_to_pragma_result({:ok, map}) when is_map(map) do
+    {:ok, Map.get(map, :rows)}
+  end
+
+  def raw_query_to_pragma_result({:error, _anything} = err), do: err
+
+  @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra argument:
   - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra argument.
   - `get(db, :table_info, :users)` is a PRAGMA that does require an extra argument.
@@ -253,7 +265,8 @@ defmodule Xqlite.Pragma do
 
   @spec get0(reference(), pragma_key(), pragma_opts()) :: pragma_get_result()
   defp get0(conn, key, _opts) do
-    XqliteNIF.raw_exec(conn, "PRAGMA #{key};")
+    XqliteNIF.raw_query(conn, "PRAGMA #{key};")
+    |> raw_query_to_pragma_result()
     |> result(key)
   end
 
@@ -272,7 +285,8 @@ defmodule Xqlite.Pragma do
   end
 
   defp get1(conn, key, arg, _opts) do
-    XqliteNIF.raw_exec(conn, "PRAGMA #{key}(#{arg});")
+    XqliteNIF.raw_query(conn, "PRAGMA #{key}(#{arg});")
+    |> raw_query_to_pragma_result()
     |> result(key)
   end
 

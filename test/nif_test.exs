@@ -117,10 +117,13 @@ defmodule XqliteNifTest do
     end
   end
 
-  describe "raw_exec/3" do
+  describe "raw_query/3" do
     test "can execute a simple query" do
       {:ok, conn} = NIF.raw_open(@valid_db_path)
-      assert {:ok, [[1]]} = NIF.raw_exec(conn, "SELECT 1;", [])
+
+      assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
+               NIF.raw_query(conn, "SELECT 1;", [])
+
       assert {:ok, true} = NIF.raw_close(conn)
     end
   end
@@ -128,33 +131,41 @@ defmodule XqliteNifTest do
   describe "various tests with a single table:" do
     setup do
       {:ok, conn} = NIF.raw_open(":memory:")
-      {:ok, _} = NIF.raw_exec(conn, @test_1_create)
-      {:ok, _} = NIF.raw_exec(conn, @test_1_insert)
+      {:ok, %{columns: [], rows: [], num_rows: 0}} = NIF.raw_query(conn, @test_1_create)
+      {:ok, %{columns: [], rows: [], num_rows: 0}} = NIF.raw_query(conn, @test_1_insert)
       on_exit(fn -> NIF.raw_close(conn) end)
       {:ok, conn: conn}
     end
 
     test "fetch all records", %{conn: conn} do
       assert {:ok,
-              [
-                [1, nil, 3.14, "First row", <<255, 0, 255>>],
-                [2, 42, nil, "Second row", <<192, 175, 143>>],
-                [3, 123, 2.71828, nil, <<237, 159, 191, 237>>],
-                [4, 7, 9.99, "Fourth row", nil],
-                [5, 555, 5.55, "Fifth row", <<254, 128, 128>>],
-                [6, 666, 6.66, "Sixth row", <<240, 128, 128, 128>>],
-                [7, 777, 7.77, "Seventh row", <<255>>]
-              ]} == NIF.raw_exec(conn, "SELECT * FROM test1;")
+              %{
+                columns: ["id", "int_col", "real_col", "string_col", "blob_col"],
+                rows: [
+                  [1, nil, 3.14, "First row", <<255, 0, 255>>],
+                  [2, 42, nil, "Second row", <<192, 175, 143>>],
+                  [3, 123, 2.71828, nil, <<237, 159, 191, 237>>],
+                  [4, 7, 9.99, "Fourth row", nil],
+                  [5, 555, 5.55, "Fifth row", <<254, 128, 128>>],
+                  [6, 666, 6.66, "Sixth row", <<240, 128, 128, 128>>],
+                  [7, 777, 7.77, "Seventh row", <<255>>]
+                ],
+                num_rows: 7
+              }} == NIF.raw_query(conn, "SELECT * FROM test1;")
     end
 
     test "fetch records with filters", %{conn: conn} do
       assert {:ok,
-              [
-                [5, 555, 5.55, "Fifth row", <<254, 128, 128>>],
-                [6, 666, 6.66, "Sixth row", <<240, 128, 128, 128>>],
-                [7, 777, 7.77, "Seventh row", <<255>>]
-              ]} ==
-               NIF.raw_exec(
+              %{
+                columns: ["id", "int_col", "real_col", "string_col", "blob_col"],
+                rows: [
+                  [5, 555, 5.55, "Fifth row", <<254, 128, 128>>],
+                  [6, 666, 6.66, "Sixth row", <<240, 128, 128, 128>>],
+                  [7, 777, 7.77, "Seventh row", <<255>>]
+                ],
+                num_rows: 3
+              }} ==
+               NIF.raw_query(
                  conn,
                  "select * from test1 where int_col > :value and length(string_col) >= :length;",
                  value: 100,
@@ -170,7 +181,7 @@ defmodule XqliteNifTest do
       {:ok, conn} = NIF.raw_open(":memory:")
 
       for ddl <- @test_2_create_statements do
-        {:ok, _ddl_result} = XqliteNIF.raw_exec(conn, ddl)
+        {:ok, %{columns: [], rows: [], num_rows: 0}} = XqliteNIF.raw_query(conn, ddl)
       end
 
       on_exit(fn -> NIF.raw_close(conn) end)
@@ -179,94 +190,168 @@ defmodule XqliteNifTest do
 
     test "fetch all tables", %{conn: conn} do
       assert {:ok,
-              [
-                ["main", "order_items", "table", 5, 0, 0],
-                ["main", "orders", "table", 4, 0, 0],
-                ["main", "products", "table", 3, 0, 0],
-                ["main", "customers", "table", 3, 0, 0],
-                ["main", "sqlite_schema", "table", 5, 0, 0],
-                ["temp", "sqlite_temp_schema", "table", 5, 0, 0]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA table_list;")
+              %{
+                columns: ["schema", "name", "type", "ncol", "wr", "strict"],
+                rows: [
+                  ["main", "order_items", "table", 5, 0, 0],
+                  ["main", "orders", "table", 4, 0, 0],
+                  ["main", "products", "table", 3, 0, 0],
+                  ["main", "customers", "table", 3, 0, 0],
+                  ["main", "sqlite_schema", "table", 5, 0, 0],
+                  ["temp", "sqlite_temp_schema", "table", 5, 0, 0]
+                ],
+                num_rows: 6
+              }} == XqliteNIF.raw_query(conn, "PRAGMA table_list;")
     end
 
     test "fetch table information for customers", %{conn: conn} do
       assert {:ok,
-              [
-                [0, "customer_id", "INTEGER", 0, nil, 1],
-                [1, "name", "TEXT", 1, nil, 0],
-                [2, "email", "TEXT", 0, nil, 0]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA table_info(customers);")
+              %{
+                columns: ["cid", "name", "type", "notnull", "dflt_value", "pk"],
+                rows: [
+                  [0, "customer_id", "INTEGER", 0, nil, 1],
+                  [1, "name", "TEXT", 1, nil, 0],
+                  [2, "email", "TEXT", 0, nil, 0]
+                ],
+                num_rows: 3
+              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(customers);")
     end
 
     test "fetch table information for products", %{conn: conn} do
       assert {:ok,
-              [
-                [0, "product_id", "INTEGER", 0, nil, 1],
-                [1, "name", "TEXT", 1, nil, 0],
-                [2, "price", "REAL", 1, nil, 0]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA table_info(products);")
+              %{
+                columns: ["cid", "name", "type", "notnull", "dflt_value", "pk"],
+                rows: [
+                  [0, "product_id", "INTEGER", 0, nil, 1],
+                  [1, "name", "TEXT", 1, nil, 0],
+                  [2, "price", "REAL", 1, nil, 0]
+                ],
+                num_rows: 3
+              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(products);")
     end
 
     test "fetch table information for orders", %{conn: conn} do
       assert {:ok,
-              [
-                [0, "order_id", "INTEGER", 0, nil, 1],
-                [1, "customer_id", "INTEGER", 1, nil, 0],
-                [2, "order_date", "TEXT", 1, nil, 0],
-                [3, "status", "TEXT", 1, nil, 0]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA table_info(orders);")
+              %{
+                columns: ["cid", "name", "type", "notnull", "dflt_value", "pk"],
+                rows: [
+                  [0, "order_id", "INTEGER", 0, nil, 1],
+                  [1, "customer_id", "INTEGER", 1, nil, 0],
+                  [2, "order_date", "TEXT", 1, nil, 0],
+                  [3, "status", "TEXT", 1, nil, 0]
+                ],
+                num_rows: 4
+              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(orders);")
     end
 
     test "fetch table information for order_items", %{conn: conn} do
       assert {:ok,
-              [
-                [0, "item_id", "INTEGER", 0, nil, 1],
-                [1, "order_id", "INTEGER", 1, nil, 0],
-                [2, "product_id", "INTEGER", 1, nil, 0],
-                [3, "quantity", "INTEGER", 1, nil, 0],
-                [4, "price", "REAL", 1, nil, 0]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA table_info(order_items);")
+              %{
+                columns: ["cid", "name", "type", "notnull", "dflt_value", "pk"],
+                rows: [
+                  [0, "item_id", "INTEGER", 0, nil, 1],
+                  [1, "order_id", "INTEGER", 1, nil, 0],
+                  [2, "product_id", "INTEGER", 1, nil, 0],
+                  [3, "quantity", "INTEGER", 1, nil, 0],
+                  [4, "price", "REAL", 1, nil, 0]
+                ],
+                num_rows: 5
+              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(order_items);")
     end
 
     test "fetch foreign key information for customers", %{conn: conn} do
-      assert {:ok, []} == XqliteNIF.raw_exec(conn, "PRAGMA foreign_key_list(customers);")
+      assert {:ok,
+              %{
+                columns: [
+                  "id",
+                  "seq",
+                  "table",
+                  "from",
+                  "to",
+                  "on_update",
+                  "on_delete",
+                  "match"
+                ],
+                rows: [],
+                num_rows: 0
+              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(customers);")
     end
 
     test "fetch foreign key information for products", %{conn: conn} do
-      assert {:ok, []} == XqliteNIF.raw_exec(conn, "PRAGMA foreign_key_list(products);")
+      assert {:ok,
+              %{
+                columns: [
+                  "id",
+                  "seq",
+                  "table",
+                  "from",
+                  "to",
+                  "on_update",
+                  "on_delete",
+                  "match"
+                ],
+                rows: [],
+                num_rows: 0
+              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(products);")
     end
 
     test "fetch foreign key information for orders", %{conn: conn} do
       assert {:ok,
-              [
-                [
-                  0,
-                  0,
-                  "customers",
-                  "customer_id",
-                  "customer_id",
-                  "NO ACTION",
-                  "NO ACTION",
-                  "NONE"
-                ]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA foreign_key_list(orders);")
+              %{
+                columns: [
+                  "id",
+                  "seq",
+                  "table",
+                  "from",
+                  "to",
+                  "on_update",
+                  "on_delete",
+                  "match"
+                ],
+                rows: [
+                  [
+                    0,
+                    0,
+                    "customers",
+                    "customer_id",
+                    "customer_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE"
+                  ]
+                ],
+                num_rows: 1
+              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(orders);")
     end
 
     test "fetch foreign key information for order_items", %{conn: conn} do
       assert {:ok,
-              [
-                [
-                  0,
-                  0,
-                  "products",
-                  "product_id",
-                  "product_id",
-                  "NO ACTION",
-                  "NO ACTION",
-                  "NONE"
+              %{
+                columns: [
+                  "id",
+                  "seq",
+                  "table",
+                  "from",
+                  "to",
+                  "on_update",
+                  "on_delete",
+                  "match"
                 ],
-                [1, 0, "orders", "order_id", "order_id", "NO ACTION", "NO ACTION", "NONE"]
-              ]} == XqliteNIF.raw_exec(conn, "PRAGMA foreign_key_list(order_items);")
+                rows: [
+                  [
+                    0,
+                    0,
+                    "products",
+                    "product_id",
+                    "product_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE"
+                  ],
+                  [1, 0, "orders", "order_id", "order_id", "NO ACTION", "NO ACTION", "NONE"]
+                ],
+                num_rows: 2
+              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(order_items);")
     end
 
     # end of "various tests with multiple tables:"

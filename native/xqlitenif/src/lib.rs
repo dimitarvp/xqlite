@@ -9,6 +9,7 @@ rustler::atoms! {
     cannot_open_database,
     cannot_prepare_statement,
     cannot_read_column,
+    columns,
     error,
     expected_keyword_list,
     expected_keyword_tuple,
@@ -16,14 +17,17 @@ rustler::atoms! {
     float,
     function,
     integer,
+    internal_encoding_error,
     list,
     lock_error,
     map,
     no_value,
+    num_rows,
     ok,
     pid,
     port,
     reference,
+    rows,
     tuple,
     unknown,
     unsupported_atom,
@@ -32,6 +36,7 @@ rustler::atoms! {
 
 use rusqlite::{types::Value, Connection, Row, Rows, ToSql};
 use rustler::types::atom::{false_, nil, true_};
+use rustler::types::map::map_new;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
 use rustler::{Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term};
 use std::fmt::{self, Debug, Display};
@@ -42,6 +47,39 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct XqliteConn(Arc<Mutex<Connection>>);
 #[resource_impl]
 impl Resource for XqliteConn {}
+
+#[derive(Debug)]
+struct XqliteQueryResult<'a> {
+    columns: Vec<String>,
+    rows: Vec<Vec<Term<'a>>>,
+    num_rows: usize,
+}
+
+impl Encoder for XqliteQueryResult<'_> {
+    fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
+        let map_value_result: Result<Term, String> = Ok(map_new(env))
+            .and_then(|map| {
+                map.map_put(columns(), self.columns.encode(env))
+                    .map_err(|_| "Failed to insert :columns key".to_string())
+            })
+            .and_then(|map| {
+                map.map_put(rows(), self.rows.encode(env))
+                    .map_err(|_| "Failed to insert :rows key".to_string())
+            })
+            .and_then(|map| {
+                map.map_put(num_rows(), self.num_rows.encode(env))
+                    .map_err(|_| "Failed to insert :num_rows key".to_string())
+            });
+
+        match map_value_result {
+            Ok(final_map) => final_map,
+            Err(context) => {
+                let err = XqliteError::InternalEncodingError { context };
+                (error(), err).encode(env)
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 struct BlobResource(Vec<u8>);
@@ -113,6 +151,7 @@ pub(crate) enum XqliteError {
     CannotOpenDatabase(String, String),
     CannotConvertAtomToString(String),
     LockError(String),
+    InternalEncodingError { context: String }, // For failures during Term encoding
 }
 
 impl Display for XqliteError {
@@ -166,6 +205,9 @@ impl Display for XqliteError {
             XqliteError::LockError(reason) => {
                 write!(f, "Failed to lock connection mutex: {}", reason)
             }
+            XqliteError::InternalEncodingError { context } => {
+                write!(f, "Internal error during result encoding: {}", context)
+            }
         }
     }
 }
@@ -207,6 +249,9 @@ impl Encoder for XqliteError {
                 (cannot_convert_atom_to_string(), reason).encode(env)
             }
             XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
+            XqliteError::InternalEncodingError { context } => {
+                (internal_encoding_error(), context).encode(env)
+            }
         }
     }
 }
@@ -367,12 +412,12 @@ fn raw_open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_exec<'a>(
+fn raw_query<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
+) -> Result<XqliteQueryResult<'a>, XqliteError> {
     let conn_guard = handle
         .0
         .lock()
@@ -383,11 +428,16 @@ fn raw_exec<'a>(
     let mut stmt = conn.prepare(sql.as_str()).map_err(|e| {
         XqliteError::CannotPrepareStatement(sql_string_for_prepare, e.to_string())
     })?;
-    let column_count = stmt.column_count();
 
+    let column_names: Vec<String> =
+        stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let column_count = column_names.len();
+
+    // Branch based on parameter type
     let rows_result = match params_term.get_type() {
         TermType::List => {
             if is_keyword(params_term) {
+                // keyword list: named arguments.
                 let named_params_vec = decode_exec_keyword_params(env, params_term)?;
                 let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                     .iter()
@@ -395,6 +445,7 @@ fn raw_exec<'a>(
                     .collect();
                 stmt.query(params_for_rusqlite.as_slice())
             } else {
+                // (assumed) list: positional arguments.
                 let positional_values: Vec<Value> =
                     decode_plain_list_params(env, params_term)?;
                 let params_slice: Vec<&dyn ToSql> =
@@ -414,7 +465,15 @@ fn raw_exec<'a>(
 
     let rows = rows_result.map_err(|e| XqliteError::CannotExecute(e.to_string()))?;
 
-    process_rows(env, rows, column_count)
+    let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
+
+    let num_rows = results_vec.len();
+    Ok(XqliteQueryResult {
+        columns: column_names,
+        rows: results_vec,
+        num_rows,
+    })
+    // MutexGuard (conn_guard) is implicitly dropped here, releasing the lock
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
