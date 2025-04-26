@@ -2,7 +2,7 @@ defmodule Xqlite.MixProject do
   use Mix.Project
 
   @name "Xqlite"
-  @version "0.1.1"
+  @version "0.2.0"
 
   def project do
     [
@@ -38,8 +38,7 @@ defmodule Xqlite.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
-      mod: {Xqlite.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
@@ -47,8 +46,6 @@ defmodule Xqlite.MixProject do
     [
       # dependencies that are always included.
 
-      {:floki, "~> 0.23"},
-      {:jason, "~> 1.2"},
       {:rustler, "~> 0.36.1", runtime: false},
 
       # dev / test dependencies.

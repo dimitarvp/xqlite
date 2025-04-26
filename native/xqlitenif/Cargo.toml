@@ -1,6 +1,6 @@
 [package]
 name = "xqlitenif"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Dimitar Panayotov <mitko.p@gmail.com>"]
 edition = "2018"
 
@@ -10,8 +10,11 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rusqlite = "0.32"
-rustler = { version = "0.36", features = ["nif_version_2_17"] }
+rusqlite = { version = "0.35", features = [
+  "buildtime_bindgen",
+  "modern_sqlite",
+] }
+rustler = { version = "0.36.1" }
 
 [profile.release]
 lto = true

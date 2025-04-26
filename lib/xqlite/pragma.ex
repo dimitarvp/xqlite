@@ -7,8 +7,10 @@ defmodule Xqlite.Pragma do
   """
 
   import Xqlite, only: [int2bool: 1]
-  import Xqlite.Conn, only: [is_conn: 1]
 
+  # We need those called in module attribute definitions
+  # and that cannot be done with functions in the same module.
+  # They have to be in another module.
   import Xqlite.PragmaUtil,
     only: [
       filter: 2,
@@ -17,49 +19,6 @@ defmodule Xqlite.Pragma do
       readable_with_zero_args?: 1,
       writable?: 1
     ]
-
-  @doc """
-  Given the contents of the `https://www.sqlite.org/pragma.html` URL passed to this
-  function, retrieve a list of supported sqlite3 pragma names.
-  """
-  @spec extract_supported_pragmas(String.t()) :: [String.t()]
-  def extract_supported_pragmas(html) when is_binary(html) do
-    matches =
-      html
-      |> Floki.parse_document()
-      |> elem(1)
-      |> Floki.find("/html/body/script")
-      |> Enum.filter(fn {"script", [], texts} ->
-        Enum.any?(texts, &Regex.match?(~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*\[\s*\{.+/misu, &1))
-      end)
-
-    case matches do
-      [] ->
-        []
-
-      [{"script", [], texts}] ->
-        text = Enum.join(texts, "\n")
-
-        results =
-          Regex.named_captures(
-            ~r/\s*var\s*[a-zA-Z0-9_]+\s*=\s*(?<json>\[\s*\{.+\}\s*\])\s*;/misu,
-            text
-          )
-
-        results
-        |> Map.get("json")
-        |> Jason.decode!()
-        |> Enum.filter(fn
-          # The pragmas with %{s: 0} are the ones that are recommended to be used;
-          # the rest are either deprecated, used for debugging, or require special builds.
-          %{"s" => 0, "u" => _, "x" => _} -> true
-          _ -> false
-        end)
-        |> Enum.map(fn %{"s" => 0, "u" => _, "x" => name} -> name end)
-    end
-  end
-
-  # --- Types.
 
   @type name :: String.t()
   @type pragma_opts :: keyword()
@@ -75,12 +34,6 @@ defmodule Xqlite.Pragma do
   @type synchronous_value :: :off | :normal | :full | :extra
   @type temp_store_key :: 0 | 1 | 2
   @type temp_store_value :: :default | :file | :memory
-
-  # --- Guards.
-
-  defguard is_pragma_opts(x) when is_list(x)
-  defguard is_pragma_key(x) when is_binary(x) or is_atom(x)
-  defguard is_pragma_value(x) when is_binary(x) or is_atom(x) or is_integer(x) or is_boolean(x)
 
   @schema %{
     application_id: [r: {0, true, :int}, w: {true, :int, :nothing}],
@@ -276,6 +229,18 @@ defmodule Xqlite.Pragma do
   def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
+  A convenience wrapper to make the result of a `XqliteNIF.raw_query/3` call to
+  a format that is required by the `result` processor function.
+  Note that we deliberately assert strongly on the type of success value as
+  any other would be a critical bug in this library.
+  """
+  def raw_query_to_pragma_result({:ok, map}) when is_map(map) do
+    {:ok, Map.get(map, :rows)}
+  end
+
+  def raw_query_to_pragma_result({:error, _anything} = err), do: err
+
+  @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra argument:
   - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra argument.
   - `get(db, :table_info, :users)` is a PRAGMA that does require an extra argument.
@@ -286,96 +251,80 @@ defmodule Xqlite.Pragma do
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
   """
-  @spec get(Xqlite.Conn.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
+  @spec get(reference(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
           pragma_get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
-  def get(db, key, arg_or_opts, _opts)
-      when is_conn(db) and is_pragma_key(key) and is_list(arg_or_opts) do
-    get0(db, key, arg_or_opts)
+  def get(db, key, list, _opts) when is_list(list) do
+    get0(db, key, list)
   end
 
-  def get(db, key, arg_or_opts, opts)
-      when is_conn(db) and is_pragma_key(key) and is_pragma_key(arg_or_opts) and
-             is_list(opts) do
-    get1(db, key, arg_or_opts, opts)
+  def get(db, key, arg, opts) when is_list(opts) do
+    get1(db, key, arg, opts)
   end
 
-  @spec get0(Xqlite.Conn.conn(), pragma_key(), pragma_opts()) :: pragma_get_result()
-  defp get0(conn, key, opts) when is_conn(conn) and is_atom(key) and is_pragma_opts(opts) do
-    get0(conn, Atom.to_string(key), opts)
-  end
-
-  defp get0(conn, key, opts) when is_conn(conn) and is_binary(key) and is_pragma_opts(opts) do
-    XqliteNIF.pragma_get0(conn, key, opts)
+  @spec get0(reference(), pragma_key(), pragma_opts()) :: pragma_get_result()
+  defp get0(conn, key, _opts) do
+    XqliteNIF.raw_query(conn, "PRAGMA #{key};")
+    |> raw_query_to_pragma_result()
     |> result(key)
   end
 
-  @spec get1(Xqlite.Conn.conn(), pragma_key(), pragma_key(), pragma_opts()) ::
+  @spec get1(reference(), pragma_key(), pragma_key(), pragma_opts()) ::
           pragma_get_result()
-  defp get1(conn, key, arg, opts)
-       when is_conn(conn) and is_atom(key) and is_atom(arg) and is_pragma_opts(opts) do
+  defp get1(conn, key, arg, opts) when is_atom(key) and is_atom(arg) do
     get1(conn, Atom.to_string(key), Atom.to_string(arg), opts)
   end
 
-  defp get1(conn, key, arg, opts)
-       when is_conn(conn) and is_atom(key) and is_binary(arg) and is_pragma_opts(opts) do
+  defp get1(conn, key, arg, opts) when is_atom(key) and is_binary(arg) do
     get1(conn, Atom.to_string(key), arg, opts)
   end
 
-  defp get1(conn, key, arg, opts)
-       when is_conn(conn) and is_binary(key) and is_atom(arg) and is_pragma_opts(opts) do
+  defp get1(conn, key, arg, opts) when is_binary(key) and is_atom(arg) do
     get1(conn, key, Atom.to_string(arg), opts)
   end
 
-  defp get1(conn, key, arg, opts)
-       when is_conn(conn) and is_binary(key) and is_binary(arg) and is_pragma_opts(opts) do
-    XqliteNIF.pragma_get1(conn, key, arg, opts)
+  defp get1(conn, key, arg, _opts) do
+    XqliteNIF.raw_query(conn, "PRAGMA #{key}(#{arg});")
+    |> raw_query_to_pragma_result()
     |> result(key)
   end
 
-  @spec index_list(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
-  def index_list(db, name, opts \\ [])
-      when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
+  @spec index_list(reference(), name(), pragma_opts()) :: pragma_result()
+  def index_list(db, name, opts \\ []) do
     get1(db, "index_list", name, opts)
   end
 
-  @spec index_info(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
-  def index_info(db, name, opts \\ [])
-      when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
+  @spec index_info(reference(), name(), pragma_opts()) :: pragma_result()
+  def index_info(db, name, opts \\ []) do
     get1(db, "index_info", name, opts)
   end
 
-  @spec index_xinfo(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
-  def index_xinfo(db, name, opts \\ [])
-      when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
+  @spec index_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
+  def index_xinfo(db, name, opts \\ []) do
     get1(db, "index_xinfo", name, opts)
   end
 
-  @spec table_info(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
-  def table_info(db, name, opts \\ [])
-      when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
+  @spec table_info(reference(), name(), pragma_opts()) :: pragma_result()
+  def table_info(db, name, opts \\ []) do
     get1(db, "table_info", name, opts)
   end
 
-  @spec table_xinfo(Xqlite.Conn.conn(), name(), pragma_opts()) :: pragma_result()
-  def table_xinfo(db, name, opts \\ [])
-      when is_conn(db) and is_binary(name) and is_pragma_opts(opts) do
+  @spec table_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
+  def table_xinfo(db, name, opts \\ []) do
     get1(db, "table_xinfo", name, opts)
   end
 
   @doc ~S"""
   Changes a PRAGMA's value.
   """
-  @spec put(Xqlite.Conn.conn(), pragma_key(), pragma_value()) :: pragma_result()
-  def put(db, key, val)
-      when is_conn(db) and is_atom(key) and is_pragma_value(val) do
+  @spec put(reference(), pragma_key(), pragma_value()) :: pragma_result()
+  def put(db, key, val) when is_atom(key) do
     put(db, Atom.to_string(key), val)
   end
 
-  def put(db, key, val)
-      when is_conn(db) and is_binary(key) and is_pragma_value(val) do
-    XqliteNIF.pragma_put(db, key, val, [])
+  def put(db, key, val) when is_binary(key) do
+    XqliteNIF.raw_pragma_write_and_read(db, key, val)
     |> result(key)
   end
 
@@ -403,9 +352,21 @@ defmodule Xqlite.Pragma do
   @spec result(pragma_result(), pragma_key()) :: pragma_result()
   defp result({:error, _} = e, _k), do: e
   defp result({:error, _, _} = e, _k), do: e
-  defp result(:ok, _k), do: :ok
+  defp result({:ok, :no_value}, _k), do: :ok
+  defp result({:ok, "ok"}, _k), do: :ok
+
+  defp result({:ok, v}, _k) when is_integer(v) or is_float(v) or is_binary(v),
+    do: {:ok, v}
+
   defp result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
-  defp result({:ok, vv}, k) when is_list(vv), do: {:ok, multiple(String.to_atom(k), vv)}
+  defp result({:ok, [[v]]}, k) when is_atom(k), do: {:ok, single(k, v)}
+  defp result({:ok, [[v]]}, k) when is_binary(k), do: {:ok, single(String.to_atom(k), v)}
+  defp result({:ok, vv}, k) when is_atom(k) and is_list(vv), do: {:ok, multiple(k, vv)}
+
+  defp result({:ok, vv}, k) when is_binary(k) and is_list(vv),
+    do: {:ok, multiple(String.to_atom(k), vv)}
+
+  defp result(:ok, _k), do: :ok
 
   # Generate pragma getter functions that convert a 0/1 integer result to a boolean
   # or transform special integer values to atoms.
