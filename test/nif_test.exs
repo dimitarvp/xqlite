@@ -201,7 +201,7 @@ defmodule XqliteNifTest do
                 columns: ["id", "pi_value", "label"],
                 rows: [[42, 3.14159, "approx_pi"]],
                 num_rows: 1
-              }} = XqliteNIF.raw_query(conn, query_sql, query_params)
+              }} == XqliteNIF.raw_query(conn, query_sql, query_params)
     end
 
     test "fetch all records", %{conn: conn} do
