@@ -7,10 +7,8 @@ defmodule Xqlite.Config do
   - Provides functions to modify a keyword list of options.
   """
 
-  import Xqlite.Conn, only: [is_db_name: 1]
-
   # Default is an anonymous in-memory database.
-  @default_db_name Xqlite.anon_db()
+  @default_db_name ":memory:"
 
   # Default timeout for any Sqlite3 command, including opening and closing.
   @default_exec_timeout 5_000
@@ -24,27 +22,28 @@ defmodule Xqlite.Config do
 
   @type size :: pos_integer()
   @type key :: atom()
-  @type value :: Xqlite.Conn.db_name() | size() | timeout()
+  @type value :: String.t() | size() | timeout()
   @type t :: %__MODULE__{
           batch_size: size(),
-          db_name: Xqlite.Conn.db_name(),
+          db_name: String.t(),
           exec_timeout: timeout(),
           genserver_timeout: timeout()
         }
 
   defguard is_config_opts(x) when is_list(x)
-  defguard is_timeout(x) when (is_atom(x) and x == :infinity) or (is_integer(x) and x >= 0)
   defguard is_size(x) when is_integer(x) and x > 0
+  defguard is_timeout_number(x) when is_integer(x) and x > 0
+  defguard is_timeout(x) when x == :infinity or is_timeout_number(x)
 
   defguard is_key(x)
            when is_atom(x) and x in ~w(db_name batch_size exec_timeout genserver_timeout)a
 
-  defguard is_value(x) when is_db_name(x) or is_timeout(x) or is_size(x)
+  defguard is_value(x) when is_binary(x) or is_timeout(x) or is_size(x)
 
   @spec default_batch_size() :: size()
   def default_batch_size(), do: @default_batch_size
 
-  @spec default_db_name() :: Xqlite.Conn.db_name()
+  @spec default_db_name() :: String.t()
   def default_db_name(), do: @default_db_name
 
   @spec default_exec_timeout() :: timeout()
@@ -61,44 +60,44 @@ defmodule Xqlite.Config do
   @spec default() :: keyword()
   def default(), do: %__MODULE__{} |> Map.to_list()
 
-  @spec get(Xqlite.Conn.opts(), key()) :: value()
+  @spec get(keyword(), key()) :: value()
   def get(opts, key) when is_config_opts(opts) and is_key(key) do
     Keyword.get(opts, key, Keyword.get(default(), key))
   end
 
-  @spec get_batch_size(Xqlite.Conn.opts()) :: size()
+  @spec get_batch_size(keyword()) :: size()
   def get_batch_size(opts), do: get(opts, :batch_size)
 
-  @spec get_db_name(Xqlite.Conn.opts()) :: Xqlite.Conn.db_name()
+  @spec get_db_name(keyword()) :: String.t()
   def get_db_name(opts), do: get(opts, :db_name)
 
-  @spec get_exec_timeout(Xqlite.Conn.opts()) :: timeout()
+  @spec get_exec_timeout(keyword()) :: timeout()
   def get_exec_timeout(opts), do: get(opts, :exec_timeout)
 
-  @spec get_genserver_timeout(Xqlite.Conn.opts()) :: timeout()
+  @spec get_genserver_timeout(keyword()) :: timeout()
   def get_genserver_timeout(opts), do: get(opts, :genserver_timeout)
 
-  @spec put(Xqlite.Conn.opts(), key(), value()) :: Xqlite.Conn.opts()
+  @spec put(keyword(), key(), value()) :: keyword()
   def put(opts, key, value) when is_config_opts(opts) and is_key(key) and is_value(value) do
     Keyword.put(opts, key, value)
   end
 
-  @spec put_batch_size(Xqlite.Conn.opts(), size()) :: Xqlite.Conn.opts()
+  @spec put_batch_size(keyword(), size()) :: keyword()
   def put_batch_size(opts, n) when is_config_opts(opts) and is_size(n) do
     put(opts, :batch_size, n)
   end
 
-  @spec put_db_name(Xqlite.Conn.opts(), Xqlite.Conn.db_name()) :: Xqlite.Conn.opts()
-  def put_db_name(opts, db_name) when is_config_opts(opts) and is_db_name(db_name) do
+  @spec put_db_name(keyword(), String.t()) :: keyword()
+  def put_db_name(opts, db_name) when is_config_opts(opts) and is_binary(db_name) do
     put(opts, :db_name, db_name)
   end
 
-  @spec put_exec_timeout(Xqlite.Conn.opts(), timeout()) :: Xqlite.Conn.opts()
+  @spec put_exec_timeout(keyword(), timeout()) :: keyword()
   def put_exec_timeout(opts, t) when is_config_opts(opts) and is_timeout(t) do
     put(opts, :exec_timeout, t)
   end
 
-  @spec put_genserver_timeout(Xqlite.Conn.opts(), timeout()) :: Xqlite.Conn.opts()
+  @spec put_genserver_timeout(keyword(), timeout()) :: keyword()
   def put_genserver_timeout(opts, t) when is_config_opts(opts) and is_timeout(t) do
     put(opts, :genserver_timeout, t)
   end
