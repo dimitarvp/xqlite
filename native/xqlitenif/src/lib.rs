@@ -8,33 +8,65 @@ rustler::atoms! {
     cannot_fetch_row,
     cannot_open_database,
     cannot_prepare_statement,
-    cannot_read_column,
+    code,
     columns,
+    constraint_check,
+    constraint_commit_hook,
+    constraint_datatype,
+    constraint_foreign_key,
+    constraint_function,
+    constraint_not_null,
+    constraint_pinned,
+    constraint_primary_key,
+    constraint_rowid,
+    constraint_trigger,
+    constraint_unique,
+    constraint_violation,
+    constraint_vtab,
     error,
+    execute_returned_results,
+    expected,
     expected_keyword_list,
     expected_keyword_tuple,
     expected_list,
     float,
+    from_sql_conversion_failure,
     function,
     integer,
+    integral_value_out_of_range,
     internal_encoding_error,
+    invalid_column_index,
+    invalid_column_name,
+    invalid_column_type,
+    invalid_parameter_count,
+    invalid_parameter_name,
     list,
     lock_error,
     map,
+    message,
+    multiple_statements,
     no_value,
+    null_byte_in_string,
     num_rows,
-    ok,
+    offset,
     pid,
     port,
+    provided,
     reference,
     rows,
+    sql,
+    sql_input_error,
+    sqlite_failure,
+    text,
+    to_sql_conversion_failure,
     tuple,
     unknown,
     unsupported_atom,
     unsupported_data_type,
+    utf8_error,
 }
 
-use rusqlite::{types::Value, Connection, Row, Rows, ToSql};
+use rusqlite::{ffi, types::Value, Connection, ErrorCode, Row, Rows, ToSql};
 use rustler::types::atom::{false_, nil, true_};
 use rustler::types::map::map_new;
 use rustler::{resource_impl, Atom, Binary, ListIterator, TermType};
@@ -86,6 +118,393 @@ struct BlobResource(Vec<u8>);
 #[resource_impl]
 impl Resource for BlobResource {}
 
+#[derive(Debug)]
+pub(crate) enum XqliteError {
+    // Input Conversion / Validation
+    CannotConvertToSqliteValue {
+        value_str: String,
+        reason: String,
+    },
+    ToSqlConversionFailure {
+        reason: String,
+    },
+    ExpectedKeywordList {
+        value_str: String,
+    },
+    ExpectedKeywordTuple {
+        value_str: String,
+    },
+    ExpectedList {
+        value_str: String,
+    },
+    UnsupportedAtom {
+        atom_value: String,
+    },
+    UnsupportedDataType {
+        term_type: TermType,
+    },
+    CannotConvertAtomToString(String),
+    InvalidParameterCount {
+        provided: usize,
+        expected: usize,
+    },
+    InvalidParameterName(String),
+    NulErrorInString,
+    MultipleStatements,
+
+    // DB Open / Connection Errors
+    CannotOpenDatabase(String, String),
+    LockError(String),
+
+    // Statement / Execution Errors
+    CannotPrepareStatement(String, String),
+    SqlInputError {
+        code: i32,
+        message: String,
+        sql: String,
+        offset: i32,
+    },
+    ExecuteReturnedResults,
+    CannotExecute(String), // Generic execution error
+    CannotExecutePragma {
+        pragma: String,
+        reason: String,
+    },
+
+    // Row / Column Errors
+    CannotFetchRow(String),
+    InvalidColumnIndex(usize),
+    InvalidColumnName(String),
+    InvalidColumnType {
+        index: usize,
+        name: String,
+        sqlite_type: Atom,
+    },
+    FromSqlConversionFailure {
+        index: usize,
+        sqlite_type: Atom,
+        reason: String,
+    },
+    IntegralValueOutOfRange {
+        index: usize,
+        value: i64,
+    },
+    Utf8Error {
+        reason: String,
+    },
+
+    // Constraint Errors (from SqliteFailure)
+    ConstraintViolation {
+        kind: Option<Atom>,
+        message: String,
+    },
+
+    // Generic Fallback
+    SqliteFailure {
+        code: i32,
+        extended_code: i32,
+        message: Option<String>,
+    },
+
+    // Internal
+    InternalEncodingError {
+        context: String,
+    },
+}
+
+impl Display for XqliteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            XqliteError::CannotConvertToSqliteValue { value_str, reason } => write!(f, "Cannot convert Elixir value '{}' to SQLite type: {}", value_str, reason),
+            XqliteError::ToSqlConversionFailure { reason } => write!(f, "Cannot convert Rust value to SQLite type: {}", reason),
+            XqliteError::ExpectedKeywordList { value_str } => write!(f, "Expected a keyword list for named parameters, got: {}", value_str),
+            XqliteError::ExpectedKeywordTuple { value_str } => write!(f, "Expected a {{atom, value}} tuple inside keyword list, got: {}", value_str),
+            XqliteError::ExpectedList { value_str } => write!(f, "Expected a List for parameters, got: {}", value_str),
+            XqliteError::UnsupportedAtom { atom_value } => write!(f, "Unsupported atom value '{}'. Allowed values: nil, true, false", atom_value),
+            XqliteError::UnsupportedDataType { term_type } => write!(f, "Unsupported data type {}. Allowed types: atom, integer, float, binary", term_type_to_string(*term_type)),
+            XqliteError::CannotPrepareStatement(sql, reason) => write!(f, "Cannot prepare statement '{}': {}", sql, reason),
+            XqliteError::CannotExecute(reason) => write!(f, "Cannot execute query/statement: {}", reason),
+            XqliteError::CannotExecutePragma { pragma, reason } => write!(f, "Cannot execute PRAGMA '{}': {}", pragma, reason),
+            XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {}", reason),
+            XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{}': {}", path, reason),
+            XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {}", reason),
+            XqliteError::LockError(reason) => write!(f, "Failed to lock connection mutex: {}", reason),
+            XqliteError::InternalEncodingError { context } => write!(f, "Internal error during result encoding: {}", context),
+            XqliteError::InvalidParameterCount { provided, expected } => write!(f, "Invalid parameter count: provided {}, expected {}", provided, expected),
+            XqliteError::InvalidParameterName(name) => write!(f, "Invalid parameter name: '{}'", name),
+            XqliteError::NulErrorInString => write!(f, "Input string contains embedded null byte"),
+            XqliteError::MultipleStatements => write!(f, "Provided SQL string contains multiple statements"),
+            XqliteError::InvalidColumnIndex(index) => write!(f, "Invalid column index: {}", index),
+            XqliteError::InvalidColumnName(name) => write!(f, "Invalid column name: '{}'", name),
+            XqliteError::InvalidColumnType { index, name, sqlite_type } => write!(f, "Invalid column type at index {} (name: '{}'): cannot convert SQLite type '{:?}'", index, name, sqlite_type),
+            XqliteError::ExecuteReturnedResults => write!(f, "Execute returned results, expected no rows"),
+            XqliteError::Utf8Error { reason } => write!(f, "UTF-8 decoding error: {}", reason),
+            XqliteError::FromSqlConversionFailure { index, sqlite_type, reason } => write!(f, "Failed to convert SQLite type '{:?}' at index {} to Rust type: {}", sqlite_type, index, reason),
+            XqliteError::IntegralValueOutOfRange { index, value } => write!(f, "Integral value {} at index {} out of range for requested Rust type", value, index),
+            XqliteError::SqlInputError { code, message, sql: _, offset } => write!(f, "SQL input error (Code {}): '{}' near offset {}", code, message, offset),
+            XqliteError::ConstraintViolation { kind: _, message } => write!(f, "Constraint violation: {}", message),
+            XqliteError::SqliteFailure { code, extended_code, message } => write!(f, "SQLite failure (Code: {}, Extended: {}): {}", code, extended_code, message.as_deref().unwrap_or("No details")),
+        }
+    }
+}
+
+impl Encoder for XqliteError {
+    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
+        match self {
+            XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
+                (cannot_convert_to_sqlite_value(), value_str, reason).encode(env)
+            }
+            XqliteError::ToSqlConversionFailure { reason } => {
+                (to_sql_conversion_failure(), reason).encode(env)
+            }
+            XqliteError::ExpectedKeywordList { value_str } => {
+                (expected_keyword_list(), value_str).encode(env)
+            }
+            XqliteError::ExpectedKeywordTuple { value_str } => {
+                (expected_keyword_tuple(), value_str).encode(env)
+            }
+            XqliteError::ExpectedList { value_str } => {
+                (expected_list(), value_str).encode(env)
+            }
+            XqliteError::UnsupportedAtom { atom_value: _ } => unsupported_atom().encode(env),
+            XqliteError::UnsupportedDataType { term_type } => {
+                (unsupported_data_type(), term_type_to_atom(env, *term_type)).encode(env)
+            }
+            XqliteError::CannotPrepareStatement(sql, reason) => {
+                (cannot_prepare_statement(), sql, reason).encode(env)
+            }
+            XqliteError::CannotExecute(reason) => (cannot_execute(), reason).encode(env),
+            XqliteError::CannotExecutePragma { pragma, reason } => {
+                (cannot_execute_pragma(), pragma, reason).encode(env)
+            }
+            XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
+            XqliteError::CannotOpenDatabase(path, reason) => {
+                (cannot_open_database(), path, reason).encode(env)
+            }
+            XqliteError::CannotConvertAtomToString(reason) => {
+                (cannot_convert_atom_to_string(), reason).encode(env)
+            }
+            XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
+            XqliteError::InternalEncodingError { context } => {
+                (internal_encoding_error(), context).encode(env)
+            }
+            XqliteError::InvalidParameterCount { provided, expected } => {
+                let map_result = map_new(env)
+                    // Use crate::* to avoid shadowing
+                    .map_put(crate::provided(), provided) // Use full path to atom fn
+                    .and_then(|map| map.map_put(crate::expected(), expected)); // Use full path to atom fn
+                match map_result {
+                    Ok(map) => (invalid_parameter_count(), map).encode(env), // Use atom fn for tuple key
+                    Err(_) => (
+                        error(),
+                        internal_encoding_error(),
+                        "Failed map create for InvalidParameterCount",
+                    )
+                        .encode(env),
+                }
+            }
+            XqliteError::InvalidParameterName(name) => {
+                (invalid_parameter_name(), name).encode(env)
+            }
+            XqliteError::NulErrorInString => null_byte_in_string().encode(env),
+            XqliteError::MultipleStatements => multiple_statements().encode(env),
+            XqliteError::InvalidColumnIndex(index) => {
+                (invalid_column_index(), index).encode(env)
+            }
+            XqliteError::InvalidColumnName(name) => (invalid_column_name(), name).encode(env),
+            XqliteError::InvalidColumnType {
+                index,
+                name,
+                sqlite_type,
+            } => (invalid_column_type(), index, name, *sqlite_type).encode(env),
+            XqliteError::ExecuteReturnedResults => execute_returned_results().encode(env),
+            XqliteError::Utf8Error { reason } => (utf8_error(), reason).encode(env),
+            XqliteError::FromSqlConversionFailure {
+                index,
+                sqlite_type,
+                reason,
+            } => (from_sql_conversion_failure(), index, *sqlite_type, reason).encode(env),
+            XqliteError::IntegralValueOutOfRange { index, value } => {
+                (integral_value_out_of_range(), index, value).encode(env)
+            }
+            // <<< Corrected map encoding for SqlInputError >>>
+            XqliteError::SqlInputError {
+                code,
+                message,
+                sql,
+                offset,
+            } => {
+                let map_result = map_new(env)
+                    // Scope the atom access to avoid shadowing with the `code` variable.
+                    .map_put(crate::code(), code)
+                    .and_then(|map| map.map_put(crate::message(), message)) // Use full path
+                    .and_then(|map| map.map_put(crate::sql(), sql)) // Use full path
+                    .and_then(|map| map.map_put(crate::offset(), offset));
+                match map_result {
+                    Ok(map) => (sql_input_error(), map).encode(env), // Use atom fn for tuple key
+                    Err(_) => (
+                        error(),
+                        internal_encoding_error(),
+                        "Failed map create for SqlInputError",
+                    )
+                        .encode(env),
+                }
+            }
+            XqliteError::ConstraintViolation { kind, message } => {
+                (constraint_violation(), *kind, message).encode(env)
+            }
+            XqliteError::SqliteFailure {
+                code,
+                extended_code,
+                message,
+            } => (sqlite_failure(), code, extended_code, message).encode(env),
+        }
+    }
+}
+
+impl RefUnwindSafe for XqliteError {}
+
+impl From<rusqlite::Error> for XqliteError {
+    fn from(err: rusqlite::Error) -> Self {
+        match err {
+            // --- Handle SqliteFailure: Check constraints first, then specific codes, then fallback ---
+            rusqlite::Error::SqliteFailure(ffi_err, msg_opt) => {
+                // Use the extended code primarily for specific constraint checks
+                if let Some(kind_atom) =
+                    constraint_kind_to_atom_extended(ffi_err.extended_code)
+                {
+                    // We got a specific kind (:constraint_*) or the generic :constraint_violation
+                    XqliteError::ConstraintViolation {
+                        kind: Some(kind_atom),
+                        message: msg_opt.unwrap_or_else(|| ffi_err.to_string()), // Use ffi_err string if no specific message
+                    }
+                } else {
+                    // Match on the primary ErrorCode already parsed by libsqlite3-sys
+                    match ffi_err.code {
+                        // Add specific mappings for primary codes here if needed for distinct handling
+                        ErrorCode::NotFound => XqliteError::CannotExecute(
+                            msg_opt.unwrap_or_else(|| "SQLite object not found".to_string()),
+                        ),
+                        ErrorCode::DatabaseCorrupt => XqliteError::CannotExecute(
+                            msg_opt.unwrap_or_else(|| "SQLite database corrupt".to_string()),
+                        ),
+                        ErrorCode::ReadOnly => {
+                            XqliteError::CannotExecute(msg_opt.unwrap_or_else(|| {
+                                "Attempt to write a readonly database".to_string()
+                            }))
+                        }
+                        // <<< Corrected: Use DatabaseBusy >>>
+                        ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => {
+                            XqliteError::CannotExecute(msg_opt.unwrap_or_else(|| {
+                                "Database/table is locked or busy".to_string()
+                            }))
+                        }
+                        ErrorCode::ApiMisuse => XqliteError::CannotExecute(
+                            msg_opt
+                                .unwrap_or_else(|| "SQLite API misuse detected".to_string()),
+                        ),
+                        // Add more specific ErrorCode mappings here if desired
+
+                        // If no specific primary code match, use the generic SqliteFailure fallback
+                        _ => XqliteError::SqliteFailure {
+                            code: ffi_err.code as i32, // Store the primary code integer value
+                            extended_code: ffi_err.extended_code,
+                            message: msg_opt,
+                        },
+                    }
+                }
+            }
+
+            // --- Handle other rusqlite::Error variants ---
+            rusqlite::Error::FromSqlConversionFailure(idx, sql_type, source_err) => {
+                XqliteError::FromSqlConversionFailure {
+                    index: idx,
+                    sqlite_type: sqlite_type_to_atom(sql_type),
+                    reason: source_err.to_string(),
+                }
+            }
+            rusqlite::Error::IntegralValueOutOfRange(idx, val) => {
+                XqliteError::IntegralValueOutOfRange {
+                    index: idx,
+                    value: val,
+                }
+            }
+            rusqlite::Error::Utf8Error(utf8_err) => XqliteError::Utf8Error {
+                reason: utf8_err.to_string(),
+            },
+            rusqlite::Error::NulError(_nul_err) => XqliteError::NulErrorInString,
+            rusqlite::Error::InvalidParameterName(name) => {
+                XqliteError::InvalidParameterName(name)
+            }
+            rusqlite::Error::InvalidParameterCount(provided, expected) => {
+                XqliteError::InvalidParameterCount { provided, expected }
+            }
+            rusqlite::Error::ExecuteReturnedResults => XqliteError::ExecuteReturnedResults,
+            rusqlite::Error::InvalidColumnIndex(idx) => XqliteError::InvalidColumnIndex(idx),
+            rusqlite::Error::InvalidColumnName(name) => XqliteError::InvalidColumnName(name),
+            rusqlite::Error::InvalidColumnType(idx, name, sql_type) => {
+                XqliteError::InvalidColumnType {
+                    index: idx,
+                    name,
+                    sqlite_type: sqlite_type_to_atom(sql_type),
+                }
+            }
+            rusqlite::Error::ToSqlConversionFailure(source_err) => {
+                XqliteError::ToSqlConversionFailure {
+                    reason: source_err.to_string(),
+                }
+            }
+            rusqlite::Error::MultipleStatement => XqliteError::MultipleStatements,
+
+            rusqlite::Error::SqlInputError {
+                error: ffi_err,
+                msg,
+                sql,
+                offset,
+            } => XqliteError::SqlInputError {
+                code: ffi_err.code as i32,
+                message: msg,
+                sql,
+                offset,
+            },
+
+            // Catch-all for any other rusqlite::Error variants not explicitly handled
+            // Note: QueryReturnedNoRows is deliberately not caught here.
+            other_err => XqliteError::CannotExecute(other_err.to_string()),
+        }
+    }
+}
+
+// Based on libsqlite3-sys constants
+fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
+    // Primary constraint code check
+    const SQLITE_CONSTRAINT_PRIMARY: i32 = ffi::SQLITE_CONSTRAINT; // Get the base code
+
+    match extended_code {
+        ffi::SQLITE_CONSTRAINT_CHECK => Some(constraint_check()),
+        ffi::SQLITE_CONSTRAINT_COMMITHOOK => Some(constraint_commit_hook()),
+        ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Some(constraint_foreign_key()),
+        ffi::SQLITE_CONSTRAINT_FUNCTION => Some(constraint_function()),
+        ffi::SQLITE_CONSTRAINT_NOTNULL => Some(constraint_not_null()),
+        ffi::SQLITE_CONSTRAINT_PRIMARYKEY => Some(constraint_primary_key()),
+        ffi::SQLITE_CONSTRAINT_ROWID => Some(constraint_rowid()),
+        ffi::SQLITE_CONSTRAINT_TRIGGER => Some(constraint_trigger()),
+        ffi::SQLITE_CONSTRAINT_UNIQUE => Some(constraint_unique()),
+        ffi::SQLITE_CONSTRAINT_VTAB => Some(constraint_vtab()),
+        ffi::SQLITE_CONSTRAINT_PINNED => Some(constraint_pinned()),
+        ffi::SQLITE_CONSTRAINT_DATATYPE => Some(constraint_datatype()),
+
+        // Catch-all: Check if the primary code part matches SQLITE_CONSTRAINT
+        // This covers cases where SQLite might return, e.g., just 19 (SQLITE_CONSTRAINT)
+        // without a specific extended code like (19 | (5 << 8)) for NOTNULL.
+        // It also covers *future* extended constraint codes we don't know about yet.
+        code if (code & 0xff) == SQLITE_CONSTRAINT_PRIMARY => Some(constraint_violation()), // Return the generic atom
+
+        // Not a known extended constraint code, and not even a basic constraint code
+        _ => None,
+    }
+}
+
 fn term_type_to_string(term_type: TermType) -> &'static str {
     match term_type {
         TermType::Atom => "atom",
@@ -120,6 +539,16 @@ fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
     }
 }
 
+fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
+    match t {
+        rusqlite::types::Type::Null => nil(),
+        rusqlite::types::Type::Integer => integer(),
+        rusqlite::types::Type::Real => float(),
+        rusqlite::types::Type::Text => text(),
+        rusqlite::types::Type::Blob => binary(),
+    }
+}
+
 fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
     match val {
         Value::Null => nil().encode(env),
@@ -132,135 +561,6 @@ fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
                 .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
                 .encode(env)
         }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum XqliteError {
-    CannotConvertToSqliteValue { value_str: String, reason: String },
-    ExpectedKeywordList { value_str: String },
-    ExpectedKeywordTuple { value_str: String },
-    ExpectedList { value_str: String },
-    UnsupportedAtom { atom_value: String },
-    UnsupportedDataType { term_type: TermType },
-    CannotPrepareStatement(String, String),
-    CannotReadColumn(usize, String),
-    CannotExecute(String),
-    CannotExecutePragma { pragma: String, reason: String },
-    CannotFetchRow(String),
-    CannotOpenDatabase(String, String),
-    CannotConvertAtomToString(String),
-    LockError(String),
-    InternalEncodingError { context: String }, // For failures during Term encoding
-}
-
-impl Display for XqliteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            XqliteError::CannotConvertToSqliteValue { value_str, reason } => write!(
-                f,
-                "Cannot convert value '{}' to SQLite type: {}",
-                value_str, reason
-            ),
-            XqliteError::ExpectedKeywordList { value_str } => {
-                write!(f, "Expected a keyword list, got: {}", value_str)
-            }
-            XqliteError::ExpectedKeywordTuple { value_str } => write!(
-                f,
-                "Expected a {{atom, value}} tuple inside keyword list, got: {}",
-                value_str
-            ),
-            XqliteError::ExpectedList { value_str } => {
-                write!(f, "Expected a list, got: {}", value_str)
-            }
-            XqliteError::UnsupportedAtom { atom_value } => write!(
-                f,
-                "Unsupported atom value '{}'. Allowed values: nil, true, false",
-                atom_value
-            ),
-            XqliteError::UnsupportedDataType { term_type } => write!(
-                f,
-                "Unsupported data type {}. Allowed types: atom, integer, float, binary",
-                term_type_to_string(*term_type)
-            ),
-            XqliteError::CannotPrepareStatement(sql, reason) => {
-                write!(f, "Cannot prepare statement '{}': {}", sql, reason)
-            }
-            XqliteError::CannotReadColumn(index, reason) => {
-                write!(f, "Cannot read column value at index {}: {}", index, reason)
-            }
-            XqliteError::CannotExecute(reason) => {
-                write!(f, "Cannot execute query: {}", reason)
-            }
-            XqliteError::CannotExecutePragma { pragma, reason } => {
-                write!(f, "Cannot execute PRAGMA '{}': {}", pragma, reason)
-            }
-            XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {}", reason),
-            XqliteError::CannotOpenDatabase(path, reason) => {
-                write!(f, "Cannot open database '{}': {}", path, reason)
-            }
-            XqliteError::CannotConvertAtomToString(reason) => {
-                write!(f, "Cannot convert Elixir atom to string: {}", reason)
-            }
-            XqliteError::LockError(reason) => {
-                write!(f, "Failed to lock connection mutex: {}", reason)
-            }
-            XqliteError::InternalEncodingError { context } => {
-                write!(f, "Internal error during result encoding: {}", context)
-            }
-        }
-    }
-}
-
-impl Encoder for XqliteError {
-    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
-        match self {
-            XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
-                (cannot_convert_to_sqlite_value(), value_str, reason).encode(env)
-            }
-            XqliteError::ExpectedKeywordList { value_str } => {
-                (expected_keyword_list(), value_str).encode(env)
-            }
-            XqliteError::ExpectedKeywordTuple { value_str } => {
-                (expected_keyword_tuple(), value_str).encode(env)
-            }
-            XqliteError::ExpectedList { value_str } => {
-                (expected_list(), value_str).encode(env)
-            }
-            XqliteError::UnsupportedAtom { atom_value: _ } => unsupported_atom().encode(env),
-            XqliteError::UnsupportedDataType { term_type } => {
-                (unsupported_data_type(), term_type_to_atom(env, *term_type)).encode(env)
-            }
-            XqliteError::CannotPrepareStatement(sql, reason) => {
-                (cannot_prepare_statement(), sql, reason).encode(env)
-            }
-            XqliteError::CannotReadColumn(index, reason) => {
-                (cannot_read_column(), index, reason).encode(env)
-            }
-            XqliteError::CannotExecute(reason) => (cannot_execute(), reason).encode(env),
-            XqliteError::CannotExecutePragma { pragma, reason } => {
-                (cannot_execute_pragma(), pragma, reason).encode(env)
-            }
-            XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
-            XqliteError::CannotOpenDatabase(path, reason) => {
-                (cannot_open_database(), path, reason).encode(env)
-            }
-            XqliteError::CannotConvertAtomToString(reason) => {
-                (cannot_convert_atom_to_string(), reason).encode(env)
-            }
-            XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
-            XqliteError::InternalEncodingError { context } => {
-                (internal_encoding_error(), context).encode(env)
-            }
-        }
-    }
-}
-
-impl RefUnwindSafe for XqliteError {}
-
-impl From<rusqlite::Error> for XqliteError {
-    fn from(err: rusqlite::Error) -> Self {
-        XqliteError::CannotExecute(err.to_string())
     }
 }
 
@@ -360,19 +660,33 @@ fn process_rows<'a, 'rows>(
     column_count: usize,
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
     let mut results: Vec<Vec<Term<'a>>> = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| XqliteError::CannotFetchRow(e.to_string()))?
-    {
-        let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
-        for i in 0..column_count {
-            let value: Value = row
-                .get::<usize, Value>(i)
-                .map_err(|e| XqliteError::CannotReadColumn(i, e.to_string()))?;
-            let term = encode_val(env, value);
-            row_values.push(term);
+
+    // Use loop and match to handle Result<Option<Row>> from rows.next()
+    loop {
+        match rows.next() {
+            Ok(Some(row)) => {
+                // Successfully got a row
+                let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
+                for i in 0..column_count {
+                    // Use `?` here - if row.get fails, it returns rusqlite::Error,
+                    // which will be converted via From/Into by the surrounding function's
+                    // Result signature (XqliteError) if this closure doesn't map it.
+                    // Or map it explicitly if needed (as done below, which is safer).
+                    let value: Value = row.get::<usize, Value>(i)?; // This '?' uses the From impl
+                    let term = encode_val(env, value);
+                    row_values.push(term);
+                }
+                results.push(row_values);
+            }
+            Ok(None) => {
+                // End of rows, break the loop successfully
+                break;
+            }
+            Err(e) => {
+                // Error fetching next row, map it and return Err
+                return Err(XqliteError::CannotFetchRow(e.to_string()));
+            }
         }
-        results.push(row_values);
     }
     Ok(results)
 }
@@ -395,9 +709,7 @@ where
         .0
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    // Execute the closure with the locked connection
-    func(&*conn_guard)
-    // Lock is released when conn_guard goes out of scope here
+    func(&conn_guard)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -431,19 +743,17 @@ fn raw_query<'a>(
     sql: String,
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    // Clone sql string once for potential error reporting within the closure
     let sql_for_err = sql.clone();
 
     with_conn(&handle, |conn| {
-        let mut stmt = conn.prepare(sql.as_str()).map_err(|e| {
-            XqliteError::CannotPrepareStatement(sql_for_err, e.to_string()) // Use cloned sql
-        })?;
-
+        let mut stmt = conn
+            .prepare(sql.as_str())
+            .map_err(|e| XqliteError::CannotPrepareStatement(sql_for_err, e.to_string()))?;
         let column_names: Vec<String> =
             stmt.column_names().iter().map(|s| s.to_string()).collect();
         let column_count = column_names.len();
 
-        let rows_result = match params_term.get_type() {
+        let rows = match params_term.get_type() {
             TermType::List => {
                 if is_keyword(params_term) {
                     let named_params_vec = decode_exec_keyword_params(env, params_term)?;
@@ -451,17 +761,17 @@ fn raw_query<'a>(
                         .iter()
                         .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
                         .collect();
-                    stmt.query(params_for_rusqlite.as_slice())
+                    stmt.query(params_for_rusqlite.as_slice())?
                 } else {
                     let positional_values: Vec<Value> =
                         decode_plain_list_params(env, params_term)?;
                     let params_slice: Vec<&dyn ToSql> =
                         positional_values.iter().map(|v| v as &dyn ToSql).collect();
-                    stmt.query(params_slice.as_slice())
+                    stmt.query(params_slice.as_slice())?
                 }
             }
             _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
-                stmt.query([])
+                stmt.query([])?
             }
             _ => {
                 return Err(XqliteError::ExpectedList {
@@ -470,7 +780,6 @@ fn raw_query<'a>(
             }
         };
 
-        let rows = rows_result.map_err(|e| XqliteError::CannotExecute(e.to_string()))?;
         let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
         let num_rows = results_vec.len();
 
@@ -490,13 +799,11 @@ fn raw_execute<'a>(
     params_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
     with_conn(&handle, |conn| {
-        // Use helper
         let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
         let params_slice: Vec<&dyn ToSql> =
             positional_values.iter().map(|v| v as &dyn ToSql).collect();
-
-        conn.execute(sql.as_str(), params_slice.as_slice())
-            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+        // Use `?` which will now invoke the refined `From<rusqlite::Error>` impl
+        Ok(conn.execute(sql.as_str(), params_slice.as_slice())?)
     })
 }
 
@@ -507,10 +814,10 @@ fn raw_pragma_write(
 ) -> Result<usize, XqliteError> {
     let pragma_sql_for_err = pragma_sql.clone();
     with_conn(&handle, |conn| {
-        // Use helper
+        // Keep explicit mapping for pragmas to distinguish from general execute errors
         conn.execute(&pragma_sql, [])
             .map_err(|e| XqliteError::CannotExecutePragma {
-                pragma: pragma_sql_for_err, // Use cloned string
+                pragma: pragma_sql_for_err,
                 reason: e.to_string(),
             })
     })
@@ -523,39 +830,28 @@ fn raw_pragma_write_and_read<'a>(
     pragma_name: String,
     value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
-    // Clone pragma_name for potential error reporting
     let pragma_name_for_err = pragma_name.clone();
     let pragma_value_to_set = elixir_term_to_rusqlite_value(env, value_term)?;
-    // Clone value too for error reporting
     let value_for_err = pragma_value_to_set.clone();
 
-    // Use with_conn helper. The closure now returns Result<Option<Value>, XqliteError>
-    // by handling rusqlite::Error internally.
-    let read_back_option = with_conn(&handle, |conn| {
-        let result = conn.pragma_update_and_check(
+    let result_option = with_conn(&handle, |conn| {
+        match conn.pragma_update_and_check(
             None,
-            &pragma_name,                               // Borrow original string
-            &pragma_value_to_set,                       // Borrow original value
-            |row: &Row<'_>| row.get::<usize, Value>(0), // Explicit type for row.get() -> Value
-        );
-
-        // Match on the rusqlite::Result *inside* the closure
-        match result {
-            Ok(value) => Ok(Some(value)), // Success, wrap value in Some
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), // Specific case, return None
-            Err(other_err) => {
-                // Map other rusqlite errors to our specific Pragma error
-                Err(XqliteError::CannotExecutePragma {
-                    // Use cloned values for the error context
-                    pragma: format!("PRAGMA {} = {:?};", pragma_name_for_err, value_for_err),
-                    reason: other_err.to_string(),
-                })
-            }
+            &pragma_name,
+            &pragma_value_to_set,
+            |row: &Row<'_>| row.get::<usize, Value>(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(other_err) => Err(XqliteError::CannotExecutePragma {
+                // Keep explicit mapping
+                pragma: format!("PRAGMA {} = {:?};", pragma_name_for_err, value_for_err),
+                reason: other_err.to_string(),
+            }),
         }
-    })?; // Propagate LockError or the mapped Pragma error from with_conn
+    })?;
 
-    // Encode the Option<Value> result after the lock is released
-    match read_back_option {
+    match result_option {
         Some(value) => Ok(encode_val(env, value)),
         None => Ok(no_value().encode(env)),
     }
@@ -564,27 +860,24 @@ fn raw_pragma_write_and_read<'a>(
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
-        conn.execute("BEGIN;", [])
-            .map(|_| true)
-            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+        conn.execute("BEGIN;", [])?;
+        Ok(true)
     })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
-        conn.execute("COMMIT;", [])
-            .map(|_| true)
-            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+        conn.execute("COMMIT;", [])?;
+        Ok(true)
     })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
-        conn.execute("ROLLBACK;", [])
-            .map(|_| true)
-            .map_err(|e| XqliteError::CannotExecute(e.to_string()))
+        conn.execute("ROLLBACK;", [])?;
+        Ok(true)
     })
 }
 
