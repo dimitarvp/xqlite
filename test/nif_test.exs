@@ -68,6 +68,15 @@ defmodule XqliteNifTest do
     """
   ]
 
+  @test_3_create_and_insert ~S"""
+  CREATE TABLE batch_test_table (
+    id INTEGER PRIMARY KEY,
+    pi_value REAL NOT NULL,
+    label TEXT NOT NULL
+  );
+  INSERT INTO batch_test_table (id, pi_value, label) VALUES (42, 3.14159, 'approx_pi');
+  """
+
   setup do
     # Ensure the invalid path target doesn't exist before tests using it
     if File.exists?(@invalid_db_path) do
@@ -177,6 +186,22 @@ defmodule XqliteNifTest do
                 rows: [],
                 num_rows: 0
               }} == NIF.raw_query(conn, "SELECT * FROM test1 where id = 100;")
+    end
+
+    test "create a table and insert records in a single SQL block delimited by a semicolon", %{
+      conn: conn
+    } do
+      assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @test_3_create_and_insert)
+
+      query_sql = "SELECT id, pi_value, label FROM batch_test_table WHERE id = ?1;"
+      query_params = [42]
+
+      assert {:ok,
+              %{
+                columns: ["id", "pi_value", "label"],
+                rows: [[42, 3.14159, "approx_pi"]],
+                num_rows: 1
+              }} = XqliteNIF.raw_query(conn, query_sql, query_params)
     end
 
     test "fetch all records", %{conn: conn} do

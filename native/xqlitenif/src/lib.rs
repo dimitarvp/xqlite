@@ -808,6 +808,17 @@ fn raw_execute<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn raw_execute_batch(
+    handle: ResourceArc<XqliteConn>,
+    sql_batch: String,
+) -> Result<bool, XqliteError> {
+    with_conn(&handle, |conn| {
+        conn.execute_batch(&sql_batch)?;
+        Ok(true)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn raw_pragma_write(
     handle: ResourceArc<XqliteConn>,
     pragma_sql: String,
