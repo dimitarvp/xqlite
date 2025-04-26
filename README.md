@@ -1,36 +1,141 @@
-# Description
+# Xqlite
 
-SQLite3 library and an adapter for Ecto 3.x in one package (the minimum Ecto 3.x version is still TBD). It steps on the excellent [rusqlite](https://crates.io/crates/rusqlite) Rust crate.
+[![Hex version](https://img.shields.io/hexpm/v/xqlite.svg?style=flat)](https://hex.pm/packages/xqlite)
+[![Build Status](https://github.com/dimitarvp/xqlite/workflows/CI/badge.svg)](https://github.com/dimitarvp/xqlite/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**WARNING**: Not fully ready for use yet. Read the roadmap for details.
+Low-level, safe, and fast NIF bindings to SQLite 3 for Elixir, powered by Rust and the excellent [rusqlite](https://crates.io/crates/rusqlite) crate.
 
-# Current status, priorities, and technical background
+This library provides direct access to core SQLite functionality. For seamless Ecto 3.x integration (including connection pooling, migrations, and Ecto types), please see the planned [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) library (work in progress).
 
-I am looking for the best Rust primitives and 3rd party libraries to use as less locks as possible when working with sqlite since it itself uses enough of them and I don't want the Rust code to do superfluous synchronization.
+**Target Audience:** Developers needing direct, performant control over SQLite operations from Elixir, potentially as a foundation for higher-level libraries, or for those not interested in Ecto integration.
 
-Apparently there are some sqlite operations that aren't threadsafe in serialized mode (the so-called "full mutex" sqlite mode). Context: https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109. And a link to the official sqlite3 docs: https://sqlite.org/threadsafe.html
+## Core Design & Thread Safety
 
-For these reasons, this library will always open sqlite connections in the so-called "no mutex" mode -- meaning that every time an sqlite operation is issued on the Elixir side, the Rust code will get a new sqlite connection from an internal pool so as to never share a single internal sqlite database handle between OTP processes. I haven't figured out how to balance the publicly exposed Erlang/Elixir pool with that internal Rust pool just yet, that's a high-prio task for the near future.
+SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for concurrent access ([`!Sync`](https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109)). To safely expose connections to the concurrent Elixir environment, `xqlite` wraps each `rusqlite::Connection` within an `Arc<Mutex<_>>` managed by a `ResourceArc`.
 
-**CURRENTLY WORKING ON**: to achieve stable and predictable Rust code with minimal lock contention. I am investing hard in making the code readable and understandable -- not happy with its first working version so I am experimenting with various other solutions.
+- **Safety:** This ensures that only one Elixir process can access a specific SQLite connection handle at any given moment, preventing data races and ensuring compatibility with Rustler's `Resource` requirements (`Sync`).
+- **Handles:** NIF functions return opaque, thread-safe resource handles (`ResourceArc<XqliteConn>`) representing individual SQLite connections.
+- **Pooling:** This NIF layer **does not** implement connection pooling. Managing a pool of connections (e.g., using `DBConnection`) is the responsibility of the calling Elixir code or higher-level libraries like the planned `xqlite_ecto3`.
 
-# Roadmap, goals, and TODO
+This library prioritizes compatibility with **modern SQLite versions**. While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal.
 
-- [x] Can open and close sqlite connections.
-- [x] Can retrieve and set PRAGMA properties.
-- [x] Can execute any arbitrary SQL statements but it does not return any records; only a number of records / tables / triggers / etc. which were affected by the statement.
-- [x] Can execute SELECT statements without arguments (arguments must be already in the query string, yes yes SQL injection I know but hey, I am just trying to arrive at a first working version).
-- [ ] **NEXT UP ON THE ELIXIR SIDE OF THE CODE**: Support all SQL operations -- insert, select, update, delete and all others (like creating triggers).
-- [ ] Provide support for connection pooling (which it already has but it's currently only used internally in the Rust code; it has to be integrated with [Poolboy](https://github.com/devinus/poolboy) and/or Ecto 3.x in general).
-- [ ] Provide an OTP wiring in the form of a [GenServer](https://hexdocs.pm/elixir/GenServer.html). Main idea is to centralize and serialize the write operations (INSERT, UPDATE, DELETE, DROP etc.) so the user doesn't accidentally delete a record and then try to update it.
-- [ ] Integrate with Ecto 3.x.
-- [ ] Provide first-class support for the [session extension](https://www.sqlite.org/sessionintro.html) so the users of the library can snapshot and isolate batches of changes (which are coincidentally also named changesets and patchsets; **not** to be mistaken with Ecto's [Changeset](https://hexdocs.pm/ecto/Ecto.Changeset.html#content)).
+## Current Capabilities
 
-# Far future and potentially impossible goals
+The `XqliteNIF` module provides the following low-level functions:
 
-- To provide an optional strict mode with guidelines borrowed [from sqlite itself](https://sqlite.org/src/wiki?name=StrictMode). Additionally, this is going to involve automatically injecting sqlite triggers in the database that enforce proper types in every column (a la PostgreSQL), combined with runtime type checks -- pattern-matching and guards -- in the Elixir code. It's probably going to be clunky and not provide 100% guarantee but the author feels it's still going to be a huge improvement over the basically almost untyped raw sqlite.
+- **Connection Management:**
+  - `raw_open(path :: String.t())`: Opens a file-based database.
+  - `raw_open_in_memory(uri :: String.t())`: Opens an in-memory database (can use URI options like `cache=shared`).
+  - `raw_open_temporary()`: Opens a private, temporary on-disk database.
+  - `raw_close(conn :: ResourceArc<XqliteConn>)`: Conceptually closes the connection (relies on BEAM garbage collection of the resource handle for actual closing). Returns `{:ok, true}` immediately.
+- **Query Execution:**
+  - `raw_query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements.
+    - Supports positional (`[1, "foo"]`) or named (`[val1: 1, val2: "foo"]`) parameters.
+    - Returns `{:ok, %{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}}` or `{:error, reason}`.
+- **Statement Execution:**
+  - `raw_execute(conn, sql :: String.t(), params :: list())`: Executes `INSERT`, `UPDATE`, `DELETE`, DDL, etc.
+    - Supports positional parameters only (`[1, "foo"]`).
+    - Returns `{:ok, affected_rows :: non_neg_integer()}` or `{:error, reason}`.
+- **PRAGMA Handling:**
+  - `raw_pragma_write(conn, pragma_sql :: String.t())`: Executes a PRAGMA statement that modifies state (e.g., `PRAGMA journal_mode = WAL`). Returns affected rows (usually 0).
+  - `raw_pragma_write_and_read(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value and reads it back. Returns `{:ok, read_value}` or `{:ok, :no_value}`.
+- **Transaction Control:**
+  - `raw_begin(conn)`: Executes `BEGIN;`.
+  - `raw_commit(conn)`: Executes `COMMIT;`.
+  - `raw_rollback(conn)`: Executes `ROLLBACK;`.
+- **Error Handling:**
+  - All functions return `{:ok, result}` or `{:error, reason}` tuples.
+  - `reason` provides structured information about the error (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:constraint_violation, kind, message}`, `{:invalid_parameter_count, %{expected: _, provided: _}}`, etc.). See `XqliteError` in Rust code for details.
 
-# Installation
+## Basic Usage Examples
+
+```elixir
+# --- Opening a connection ---
+case XqliteNIF.raw_open("my_database.db") do
+  {:ok, conn} ->
+    IO.puts("Connection opened successfully.")
+    # Use conn...
+    # Remember to eventually let conn go out of scope or call raw_close
+    # XqliteNIF.raw_close(conn) # Optional, GC handles it
+
+  {:error, reason} ->
+    IO.inspect(reason, label: "Failed to open database")
+end
+
+# --- Executing a query (SELECT) ---
+sql_select = "SELECT id, name FROM users WHERE id = ?1;"
+params_select = [1]
+
+case XqliteNIF.raw_query(conn, sql_select, params_select) do
+  {:ok, %{columns: cols, rows: rows, num_rows: num}} ->
+    IO.puts("Query successful:")
+    IO.inspect(cols, label: "Columns")
+    IO.inspect(rows, label: "Rows")
+    IO.inspect(num, label: "Num Rows")
+
+  {:error, reason} ->
+    IO.inspect(reason, label: "Query failed")
+end
+
+# --- Executing a statement (INSERT) ---
+sql_insert = "INSERT INTO users (name, email) VALUES (?1, ?2);"
+params_insert = ["Alice", "alice@example.com"]
+
+case XqliteNIF.raw_execute(conn, sql_insert, params_insert) do
+  {:ok, affected_rows} ->
+    IO.puts("Insert successful. Rows affected: #{affected_rows}")
+
+  {:error, reason} ->
+    IO.inspect(reason, label: "Insert failed")
+    # Example: {:error, {:constraint_violation, :constraint_unique, "UNIQUE constraint failed: users.email"}}
+end
+
+# --- Using a transaction ---
+case XqliteNIF.raw_begin(conn) do
+  {:ok, true} ->
+    # Perform operations within the transaction
+    case XqliteNIF.raw_execute(conn, "UPDATE accounts SET balance = balance - 100 WHERE id = 1", []) do
+      {:ok, 1} ->
+        case XqliteNIF.raw_execute(conn, "UPDATE accounts SET balance = balance + 100 WHERE id = 2", []) do
+          {:ok, 1} ->
+            # Commit if both succeed
+            XqliteNIF.raw_commit(conn)
+            IO.puts("Transaction committed.")
+          {:error, reason_2} ->
+            IO.inspect(reason_2, label: "Second update failed, rolling back")
+            XqliteNIF.raw_rollback(conn)
+        end
+      {:error, reason_1} ->
+        IO.inspect(reason_1, label: "First update failed, rolling back")
+        XqliteNIF.raw_rollback(conn)
+    end
+  {:error, reason_begin} ->
+    IO.inspect(reason_begin, label: "Failed to begin transaction")
+end
+
+```
+
+## Roadmap
+
+The following features are planned for the **`xqlite`** (NIF) library:
+
+- [ ] **Schema Introspection:** Add NIFs to query schema details using `PRAGMA` commands (`table_list`, `table_info`, `foreign_key_list`, `index_xinfo`, etc.) and fetch raw `CREATE` SQL from `sqlite_schema`.
+- [ ] **Batch Execution:** Add `raw_execute_batch/2` NIF for executing multiple SQL statements in a single string (useful for `structure.sql` loading).
+- [ ] **Savepoints:** Add NIFs for managing transaction savepoints (`raw_savepoint`, `raw_rollback_to_savepoint`, `raw_release_savepoint`).
+- [ ] **Last Insert RowID:** Add `last_insert_rowid/1` NIF.
+
+The **`xqlite_ecto3`** library (separate project) will provide:
+
+- [ ] Full Ecto 3.x adapter implementation (`use Ecto.Adapters.SQL`).
+- [ ] Integration with `DBConnection` for connection pooling.
+- [ ] Type handling (`dumpers`/`loaders`) for mapping Ecto types to SQLite storage (including Date/Time, Decimals, Binaries).
+- [ ] Migration support.
+- [ ] Structure dump/load (`mix ecto.dump`, `mix ecto.load`).
+
+Further future possibilities include exploring SQLite's Session Extension and potentially a "Strict Mode".
+
+## Installation
 
 This package is not yet published on hex.pm. To use it, add this to your list of dependencies in `mix.exs`:
 
@@ -42,14 +147,12 @@ def deps do
 end
 ```
 
-When I add it to hex.pm I'll start tagging it properly as well and then versions can be used normally.
+Ensure you have a compatible Rust toolchain installed.
 
-# Technical notes
+## Contributing
 
-- Testing both the Elixir and the Rust side is a first priority. No matter what feature gets added, it comes with tests. Please do not ever rely on reverse-engineering the code. Implementation details _will_ be changing under your feet. I'll gradually be stabilizing the public contract of the library -- please do only lean on that.
+Contributions are welcome! Please feel free to open issues or submit pull requests. Focus on testing any new code added. Rely only on the public Elixir API provided by the `XqliteNIF` module, as internal Rust implementation details may change.
 
-- `Mix.Config` will not be used to configure this library. Every needed configuration will be provided to the library's function directly. Additionally, the future `GenServer` will likely be made to also carry configuration for convenience.
+## License
 
-- Elixir 1.9's `Config` will not be used either. See [Avoid application configuration](https://hexdocs.pm/elixir/library-guidelines.html#avoid-application-configuration) by Elixir's authors.
-
-- The `Xqlite.Config` module has been created but it's not used anywhere for now.
+This project is licensed under the terms of the MIT license. See the [`LICENSE.md`](LICENSE.md) file for details.
