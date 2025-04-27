@@ -168,6 +168,42 @@ defmodule XqliteNifTest do
               }} == XqliteNIF.raw_query(conn, query_sql, query_params)
     end
 
+    test "last_insert_rowid returns the explicit rowid of the last inserted row", %{conn: conn} do
+      # 1. Setup: Create a simple table with an INTEGER PRIMARY KEY
+      create_sql = "CREATE TABLE rowid_test (id INTEGER PRIMARY KEY, data TEXT);"
+      # DDL execution usually affects 0 user rows
+      assert {:ok, 0} == XqliteNIF.raw_execute(conn, create_sql, [])
+
+      # 2. Action: Insert a row providing an explicit ID
+      insert_sql = "INSERT INTO rowid_test (id, data) VALUES (?1, ?2);"
+      # The specific ID we are inserting
+      explicit_id = 123
+      insert_params = [explicit_id, "some test data"]
+      # Assert that the insert affected 1 row
+      assert {:ok, 1} == XqliteNIF.raw_execute(conn, insert_sql, insert_params)
+
+      # 3. Verification: Call last_insert_rowid immediately and assert the explicit ID
+      assert {:ok, 123} == XqliteNIF.last_insert_rowid(conn)
+    end
+
+    # Optional: Test with default rowid generation (should be 1 for first insert)
+    test "last_insert_rowid returns the auto-generated rowid when ID is not provided", %{
+      conn: conn
+    } do
+      # 1. Setup: Create a simple table with an INTEGER PRIMARY KEY
+      create_sql = "CREATE TABLE rowid_test_auto (id INTEGER PRIMARY KEY, data TEXT);"
+      assert {:ok, 0} == XqliteNIF.raw_execute(conn, create_sql, [])
+
+      # 2. Action: Insert a row WITHOUT providing an explicit ID
+      insert_sql = "INSERT INTO rowid_test_auto (data) VALUES (?1);"
+      insert_params = ["auto data"]
+      assert {:ok, 1} == XqliteNIF.raw_execute(conn, insert_sql, insert_params)
+
+      # 3. Verification: Call last_insert_rowid. For the first insert in a fresh table,
+      # SQLite typically generates rowid 1.
+      assert {:ok, 1} == XqliteNIF.last_insert_rowid(conn)
+    end
+
     test "raw_rollback_to_savepoint reverts changes made after the savepoint", %{conn: conn} do
       # Setup: Create table and insert initial row (id: 1)
       assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @savepoint_table_setup)

@@ -16,6 +16,7 @@ defmodule XqliteNIF do
   def raw_savepoint(_conn, _name), do: err()
   def raw_rollback_to_savepoint(_conn, _name), do: err()
   def raw_release_savepoint(_conn, _name), do: err()
+  def last_insert_rowid(_conn), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

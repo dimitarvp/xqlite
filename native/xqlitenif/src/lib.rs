@@ -934,6 +934,11 @@ fn raw_release_savepoint(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError> {
+    with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn raw_close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     Ok(true)
 }
