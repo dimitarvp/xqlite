@@ -77,6 +77,14 @@ defmodule XqliteNifTest do
   INSERT INTO batch_test_table (id, pi_value, label) VALUES (42, 3.14159, 'approx_pi');
   """
 
+  @savepoint_table_setup ~S"""
+  CREATE TABLE savepoint_test (
+    id INTEGER PRIMARY KEY,
+    val TEXT NOT NULL
+  );
+  INSERT INTO savepoint_test (id, val) VALUES (1, 'one');
+  """
+
   setup do
     # Ensure the invalid path target doesn't exist before tests using it
     if File.exists?(@invalid_db_path) do
@@ -137,7 +145,7 @@ defmodule XqliteNifTest do
     end
   end
 
-  describe "various tests on an initially empty database" do
+  describe "various tests on an initially empty database:" do
     setup do
       {:ok, conn} = NIF.raw_open_in_memory(":memory:")
       on_exit(fn -> NIF.raw_close(conn) end)
@@ -158,6 +166,107 @@ defmodule XqliteNifTest do
                 rows: [[42, 3.14159, "approx_pi"]],
                 num_rows: 1
               }} == XqliteNIF.raw_query(conn, query_sql, query_params)
+    end
+
+    test "raw_rollback_to_savepoint reverts changes made after the savepoint", %{conn: conn} do
+      # Setup: Create table and insert initial row (id: 1)
+      assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @savepoint_table_setup)
+
+      # Verify initial state
+      assert_savepoint_record_present(conn, 1, "one")
+
+      # Start the main transaction
+      assert {:ok, true} == XqliteNIF.raw_begin(conn)
+
+      # Insert row 2 within the main transaction
+      assert {:ok, 1} ==
+               XqliteNIF.raw_execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
+
+      # Verify row 2 exists within the transaction
+      assert_savepoint_record_present(conn, 2, "two")
+
+      # Create a savepoint
+      assert {:ok, true} == XqliteNIF.raw_savepoint(conn, "sp1")
+
+      # Insert row 3 after the savepoint
+      assert {:ok, 1} ==
+               XqliteNIF.raw_execute(
+                 conn,
+                 "INSERT INTO savepoint_test VALUES (3, 'three')",
+                 []
+               )
+
+      # Verify row 3 exists before rollback
+      assert_savepoint_record_present(conn, 3, "three")
+
+      # Rollback to the savepoint "sp1"
+      assert {:ok, true} == XqliteNIF.raw_rollback_to_savepoint(conn, "sp1")
+
+      # Verify: Row 3 should now be gone
+      assert_savepoint_record_missing(conn, 3)
+
+      # Verify: Row 2 should still be there
+      assert_savepoint_record_present(conn, 2, "two")
+
+      # Commit the main transaction (which now only includes the insertion of row 2)
+      assert {:ok, true} == XqliteNIF.raw_commit(conn)
+
+      # Final verification outside transaction
+      assert_savepoint_record_present(conn, 1, "one")
+      assert_savepoint_record_present(conn, 2, "two")
+      assert_savepoint_record_missing(conn, 3)
+    end
+
+    test "raw_release_savepoint incorporates changes made after the savepoint into the transaction",
+         %{
+           conn: conn
+         } do
+      # Setup: Create table and insert initial row (id: 1)
+      assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @savepoint_table_setup)
+
+      # Verify initial state
+      assert_savepoint_record_present(conn, 1, "one")
+
+      # Start the main transaction
+      assert {:ok, true} == XqliteNIF.raw_begin(conn)
+
+      # Insert row 2 within the main transaction
+      assert {:ok, 1} ==
+               XqliteNIF.raw_execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
+
+      # Verify row 2 exists within the transaction
+      assert_savepoint_record_present(conn, 2, "two")
+
+      # Create a savepoint
+      assert {:ok, true} == XqliteNIF.raw_savepoint(conn, "sp1")
+
+      # Insert row 3 after the savepoint
+      assert {:ok, 1} ==
+               XqliteNIF.raw_execute(
+                 conn,
+                 "INSERT INTO savepoint_test VALUES (3, 'three')",
+                 []
+               )
+
+      # Verify row 3 exists before release
+      assert_savepoint_record_present(conn, 3, "three")
+
+      # Release the savepoint "sp1". This merges inserting row 3 into the main transaction.
+      assert {:ok, true} == XqliteNIF.raw_release_savepoint(conn, "sp1")
+
+      # Verify: Row 3 should still be there after release
+      assert_savepoint_record_present(conn, 3, "three")
+
+      # Verify: Row 2 should also still be there
+      assert_savepoint_record_present(conn, 2, "two")
+
+      # Commit the main transaction (which now includes the insertion of both row 2 and row 3)
+      assert {:ok, true} == XqliteNIF.raw_commit(conn)
+
+      # Final verification outside transaction
+      assert_savepoint_record_present(conn, 1, "one")
+      assert_savepoint_record_present(conn, 2, "two")
+      assert_savepoint_record_present(conn, 3, "three")
     end
   end
 
@@ -430,5 +539,36 @@ defmodule XqliteNifTest do
     end
 
     # end of "various tests with multiple tables:"
+  end
+
+  defp query_savepoint_test_row(conn, id) do
+    sql = "SELECT id, val FROM savepoint_test WHERE id = ?1;"
+    XqliteNIF.raw_query(conn, sql, [id])
+  end
+
+  # Asserts that a specific record exists with the expected value
+  defp assert_savepoint_record_present(conn, id, expected_val) do
+    expected_result =
+      {:ok,
+       %{
+         columns: ["id", "val"],
+         rows: [[id, expected_val]],
+         num_rows: 1
+       }}
+
+    assert expected_result == query_savepoint_test_row(conn, id)
+  end
+
+  # Asserts that a specific record does NOT exist
+  defp assert_savepoint_record_missing(conn, id) do
+    expected_result =
+      {:ok,
+       %{
+         columns: ["id", "val"],
+         rows: [],
+         num_rows: 0
+       }}
+
+    assert expected_result == query_savepoint_test_row(conn, id)
   end
 end
