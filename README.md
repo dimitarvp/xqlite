@@ -18,7 +18,7 @@ SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for c
 - **Handles:** NIF functions return opaque, thread-safe resource handles (`ResourceArc<XqliteConn>`) representing individual SQLite connections.
 - **Pooling:** This NIF layer **does not** implement connection pooling. Managing a pool of connections (e.g., using `DBConnection`) is the responsibility of the calling Elixir code or higher-level libraries like the planned `xqlite_ecto3`.
 
-This library prioritizes compatibility with **modern SQLite versions**. While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal.
+This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.0 recommended). While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal. **Notably, retrieving primary keys automatically after insertion into `WITHOUT ROWID` tables is only reliably supported via the `RETURNING` clause (available since SQLite 3.35.0). Using `WITHOUT ROWID` tables on older SQLite versions may require you to supply primary key values explicitly within your application, as `last_insert_rowid/1` cannot be used for these tables.**
 
 ## Current Capabilities
 
@@ -30,13 +30,14 @@ The `XqliteNIF` module provides the following low-level functions:
   - `raw_open_temporary()`: Opens a private, temporary on-disk database.
   - `raw_close(conn :: ResourceArc<XqliteConn>)`: Conceptually closes the connection (relies on BEAM garbage collection of the resource handle for actual closing). Returns `{:ok, true}` immediately.
 - **Query Execution:**
-  - `raw_query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements.
+  - `raw_query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements (including `INSERT/UPDATE/DELETE ... RETURNING ...`).
     - Supports positional (`[1, "foo"]`) or named (`[val1: 1, val2: "foo"]`) parameters.
     - Returns `{:ok, %{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}}` or `{:error, reason}`.
 - **Statement Execution:**
-  - `raw_execute(conn, sql :: String.t(), params :: list())`: Executes `INSERT`, `UPDATE`, `DELETE`, DDL, etc.
+  - `raw_execute(conn, sql :: String.t(), params :: list())`: Executes standard `INSERT`, `UPDATE`, `DELETE`, DDL, etc., that do not return rows.
     - Supports positional parameters only (`[1, "foo"]`).
     - Returns `{:ok, affected_rows :: non_neg_integer()}` or `{:error, reason}`.
+  - `raw_execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements separated by semicolons in a single string. Returns `{:ok, true}` on success.
 - **PRAGMA Handling:**
   - `raw_pragma_write(conn, pragma_sql :: String.t())`: Executes a PRAGMA statement that modifies state (e.g., `PRAGMA journal_mode = WAL`). Returns affected rows (usually 0).
   - `raw_pragma_write_and_read(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value and reads it back. Returns `{:ok, read_value}` or `{:ok, :no_value}`.
@@ -44,9 +45,18 @@ The `XqliteNIF` module provides the following low-level functions:
   - `raw_begin(conn)`: Executes `BEGIN;`.
   - `raw_commit(conn)`: Executes `COMMIT;`.
   - `raw_rollback(conn)`: Executes `ROLLBACK;`.
+  - `raw_savepoint(conn, name :: String.t())`: Creates a named transaction savepoint.
+  - `raw_release_savepoint(conn, name :: String.t())`: Releases a named savepoint, incorporating its changes.
+  - `raw_rollback_to_savepoint(conn, name :: String.t())`: Rolls back changes to a named savepoint.
+- **Inserted Row ID:**
+  - `last_insert_rowid(conn)`: Retrieves the integer `rowid` of the most recent successful `INSERT` into a standard rowid table on the given database connection. Returns `{:ok, rowid :: integer()}` or `{:error, reason}`.
+    - **Important Caveats:**
+      - This function reflects the state of the specific `conn` handle. If the _same handle_ is shared and used concurrently for `INSERT`s by multiple Elixir processes (which is discouraged), the returned value might belong to an `INSERT` from a different process than the one calling `last_insert_rowid`. Standard connection pooling (e.g., via `DBConnection`) avoids this issue by not sharing handles concurrently.
+      - It **does not work** for tables created using the `WITHOUT ROWID` option.
+      - It provides a fallback for retrieving generated IDs on **SQLite versions prior to 3.35.0**. For modern SQLite versions, using `INSERT ... RETURNING` via `raw_query/3` is the preferred and safer atomic method (see example below).
 - **Error Handling:**
   - All functions return `{:ok, result}` or `{:error, reason}` tuples.
-  - `reason` provides structured information about the error (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:constraint_violation, kind, message}`, `{:invalid_parameter_count, %{expected: _, provided: _}}`, etc.). See `XqliteError` in Rust code for details.
+  - `reason` provides structured information about the error (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:constraint_violation, kind, message}`, `{:invalid_parameter_count, %{expected: _, provided: _}}`, etc.). See `XqliteError` in the Rust code for details.
 
 ## Basic Usage Examples
 
@@ -79,16 +89,37 @@ case XqliteNIF.raw_query(conn, sql_select, params_select) do
 end
 
 # --- Executing a statement (INSERT) ---
+# Use this when you don't need the inserted ID back immediately,
+# or when using SQLite < 3.35.0 with standard rowid tables.
 sql_insert = "INSERT INTO users (name, email) VALUES (?1, ?2);"
 params_insert = ["Alice", "alice@example.com"]
 
 case XqliteNIF.raw_execute(conn, sql_insert, params_insert) do
   {:ok, affected_rows} ->
     IO.puts("Insert successful. Rows affected: #{affected_rows}")
+    # Optionally call last_insert_rowid immediately after (see Caveats)
+    # case XqliteNIF.last_insert_rowid(conn) do
+    #   {:ok, id} -> IO.puts("Last insert ID (non-atomic): #{id}")
+    #   {:error, err} -> IO.inspect(err, label: "Failed to get last row ID")
+    # end
 
   {:error, reason} ->
     IO.inspect(reason, label: "Insert failed")
     # Example: {:error, {:constraint_violation, :constraint_unique, "UNIQUE constraint failed: users.email"}}
+end
+
+# --- Executing an INSERT and retrieving ID atomically (SQLite >= 3.35.0) ---
+# This is the PREFERRED method on modern SQLite versions.
+sql_insert_return = "INSERT INTO users (name, email) VALUES (?1, ?2) RETURNING id;"
+params_insert_return = ["Bob", "bob@example.com"]
+
+# Note: Use raw_query because INSERT...RETURNING returns rows/columns
+case XqliteNIF.raw_query(conn, sql_insert_return, params_insert_return) do
+  {:ok, %{columns: ["id"], rows: [[inserted_id]], num_rows: 1}} ->
+    IO.puts("Insert successful. Atomically retrieved ID: #{inserted_id}")
+
+  {:error, reason} ->
+    IO.inspect(reason, label: "Insert/Returning failed")
 end
 
 # --- Using a transaction ---
@@ -121,9 +152,6 @@ end
 The following features are planned for the **`xqlite`** (NIF) library:
 
 - [ ] **Schema Introspection:** Add NIFs to query schema details using `PRAGMA` commands (`table_list`, `table_info`, `foreign_key_list`, `index_xinfo`, etc.) and fetch raw `CREATE` SQL from `sqlite_schema`.
-- [ ] **Batch Execution:** Add `raw_execute_batch/2` NIF for executing multiple SQL statements in a single string (useful for `structure.sql` loading).
-- [ ] **Savepoints:** Add NIFs for managing transaction savepoints (`raw_savepoint`, `raw_rollback_to_savepoint`, `raw_release_savepoint`).
-- [ ] **Last Insert RowID:** Add `last_insert_rowid/1` NIF.
 
 The **`xqlite_ecto3`** library (separate project) will provide:
 
