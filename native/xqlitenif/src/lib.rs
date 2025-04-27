@@ -701,6 +701,11 @@ fn is_keyword<'a>(list_term: Term<'a>) -> bool {
     }
 }
 
+#[inline]
+fn quote_savepoint_name(name: &str) -> String {
+    format!("'{}'", name.replace('\'', "''"))
+}
+
 fn with_conn<F, R>(handle: &ResourceArc<XqliteConn>, func: F) -> Result<R, XqliteError>
 where
     F: FnOnce(&Connection) -> Result<R, XqliteError>,
@@ -888,6 +893,42 @@ fn raw_commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 fn raw_rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
         conn.execute("ROLLBACK;", [])?;
+        Ok(true)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_savepoint(handle: ResourceArc<XqliteConn>, name: String) -> Result<bool, XqliteError> {
+    with_conn(&handle, |conn| {
+        let quoted_name = quote_savepoint_name(&name);
+        let sql = format!("SAVEPOINT {};", quoted_name);
+        conn.execute(&sql, [])?;
+        Ok(true)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_rollback_to_savepoint(
+    handle: ResourceArc<XqliteConn>,
+    name: String,
+) -> Result<bool, XqliteError> {
+    with_conn(&handle, |conn| {
+        let quoted_name = quote_savepoint_name(&name);
+        let sql = format!("ROLLBACK TO SAVEPOINT {};", quoted_name);
+        conn.execute(&sql, [])?;
+        Ok(true)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn raw_release_savepoint(
+    handle: ResourceArc<XqliteConn>,
+    name: String,
+) -> Result<bool, XqliteError> {
+    with_conn(&handle, |conn| {
+        let quoted_name = quote_savepoint_name(&name);
+        let sql = format!("RELEASE SAVEPOINT {};", quoted_name);
+        conn.execute(&sql, [])?;
         Ok(true)
     })
 }
