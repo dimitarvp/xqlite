@@ -447,24 +447,23 @@ defmodule Xqlite.SchemaIntrospectionTest do
     expected_cols = [
       %Schema.IndexColumnInfo{
         index_column_sequence: 0,
+        # 'full_name' is column 2 (0-based) in 'users' table
+        table_column_id: 2,
         name: "full_name",
         sort_order: :asc,
         collation: "BINARY",
         is_key_column: true
       },
-      # Implicitly included PK (user_id)
       %Schema.IndexColumnInfo{
         index_column_sequence: 1,
-        # Name is nil for implicit PK/rowid
+        # Implicitly included rowid/PK has cid -1
+        table_column_id: -1,
         name: nil,
         sort_order: :asc,
         collation: "BINARY",
-        # It's an included column, not key
         is_key_column: false
       }
     ]
-
-    # No sort needed, PRAGMA returns in sequence order
 
     assert {:ok, expected_cols} == XqliteNIF.raw_schema_index_columns(conn, "idx_users_name")
   end
@@ -475,23 +474,23 @@ defmodule Xqlite.SchemaIntrospectionTest do
     expected_cols = [
       %Schema.IndexColumnInfo{
         index_column_sequence: 0,
+        # 'email' is column 3 in 'users' table
+        table_column_id: 3,
         name: "email",
         sort_order: :desc,
         collation: "BINARY",
         is_key_column: true
       },
-      # Implicitly included PK (user_id)
       %Schema.IndexColumnInfo{
         index_column_sequence: 1,
+        # Implicitly included rowid/PK has cid -1
+        table_column_id: -1,
         name: nil,
-        # Implicit PK sort is ASC
         sort_order: :asc,
         collation: "BINARY",
         is_key_column: false
       }
     ]
-
-    # No sort needed
 
     assert {:ok, expected_cols} ==
              XqliteNIF.raw_schema_index_columns(conn, "idx_users_email_desc")
@@ -503,6 +502,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
       [
         %Schema.IndexColumnInfo{
           index_column_sequence: 0,
+          # 'user_id' is column 0 in 'user_items'
+          table_column_id: 0,
           name: "user_id",
           sort_order: :asc,
           collation: "BINARY",
@@ -510,22 +511,23 @@ defmodule Xqlite.SchemaIntrospectionTest do
         },
         %Schema.IndexColumnInfo{
           index_column_sequence: 1,
+          # 'item_sku' is column 1 in 'user_items'
+          table_column_id: 1,
           name: "item_sku",
           sort_order: :asc,
           collation: "BINARY",
           is_key_column: true
         },
-        # Implicitly included rowid
         %Schema.IndexColumnInfo{
           index_column_sequence: 2,
+          # Implicitly included rowid
+          table_column_id: -1,
           name: nil,
           sort_order: :asc,
           collation: "BINARY",
           is_key_column: false
         }
       ]
-
-    # No sort needed, should return in sequence order
 
     assert {:ok, expected_cols} ==
              XqliteNIF.raw_schema_index_columns(conn, "sqlite_autoindex_user_items_1")

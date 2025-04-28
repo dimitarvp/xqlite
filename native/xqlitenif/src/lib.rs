@@ -196,6 +196,7 @@ pub(crate) struct IndexInfo {
 #[module = "Xqlite.Schema.IndexColumnInfo"]
 pub(crate) struct IndexColumnInfo {
     pub index_column_sequence: i64,
+    pub table_column_id: i64,
     pub name: Option<String>,
     pub sort_order: Atom,
     pub collation: String,
@@ -1560,7 +1561,7 @@ fn raw_schema_indexes(
 #[derive(Debug)]
 struct TempIndexColumnData {
     seqno: i64,
-    // cid: i64, // Column ID in table, often -1 for expressions, maybe omit?
+    cid: i64,             // Column ID in table, often -1 for expressions
     name: Option<String>, // Name is NULL for expressions
     desc: i64,            // Sort order: 0=ASC, 1=DESC
     coll: String,         // Collation sequence name
@@ -1574,7 +1575,6 @@ fn raw_schema_index_columns(
 ) -> Result<Vec<IndexColumnInfo>, XqliteError> {
     with_conn(&handle, |conn| {
         let quoted_index_name = quote_identifier(&index_name);
-        // Use index_xinfo for more details (collation, key/included)
         let sql = format!("PRAGMA index_xinfo({});", quoted_index_name);
         let mut stmt = conn.prepare(&sql)?;
 
@@ -1585,6 +1585,7 @@ fn raw_schema_index_columns(
                 // seqno(0), cid(1), name(2), desc(3), coll(4), key(5)
                 Ok(TempIndexColumnData {
                     seqno: row.get(0)?,
+                    cid: row.get(1)?,
                     name: row.get(2)?,
                     desc: row.get(3)?,
                     coll: row.get(4)?,
@@ -1608,7 +1609,7 @@ fn raw_schema_index_columns(
                             ),
                                 error_detail: SchemaErrorDetail::UnexpectedValue(
                                     unexpected_val,
-                                ), // Already String
+                                ),
                             }
                         })?;
 
@@ -1632,14 +1633,14 @@ fn raw_schema_index_columns(
                     // Construct final struct
                     final_cols.push(IndexColumnInfo {
                         index_column_sequence: temp_data.seqno,
-                        name: temp_data.name, // Keep Option<String>
+                        table_column_id: temp_data.cid,
+                        name: temp_data.name,
                         sort_order: sort_order_atom,
                         collation: temp_data.coll,
                         is_key_column: is_key_bool,
                     });
                 }
                 Err(rusqlite_err) => {
-                    // Propagate rusqlite errors
                     return Err(rusqlite_err.into());
                 }
             }
