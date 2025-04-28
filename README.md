@@ -54,9 +54,18 @@ The `XqliteNIF` module provides the following low-level functions:
       - This function reflects the state of the specific `conn` handle. If the _same handle_ is shared and used concurrently for `INSERT`s by multiple Elixir processes (which is discouraged), the returned value might belong to an `INSERT` from a different process than the one calling `last_insert_rowid`. Standard connection pooling (e.g., via `DBConnection`) avoids this issue by not sharing handles concurrently.
       - It **does not work** for tables created using the `WITHOUT ROWID` option.
       - It provides a fallback for retrieving generated IDs on **SQLite versions prior to 3.35.0**. For modern SQLite versions, using `INSERT ... RETURNING` via `raw_query/3` is the preferred and safer atomic method (see example below).
+- **Schema Introspection:**
+  - `raw_schema_databases(conn)`: Lists attached databases.
+  - `raw_schema_list_objects(conn, schema \\ nil)`: Lists objects (tables, views, etc.) optionally filtered by schema name.
+  - `raw_schema_columns(conn, table_name)`: Lists columns for a specific table.
+  - `raw_schema_foreign_keys(conn, table_name)`: Lists foreign keys originating from a specific table.
+  - `raw_schema_indexes(conn, table_name)`: Lists indexes defined on a specific table.
+  - `raw_schema_index_columns(conn, index_name)`: Lists columns comprising a specific index.
+  - `raw_get_create_sql(conn, object_name)`: Retrieves the original `CREATE` statement for an object.
+  - These functions return `{:ok, list_of_structs} | {:ok, string | nil} | {:error, reason}`. The structs are defined in the `Xqlite.Schema.*` modules (e.g., `Xqlite.Schema.ColumnInfo`). Please refer to those modules or generated documentation for detailed field descriptions and typespecs.
 - **Error Handling:**
   - All functions return `{:ok, result}` or `{:error, reason}` tuples.
-  - `reason` provides structured information about the error (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:constraint_violation, kind, message}`, `{:invalid_parameter_count, %{expected: _, provided: _}}`, etc.). See `XqliteError` in the Rust code for details.
+  - `reason` provides structured information about the error (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:constraint_violation, kind, message}`, `{:invalid_parameter_count, %{expected: _, provided: _}}`, `{:schema_parsing_error, context, detail}`, etc.). See `XqliteError` in the Rust code for details.
 
 ## Basic Usage Examples
 
@@ -122,6 +131,28 @@ case XqliteNIF.raw_query(conn, sql_insert_return, params_insert_return) do
     IO.inspect(reason, label: "Insert/Returning failed")
 end
 
+# --- Querying Schema Information ---
+# Example: Get column info for a table
+case XqliteNIF.raw_schema_columns(conn, "users") do
+  {:ok, [%Schema.ColumnInfo{name: first_col_name, type_affinity: first_col_affinity} | _rest]} ->
+    IO.puts("First column in 'users': #{first_col_name} (Affinity: #{first_col_affinity})")
+  {:ok, []} ->
+    IO.puts("Table 'users' not found or has no columns.")
+  {:error, reason} ->
+     IO.inspect(reason, label: "Failed to get columns for 'users'")
+end
+
+# Example: Get the CREATE statement for an object
+case XqliteNIF.raw_get_create_sql(conn, "users") do
+  {:ok, create_sql} when is_binary(create_sql) ->
+     IO.puts("CREATE SQL for 'users' starts with: #{String.slice(create_sql, 0, 50)}...")
+  {:ok, nil} ->
+     IO.puts("Object 'users' not found.")
+  {:error, reason} ->
+     IO.inspect(reason, label: "Failed to get CREATE SQL for 'users'")
+end
+# Other schema functions (raw_schema_list_objects, raw_schema_indexes, etc.) exist too.
+
 # --- Using a transaction ---
 case XqliteNIF.raw_begin(conn) do
   {:ok, true} ->
@@ -148,10 +179,6 @@ end
 ```
 
 ## Roadmap
-
-The following features are planned for the **`xqlite`** (NIF) library:
-
-- [ ] **Schema Introspection:** Add NIFs to query schema details using `PRAGMA` commands (`table_list`, `table_info`, `foreign_key_list`, `index_xinfo`, etc.) and fetch raw `CREATE` SQL from `sqlite_schema`.
 
 The **`xqlite_ecto3`** library (separate project) will provide:
 
