@@ -16,6 +16,13 @@ defmodule XqliteNIF do
   def raw_savepoint(_conn, _name), do: err()
   def raw_rollback_to_savepoint(_conn, _name), do: err()
   def raw_release_savepoint(_conn, _name), do: err()
+  def raw_schema_databases(_conn), do: err()
+  def raw_schema_list_objects(_conn, _schema \\ nil), do: err()
+  def raw_schema_columns(_conn, _table_name), do: err()
+  def raw_schema_foreign_keys(_conn, _table_name), do: err()
+  def raw_schema_indexes(_conn, _table_name), do: err()
+  def raw_schema_index_columns(_conn, _index_name), do: err()
+  def raw_get_create_sql(_conn, _object_name), do: err()
   def last_insert_rowid(_conn), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)
