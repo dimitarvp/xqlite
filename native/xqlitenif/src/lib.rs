@@ -26,6 +26,7 @@ rustler::atoms! {
     constraint_violation,
     constraint_vtab,
     create_index,
+    database_busy_or_locked,
     desc,
     error,
     execute_returned_results,
@@ -57,6 +58,7 @@ rustler::atoms! {
     num_rows,
     numeric,
     offset,
+    operation_interrupted,
     partial,
     pid,
     port,
@@ -264,6 +266,10 @@ pub(crate) enum XqliteError {
         pragma: String,
         reason: String,
     },
+    DatabaseBusyOrLocked {
+        message: String,
+    },
+    OperationInterrupted,
 
     // Row / Column Errors
     CannotFetchRow(String),
@@ -325,6 +331,12 @@ impl Display for XqliteError {
             XqliteError::CannotPrepareStatement(sql, reason) => write!(f, "Cannot prepare statement '{}': {}", sql, reason),
             XqliteError::CannotExecute(reason) => write!(f, "Cannot execute query/statement: {}", reason),
             XqliteError::CannotExecutePragma { pragma, reason } => write!(f, "Cannot execute PRAGMA '{}': {}", pragma, reason),
+            XqliteError::DatabaseBusyOrLocked { message } => {
+                write!(f, "Database busy or locked: {}", message)
+            }
+            XqliteError::OperationInterrupted => {
+                write!(f, "Database operation was interrupted")
+            }
             XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {}", reason),
             XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{}': {}", path, reason),
             XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {}", reason),
@@ -382,6 +394,10 @@ impl Encoder for XqliteError {
             XqliteError::CannotExecutePragma { pragma, reason } => {
                 (cannot_execute_pragma(), pragma, reason).encode(env)
             }
+            XqliteError::DatabaseBusyOrLocked { message } => {
+                (database_busy_or_locked(), message).encode(env)
+            }
+            XqliteError::OperationInterrupted => operation_interrupted().encode(env),
             XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
             XqliteError::CannotOpenDatabase(path, reason) => {
                 (cannot_open_database(), path, reason).encode(env)
@@ -506,12 +522,14 @@ impl From<rusqlite::Error> for XqliteError {
                                 "Attempt to write a readonly database".to_string()
                             }))
                         }
-                        // <<< Corrected: Use DatabaseBusy >>>
                         ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => {
-                            XqliteError::CannotExecute(msg_opt.unwrap_or_else(|| {
-                                "Database/table is locked or busy".to_string()
-                            }))
+                            XqliteError::DatabaseBusyOrLocked {
+                                message: msg_opt.unwrap_or_else(|| {
+                                    "Database/table is locked or busy".to_string()
+                                }),
+                            }
                         }
+                        ErrorCode::OperationInterrupted => XqliteError::OperationInterrupted,
                         ErrorCode::ApiMisuse => XqliteError::CannotExecute(
                             msg_opt
                                 .unwrap_or_else(|| "SQLite API misuse detected".to_string()),
