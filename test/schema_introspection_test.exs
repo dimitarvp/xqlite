@@ -84,56 +84,57 @@ defmodule Xqlite.SchemaIntrospectionTest do
   end
 
   test "raw_schema_list_objects lists all objects without filter", %{conn: conn} do
-    # We define the user objects we expect...
     expected_user_objects =
       [
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "active_users_view",
           object_type: :view,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "categories",
           object_type: :table,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "items",
           object_type: :table,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: true,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "user_items",
           object_type: :table,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "users",
           object_type: :table,
-          column_count: 6
+          column_count: 6,
+          is_data_writable: false,
+          strict: false
         }
       ]
       |> sort_by_name()
 
-    # ...then fetch the actual list...
     {:ok, actual_objects_unsorted} = XqliteNIF.raw_schema_list_objects(conn, nil)
 
-    # ...and filter the *actual* list to only include our expected user objects before comparing.
     actual_user_objects_sorted =
       Enum.filter(actual_objects_unsorted, fn obj ->
         obj.schema == "main" and
-          obj.name in [
-            "active_users_view",
-            "categories",
-            "items",
-            "user_items",
-            "users"
-          ]
+          obj.name in ["active_users_view", "categories", "items", "user_items", "users"]
       end)
       |> sort_by_name()
 
@@ -147,39 +148,49 @@ defmodule Xqlite.SchemaIntrospectionTest do
           schema: "main",
           name: "active_users_view",
           object_type: :view,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "categories",
           object_type: :table,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "items",
           object_type: :table,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: true,
+          strict: false
         },
-        # Add sqlite_schema expectation
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "sqlite_schema",
           object_type: :table,
-          # sqlite_schema has 5 columns
-          column_count: 5
+          column_count: 5,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "user_items",
           object_type: :table,
-          column_count: 3
+          column_count: 3,
+          is_data_writable: false,
+          strict: false
         },
         %Schema.SchemaObjectInfo{
           schema: "main",
           name: "users",
           object_type: :table,
-          column_count: 6
+          column_count: 6,
+          is_data_writable: false,
+          strict: false
         }
       ]
       |> sort_by_name()
@@ -199,6 +210,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 0,
         name: "user_id",
         type_affinity: :integer,
+        declared_type: "INTEGER",
         nullable: true,
         default_value: nil,
         primary_key_index: 1
@@ -207,6 +219,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 1,
         name: "category_id",
         type_affinity: :integer,
+        declared_type: "INTEGER",
         nullable: true,
         default_value: nil,
         primary_key_index: 0
@@ -215,6 +228,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 2,
         name: "full_name",
         type_affinity: :text,
+        declared_type: "TEXT",
         nullable: false,
         default_value: nil,
         primary_key_index: 0
@@ -223,6 +237,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 3,
         name: "email",
         type_affinity: :text,
+        declared_type: "TEXT",
         nullable: true,
         default_value: nil,
         primary_key_index: 0
@@ -231,6 +246,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 4,
         name: "balance",
         type_affinity: :float,
+        declared_type: "REAL",
         nullable: true,
         default_value: "0.0",
         primary_key_index: 0
@@ -239,6 +255,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 5,
         name: "config",
         type_affinity: :binary,
+        declared_type: "BLOB",
         nullable: true,
         default_value: nil,
         primary_key_index: 0
@@ -254,6 +271,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 0,
         name: "sku",
         type_affinity: :text,
+        declared_type: "TEXT",
         nullable: false,
         default_value: nil,
         primary_key_index: 1
@@ -262,6 +280,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 1,
         name: "description",
         type_affinity: :text,
+        declared_type: "TEXT",
         nullable: true,
         default_value: nil,
         primary_key_index: 0
@@ -270,6 +289,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 2,
         name: "price",
         type_affinity: :numeric,
+        declared_type: "NUMERIC",
         nullable: false,
         default_value: nil,
         primary_key_index: 0
@@ -285,6 +305,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 0,
         name: "user_id",
         type_affinity: :integer,
+        declared_type: "INTEGER",
         nullable: false,
         default_value: nil,
         primary_key_index: 1
@@ -293,6 +314,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 1,
         name: "item_sku",
         type_affinity: :text,
+        declared_type: "TEXT",
         nullable: false,
         default_value: nil,
         primary_key_index: 2
@@ -301,6 +323,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         column_id: 2,
         name: "quantity",
         type_affinity: :integer,
+        declared_type: "INTEGER",
         nullable: true,
         default_value: "1",
         primary_key_index: 0

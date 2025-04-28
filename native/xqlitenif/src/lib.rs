@@ -157,6 +157,8 @@ pub(crate) struct SchemaObjectInfo {
     pub name: String,
     pub object_type: Atom,
     pub column_count: i64,
+    pub is_data_writable: bool,
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, NifStruct)]
@@ -165,6 +167,7 @@ pub(crate) struct ColumnInfo {
     pub column_id: i64,
     pub name: String,
     pub type_affinity: Atom,
+    pub declared_type: String,
     pub nullable: bool,
     pub default_value: Option<String>,
     pub primary_key_index: u8,
@@ -1168,40 +1171,45 @@ fn raw_schema_databases(
 struct TempObjectInfo {
     schema: String,
     name: String,
-    obj_type_atom: Result<Atom, String>, // Keep atom conversion result here
+    obj_type_atom: Result<Atom, String>,
     column_count: i64,
+    wr_flag: i64,     // Raw value from PRAGMA 'wr' column (0 or 1)
+    strict_flag: i64, // Raw value from PRAGMA 'strict' column (0 or 1)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn raw_schema_list_objects(
     handle: ResourceArc<XqliteConn>,
-    schema: Option<String>, // Optional schema name to filter by
+    schema: Option<String>,
 ) -> Result<Vec<SchemaObjectInfo>, XqliteError> {
     with_conn(&handle, |conn| {
         let sql = "PRAGMA table_list;";
         let mut stmt = conn.prepare(sql)?;
 
-        // Step 1: Query and map, returning Vec<Result<MappedItem, rusqlite::Error>>
+        // Step 1: Query and map, returning Vec<Result<TempObjectInfo, rusqlite::Error>>
         let temp_results: Vec<Result<TempObjectInfo, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                // Inside query_map, return Result<_, rusqlite::Error>
+                // PRAGMA table_list columns: schema(0), name(1), type(2), ncol(3), wr(4), strict(5)
                 let obj_schema: String = row.get(0)?;
                 let obj_name: String = row.get(1)?;
                 let obj_type_str: String = row.get(2)?;
                 let column_count: i64 = row.get(3)?;
+                let wr_flag: i64 = row.get(4)?;
+                let strict_flag: i64 = row.get(5)?;
 
-                // Perform atom conversion, but keep the Result
                 let obj_type_atom_result =
-                    object_type_to_atom(&obj_type_str).map_err(|s| s.to_string()); // Map &str err to String err
+                    object_type_to_atom(&obj_type_str).map_err(|s| s.to_string());
 
                 Ok(TempObjectInfo {
                     schema: obj_schema,
                     name: obj_name,
                     obj_type_atom: obj_type_atom_result,
                     column_count,
+                    wr_flag,
+                    strict_flag,
                 })
-            })? // This '?' handles rusqlite errors from prepare/query
-            .collect(); // Collect into Vec<Result<TempObjectInfo, rusqlite::Error>>
+            })?
+            .collect();
 
         // Step 2: Process results, apply filter, and map errors
         let mut final_objects: Vec<SchemaObjectInfo> = Vec::new();
@@ -1211,22 +1219,14 @@ fn raw_schema_list_objects(
                     // Apply schema filter
                     if let Some(filter_schema) = &schema {
                         if temp_info.schema != *filter_schema {
-                            continue; // Skip if schema doesn't match
+                            continue;
                         }
                     }
 
-                    // Finalize atom conversion, mapping potential error
-                    match temp_info.obj_type_atom {
-                        Ok(atom) => {
-                            final_objects.push(SchemaObjectInfo {
-                                schema: temp_info.schema,
-                                name: temp_info.name,
-                                object_type: atom,
-                                column_count: temp_info.column_count,
-                            });
-                        }
+                    // Finalize atom conversion
+                    let atom = match temp_info.obj_type_atom {
+                        Ok(atom) => atom,
                         Err(unexpected_val) => {
-                            // Now we can construct and return the XqliteError
                             return Err(XqliteError::SchemaParsingError {
                                 context: format!(
                                     "Parsing object type for '{}'.'{}'",
@@ -1237,11 +1237,53 @@ fn raw_schema_list_objects(
                                 ),
                             });
                         }
-                    }
+                    };
+
+                    // Convert wr_flag (0/1) to boolean
+                    let is_writable = match temp_info.wr_flag {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(XqliteError::SchemaParsingError {
+                                context: format!(
+                                    "Parsing 'wr' flag for object '{}'.'{}'",
+                                    temp_info.schema, temp_info.name
+                                ),
+                                error_detail: SchemaErrorDetail::UnexpectedValue(
+                                    temp_info.wr_flag.to_string(),
+                                ),
+                            })
+                        }
+                    };
+
+                    // Convert strict_flag (0/1) to boolean
+                    let is_strict = match temp_info.strict_flag {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(XqliteError::SchemaParsingError {
+                                context: format!(
+                                    "Parsing 'strict' flag for object '{}'.'{}'",
+                                    temp_info.schema, temp_info.name
+                                ),
+                                error_detail: SchemaErrorDetail::UnexpectedValue(
+                                    temp_info.strict_flag.to_string(),
+                                ),
+                            })
+                        }
+                    };
+
+                    final_objects.push(SchemaObjectInfo {
+                        schema: temp_info.schema,
+                        name: temp_info.name,
+                        object_type: atom,
+                        column_count: temp_info.column_count,
+                        is_data_writable: is_writable,
+                        strict: is_strict,
+                    });
                 }
                 Err(rusqlite_err) => {
-                    // Propagate rusqlite errors encountered during row mapping
-                    return Err(rusqlite_err.into()); // Use From trait
+                    return Err(rusqlite_err.into());
                 }
             }
         }
@@ -1255,7 +1297,7 @@ fn raw_schema_list_objects(
 struct TempColumnData {
     cid: i64,
     name: String,
-    type_str: String,
+    type_str: String, // This holds the original declared type string
     notnull_flag: i64,
     dflt_value: Option<String>,
     pk_flag: i64,
@@ -1332,9 +1374,10 @@ fn raw_schema_columns(
                         column_id: temp_data.cid,
                         name: temp_data.name,
                         type_affinity: type_affinity_atom,
-                        nullable, // Use converted bool
+                        declared_type: temp_data.type_str, // Assign the original type string
+                        nullable,
                         default_value: temp_data.dflt_value,
-                        primary_key_index, // Use converted u8
+                        primary_key_index,
                     });
                 }
                 Err(rusqlite_err) => {
