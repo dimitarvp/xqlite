@@ -1278,7 +1278,7 @@ fn raw_schema_list_objects(
                         name: temp_info.name,
                         object_type: atom,
                         column_count: temp_info.column_count,
-                        is_writable: is_writable,
+                        is_writable,
                         strict: is_strict,
                     });
                 }
