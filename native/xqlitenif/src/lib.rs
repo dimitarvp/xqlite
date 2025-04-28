@@ -157,7 +157,7 @@ pub(crate) struct SchemaObjectInfo {
     pub name: String,
     pub object_type: Atom,
     pub column_count: i64,
-    pub is_data_writable: bool,
+    pub is_writable: bool,
     pub strict: bool,
 }
 
@@ -1278,7 +1278,7 @@ fn raw_schema_list_objects(
                         name: temp_info.name,
                         object_type: atom,
                         column_count: temp_info.column_count,
-                        is_data_writable: is_writable,
+                        is_writable: is_writable,
                         strict: is_strict,
                     });
                 }

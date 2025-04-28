@@ -91,7 +91,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "active_users_view",
           object_type: :view,
           column_count: 3,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -99,7 +99,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "categories",
           object_type: :table,
           column_count: 3,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -107,7 +107,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "items",
           object_type: :table,
           column_count: 3,
-          is_data_writable: true,
+          is_writable: true,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -115,7 +115,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "user_items",
           object_type: :table,
           column_count: 3,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -123,7 +123,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "users",
           object_type: :table,
           column_count: 6,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         }
       ]
@@ -149,7 +149,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "active_users_view",
           object_type: :view,
           column_count: 3,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -157,7 +157,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "categories",
           object_type: :table,
           column_count: 3,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -165,7 +165,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "items",
           object_type: :table,
           column_count: 3,
-          is_data_writable: true,
+          is_writable: true,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -173,7 +173,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "sqlite_schema",
           object_type: :table,
           column_count: 5,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -181,7 +181,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "user_items",
           object_type: :table,
           column_count: 3,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         },
         %Schema.SchemaObjectInfo{
@@ -189,7 +189,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           name: "users",
           object_type: :table,
           column_count: 6,
-          is_data_writable: false,
+          is_writable: false,
           strict: false
         }
       ]
