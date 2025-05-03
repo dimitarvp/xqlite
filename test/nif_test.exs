@@ -95,67 +95,67 @@ defmodule XqliteNifTest do
     :ok
   end
 
-  describe "raw_open/2 and raw_close/1" do
+  describe "open/2 and close/1" do
     test "opens a valid in-memory database, closes it, and fails on second close" do
-      assert {:ok, conn} = NIF.raw_open(@valid_db_path)
-      assert {:ok, true} = NIF.raw_close(conn)
-      assert {:ok, true} = NIF.raw_close(conn)
+      assert {:ok, conn} = NIF.open(@valid_db_path)
+      assert {:ok, true} = NIF.close(conn)
+      assert {:ok, true} = NIF.close(conn)
     end
 
     test "fails to open an invalid database path immediately" do
       assert {:error, {:cannot_open_database, @invalid_db_path, _reason}} =
-               NIF.raw_open(@invalid_db_path)
+               NIF.open(@invalid_db_path)
     end
 
     test "opens the same database path multiple times, returning the same handle conceptually" do
-      assert {:ok, conn1} = NIF.raw_open(@valid_db_path)
-      assert {:ok, conn2} = NIF.raw_open(@valid_db_path)
+      assert {:ok, conn1} = NIF.open(@valid_db_path)
+      assert {:ok, conn2} = NIF.open(@valid_db_path)
 
       # The resource handles themselves might be different ResourceArc wrappers,
       # but they should represent the same underlying pooled connection (keyed by path).
       # We can verify this by closing one and checking the other still works (tested by closing)
 
-      assert {:ok, true} = NIF.raw_close(conn1)
+      assert {:ok, true} = NIF.close(conn1)
 
       # Closing via conn2 should still succeed because it's no-op on the Rust side
       # as we are relying on the reference-counted Rust `Arc` to ultimately garbage-collect
       # the connection, which leads to actually closing it.
-      assert {:ok, true} = NIF.raw_close(conn2)
+      assert {:ok, true} = NIF.close(conn2)
     end
 
-    # end of describe "raw_open/2 and raw_close/1"
+    # end of describe "open/2 and close/1"
   end
 
-  describe "raw_pragma_write/2" do
+  describe "pragma_write/2" do
     test "can execute a simple PRAGMA" do
-      {:ok, conn} = NIF.raw_open(@valid_db_path)
-      assert {:ok, 0} = NIF.raw_pragma_write(conn, "PRAGMA synchronous = 0;")
-      assert {:ok, true} = NIF.raw_close(conn)
+      {:ok, conn} = NIF.open(@valid_db_path)
+      assert {:ok, 0} = NIF.pragma_write(conn, "PRAGMA synchronous = 0;")
+      assert {:ok, true} = NIF.close(conn)
     end
   end
 
-  describe "raw_query/3" do
+  describe "query/3" do
     test "can execute a simple query" do
-      {:ok, conn} = NIF.raw_open(@valid_db_path)
+      {:ok, conn} = NIF.open(@valid_db_path)
 
       assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
-               NIF.raw_query(conn, "SELECT 1;", [])
+               NIF.query(conn, "SELECT 1;", [])
 
-      assert {:ok, true} = NIF.raw_close(conn)
+      assert {:ok, true} = NIF.close(conn)
     end
   end
 
   describe "various tests on an initially empty database:" do
     setup do
-      {:ok, conn} = NIF.raw_open_in_memory(":memory:")
-      on_exit(fn -> NIF.raw_close(conn) end)
+      {:ok, conn} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
 
     test "create a table and insert records in a single SQL block delimited by a semicolon", %{
       conn: conn
     } do
-      assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @test_3_create_and_insert)
+      assert {:ok, true} == XqliteNIF.execute_batch(conn, @test_3_create_and_insert)
 
       query_sql = "SELECT id, pi_value, label FROM batch_test_table WHERE id = ?1;"
       query_params = [42]
@@ -165,14 +165,14 @@ defmodule XqliteNifTest do
                 columns: ["id", "pi_value", "label"],
                 rows: [[42, 3.14159, "approx_pi"]],
                 num_rows: 1
-              }} == XqliteNIF.raw_query(conn, query_sql, query_params)
+              }} == XqliteNIF.query(conn, query_sql, query_params)
     end
 
     test "last_insert_rowid returns the explicit rowid of the last inserted row", %{conn: conn} do
       # 1. Setup: Create a simple table with an INTEGER PRIMARY KEY
       create_sql = "CREATE TABLE rowid_test (id INTEGER PRIMARY KEY, data TEXT);"
       # DDL execution usually affects 0 user rows
-      assert {:ok, 0} == XqliteNIF.raw_execute(conn, create_sql, [])
+      assert {:ok, 0} == XqliteNIF.execute(conn, create_sql, [])
 
       # 2. Action: Insert a row providing an explicit ID
       insert_sql = "INSERT INTO rowid_test (id, data) VALUES (?1, ?2);"
@@ -180,7 +180,7 @@ defmodule XqliteNifTest do
       explicit_id = 123
       insert_params = [explicit_id, "some test data"]
       # Assert that the insert affected 1 row
-      assert {:ok, 1} == XqliteNIF.raw_execute(conn, insert_sql, insert_params)
+      assert {:ok, 1} == XqliteNIF.execute(conn, insert_sql, insert_params)
 
       # 3. Verification: Call last_insert_rowid immediately and assert the explicit ID
       assert {:ok, 123} == XqliteNIF.last_insert_rowid(conn)
@@ -192,41 +192,41 @@ defmodule XqliteNifTest do
     } do
       # 1. Setup: Create a simple table with an INTEGER PRIMARY KEY
       create_sql = "CREATE TABLE rowid_test_auto (id INTEGER PRIMARY KEY, data TEXT);"
-      assert {:ok, 0} == XqliteNIF.raw_execute(conn, create_sql, [])
+      assert {:ok, 0} == XqliteNIF.execute(conn, create_sql, [])
 
       # 2. Action: Insert a row WITHOUT providing an explicit ID
       insert_sql = "INSERT INTO rowid_test_auto (data) VALUES (?1);"
       insert_params = ["auto data"]
-      assert {:ok, 1} == XqliteNIF.raw_execute(conn, insert_sql, insert_params)
+      assert {:ok, 1} == XqliteNIF.execute(conn, insert_sql, insert_params)
 
       # 3. Verification: Call last_insert_rowid. For the first insert in a fresh table,
       # SQLite typically generates rowid 1.
       assert {:ok, 1} == XqliteNIF.last_insert_rowid(conn)
     end
 
-    test "raw_rollback_to_savepoint reverts changes made after the savepoint", %{conn: conn} do
+    test "rollback_to_savepoint reverts changes made after the savepoint", %{conn: conn} do
       # Setup: Create table and insert initial row (id: 1)
-      assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @savepoint_table_setup)
+      assert {:ok, true} == XqliteNIF.execute_batch(conn, @savepoint_table_setup)
 
       # Verify initial state
       assert_savepoint_record_present(conn, 1, "one")
 
       # Start the main transaction
-      assert {:ok, true} == XqliteNIF.raw_begin(conn)
+      assert {:ok, true} == XqliteNIF.begin(conn)
 
       # Insert row 2 within the main transaction
       assert {:ok, 1} ==
-               XqliteNIF.raw_execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
+               XqliteNIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
 
       # Verify row 2 exists within the transaction
       assert_savepoint_record_present(conn, 2, "two")
 
       # Create a savepoint
-      assert {:ok, true} == XqliteNIF.raw_savepoint(conn, "sp1")
+      assert {:ok, true} == XqliteNIF.savepoint(conn, "sp1")
 
       # Insert row 3 after the savepoint
       assert {:ok, 1} ==
-               XqliteNIF.raw_execute(
+               XqliteNIF.execute(
                  conn,
                  "INSERT INTO savepoint_test VALUES (3, 'three')",
                  []
@@ -236,7 +236,7 @@ defmodule XqliteNifTest do
       assert_savepoint_record_present(conn, 3, "three")
 
       # Rollback to the savepoint "sp1"
-      assert {:ok, true} == XqliteNIF.raw_rollback_to_savepoint(conn, "sp1")
+      assert {:ok, true} == XqliteNIF.rollback_to_savepoint(conn, "sp1")
 
       # Verify: Row 3 should now be gone
       assert_savepoint_record_missing(conn, 3)
@@ -245,7 +245,7 @@ defmodule XqliteNifTest do
       assert_savepoint_record_present(conn, 2, "two")
 
       # Commit the main transaction (which now only includes the insertion of row 2)
-      assert {:ok, true} == XqliteNIF.raw_commit(conn)
+      assert {:ok, true} == XqliteNIF.commit(conn)
 
       # Final verification outside transaction
       assert_savepoint_record_present(conn, 1, "one")
@@ -253,32 +253,32 @@ defmodule XqliteNifTest do
       assert_savepoint_record_missing(conn, 3)
     end
 
-    test "raw_release_savepoint incorporates changes made after the savepoint into the transaction",
+    test "release_savepoint incorporates changes made after the savepoint into the transaction",
          %{
            conn: conn
          } do
       # Setup: Create table and insert initial row (id: 1)
-      assert {:ok, true} == XqliteNIF.raw_execute_batch(conn, @savepoint_table_setup)
+      assert {:ok, true} == XqliteNIF.execute_batch(conn, @savepoint_table_setup)
 
       # Verify initial state
       assert_savepoint_record_present(conn, 1, "one")
 
       # Start the main transaction
-      assert {:ok, true} == XqliteNIF.raw_begin(conn)
+      assert {:ok, true} == XqliteNIF.begin(conn)
 
       # Insert row 2 within the main transaction
       assert {:ok, 1} ==
-               XqliteNIF.raw_execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
+               XqliteNIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
 
       # Verify row 2 exists within the transaction
       assert_savepoint_record_present(conn, 2, "two")
 
       # Create a savepoint
-      assert {:ok, true} == XqliteNIF.raw_savepoint(conn, "sp1")
+      assert {:ok, true} == XqliteNIF.savepoint(conn, "sp1")
 
       # Insert row 3 after the savepoint
       assert {:ok, 1} ==
-               XqliteNIF.raw_execute(
+               XqliteNIF.execute(
                  conn,
                  "INSERT INTO savepoint_test VALUES (3, 'three')",
                  []
@@ -288,7 +288,7 @@ defmodule XqliteNifTest do
       assert_savepoint_record_present(conn, 3, "three")
 
       # Release the savepoint "sp1". This merges inserting row 3 into the main transaction.
-      assert {:ok, true} == XqliteNIF.raw_release_savepoint(conn, "sp1")
+      assert {:ok, true} == XqliteNIF.release_savepoint(conn, "sp1")
 
       # Verify: Row 3 should still be there after release
       assert_savepoint_record_present(conn, 3, "three")
@@ -297,7 +297,7 @@ defmodule XqliteNifTest do
       assert_savepoint_record_present(conn, 2, "two")
 
       # Commit the main transaction (which now includes the insertion of both row 2 and row 3)
-      assert {:ok, true} == XqliteNIF.raw_commit(conn)
+      assert {:ok, true} == XqliteNIF.commit(conn)
 
       # Final verification outside transaction
       assert_savepoint_record_present(conn, 1, "one")
@@ -308,25 +308,25 @@ defmodule XqliteNifTest do
 
   describe "various tests with a single table:" do
     setup do
-      {:ok, conn} = NIF.raw_open(":memory:")
+      {:ok, conn} = NIF.open(":memory:")
       # DDL statements don't return tables created / modified / dropped.
-      {:ok, 0} = NIF.raw_execute(conn, @test_1_create)
+      {:ok, 0} = NIF.execute(conn, @test_1_create)
       # Modifying statements -- INSERT, DELETE, UPDATE -- do return a number of affected rows.
-      {:ok, 7} = NIF.raw_execute(conn, @test_1_insert)
-      on_exit(fn -> NIF.raw_close(conn) end)
+      {:ok, 7} = NIF.execute(conn, @test_1_insert)
+      on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
 
     test "insert a record and commit transaction", %{conn: conn} do
-      assert {:ok, true} == NIF.raw_begin(conn)
+      assert {:ok, true} == NIF.begin(conn)
 
       assert {:ok, 1} ==
-               NIF.raw_execute(conn, ~S"""
+               NIF.execute(conn, ~S"""
                INSERT INTO test1 (id, int_col, real_col, string_col, blob_col)
                VALUES (100, 101, 5.19, 'Some row', x'FF00FF');
                """)
 
-      assert {:ok, true} == NIF.raw_commit(conn)
+      assert {:ok, true} == NIF.commit(conn)
 
       assert {:ok,
               %{
@@ -335,26 +335,26 @@ defmodule XqliteNifTest do
                   [100, 101, 5.19, "Some row", <<255, 0, 255>>]
                 ],
                 num_rows: 1
-              }} == NIF.raw_query(conn, "SELECT * FROM test1 where id = 100;")
+              }} == NIF.query(conn, "SELECT * FROM test1 where id = 100;")
     end
 
     test "insert a record and rollback transaction", %{conn: conn} do
-      assert {:ok, true} == NIF.raw_begin(conn)
+      assert {:ok, true} == NIF.begin(conn)
 
       assert {:ok, 1} ==
-               NIF.raw_execute(conn, ~S"""
+               NIF.execute(conn, ~S"""
                INSERT INTO test1 (id, int_col, real_col, string_col, blob_col)
                VALUES (100, 101, 5.19, 'Some row', x'FF00FF');
                """)
 
-      assert {:ok, true} == NIF.raw_rollback(conn)
+      assert {:ok, true} == NIF.rollback(conn)
 
       assert {:ok,
               %{
                 columns: ["id", "int_col", "real_col", "string_col", "blob_col"],
                 rows: [],
                 num_rows: 0
-              }} == NIF.raw_query(conn, "SELECT * FROM test1 where id = 100;")
+              }} == NIF.query(conn, "SELECT * FROM test1 where id = 100;")
     end
 
     test "fetch all records", %{conn: conn} do
@@ -371,7 +371,7 @@ defmodule XqliteNifTest do
                   [7, 777, 7.77, "Seventh row", <<255>>]
                 ],
                 num_rows: 7
-              }} == NIF.raw_query(conn, "SELECT * FROM test1;")
+              }} == NIF.query(conn, "SELECT * FROM test1;")
     end
 
     test "fetch records with filters", %{conn: conn} do
@@ -385,7 +385,7 @@ defmodule XqliteNifTest do
                 ],
                 num_rows: 3
               }} ==
-               NIF.raw_query(
+               NIF.query(
                  conn,
                  "select * from test1 where int_col > :value and length(string_col) >= :length;",
                  value: 100,
@@ -398,13 +398,13 @@ defmodule XqliteNifTest do
 
   describe "various tests with multiple tables:" do
     setup do
-      {:ok, conn} = NIF.raw_open(":memory:")
+      {:ok, conn} = NIF.open(":memory:")
 
       for ddl <- @test_2_create_statements do
-        {:ok, %{columns: [], rows: [], num_rows: 0}} = XqliteNIF.raw_query(conn, ddl)
+        {:ok, %{columns: [], rows: [], num_rows: 0}} = XqliteNIF.query(conn, ddl)
       end
 
-      on_exit(fn -> NIF.raw_close(conn) end)
+      on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
 
@@ -421,7 +421,7 @@ defmodule XqliteNifTest do
                   ["temp", "sqlite_temp_schema", "table", 5, 0, 0]
                 ],
                 num_rows: 6
-              }} == XqliteNIF.raw_query(conn, "PRAGMA table_list;")
+              }} == XqliteNIF.query(conn, "PRAGMA table_list;")
     end
 
     test "fetch table information for customers", %{conn: conn} do
@@ -434,7 +434,7 @@ defmodule XqliteNifTest do
                   [2, "email", "TEXT", 0, nil, 0]
                 ],
                 num_rows: 3
-              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(customers);")
+              }} == XqliteNIF.query(conn, "PRAGMA table_info(customers);")
     end
 
     test "fetch table information for products", %{conn: conn} do
@@ -447,7 +447,7 @@ defmodule XqliteNifTest do
                   [2, "price", "REAL", 1, nil, 0]
                 ],
                 num_rows: 3
-              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(products);")
+              }} == XqliteNIF.query(conn, "PRAGMA table_info(products);")
     end
 
     test "fetch table information for orders", %{conn: conn} do
@@ -461,7 +461,7 @@ defmodule XqliteNifTest do
                   [3, "status", "TEXT", 1, nil, 0]
                 ],
                 num_rows: 4
-              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(orders);")
+              }} == XqliteNIF.query(conn, "PRAGMA table_info(orders);")
     end
 
     test "fetch table information for order_items", %{conn: conn} do
@@ -476,7 +476,7 @@ defmodule XqliteNifTest do
                   [4, "price", "REAL", 1, nil, 0]
                 ],
                 num_rows: 5
-              }} == XqliteNIF.raw_query(conn, "PRAGMA table_info(order_items);")
+              }} == XqliteNIF.query(conn, "PRAGMA table_info(order_items);")
     end
 
     test "fetch foreign key information for customers", %{conn: conn} do
@@ -494,7 +494,7 @@ defmodule XqliteNifTest do
                 ],
                 rows: [],
                 num_rows: 0
-              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(customers);")
+              }} == XqliteNIF.query(conn, "PRAGMA foreign_key_list(customers);")
     end
 
     test "fetch foreign key information for products", %{conn: conn} do
@@ -512,7 +512,7 @@ defmodule XqliteNifTest do
                 ],
                 rows: [],
                 num_rows: 0
-              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(products);")
+              }} == XqliteNIF.query(conn, "PRAGMA foreign_key_list(products);")
     end
 
     test "fetch foreign key information for orders", %{conn: conn} do
@@ -541,7 +541,7 @@ defmodule XqliteNifTest do
                   ]
                 ],
                 num_rows: 1
-              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(orders);")
+              }} == XqliteNIF.query(conn, "PRAGMA foreign_key_list(orders);")
     end
 
     test "fetch foreign key information for order_items", %{conn: conn} do
@@ -571,7 +571,7 @@ defmodule XqliteNifTest do
                   [1, 0, "orders", "order_id", "order_id", "NO ACTION", "NO ACTION", "NONE"]
                 ],
                 num_rows: 2
-              }} == XqliteNIF.raw_query(conn, "PRAGMA foreign_key_list(order_items);")
+              }} == XqliteNIF.query(conn, "PRAGMA foreign_key_list(order_items);")
     end
 
     # end of "various tests with multiple tables:"
@@ -579,7 +579,7 @@ defmodule XqliteNifTest do
 
   defp query_savepoint_test_row(conn, id) do
     sql = "SELECT id, val FROM savepoint_test WHERE id = ?1;"
-    XqliteNIF.raw_query(conn, sql, [id])
+    XqliteNIF.query(conn, sql, [id])
   end
 
   # Asserts that a specific record exists with the expected value

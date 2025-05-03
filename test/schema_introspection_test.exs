@@ -64,9 +64,9 @@ defmodule Xqlite.SchemaIntrospectionTest do
 
   # Each test case gets an in-memory database with the DDL executed after opening.
   setup do
-    {:ok, conn} = NIF.raw_open_in_memory(":memory:")
-    on_exit(fn -> NIF.raw_close(conn) end)
-    {:ok, true} = XqliteNIF.raw_execute_batch(conn, @schema_ddl)
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+    on_exit(fn -> NIF.close(conn) end)
+    {:ok, true} = XqliteNIF.execute_batch(conn, @schema_ddl)
     {:ok, conn: conn}
   end
 
@@ -78,12 +78,12 @@ defmodule Xqlite.SchemaIntrospectionTest do
     Enum.sort_by(list, &{&1.id, &1.column_sequence})
   end
 
-  test "raw_schema_databases returns info for the main database", %{conn: conn} do
+  test "schema_databases returns info for the main database", %{conn: conn} do
     expected_result = {:ok, [%Schema.DatabaseInfo{name: "main", file: ""}]}
-    assert expected_result == XqliteNIF.raw_schema_databases(conn)
+    assert expected_result == XqliteNIF.schema_databases(conn)
   end
 
-  test "raw_schema_list_objects lists all objects without filter", %{conn: conn} do
+  test "schema_list_objects lists all objects without filter", %{conn: conn} do
     expected_user_objects =
       [
         %Schema.SchemaObjectInfo{
@@ -129,7 +129,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
       ]
       |> sort_by_name()
 
-    {:ok, actual_objects_unsorted} = XqliteNIF.raw_schema_list_objects(conn, nil)
+    {:ok, actual_objects_unsorted} = XqliteNIF.schema_list_objects(conn, nil)
 
     actual_user_objects_sorted =
       Enum.filter(actual_objects_unsorted, fn obj ->
@@ -141,7 +141,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
     assert {:ok, expected_user_objects} == {:ok, actual_user_objects_sorted}
   end
 
-  test "raw_schema_list_objects lists objects filtered by schema 'main'", %{conn: conn} do
+  test "schema_list_objects lists objects filtered by schema 'main'", %{conn: conn} do
     expected_objects =
       [
         %Schema.SchemaObjectInfo{
@@ -196,15 +196,15 @@ defmodule Xqlite.SchemaIntrospectionTest do
       |> sort_by_name()
 
     assert {:ok, expected_objects} ==
-             XqliteNIF.raw_schema_list_objects(conn, "main")
+             XqliteNIF.schema_list_objects(conn, "main")
              |> then(fn {:ok, list} -> {:ok, sort_by_name(list)} end)
   end
 
-  test "raw_schema_list_objects returns empty list for non-existent schema", %{conn: conn} do
-    assert {:ok, []} == XqliteNIF.raw_schema_list_objects(conn, "non_existent_schema")
+  test "schema_list_objects returns empty list for non-existent schema", %{conn: conn} do
+    assert {:ok, []} == XqliteNIF.schema_list_objects(conn, "non_existent_schema")
   end
 
-  test "raw_schema_columns returns column info for 'users' table", %{conn: conn} do
+  test "schema_columns returns column info for 'users' table", %{conn: conn} do
     expected_columns = [
       %Schema.ColumnInfo{
         column_id: 0,
@@ -262,10 +262,10 @@ defmodule Xqlite.SchemaIntrospectionTest do
       }
     ]
 
-    assert {:ok, expected_columns} == XqliteNIF.raw_schema_columns(conn, "users")
+    assert {:ok, expected_columns} == XqliteNIF.schema_columns(conn, "users")
   end
 
-  test "raw_schema_columns returns column info for 'items' (WITHOUT ROWID)", %{conn: conn} do
+  test "schema_columns returns column info for 'items' (WITHOUT ROWID)", %{conn: conn} do
     expected_columns = [
       %Schema.ColumnInfo{
         column_id: 0,
@@ -296,10 +296,10 @@ defmodule Xqlite.SchemaIntrospectionTest do
       }
     ]
 
-    assert {:ok, expected_columns} == XqliteNIF.raw_schema_columns(conn, "items")
+    assert {:ok, expected_columns} == XqliteNIF.schema_columns(conn, "items")
   end
 
-  test "raw_schema_columns returns column info for 'user_items' (Compound PK)", %{conn: conn} do
+  test "schema_columns returns column info for 'user_items' (Compound PK)", %{conn: conn} do
     expected_columns = [
       %Schema.ColumnInfo{
         column_id: 0,
@@ -330,14 +330,14 @@ defmodule Xqlite.SchemaIntrospectionTest do
       }
     ]
 
-    assert {:ok, expected_columns} == XqliteNIF.raw_schema_columns(conn, "user_items")
+    assert {:ok, expected_columns} == XqliteNIF.schema_columns(conn, "user_items")
   end
 
-  test "raw_schema_columns returns empty list for non-existent table", %{conn: conn} do
-    assert {:ok, []} == XqliteNIF.raw_schema_columns(conn, "non_existent_table")
+  test "schema_columns returns empty list for non-existent table", %{conn: conn} do
+    assert {:ok, []} == XqliteNIF.schema_columns(conn, "non_existent_table")
   end
 
-  test "raw_schema_foreign_keys returns FK info for 'users' table", %{conn: conn} do
+  test "schema_foreign_keys returns FK info for 'users' table", %{conn: conn} do
     expected_fks = [
       %Schema.ForeignKeyInfo{
         id: 0,
@@ -351,10 +351,10 @@ defmodule Xqlite.SchemaIntrospectionTest do
       }
     ]
 
-    assert {:ok, expected_fks} == XqliteNIF.raw_schema_foreign_keys(conn, "users")
+    assert {:ok, expected_fks} == XqliteNIF.schema_foreign_keys(conn, "users")
   end
 
-  test "raw_schema_foreign_keys returns multiple FK info for 'user_items' table", %{conn: conn} do
+  test "schema_foreign_keys returns multiple FK info for 'user_items' table", %{conn: conn} do
     expected_fks =
       [
         %Schema.ForeignKeyInfo{
@@ -382,20 +382,20 @@ defmodule Xqlite.SchemaIntrospectionTest do
       |> sort_by_id_seq()
 
     assert {:ok, expected_fks} ==
-             XqliteNIF.raw_schema_foreign_keys(conn, "user_items")
+             XqliteNIF.schema_foreign_keys(conn, "user_items")
              |> then(fn {:ok, list} -> {:ok, sort_by_id_seq(list)} end)
   end
 
-  test "raw_schema_foreign_keys returns empty list for table with no FKs", %{conn: conn} do
-    assert {:ok, []} == XqliteNIF.raw_schema_foreign_keys(conn, "categories")
-    assert {:ok, []} == XqliteNIF.raw_schema_foreign_keys(conn, "items")
+  test "schema_foreign_keys returns empty list for table with no FKs", %{conn: conn} do
+    assert {:ok, []} == XqliteNIF.schema_foreign_keys(conn, "categories")
+    assert {:ok, []} == XqliteNIF.schema_foreign_keys(conn, "items")
   end
 
-  test "raw_schema_foreign_keys returns empty list for non-existent table", %{conn: conn} do
-    assert {:ok, []} == XqliteNIF.raw_schema_foreign_keys(conn, "non_existent_table")
+  test "schema_foreign_keys returns empty list for non-existent table", %{conn: conn} do
+    assert {:ok, []} == XqliteNIF.schema_foreign_keys(conn, "non_existent_table")
   end
 
-  test "raw_schema_indexes returns index info for 'users' table", %{conn: conn} do
+  test "schema_indexes returns index info for 'users' table", %{conn: conn} do
     expected_indexes =
       [
         # Implicit index for UNIQUE email constraint (gets name _1)
@@ -424,11 +424,11 @@ defmodule Xqlite.SchemaIntrospectionTest do
       |> sort_by_name()
 
     assert {:ok, expected_indexes} ==
-             XqliteNIF.raw_schema_indexes(conn, "users")
+             XqliteNIF.schema_indexes(conn, "users")
              |> then(fn {:ok, list} -> {:ok, sort_by_name(list)} end)
   end
 
-  test "raw_schema_indexes returns index info for 'items' (WITHOUT ROWID)", %{conn: conn} do
+  test "schema_indexes returns index info for 'items' (WITHOUT ROWID)", %{conn: conn} do
     expected_indexes =
       [
         %Schema.IndexInfo{
@@ -441,11 +441,11 @@ defmodule Xqlite.SchemaIntrospectionTest do
       |> sort_by_name()
 
     assert {:ok, expected_indexes} ==
-             XqliteNIF.raw_schema_indexes(conn, "items")
+             XqliteNIF.schema_indexes(conn, "items")
              |> then(fn {:ok, list} -> {:ok, sort_by_name(list)} end)
   end
 
-  test "raw_schema_indexes returns index info for 'user_items' (Compound PK)", %{conn: conn} do
+  test "schema_indexes returns index info for 'user_items' (Compound PK)", %{conn: conn} do
     expected_indexes =
       [
         %Schema.IndexInfo{
@@ -458,15 +458,15 @@ defmodule Xqlite.SchemaIntrospectionTest do
       |> sort_by_name()
 
     assert {:ok, expected_indexes} ==
-             XqliteNIF.raw_schema_indexes(conn, "user_items")
+             XqliteNIF.schema_indexes(conn, "user_items")
              |> then(fn {:ok, list} -> {:ok, sort_by_name(list)} end)
   end
 
-  test "raw_schema_indexes returns empty list for non-existent table", %{conn: conn} do
-    assert {:ok, []} == XqliteNIF.raw_schema_indexes(conn, "non_existent_table")
+  test "schema_indexes returns empty list for non-existent table", %{conn: conn} do
+    assert {:ok, []} == XqliteNIF.schema_indexes(conn, "non_existent_table")
   end
 
-  test "raw_schema_index_columns returns info for simple index 'idx_users_name'", %{conn: conn} do
+  test "schema_index_columns returns info for simple index 'idx_users_name'", %{conn: conn} do
     expected_cols = [
       %Schema.IndexColumnInfo{
         index_column_sequence: 0,
@@ -488,10 +488,10 @@ defmodule Xqlite.SchemaIntrospectionTest do
       }
     ]
 
-    assert {:ok, expected_cols} == XqliteNIF.raw_schema_index_columns(conn, "idx_users_name")
+    assert {:ok, expected_cols} == XqliteNIF.schema_index_columns(conn, "idx_users_name")
   end
 
-  test "raw_schema_index_columns returns info for DESC index 'idx_users_email_desc'", %{
+  test "schema_index_columns returns info for DESC index 'idx_users_email_desc'", %{
     conn: conn
   } do
     expected_cols = [
@@ -516,10 +516,10 @@ defmodule Xqlite.SchemaIntrospectionTest do
     ]
 
     assert {:ok, expected_cols} ==
-             XqliteNIF.raw_schema_index_columns(conn, "idx_users_email_desc")
+             XqliteNIF.schema_index_columns(conn, "idx_users_email_desc")
   end
 
-  test "raw_schema_index_columns returns info for compound PK index 'sqlite_autoindex_user_items_1'",
+  test "schema_index_columns returns info for compound PK index 'sqlite_autoindex_user_items_1'",
        %{conn: conn} do
     expected_cols =
       [
@@ -553,38 +553,38 @@ defmodule Xqlite.SchemaIntrospectionTest do
       ]
 
     assert {:ok, expected_cols} ==
-             XqliteNIF.raw_schema_index_columns(conn, "sqlite_autoindex_user_items_1")
+             XqliteNIF.schema_index_columns(conn, "sqlite_autoindex_user_items_1")
   end
 
-  test "raw_schema_index_columns returns empty list for non-existent index", %{conn: conn} do
-    assert {:ok, []} == XqliteNIF.raw_schema_index_columns(conn, "non_existent_index")
+  test "schema_index_columns returns empty list for non-existent index", %{conn: conn} do
+    assert {:ok, []} == XqliteNIF.schema_index_columns(conn, "non_existent_index")
   end
 
-  test "raw_get_create_sql returns SQL for table 'users'", %{conn: conn} do
-    assert {:ok, sql} = XqliteNIF.raw_get_create_sql(conn, "users")
+  test "get_create_sql returns SQL for table 'users'", %{conn: conn} do
+    assert {:ok, sql} = XqliteNIF.get_create_sql(conn, "users")
     assert is_binary(sql) and String.starts_with?(sql, "CREATE TABLE users")
   end
 
-  test "raw_get_create_sql returns SQL for view 'active_users_view'", %{conn: conn} do
-    assert {:ok, sql} = XqliteNIF.raw_get_create_sql(conn, "active_users_view")
+  test "get_create_sql returns SQL for view 'active_users_view'", %{conn: conn} do
+    assert {:ok, sql} = XqliteNIF.get_create_sql(conn, "active_users_view")
     assert is_binary(sql) and String.starts_with?(sql, "CREATE VIEW active_users_view")
   end
 
-  test "raw_get_create_sql returns SQL for index 'idx_users_name'", %{conn: conn} do
-    assert {:ok, sql} = XqliteNIF.raw_get_create_sql(conn, "idx_users_name")
+  test "get_create_sql returns SQL for index 'idx_users_name'", %{conn: conn} do
+    assert {:ok, sql} = XqliteNIF.get_create_sql(conn, "idx_users_name")
     assert is_binary(sql) and String.starts_with?(sql, "CREATE INDEX idx_users_name")
   end
 
-  test "raw_get_create_sql returns SQL for trigger 'update_user_balance_trigger'", %{
+  test "get_create_sql returns SQL for trigger 'update_user_balance_trigger'", %{
     conn: conn
   } do
-    assert {:ok, sql} = XqliteNIF.raw_get_create_sql(conn, "update_user_balance_trigger")
+    assert {:ok, sql} = XqliteNIF.get_create_sql(conn, "update_user_balance_trigger")
 
     assert is_binary(sql) and
              String.starts_with?(sql, "CREATE TRIGGER update_user_balance_trigger")
   end
 
-  test "raw_get_create_sql returns nil for non-existent object", %{conn: conn} do
-    assert {:ok, nil} == XqliteNIF.raw_get_create_sql(conn, "non_existent_object")
+  test "get_create_sql returns nil for non-existent object", %{conn: conn} do
+    assert {:ok, nil} == XqliteNIF.get_create_sql(conn, "non_existent_object")
   end
 end
