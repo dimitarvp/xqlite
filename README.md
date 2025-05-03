@@ -180,15 +180,26 @@ end
 
 ## Roadmap
 
+The following features and enhancements are planned for the **`xqlite`** (NIF) library, prioritized roughly as follows:
+
+- [ ] **Query Cancellation:** Implement an explicit cancellation mechanism (using a `CancelToken` resource, `cancel/1` NIF, and `_cancellable` NIF variants) allowing long-running queries/statements to be interrupted. _Crucial for robust timeout handling in Ecto/DBConnection._
+- [ ] **Streaming Results:** Add NIFs to fetch large query results incrementally in chunks, rather than loading everything into memory at once. _Essential for supporting `Repo.stream/2` and handling large datasets efficiently._
+- [ ] **Online Backup API:** Add NIFs to interact with SQLite's Online Backup API for performing live backups of the database. _Fundamental for operational reliability._
+- [ ] **Session Extension:** Add NIFs to support SQLite's Session Extension for tracking and managing database changes (changesets/patchsets).
+- [ ] **Extension Loading:** Add a `load_extension/2` NIF to enable loading SQLite runtime extensions (e.g., FTS, JSON1, SpatiaLite, custom extensions) provided as shared libraries. _Key for unlocking advanced SQLite capabilities._
+- [ ] **Incremental Blob I/O:** Add NIFs to support reading and writing large BLOB values incrementally, avoiding high memory usage.
+- [ ] **User-Defined Functions:** Investigate and implement support for registering custom SQL functions, aggregates, and potentially window functions (UDFs) from Elixir/Rust.
+- [ ] **Optional: SQLCipher Support (build feature):** Investigate adding optional build-time support for SQLCipher database encryption via `rusqlite` Cargo features.
+
 The **`xqlite_ecto3`** library (separate project) will provide:
 
 - [ ] Full Ecto 3.x adapter implementation (`use Ecto.Adapters.SQL`).
-- [ ] Integration with `DBConnection` for connection pooling.
-- [ ] Type handling (`dumpers`/`loaders`) for mapping Ecto types to SQLite storage (including Date/Time, Decimals, Binaries).
-- [ ] Migration support.
+- [ ] Integration with `DBConnection` for connection pooling (using WAL and `busy_timeout` for concurrency).
+- [ ] Type handling (`dumpers`/`loaders`) for mapping Ecto types to SQLite storage (including Date/Time, Decimals, Binaries, JSON).
+- [ ] Migration support (including migration locking).
 - [ ] Structure dump/load (`mix ecto.dump`, `mix ecto.load`).
 
-Further future possibilities include exploring SQLite's Session Extension and potentially a "Strict Mode".
+Further future possibilities include exploring a high-level "Strict Mode" helper and other advanced SQLite features.
 
 ## Installation
 
