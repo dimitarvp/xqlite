@@ -6,7 +6,7 @@ defmodule XqlitePragmaTest do
   alias Xqlite.Pragma, as: P
 
   setup do
-    {:ok, db} = NIF.raw_open(":memory:")
+    {:ok, db} = NIF.open(":memory:")
     {:ok, db: db}
   end
 

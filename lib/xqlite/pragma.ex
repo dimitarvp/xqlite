@@ -229,16 +229,16 @@ defmodule Xqlite.Pragma do
   def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
-  A convenience wrapper to make the result of a `XqliteNIF.raw_query/3` call to
+  A convenience wrapper to make the result of a `XqliteNIF.query/3` call to
   a format that is required by the `result` processor function.
   Note that we deliberately assert strongly on the type of success value as
   any other would be a critical bug in this library.
   """
-  def raw_query_to_pragma_result({:ok, map}) when is_map(map) do
+  def query_to_pragma_result({:ok, map}) when is_map(map) do
     {:ok, Map.get(map, :rows)}
   end
 
-  def raw_query_to_pragma_result({:error, _anything} = err), do: err
+  def query_to_pragma_result({:error, _anything} = err), do: err
 
   @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra argument:
@@ -265,8 +265,8 @@ defmodule Xqlite.Pragma do
 
   @spec get0(reference(), pragma_key(), pragma_opts()) :: pragma_get_result()
   defp get0(conn, key, _opts) do
-    XqliteNIF.raw_query(conn, "PRAGMA #{key};")
-    |> raw_query_to_pragma_result()
+    XqliteNIF.query(conn, "PRAGMA #{key};")
+    |> query_to_pragma_result()
     |> result(key)
   end
 
@@ -285,8 +285,8 @@ defmodule Xqlite.Pragma do
   end
 
   defp get1(conn, key, arg, _opts) do
-    XqliteNIF.raw_query(conn, "PRAGMA #{key}(#{arg});")
-    |> raw_query_to_pragma_result()
+    XqliteNIF.query(conn, "PRAGMA #{key}(#{arg});")
+    |> query_to_pragma_result()
     |> result(key)
   end
 
@@ -324,7 +324,7 @@ defmodule Xqlite.Pragma do
   end
 
   def put(db, key, val) when is_binary(key) do
-    XqliteNIF.raw_pragma_write_and_read(db, key, val)
+    XqliteNIF.pragma_write_and_read(db, key, val)
     |> result(key)
   end
 

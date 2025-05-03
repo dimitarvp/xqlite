@@ -949,7 +949,7 @@ where
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let conn = Connection::open(&path)
         .map_err(|e| XqliteError::CannotOpenDatabase(path, e.to_string()))?;
     let arc_mutex_conn = Arc::new(Mutex::new(conn));
@@ -957,7 +957,7 @@ fn raw_open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let conn = Connection::open(&uri)
         .map_err(|e| XqliteError::CannotOpenDatabase(uri, e.to_string()))?;
     let arc_mutex_conn = Arc::new(Mutex::new(conn));
@@ -965,7 +965,7 @@ fn raw_open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteErro
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let conn = Connection::open("")
         .map_err(|e| XqliteError::CannotOpenDatabase("".to_string(), e.to_string()))?;
     let arc_mutex_conn = Arc::new(Mutex::new(conn));
@@ -973,7 +973,7 @@ fn raw_open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_query<'a>(
+fn query<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     sql: String,
@@ -1028,7 +1028,7 @@ fn raw_query<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_execute<'a>(
+fn execute<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     sql: String,
@@ -1044,7 +1044,7 @@ fn raw_execute<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_execute_batch(
+fn execute_batch(
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
 ) -> Result<bool, XqliteError> {
@@ -1055,7 +1055,7 @@ fn raw_execute_batch(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_pragma_write(
+fn pragma_write(
     handle: ResourceArc<XqliteConn>,
     pragma_sql: String,
 ) -> Result<usize, XqliteError> {
@@ -1071,7 +1071,7 @@ fn raw_pragma_write(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_pragma_write_and_read<'a>(
+fn pragma_write_and_read<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
@@ -1105,7 +1105,7 @@ fn raw_pragma_write_and_read<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+fn begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
         conn.execute("BEGIN;", [])?;
         Ok(true)
@@ -1113,7 +1113,7 @@ fn raw_begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+fn commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
         conn.execute("COMMIT;", [])?;
         Ok(true)
@@ -1121,7 +1121,7 @@ fn raw_commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+fn rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
         conn.execute("ROLLBACK;", [])?;
         Ok(true)
@@ -1129,7 +1129,7 @@ fn raw_rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_savepoint(handle: ResourceArc<XqliteConn>, name: String) -> Result<bool, XqliteError> {
+fn savepoint(handle: ResourceArc<XqliteConn>, name: String) -> Result<bool, XqliteError> {
     with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
         let sql = format!("SAVEPOINT {};", quoted_name);
@@ -1139,7 +1139,7 @@ fn raw_savepoint(handle: ResourceArc<XqliteConn>, name: String) -> Result<bool, 
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_rollback_to_savepoint(
+fn rollback_to_savepoint(
     handle: ResourceArc<XqliteConn>,
     name: String,
 ) -> Result<bool, XqliteError> {
@@ -1152,7 +1152,7 @@ fn raw_rollback_to_savepoint(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_release_savepoint(
+fn release_savepoint(
     handle: ResourceArc<XqliteConn>,
     name: String,
 ) -> Result<bool, XqliteError> {
@@ -1165,7 +1165,7 @@ fn raw_release_savepoint(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_schema_databases(
+fn schema_databases(
     handle: ResourceArc<XqliteConn>,
 ) -> Result<Vec<DatabaseInfo>, XqliteError> {
     with_conn(&handle, |conn| {
@@ -1196,7 +1196,7 @@ struct TempObjectInfo {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_schema_list_objects(
+fn schema_list_objects(
     handle: ResourceArc<XqliteConn>,
     schema: Option<String>,
 ) -> Result<Vec<SchemaObjectInfo>, XqliteError> {
@@ -1322,7 +1322,7 @@ struct TempColumnData {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_schema_columns(
+fn schema_columns(
     handle: ResourceArc<XqliteConn>,
     table_name: String,
 ) -> Result<Vec<ColumnInfo>, XqliteError> {
@@ -1423,7 +1423,7 @@ struct TempForeignKeyData {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_schema_foreign_keys(
+fn schema_foreign_keys(
     handle: ResourceArc<XqliteConn>,
     table_name: String,
 ) -> Result<Vec<ForeignKeyInfo>, XqliteError> {
@@ -1527,7 +1527,7 @@ struct TempIndexData {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_schema_indexes(
+fn schema_indexes(
     handle: ResourceArc<XqliteConn>,
     table_name: String,
 ) -> Result<Vec<IndexInfo>, XqliteError> {
@@ -1630,7 +1630,7 @@ struct TempIndexColumnData {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_schema_index_columns(
+fn schema_index_columns(
     handle: ResourceArc<XqliteConn>,
     index_name: String,
 ) -> Result<Vec<IndexColumnInfo>, XqliteError> {
@@ -1712,7 +1712,7 @@ fn raw_schema_index_columns(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_get_create_sql(
+fn get_create_sql(
     handle: ResourceArc<XqliteConn>,
     object_name: String,
 ) -> Result<Option<String>, XqliteError> {
@@ -1745,7 +1745,7 @@ fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn raw_close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+fn close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     Ok(true)
 }
 
