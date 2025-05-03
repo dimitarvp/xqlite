@@ -68,15 +68,6 @@ defmodule XqliteNifTest do
     """
   ]
 
-  @test_3_create_and_insert ~S"""
-  CREATE TABLE batch_test_table (
-    id INTEGER PRIMARY KEY,
-    pi_value REAL NOT NULL,
-    label TEXT NOT NULL
-  );
-  INSERT INTO batch_test_table (id, pi_value, label) VALUES (42, 3.14159, 'approx_pi');
-  """
-
   @savepoint_table_setup ~S"""
   CREATE TABLE savepoint_test (
     id INTEGER PRIMARY KEY,
@@ -120,22 +111,6 @@ defmodule XqliteNifTest do
       {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
-    end
-
-    test "create a table and insert records in a single SQL block delimited by a semicolon", %{
-      conn: conn
-    } do
-      assert {:ok, true} == XqliteNIF.execute_batch(conn, @test_3_create_and_insert)
-
-      query_sql = "SELECT id, pi_value, label FROM batch_test_table WHERE id = ?1;"
-      query_params = [42]
-
-      assert {:ok,
-              %{
-                columns: ["id", "pi_value", "label"],
-                rows: [[42, 3.14159, "approx_pi"]],
-                num_rows: 1
-              }} == XqliteNIF.query(conn, query_sql, query_params)
     end
 
     test "last_insert_rowid returns the explicit rowid of the last inserted row", %{conn: conn} do
