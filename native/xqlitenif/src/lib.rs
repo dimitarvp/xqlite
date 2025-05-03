@@ -90,7 +90,9 @@ rustler::atoms! {
     view
 }
 
-use rusqlite::{ffi, types::Value, Connection, ErrorCode, Row, Rows, ToSql};
+use rusqlite::{
+    ffi, types::Value, Connection, Error as RusqliteError, ErrorCode, Rows, ToSql,
+};
 use rustler::types::atom::{false_, nil, true_};
 use rustler::types::map::map_new;
 use rustler::{
@@ -785,6 +787,49 @@ fn decode_plain_list_params<'a>(
     Ok(values)
 }
 
+fn format_term_for_pragma<'a>(env: Env<'a>, term: Term<'a>) -> Result<String, XqliteError> {
+    // Based on elixir_term_to_rusqlite_value, but produces SQL literal strings
+    let term_type = term.get_type();
+    match term_type {
+        TermType::Atom => {
+            if term == nil().to_term(env) {
+                Ok("NULL".to_string())
+            } else if term == true_().to_term(env) {
+                Ok("ON".to_string()) // Common PRAGMA boolean values
+            } else if term == false_().to_term(env) {
+                Ok("OFF".to_string()) // Common PRAGMA boolean values
+            } else {
+                // Allow other atoms if they represent valid PRAGMA keywords (like WAL, DELETE)
+                term.atom_to_string()
+                    .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{:?}", e)))
+            }
+        }
+        TermType::Integer => term
+            .decode::<i64>()
+            .map(|i| i.to_string()) // Convert integer directly to string
+            .map_err(|e| XqliteError::CannotConvertToSqliteValue {
+                value_str: format!("{:?}", term),
+                reason: format!("{:?}", e),
+            }),
+        // Floats are usually not set via PRAGMA, but handle just in case
+        TermType::Float => term.decode::<f64>().map(|f| f.to_string()).map_err(|e| {
+            XqliteError::CannotConvertToSqliteValue {
+                value_str: format!("{:?}", term),
+                reason: format!("{:?}", e),
+            }
+        }),
+        // Binaries interpreted as Strings, need single quotes
+        TermType::Binary => term
+            .decode::<String>()
+            .map(|s| format!("'{}'", s.replace('\'', "''"))) // Single quote and escape
+            .map_err(|e| XqliteError::CannotConvertToSqliteValue {
+                value_str: format!("{:?}", term),
+                reason: format!("Failed to decode binary as string for PRAGMA: {:?}", e),
+            }),
+        _ => Err(XqliteError::UnsupportedDataType { term_type }),
+    }
+}
+
 fn process_rows<'a, 'rows>(
     env: Env<'a>,
     mut rows: Rows<'rows>, // Takes ownership of `rows`
@@ -1054,54 +1099,67 @@ fn execute_batch(
     })
 }
 
+/// Reads the current value of an SQLite PRAGMA.
 #[rustler::nif(schedule = "DirtyIo")]
-fn pragma_write(
+fn get_pragma(
+    env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
-    pragma_sql: String,
-) -> Result<usize, XqliteError> {
-    let pragma_sql_for_err = pragma_sql.clone();
+    pragma_name: String,
+) -> Result<Term<'_>, XqliteError> {
+    // This function contains the logic previously in Step 2 of pragma_write_and_read
     with_conn(&handle, |conn| {
-        // Keep explicit mapping for pragmas to distinguish from general execute errors
-        conn.execute(&pragma_sql, [])
-            .map_err(|e| XqliteError::CannotExecutePragma {
-                pragma: pragma_sql_for_err,
+        // Assuming with_conn is available (e.g., pub(crate) in util.rs)
+        let read_sql = format!("PRAGMA {};", pragma_name);
+        match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
+            Ok(value) => Ok(encode_val(env, value)), // Assuming encode_val is available
+            Err(RusqliteError::QueryReturnedNoRows) => Ok(no_value().to_term(env)), // Use atoms module
+            Err(e) => Err(XqliteError::CannotExecutePragma {
+                pragma: read_sql,
                 reason: e.to_string(),
-            })
+            }),
+        }
     })
 }
 
+/// Sets an SQLite PRAGMA to a specific value.
+/// Returns {:ok, true} on success, or {:error, reason} on failure.
+/// Does NOT return the new value; call get_pragma separately if needed for verification.
 #[rustler::nif(schedule = "DirtyIo")]
-fn pragma_write_and_read<'a>(
+fn set_pragma<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
     value_term: Term<'a>,
-) -> Result<Term<'a>, XqliteError> {
-    let pragma_name_for_err = pragma_name.clone();
-    let pragma_value_to_set = elixir_term_to_rusqlite_value(env, value_term)?;
-    let value_for_err = pragma_value_to_set.clone();
+) -> Result<bool, XqliteError> {
+    // Returns bool now
+    // Convert Elixir term to SQL literal string suitable for PRAGMA value
+    let value_literal = format_term_for_pragma(env, value_term)?;
 
-    let result_option = with_conn(&handle, |conn| {
-        match conn.pragma_update_and_check(
-            None,
-            &pragma_name,
-            &pragma_value_to_set,
-            |row: &Row<'_>| row.get::<usize, Value>(0),
-        ) {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(other_err) => Err(XqliteError::CannotExecutePragma {
-                // Keep explicit mapping
-                pragma: format!("PRAGMA {} = {:?};", pragma_name_for_err, value_for_err),
-                reason: other_err.to_string(),
-            }),
+    with_conn(&handle, |conn| {
+        // Construct the full SQL command for setting the PRAGMA.
+        let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
+        {
+            // Scope for statement finalization via Drop
+            // Prepare the statement. This can fail (e.g., syntax error in pragma name).
+            let mut write_stmt =
+                conn.prepare(&write_sql)
+                    .map_err(|e| XqliteError::CannotExecutePragma {
+                        // Use the fully formatted SQL in the error context.
+                        pragma: write_sql.clone(),
+                        reason: e.to_string(),
+                    })?;
+
+            // Execute using query([]), immediately consuming and discarding the Rows iterator.
+            // This robustly handles PRAGMA SET commands regardless of whether they
+            // internally return rows or not, using only public rusqlite API.
+            // The '?' propagates any execution errors (like constraint issues, invalid values).
+            let _ = write_stmt.query([])?;
+
+            // If query([]) succeeded, the PRAGMA SET command executed without error.
+            // Statement finalized automatically when write_stmt goes out of scope here.
         }
-    })?;
-
-    match result_option {
-        Some(value) => Ok(encode_val(env, value)),
-        None => Ok(no_value().encode(env)),
-    }
+        Ok(true) // Return simple success if no error occurred
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
