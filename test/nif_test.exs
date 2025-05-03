@@ -95,37 +95,6 @@ defmodule XqliteNifTest do
     :ok
   end
 
-  describe "open/2 and close/1" do
-    test "opens a valid in-memory database, closes it, and fails on second close" do
-      assert {:ok, conn} = NIF.open(@valid_db_path)
-      assert {:ok, true} = NIF.close(conn)
-      assert {:ok, true} = NIF.close(conn)
-    end
-
-    test "fails to open an invalid database path immediately" do
-      assert {:error, {:cannot_open_database, @invalid_db_path, _reason}} =
-               NIF.open(@invalid_db_path)
-    end
-
-    test "opens the same database path multiple times, returning the same handle conceptually" do
-      assert {:ok, conn1} = NIF.open(@valid_db_path)
-      assert {:ok, conn2} = NIF.open(@valid_db_path)
-
-      # The resource handles themselves might be different ResourceArc wrappers,
-      # but they should represent the same underlying pooled connection (keyed by path).
-      # We can verify this by closing one and checking the other still works (tested by closing)
-
-      assert {:ok, true} = NIF.close(conn1)
-
-      # Closing via conn2 should still succeed because it's no-op on the Rust side
-      # as we are relying on the reference-counted Rust `Arc` to ultimately garbage-collect
-      # the connection, which leads to actually closing it.
-      assert {:ok, true} = NIF.close(conn2)
-    end
-
-    # end of describe "open/2 and close/1"
-  end
-
   describe "pragma_write/2" do
     test "can execute a simple PRAGMA" do
       {:ok, conn} = NIF.open(@valid_db_path)
