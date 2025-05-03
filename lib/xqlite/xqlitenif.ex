@@ -2,7 +2,7 @@ defmodule XqliteNIF do
   use Rustler, otp_app: :xqlite, crate: :xqlitenif, mode: :release
 
   def open(_path, _opts \\ []), do: err()
-  def open_in_memory(_path), do: err()
+  def open_in_memory(_path \\ ":memory:"), do: err()
   def open_temporary(), do: err()
   def query(_conn, _sql, _params \\ []), do: err()
   def execute(_conn, _sql, _params \\ []), do: err()
