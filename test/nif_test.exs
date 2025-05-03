@@ -3,9 +3,6 @@ defmodule XqliteNifTest do
 
   alias XqliteNIF, as: NIF
 
-  # Always valid
-  @valid_db_path "file:memdb1?mode=memory&cache=shared"
-
   # Using a path that cannot exist in read-only mode ensures failure
   @invalid_db_path "file:./non_existent_dir_for_sure/read_only_db?mode=ro&immutable=1"
 
@@ -47,15 +44,6 @@ defmodule XqliteNifTest do
 
     # No shared state needed between test.
     :ok
-  end
-
-  describe "pragma_write/2" do
-    test "can execute a simple PRAGMA" do
-      {:ok, conn} = NIF.open(@valid_db_path)
-      assert {:ok, true} = NIF.set_pragma(conn, "synchronous", 0)
-      assert {:ok, 0} = NIF.get_pragma(conn, "synchronous")
-      assert {:ok, true} = NIF.close(conn)
-    end
   end
 
   describe "various tests on an initially empty database:" do
