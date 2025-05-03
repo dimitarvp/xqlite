@@ -324,7 +324,9 @@ defmodule Xqlite.Pragma do
   end
 
   def put(db, key, val) when is_binary(key) do
-    XqliteNIF.pragma_write_and_read(db, key, val)
+    {:ok, true} = XqliteNIF.set_pragma(db, key, val)
+
+    XqliteNIF.get_pragma(db, key)
     |> result(key)
   end
 

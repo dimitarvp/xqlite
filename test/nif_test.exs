@@ -129,7 +129,8 @@ defmodule XqliteNifTest do
   describe "pragma_write/2" do
     test "can execute a simple PRAGMA" do
       {:ok, conn} = NIF.open(@valid_db_path)
-      assert {:ok, 0} = NIF.pragma_write(conn, "PRAGMA synchronous = 0;")
+      assert {:ok, true} = NIF.set_pragma(conn, "synchronous", 0)
+      assert {:ok, 0} = NIF.get_pragma(conn, "synchronous")
       assert {:ok, true} = NIF.close(conn)
     end
   end
