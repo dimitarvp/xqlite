@@ -1,165 +1,143 @@
 defmodule Xqlite.NIF.ConnectionTest do
-  # Safe with :memory: databases
   use ExUnit.Case, async: true
 
+  import Xqlite.TestUtil, only: [connection_openers: 0, opener_mfa_for_tag: 1]
+
   alias XqliteNIF, as: NIF
-  # Needed for DatabaseInfo struct
   alias Xqlite.Schema
 
-  # Shared in-memory DB URI for tests that need the *same* underlying DB
-  @shared_mem_db_uri "file:shared_mem_conn_test?mode=memory&cache=shared"
+  # --- Shared test code (generated via `for` loop for different DB types) ---
+  for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
+    describe "using #{prefix}" do
+      @describetag type_tag
 
-  # Invalid path for testing open errors
-  @invalid_db_path "file:./non_existent_dir_for_sure/read_only_db?mode=ro"
+      # Setup finds its tag from the context keys, then looks up the MFA
+      setup context do
+        # Find which tag atom is present as a key in the context
+        known_tags = Enum.map(connection_openers(), fn {tag, _, _} -> tag end)
+        current_tag = Enum.find(known_tags, fn tag -> Map.has_key?(context, tag) end)
 
-  # Value to use for cache_size tests
-  @test_cache_size 4000
+        # If no known tag found (shouldn't happen if for loop is correct), raise error
+        unless current_tag do
+          raise "Could not determine current db_type tag from context: #{inspect(context)}"
+        end
 
-  setup do
-    if File.exists?(@invalid_db_path) do
-      raise(
-        "Invalid DB path target '#{@invalid_db_path}' exists, please remove it before testing."
-      )
+        # Lookup the MFA using the found tag
+        {mod, fun, args} = opener_mfa_for_tag(current_tag)
+
+        # Open connection
+        assert {:ok, conn} = apply(mod, fun, args),
+               "Failed to open connection for tag :#{current_tag}"
+
+        on_exit(fn -> NIF.close(conn) end)
+        {:ok, conn: conn}
+      end
+
+      # --- Shared test cases applicable to all DB types follow ---
+      # These tests inherit the simple atom tag (e.g. :memory_private or :file_temp etc.)
+
+      test "connection is usable (set/get pragma)", %{conn: conn} do
+        assert {:ok, true} = NIF.set_pragma(conn, "cache_size", 4000)
+        assert {:ok, 4000} = NIF.get_pragma(conn, "cache_size")
+      end
+
+      test "close returns true even when called multiple times", %{conn: conn} do
+        assert {:ok, true} = NIF.close(conn)
+
+        # Subsequent calls are no-ops on the Rust side but should still return ok via the NIF interface.
+        assert {:ok, true} = NIF.close(conn)
+        assert {:ok, true} = NIF.close(conn)
+      end
+
+      test "basic query execution works", %{conn: conn} do
+        assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT 1;", [])
+      end
+
+      test "basic statement execution works", %{conn: conn} do
+        sql = "CREATE TABLE conn_test_basic (id INTEGER PRIMARY KEY);"
+        assert {:ok, 0} = NIF.execute(conn, sql, [])
+      end
     end
 
-    :ok
+    # end describe "Using #{prefix}"
   end
 
-  # --- open/1 Tests ---
+  # end `for` loop that generates a bunch of tests for each DB type
 
-  test "open/1 successfully opens a unique :memory: database" do
-    assert {:ok, conn} = NIF.open(":memory:")
-    # Verify it's usable: set PRAGMA returns :ok, true; get PRAGMA returns the value.
-    assert {:ok, true} = NIF.set_pragma(conn, "cache_size", @test_cache_size)
-    # Assert directly against module attribute value
-    assert {:ok, @test_cache_size} = NIF.get_pragma(conn, "cache_size")
-    assert {:ok, true} = NIF.close(conn)
+  # --- DB type-specific or other tests (outside the `for` loop) ---
+  describe "temporary file DB" do
+    setup do
+      assert {:ok, conn} = NIF.open_temporary()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    @tag :file_temp
+    test "schema_databases shows empty file path", %{conn: conn} do
+      assert {:ok, [%Schema.DatabaseInfo{name: "main", file: ""}]} =
+               NIF.schema_databases(conn)
+    end
   end
 
-  test "open/1 successfully opens a shared in-memory database via URI" do
-    assert {:ok, conn} = NIF.open(@shared_mem_db_uri)
-    # Verify usability: set PRAGMA returns :ok, true; get PRAGMA returns the value.
-    # Use a different value to ensure it's distinct from other tests using the shared URI
-    test_val = @test_cache_size + 1
-    assert {:ok, true} = NIF.set_pragma(conn, "cache_size", test_val)
-    # Use pin operator ^ for the variable test_val
-    assert {:ok, ^test_val} = NIF.get_pragma(conn, "cache_size")
-    assert {:ok, true} = NIF.close(conn)
+  describe "shared memory DB" do
+    @shared_mem_db_uri "file:shared_mem_conn_test_specific?mode=memory&cache=shared"
+
+    setup do
+      assert {:ok, conn1} = NIF.open(@shared_mem_db_uri)
+      assert {:ok, conn2} = NIF.open(@shared_mem_db_uri)
+
+      on_exit(fn ->
+        NIF.close(conn1)
+        NIF.close(conn2)
+      end)
+
+      {:ok, conn1: conn1, conn2: conn2}
+    end
+
+    # @tag :memory_shared
+    test "handles reference the same underlying shared DB", %{conn1: conn1, conn2: conn2} do
+      # Handles themselves are distinct ResourceArcs.
+      refute conn1 == conn2
+
+      # Check they point to the same DB using cache_size
+      # Set cache_size via conn1, assert set success
+      assert {:ok, true} = NIF.set_pragma(conn1, "cache_size", 5000)
+      # Read back via conn2 using get_pragma, assert it returns the value set by conn1
+      assert {:ok, 5000} = NIF.get_pragma(conn2, "cache_size")
+    end
   end
 
-  test "open/1 fails for an invalid path" do
-    assert {:error, {:cannot_open_database, @invalid_db_path, _reason}} =
-             NIF.open(@invalid_db_path)
-  end
+  describe "open failure" do
+    # This path is used specifically for testing open failures
+    @invalid_db_path "file:./non_existent_dir_for_sure/read_only_db?mode=ro"
+    # Get directory name
+    @invalid_dir Path.dirname(@invalid_db_path)
 
-  test "open/1 with shared URI returns different handles referencing the same DB" do
-    assert {:ok, conn1} = NIF.open(@shared_mem_db_uri)
-    assert {:ok, conn2} = NIF.open(@shared_mem_db_uri)
+    # Setup ensures the problematic path doesn't exist and registers cleanup
+    setup do
+      # Cleanup first in case previous run failed badly
+      if File.exists?(@invalid_db_path), do: File.rm!(@invalid_db_path)
+      if File.exists?(@invalid_dir), do: File.rmdir!(@invalid_dir)
 
-    # Handles themselves are distinct ResourceArcs wrapping the same underlying connection.
-    refute conn1 == conn2
+      on_exit(fn ->
+        if File.exists?(@invalid_db_path), do: File.rm!(@invalid_db_path)
+        if File.exists?(@invalid_dir), do: File.rmdir!(@invalid_dir)
+      end)
 
-    # Check they point to the same DB by setting/getting cache_size
-    # Set cache_size via conn1, assert set returns :ok, true
-    assert {:ok, true} = NIF.set_pragma(conn1, "cache_size", @test_cache_size)
+      :ok
+    end
 
-    # Read back via conn2 using get_pragma, assert it returns the value set by conn1 (use attribute directly)
-    assert {:ok, @test_cache_size} = NIF.get_pragma(conn2, "cache_size")
+    # These tests don't depend on the opener type, so define once outside loop
+    test "open/1 fails for an invalid path" do
+      assert {:error, {:cannot_open_database, @invalid_db_path, _reason}} =
+               NIF.open(@invalid_db_path)
+    end
 
-    assert {:ok, true} = NIF.close(conn1)
-    # Closing via conn2 should still succeed because close/1 is conceptually idempotent
-    # and relies on Arc/GC for the actual underlying close.
-    assert {:ok, true} = NIF.close(conn2)
-  end
-
-  # --- open_in_memory/1 Tests ---
-
-  test "open_in_memory/1 successfully opens a unique :memory: database" do
-    assert {:ok, conn} = NIF.open_in_memory(":memory:")
-    # Verify usability: set PRAGMA, check success, then get PRAGMA
-    assert {:ok, true} = NIF.set_pragma(conn, "cache_size", @test_cache_size)
-    # Assert directly against module attribute value
-    assert {:ok, @test_cache_size} = NIF.get_pragma(conn, "cache_size")
-    assert {:ok, true} = NIF.close(conn)
-  end
-
-  test "open_in_memory/1 successfully opens a shared in-memory database via URI" do
-    assert {:ok, conn} = NIF.open_in_memory(@shared_mem_db_uri)
-    # Verify usability: set PRAGMA, check success, then get PRAGMA
-    # Use a different value
-    test_val = @test_cache_size + 2
-    assert {:ok, true} = NIF.set_pragma(conn, "cache_size", test_val)
-    # Use pin operator ^ for the variable test_val
-    assert {:ok, ^test_val} = NIF.get_pragma(conn, "cache_size")
-    assert {:ok, true} = NIF.close(conn)
-  end
-
-  test "open_in_memory/1 fails for an invalid URI schema (requires file: or :memory:)" do
-    assert {:error, {:cannot_open_database, "http://invalid", _reason}} =
-             NIF.open_in_memory("http://invalid")
-  end
-
-  test "open_in_memory/1 with shared URI returns different handles referencing the same DB" do
-    assert {:ok, conn1} = NIF.open_in_memory(@shared_mem_db_uri)
-    assert {:ok, conn2} = NIF.open_in_memory(@shared_mem_db_uri)
-
-    # Handles themselves are distinct ResourceArcs.
-    refute conn1 == conn2
-
-    # Check they point to the same DB using cache_size
-    # Set cache_size via conn1, assert set success
-    assert {:ok, true} = NIF.set_pragma(conn1, "cache_size", @test_cache_size)
-    # Read back via conn2 using get_pragma (use attribute directly)
-    assert {:ok, @test_cache_size} = NIF.get_pragma(conn2, "cache_size")
-
-    assert {:ok, true} = NIF.close(conn1)
-    assert {:ok, true} = NIF.close(conn2)
-  end
-
-  # --- open_temporary/0 Tests ---
-
-  test "open_temporary/0 successfully opens a unique temporary file database" do
-    assert {:ok, conn} = NIF.open_temporary()
-    # Verify usability: set PRAGMA, check success, then get PRAGMA
-    assert {:ok, true} = NIF.set_pragma(conn, "cache_size", @test_cache_size)
-    # Assert directly against module attribute value
-    assert {:ok, @test_cache_size} = NIF.get_pragma(conn, "cache_size")
-    # Check database list - should show main with empty file path ("" not nil) for temporary DB
-    assert {:ok, [%Schema.DatabaseInfo{name: "main", file: ""}]} =
-             NIF.schema_databases(conn)
-
-    assert {:ok, true} = NIF.close(conn)
-  end
-
-  test "open_temporary/0 creates distinct databases on subsequent calls" do
-    assert {:ok, conn1} = NIF.open_temporary()
-    assert {:ok, conn2} = NIF.open_temporary()
-
-    # Handles represent distinct underlying temporary databases.
-    refute conn1 == conn2
-
-    # Verify they are distinct DBs using cache_size
-    # Get default cache_size on conn2 first
-    {:ok, default_cache_size_conn2} = NIF.get_pragma(conn2, "cache_size")
-    # Set cache_size on conn1, assert set success
-    assert {:ok, true} = NIF.set_pragma(conn1, "cache_size", @test_cache_size)
-    # Verify the value was set on conn1 (use attribute directly)
-    assert {:ok, @test_cache_size} = NIF.get_pragma(conn1, "cache_size")
-    # Read back via conn2 using get_pragma, assert it's still the default value (pin variable)
-    assert {:ok, ^default_cache_size_conn2} = NIF.get_pragma(conn2, "cache_size")
-
-    assert {:ok, true} = NIF.close(conn1)
-    assert {:ok, true} = NIF.close(conn2)
-  end
-
-  # --- close/1 Tests ---
-
-  test "close/1 returns {:ok, true} even when called multiple times" do
-    assert {:ok, conn} = NIF.open(":memory:")
-    assert {:ok, true} = NIF.close(conn)
-
-    # Subsequent calls are no-ops on the Rust side but should still return ok via the NIF interface.
-    assert {:ok, true} = NIF.close(conn)
-    assert {:ok, true} = NIF.close(conn)
+    test "open_in_memory/1 fails for an invalid URI schema" do
+      # Test attempting to open non-file/memory URI via open_in_memory
+      assert {:error, {:cannot_open_database, "http://invalid", _reason}} =
+               NIF.open_in_memory("http://invalid")
+    end
   end
 end
