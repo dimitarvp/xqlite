@@ -1,7 +1,8 @@
 defmodule Xqlite.NIF.ConnectionTest do
   use ExUnit.Case, async: true
 
-  import Xqlite.TestUtil, only: [connection_openers: 0, opener_mfa_for_tag: 1]
+  import Xqlite.TestUtil,
+    only: [connection_openers: 0, find_test_tag!: 1, opener_mfa_for_tag: 1]
 
   alias XqliteNIF, as: NIF
   alias Xqlite.Schema
@@ -11,18 +12,9 @@ defmodule Xqlite.NIF.ConnectionTest do
     describe "using #{prefix}" do
       @describetag type_tag
 
-      # Setup finds its tag from the context keys, then looks up the MFA
+      # Setup uses helpers to find the tag and corresponding MFA
       setup context do
-        # Find which tag atom is present as a key in the context
-        known_tags = Enum.map(connection_openers(), fn {tag, _, _} -> tag end)
-        current_tag = Enum.find(known_tags, fn tag -> Map.has_key?(context, tag) end)
-
-        # If no known tag found (shouldn't happen if for loop is correct), raise error
-        unless current_tag do
-          raise "Could not determine current db_type tag from context: #{inspect(context)}"
-        end
-
-        # Lookup the MFA using the found tag
+        current_tag = find_test_tag!(context)
         {mod, fun, args} = opener_mfa_for_tag(current_tag)
 
         # Open connection
