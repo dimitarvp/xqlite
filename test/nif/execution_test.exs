@@ -308,6 +308,16 @@ defmodule Xqlite.NIF.ExecutionTest do
 
         assert byte_size(retrieved_string) == 24
       end
+
+      test "execute/3 returns error when trying to execute non-query with RETURNING via execute",
+           %{conn: conn} do
+        # Use setup helper with default table name
+        setup_named_table(conn)
+
+        sql = "INSERT INTO exec_test (name, val_int) VALUES (?1, ?2) RETURNING id;"
+        params = ["Should Fail", 99]
+        assert {:error, :execute_returned_results} = NIF.execute(conn, sql, params)
+      end
     end
 
     # end describe "using #{prefix}"
