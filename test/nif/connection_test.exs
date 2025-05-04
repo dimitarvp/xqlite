@@ -1,8 +1,7 @@
 defmodule Xqlite.NIF.ConnectionTest do
   use ExUnit.Case, async: true
 
-  import Xqlite.TestUtil,
-    only: [connection_openers: 0, find_test_tag!: 1, opener_mfa_for_tag: 1]
+  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
   alias XqliteNIF, as: NIF
   alias Xqlite.Schema
@@ -12,14 +11,13 @@ defmodule Xqlite.NIF.ConnectionTest do
     describe "using #{prefix}" do
       @describetag type_tag
 
-      # Setup uses helpers to find the tag and corresponding MFA
+      # Setup uses a single helper to find the appropriate MFA based on context tag
       setup context do
-        current_tag = find_test_tag!(context)
-        {mod, fun, args} = opener_mfa_for_tag(current_tag)
+        {mod, fun, args} = find_opener_mfa!(context)
 
         # Open connection
         assert {:ok, conn} = apply(mod, fun, args),
-               "Failed to open connection for tag :#{current_tag}"
+               "Failed to open connection using #{inspect({mod, fun, args})}"
 
         on_exit(fn -> NIF.close(conn) end)
         {:ok, conn: conn}

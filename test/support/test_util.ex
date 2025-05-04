@@ -4,8 +4,8 @@ defmodule Xqlite.TestUtil do
   # A list of: an ExUnit tag, a `describe` block prefix, and a MFA to open a connection.
   # This data structure is used to generate tests for different DB types.
   @connection_openers [
-    {:memory_private, "Private In-memory DB", {NIF, :open_in_memory, []}},
-    {:file_temp, "Temporary Disk DB", {NIF, :open_temporary, []}}
+    {:memory_private, "private in-memory DB", {NIF, :open_in_memory, []}},
+    {:file_temp, "temporary file DB", {NIF, :open_temporary, []}}
   ]
 
   @tag_to_mfa_map Map.new(@connection_openers, fn {tag, _prefix, mfa} -> {tag, mfa} end)
@@ -17,35 +17,25 @@ defmodule Xqlite.TestUtil do
   def connection_openers(), do: @connection_openers
 
   @doc """
-  Looks up the opener MFA tuple for a given type tag atom.
+  Finds the opener MFA tuple based on the tag present in the ExUnit context map.
+
+  Raises an error if a known tag key isn't found in the context.
   """
-  def opener_mfa_for_tag(type_tag) when is_atom(type_tag) do
-    Map.fetch!(@tag_to_mfa_map, type_tag)
-  end
-
-  @doc """
-  Finds the specific test tag atom (e.g., `:memory_private`, `:file_temp`)
-  that will be added to the ExUnit context via `@describetag`.
-
-  ExUnit adds the tag atom as a key with a boolean value (`true`) directly
-  into the context map for tests within the tagged `describe` block.
-  """
-  def find_test_tag!(context) when is_map(context) do
-    # Get the list of known tags from our connection openers definition
-    known_tags = Enum.map(connection_openers(), fn {tag, _, _} -> tag end)
-
+  def find_opener_mfa!(context) when is_map(context) do
     # Find the first known tag that exists as a key in the context map
-    found_tag = Enum.find(known_tags, fn tag -> Map.has_key?(context, tag) end)
+    # Get known tags from the source map keys directly
+    found_tag = Enum.find(Map.keys(@tag_to_mfa_map), fn tag -> Map.has_key?(context, tag) end)
 
-    # Raise an error if no known tag is found in the context (should not happen)
+    # Raise an error if no known tag is found in the context
     unless found_tag do
       raise """
-      Could not determine current test tag from context.
-      Expected one of #{inspect(known_tags)} to be a key in context map.
+      Could not determine current test tag from context needed to find opener MFA.
+      Expected one of #{inspect(Map.keys(@tag_to_mfa_map))} to be a key in context map.
       Context: #{inspect(context)}
       """
     end
 
-    found_tag
+    # Lookup and return the MFA using the found tag
+    Map.fetch!(@tag_to_mfa_map, found_tag)
   end
 end
