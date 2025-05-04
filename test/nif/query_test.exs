@@ -203,26 +203,45 @@ defmodule Xqlite.NIF.QueryTest do
                  NIF.query(conn, sql, age: 30, nombre: "Alice")
       end
 
-      test "query/3 returns error for mixed parameter types (positional vs named)", %{
-        conn: conn
-      } do
-        # Mixed syntax
-        sql = "SELECT id FROM query_test WHERE age = ?1 AND name = :name;"
+      test "query/3 parameter type interactions (named vs positional)", %{conn: conn} do
+        # SQL with both positional and named placeholders
+        sql_mixed = "SELECT id FROM query_test WHERE age = ?1 AND name = :name;"
 
-        # Case 1: Named params passed - fails as expected (invalid param name for "?1")
-        assert {:error, {:invalid_parameter_name, name}} =
-                 NIF.query(conn, sql, age: 30, name: "Alice")
+        # --- Case 1: Using NAMED parameters with MIXED SQL ---
+        # This correctly fails because rusqlite tries to bind :age and :name,
+        # but the SQL also contains "?1", leading to parameter name/index mismatches.
+        named_params = [age: 30, name: "Alice"]
 
-        assert name in [":age", ":name"]
+        assert {:error, {:invalid_parameter_name, ":age"}} =
+                 NIF.query(conn, sql_mixed, named_params)
 
-        # Case 2: Positional params passed - Unexpectedly SUCCEEDS!
-        # Consistent with behavior seen in execution_test.exs.
-        # Asserting the actual observed behavior.
-        # Alice matches age = 30
+        # --- Case 2: Using POSITIONAL parameters with MIXED SQL ---
+        # NOTE: Unexpected Behavior: This query SUCCEEDS instead of failing due to
+        # the mixed/invalid placeholders (?1 and :name). It appears that when
+        # *positional* parameters are provided, rusqlite/SQLite successfully binds
+        # the parameter to the positional placeholder (?1) and effectively IGNORES
+        # the unbound named placeholder (:name) condition in the WHERE clause.
+        # This behavior was confirmed consistent across :memory: and temporary file DBs.
+        # age = 30 should match Alice (ID 1)
+        positional_params = [30, "Alice"]
         expected_rows = [[1]]
-        # Pass positional
+
         assert {:ok, %{columns: ["id"], rows: expected_rows, num_rows: 1}} ==
-                 NIF.query(conn, sql, [30, "Alice"])
+                 NIF.query(conn, sql_mixed, positional_params)
+
+        # --- Case 3: Control - Using ONLY named placeholders with NAMED params ---
+        # This should work correctly.
+        sql_named_only = "SELECT id FROM query_test WHERE age = :age AND name = :name;"
+
+        assert {:ok, %{columns: ["id"], rows: [[1]], num_rows: 1}} ==
+                 NIF.query(conn, sql_named_only, age: 30, name: "Alice")
+
+        # --- Case 4: Control - Using ONLY positional placeholders with POSITIONAL params ---
+        # This should work correctly.
+        sql_pos_only = "SELECT id FROM query_test WHERE age = ?1 AND name = ?2;"
+
+        assert {:ok, %{columns: ["id"], rows: [[1]], num_rows: 1}} ==
+                 NIF.query(conn, sql_pos_only, [30, "Alice"])
       end
 
       test "query/3 returns error for invalid parameter type (unsupported)", %{conn: conn} do
