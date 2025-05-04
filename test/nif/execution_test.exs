@@ -191,8 +191,13 @@ defmodule Xqlite.NIF.ExecutionTest do
         INSERT INTO ok_table VALUES (2); -- This won't run
         """
 
-        # Expect an error, the exact reason might vary but indicates failure
-        assert {:error, _reason} = NIF.execute_batch(conn, bad_sql)
+        # Expect an error related to the failing statement within the batch
+        # Observed error is sqlite_failure with "no such table" message
+        assert {:error, {:sqlite_failure, _code, _ext_code, msg}} =
+                 NIF.execute_batch(conn, bad_sql)
+
+        # Verify the message confirms the expected failure reason
+        assert String.contains?(msg || "", "no such table: non_existent_table")
 
         # Verify that statements *before* the error executed successfully (SQLite behavior)
         assert {:ok, %{rows: [[1]], num_rows: 1}} =
