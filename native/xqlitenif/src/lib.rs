@@ -61,7 +61,7 @@ rustler::atoms! {
     num_rows,
     numeric,
     offset,
-    operation_interrupted,
+    operation_cancelled,
     partial,
     pid,
     port,
@@ -275,7 +275,7 @@ pub(crate) enum XqliteError {
     DatabaseBusyOrLocked {
         message: String,
     },
-    OperationInterrupted,
+    OperationCancelled,
 
     NoSuchTable {
         message: String,
@@ -361,8 +361,8 @@ impl Display for XqliteError {
             XqliteError::DatabaseBusyOrLocked { message } => {
                 write!(f, "Database busy or locked: {}", message)
             }
-            XqliteError::OperationInterrupted => {
-                write!(f, "Database operation was interrupted")
+            XqliteError::OperationCancelled => {
+                write!(f, "Database operation was cancelled")
             }
             XqliteError::NoSuchTable { message } => {
                 write!(f, "No such table: {}", message) // Message usually includes table name
@@ -442,7 +442,7 @@ impl Encoder for XqliteError {
             XqliteError::DatabaseBusyOrLocked { message } => {
                 (database_busy_or_locked(), message).encode(env)
             }
-            XqliteError::OperationInterrupted => operation_interrupted().encode(env),
+            XqliteError::OperationCancelled => operation_cancelled().encode(env),
             XqliteError::NoSuchTable { message } => (no_such_table(), message).encode(env),
             XqliteError::NoSuchIndex { message } => (no_such_index(), message).encode(env),
             XqliteError::TableExists { message } => (table_exists(), message).encode(env),
@@ -565,7 +565,7 @@ impl From<RusqliteError> for XqliteError {
                             message: message_string,
                         }
                     }
-                    ffi::SQLITE_INTERRUPT => XqliteError::OperationInterrupted, // Kept original name
+                    ffi::SQLITE_INTERRUPT => XqliteError::OperationCancelled,
                     ffi::SQLITE_READONLY => XqliteError::ReadOnlyDatabase {
                         message: message_string,
                     },
