@@ -547,21 +547,37 @@ impl Encoder for XqliteError {
 impl RefUnwindSafe for XqliteError {}
 
 impl From<RusqliteError> for XqliteError {
-    // Use alias RusqliteError for brevity
     fn from(err: RusqliteError) -> Self {
         match err {
-            // --- Handle SqliteFailure: Map specific C API codes first ---
             RusqliteError::SqliteFailure(ffi_err, msg_opt) => {
-                // Compute the definitive error message string ONCE.
-                // Clone msg_opt if present, otherwise use ffi_err string.
                 let message_string = msg_opt.unwrap_or_else(|| ffi_err.to_string());
+                let lower_msg = message_string.to_lowercase();
 
-                // Use the primary C API result code (ffi_err.code as i32)
+                // Check common messages FIRST for logical errors often reported via code 1
+                if lower_msg.starts_with("no such table") {
+                    return XqliteError::NoSuchTable {
+                        message: message_string,
+                    };
+                } else if lower_msg.starts_with("no such index") {
+                    return XqliteError::NoSuchIndex {
+                        message: message_string,
+                    };
+                } else if lower_msg.contains("already exists") {
+                    if lower_msg.starts_with("table") {
+                        return XqliteError::TableExists {
+                            message: message_string,
+                        };
+                    } else if lower_msg.starts_with("index") {
+                        return XqliteError::IndexExists {
+                            message: message_string,
+                        };
+                    }
+                }
+
+                // If not a known message pattern, check primary C API codes
                 match ffi_err.code as i32 {
-                    // --- Directly mapped Operational Errors ---
                     ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED => {
                         XqliteError::DatabaseBusyOrLocked {
-                            // Use the computed message string
                             message: message_string,
                         }
                     }
@@ -572,96 +588,98 @@ impl From<RusqliteError> for XqliteError {
                     ffi::SQLITE_SCHEMA => XqliteError::SchemaChanged {
                         message: message_string,
                     },
-
-                    // --- Errors often related to object existence ---
-                    ffi::SQLITE_ERROR => {
-                        // Primary code 1
-                        // Check extended code for constraints first
-                        if let Some(kind_atom) =
+                    ffi::SQLITE_CONSTRAINT => {
+                        // Also check extended for constraints
+                        if let Some(kind) =
                             constraint_kind_to_atom_extended(ffi_err.extended_code)
                         {
                             XqliteError::ConstraintViolation {
-                                kind: Some(kind_atom),
+                                kind: Some(kind),
                                 message: message_string,
                             }
                         } else {
-                            // Check common messages for specific errors mapped from SQLITE_ERROR
-                            let lower_msg = message_string.to_lowercase(); // Use computed string
-                            if lower_msg.starts_with("no such table") {
-                                XqliteError::NoSuchTable {
-                                    message: message_string,
-                                }
-                            } else if lower_msg.starts_with("no such index") {
-                                XqliteError::NoSuchIndex {
-                                    message: message_string,
-                                }
-                            } else if lower_msg.contains("already exists") {
-                                if lower_msg.starts_with("table") {
-                                    XqliteError::TableExists {
-                                        message: message_string,
-                                    }
-                                } else if lower_msg.starts_with("index") {
-                                    XqliteError::IndexExists {
-                                        message: message_string,
-                                    }
-                                } else {
-                                    XqliteError::SqliteFailure {
-                                        code: 1,
-                                        extended_code: ffi_err.extended_code,
-                                        message: Some(message_string),
-                                    }
-                                }
-                            } else {
-                                // Fallback for generic SQLITE_ERROR(1)
-                                XqliteError::SqliteFailure {
-                                    code: 1,
-                                    extended_code: ffi_err.extended_code,
-                                    message: Some(message_string),
-                                }
+                            // Fallback if primary is CONSTRAINT but extended unknown
+                            XqliteError::SqliteFailure {
+                                code: ffi::SQLITE_CONSTRAINT,
+                                extended_code: ffi_err.extended_code,
+                                message: Some(message_string),
                             }
                         }
                     }
-
-                    // --- Fallback for other unmapped SQLite codes ---
-                    other_code => {
-                        // Use variable name `other_code` for clarity
-                        // Check constraints again just in case
-                        if let Some(kind_atom) =
+                    // Add other specific primary code checks here if needed
+                    _ => {
+                        // Fallback for any other code, check constraints as last resort
+                        if let Some(kind) =
                             constraint_kind_to_atom_extended(ffi_err.extended_code)
                         {
                             XqliteError::ConstraintViolation {
-                                kind: Some(kind_atom),
+                                kind: Some(kind),
                                 message: message_string,
                             }
                         } else {
-                            // Truly unmapped SQLite error code
+                            // Generic fallback
                             XqliteError::SqliteFailure {
-                                code: other_code, // Use the actual code
+                                code: ffi_err.code as i32,
                                 extended_code: ffi_err.extended_code,
-                                message: Some(message_string), // Use computed string
+                                message: Some(message_string),
                             }
                         }
                     }
                 }
-            } // End SqliteFailure arm
+            }
 
-            // --- Handle other specific rusqlite::Error variants ---
-            // (No changes needed here from the previous version)
+            RusqliteError::SqlInputError {
+                error: ffi_err,
+                msg,
+                sql,
+                offset,
+            } => {
+                let lower_msg = msg.to_lowercase();
+                // Check specific messages even for SqlInputError
+                if lower_msg.contains("already exists") {
+                    if lower_msg.starts_with("table") {
+                        XqliteError::TableExists { message: msg }
+                    } else if lower_msg.starts_with("index") {
+                        XqliteError::IndexExists { message: msg }
+                    } else {
+                        XqliteError::SqlInputError {
+                            code: ffi_err.code as i32,
+                            message: msg,
+                            sql,
+                            offset,
+                        }
+                    }
+                } else if lower_msg.starts_with("no such table") {
+                    XqliteError::NoSuchTable { message: msg }
+                } else {
+                    XqliteError::SqlInputError {
+                        code: ffi_err.code as i32,
+                        message: msg,
+                        sql,
+                        offset,
+                    }
+                }
+            }
+
+            // --- Other specific rusqlite::Error variants (consuming `err`) ---
             RusqliteError::ExecuteReturnedResults => XqliteError::ExecuteReturnedResults,
             RusqliteError::InvalidParameterCount(p, e) => XqliteError::InvalidParameterCount {
                 provided: p,
                 expected: e,
             },
-            RusqliteError::InvalidParameterName(n) => XqliteError::InvalidParameterName(n),
+            RusqliteError::InvalidParameterName(name) => {
+                XqliteError::InvalidParameterName(name)
+            } // Move String
             RusqliteError::NulError(_) => XqliteError::NulErrorInString,
             RusqliteError::Utf8Error(e) => XqliteError::Utf8Error {
                 reason: e.to_string(),
-            },
-            RusqliteError::FromSqlConversionFailure(idx, st, e) => {
+            }, // Allocates
+            RusqliteError::FromSqlConversionFailure(idx, sql_type, source_err) => {
+                // Need sqlite_type_to_atom here! Re-add it.
                 XqliteError::FromSqlConversionFailure {
                     index: idx,
-                    sqlite_type: sqlite_type_to_atom(st),
-                    reason: e.to_string(),
+                    sqlite_type: sqlite_type_to_atom(sql_type),
+                    reason: source_err.to_string(),
                 }
             }
             RusqliteError::IntegralValueOutOfRange(idx, val) => {
@@ -669,34 +687,27 @@ impl From<RusqliteError> for XqliteError {
                     index: idx,
                     value: val,
                 }
-            }
+            } // Copies i64
             RusqliteError::ToSqlConversionFailure(e) => XqliteError::ToSqlConversionFailure {
                 reason: e.to_string(),
-            },
-            RusqliteError::InvalidColumnIndex(idx) => XqliteError::InvalidColumnIndex(idx),
-            RusqliteError::InvalidColumnName(n) => XqliteError::InvalidColumnName(n),
-            RusqliteError::InvalidColumnType(idx, n, st) => XqliteError::InvalidColumnType {
-                index: idx,
-                name: n,
-                sqlite_type: sqlite_type_to_atom(st),
-            },
-            RusqliteError::SqlInputError {
-                error,
-                msg,
-                sql,
-                offset,
-            } => XqliteError::SqlInputError {
-                code: error.code as i32,
-                message: msg,
-                sql,
-                offset,
-            },
+            }, // Allocates
+            RusqliteError::InvalidColumnIndex(idx) => XqliteError::InvalidColumnIndex(idx), // Copies usize
+            RusqliteError::InvalidColumnName(name) => XqliteError::InvalidColumnName(name), // Move String
+            RusqliteError::InvalidColumnType(idx, name, sql_type) => {
+                // Need sqlite_type_to_atom here! Re-add it.
+                XqliteError::InvalidColumnType {
+                    index: idx,
+                    name,
+                    sqlite_type: sqlite_type_to_atom(sql_type),
+                }
+            }
             RusqliteError::MultipleStatement => XqliteError::MultipleStatements,
-            // Catch-all
-            other_err => XqliteError::CannotExecute(other_err.to_string()),
-        } // End match err
-    } // End from
-} // End impl
+
+            // Catch-all MUST be last
+            other_err => XqliteError::CannotExecute(other_err.to_string()), // Allocates
+        }
+    }
+}
 
 // Based on libsqlite3-sys constants
 fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
