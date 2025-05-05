@@ -84,6 +84,62 @@ defmodule Xqlite.NIF.ErrorInputTest do
         sql = "SELECT 1; SELECT 2;"
         assert {:error, {:cannot_prepare_statement, _sql, _reason}} = NIF.query(conn, sql, [])
       end
+
+      # --- DB State / Execution Error Tests ---
+
+      test "execute/3 returns :no_such_index when dropping non-existent index", %{conn: conn} do
+        sql = "DROP INDEX non_existent_index;"
+        # Note: SQLite error messages sometimes include the type, e.g., "index"
+        assert {:error, {:no_such_index, msg}} = NIF.execute(conn, sql, [])
+        assert String.contains?(msg || "", "non_existent_index")
+      end
+
+      # --- Foreign Key Constraint Violation Tests ---
+      # DDL is now included within each test that needs it.
+
+      test "execute/3 returns :constraint_foreign_key on invalid INSERT", %{conn: conn} do
+        # Setup FK tables for this specific test
+        fk_ddl = """
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE fk_parent_insert (id INTEGER PRIMARY KEY);
+        CREATE TABLE fk_child_insert (
+          id INTEGER PRIMARY KEY,
+          parent_id INTEGER NOT NULL REFERENCES fk_parent_insert(id)
+        );
+        INSERT INTO fk_parent_insert (id) VALUES (1);
+        """
+
+        assert {:ok, true} = NIF.execute_batch(conn, fk_ddl)
+
+        # Test the violation
+        # parent_id 99 doesn't exist
+        sql = "INSERT INTO fk_child_insert (id, parent_id) VALUES (10, 99);"
+
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _msg}} =
+                 NIF.execute(conn, sql, [])
+      end
+
+      test "execute/3 returns :constraint_foreign_key on invalid DELETE", %{conn: conn} do
+        # Setup FK tables for this specific test (using different names to avoid conflict)
+        fk_ddl = """
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE fk_parent_delete (id INTEGER PRIMARY KEY);
+        CREATE TABLE fk_child_delete (
+          id INTEGER PRIMARY KEY,
+          parent_id INTEGER NOT NULL REFERENCES fk_parent_delete(id)
+        );
+        INSERT INTO fk_parent_delete (id) VALUES (1);
+        INSERT INTO fk_child_delete (id, parent_id) VALUES (10, 1);
+        """
+
+        assert {:ok, true} = NIF.execute_batch(conn, fk_ddl)
+
+        # Test the violation: Try deleting the parent row referenced by the child
+        sql = "DELETE FROM fk_parent_delete WHERE id = 1;"
+
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _msg}} =
+                 NIF.execute(conn, sql, [])
+      end
     end
   end
 end
