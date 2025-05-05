@@ -32,7 +32,7 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
 
 pub(crate) fn process_rows<'a, 'rows>(
     env: Env<'a>,
-    mut rows: Rows<'rows>, // Takes ownership of `rows`
+    mut rows: Rows<'rows>,
     column_count: usize,
 ) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
     let mut results: Vec<Vec<Term<'a>>> = Vec::new();
@@ -58,7 +58,6 @@ pub(crate) fn process_rows<'a, 'rows>(
                 break;
             }
             Err(e) => {
-                // Error fetching next row, map it and return Err
                 return Err(XqliteError::CannotFetchRow(e.to_string()));
             }
         }
@@ -134,7 +133,7 @@ pub(crate) fn decode_exec_keyword_params<'a>(
             .to_term(env)
             .atom_to_string()
             .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{:?}", e)))?;
-        key_string.insert(0, ':'); // Prepend ':' as SQLite expects it in named parameters
+        key_string.insert(0, ':');
         let rusqlite_value = elixir_term_to_rusqlite_value(env, value_term)?;
         params.push((key_string, rusqlite_value));
     }
@@ -160,29 +159,26 @@ pub(crate) fn format_term_for_pragma<'a>(
     env: Env<'a>,
     term: Term<'a>,
 ) -> Result<String, XqliteError> {
-    // Based on elixir_term_to_rusqlite_value, but produces SQL literal strings
     let term_type = term.get_type();
     match term_type {
         TermType::Atom => {
             if term == nil().to_term(env) {
                 Ok("NULL".to_string())
             } else if term == true_().to_term(env) {
-                Ok("ON".to_string()) // Common PRAGMA boolean values
+                Ok("ON".to_string())
             } else if term == false_().to_term(env) {
-                Ok("OFF".to_string()) // Common PRAGMA boolean values
+                Ok("OFF".to_string())
             } else {
-                // Allow other atoms if they represent valid PRAGMA keywords (like WAL, DELETE)
                 term.atom_to_string()
                     .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{:?}", e)))
             }
         }
-        TermType::Integer => term
-            .decode::<i64>()
-            .map(|i| i.to_string()) // Convert integer directly to string
-            .map_err(|e| XqliteError::CannotConvertToSqliteValue {
+        TermType::Integer => term.decode::<i64>().map(|i| i.to_string()).map_err(|e| {
+            XqliteError::CannotConvertToSqliteValue {
                 value_str: format!("{:?}", term),
                 reason: format!("{:?}", e),
-            }),
+            }
+        }),
         // Floats are usually not set via PRAGMA, but handle just in case
         TermType::Float => term.decode::<f64>().map(|f| f.to_string()).map_err(|e| {
             XqliteError::CannotConvertToSqliteValue {
@@ -193,7 +189,7 @@ pub(crate) fn format_term_for_pragma<'a>(
         // Binaries interpreted as Strings, need single quotes
         TermType::Binary => term
             .decode::<String>()
-            .map(|s| format!("'{}'", s.replace('\'', "''"))) // Single quote and escape
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
             .map_err(|e| XqliteError::CannotConvertToSqliteValue {
                 value_str: format!("{:?}", term),
                 reason: format!("Failed to decode binary as string for PRAGMA: {:?}", e),
@@ -212,8 +208,6 @@ pub(crate) fn is_keyword<'a>(list_term: Term<'a>) -> bool {
     }
 }
 
-/// Quotes an identifier (like table name) for safe inclusion in PRAGMA commands
-/// where strings are accepted. Uses single quotes for consistency.
 #[inline]
 pub(crate) fn quote_identifier(name: &str) -> String {
     format!("'{}'", name.replace('\'', "''"))

@@ -25,13 +25,13 @@ use std::panic::RefUnwindSafe;
 
 #[derive(Debug, Clone)]
 pub(crate) enum SchemaErrorDetail {
-    UnexpectedValue(String), // Holds the raw unexpected string from PRAGMA/query
+    UnexpectedValue(String),
 }
 
 // Based on libsqlite3-sys constants
 fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
     // Primary constraint code check
-    const SQLITE_CONSTRAINT_PRIMARY: i32 = ffi::SQLITE_CONSTRAINT; // Get the base code
+    const SQLITE_CONSTRAINT_PRIMARY: i32 = ffi::SQLITE_CONSTRAINT;
 
     match extended_code {
         ffi::SQLITE_CONSTRAINT_CHECK => Some(constraint_check()),
@@ -51,9 +51,8 @@ fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
         // This covers cases where SQLite might return, e.g., just 19 (SQLITE_CONSTRAINT)
         // without a specific extended code like (19 | (5 << 8)) for NOTNULL.
         // It also covers *future* extended constraint codes we don't know about yet.
-        code if (code & 0xff) == SQLITE_CONSTRAINT_PRIMARY => Some(constraint_violation()), // Return the generic atom
+        code if (code & 0xff) == SQLITE_CONSTRAINT_PRIMARY => Some(constraint_violation()),
 
-        // Not a known extended constraint code, and not even a basic constraint code
         _ => None,
     }
 }
@@ -347,10 +346,10 @@ impl Encoder for XqliteError {
             XqliteError::InvalidParameterCount { provided, expected } => {
                 let map_result = map_new(env)
                     // Use crate::* to avoid shadowing
-                    .map_put(crate::provided(), provided) // Use full path to atom fn
-                    .and_then(|map| map.map_put(crate::expected(), expected)); // Use full path to atom fn
+                    .map_put(crate::provided(), provided)
+                    .and_then(|map| map.map_put(crate::expected(), expected));
                 match map_result {
-                    Ok(map) => (invalid_parameter_count(), map).encode(env), // Use atom fn for tuple key
+                    Ok(map) => (invalid_parameter_count(), map).encode(env),
                     Err(_) => (
                         error(),
                         internal_encoding_error(),
