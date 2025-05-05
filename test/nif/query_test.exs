@@ -250,6 +250,15 @@ defmodule Xqlite.NIF.QueryTest do
         assert {:error, {:unsupported_data_type, :map}} =
                  NIF.query(conn, sql, [%{invalid: :map}])
       end
+
+      test "query/3 returns error for NoSuchTable on SELECT", %{conn: conn} do
+        # Try selecting from a table that doesn't exist
+        sql = "SELECT * FROM non_existent_table;"
+        # This fails during prepare, not execution
+        assert {:error, {:cannot_prepare_statement, ^sql, reason}} = NIF.query(conn, sql, [])
+        # Verify the reason message confirms the underlying issue
+        assert String.contains?(reason || "", "no such table: non_existent_table")
+      end
     end
 
     # end describe "using #{prefix}"
