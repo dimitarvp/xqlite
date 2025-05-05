@@ -20,6 +20,7 @@ defmodule Xqlite.NIF.ExecutionTest do
   # Creates a table with the standard test columns but allows specifying the name.
   defp setup_named_table(conn, table_name \\ "exec_test") do
     create_sql = "CREATE TABLE #{table_name} #{@exec_test_columns_sql};"
+    # Pattern match ensures execute returns success, otherwise test fails here.
     {:ok, 0} = NIF.execute(conn, create_sql, [])
     conn
   end
@@ -53,7 +54,6 @@ defmodule Xqlite.NIF.ExecutionTest do
         assert {:ok, %{rows: [[_, "simple_create", _, _, _, _]], num_rows: 1}} =
                  NIF.query(conn, "PRAGMA table_list;", [])
                  |> then(fn {:ok, res} ->
-                   # Parse the raw result rows to find the specific table
                    filtered_rows =
                      Enum.filter(res.rows, fn [_schema, name, _, _, _, _] ->
                        name == "simple_create"
@@ -72,13 +72,12 @@ defmodule Xqlite.NIF.ExecutionTest do
         """
 
         blob_data = <<1, 2, 3, 4, 5>>
-        # Use Elixir true
         params = [1, "Test Name", 123, 99.9, blob_data, true]
 
         # INSERT affects 1 row
         assert {:ok, 1} = NIF.execute(conn, sql, params)
 
-        # Verify insertion using query (Pin blob_data variable)
+        # Verify insertion using query
         assert {:ok, %{rows: [[1, "Test Name", 123, 99.9, ^blob_data, 1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT * FROM exec_test WHERE id = 1;", [])
       end
@@ -187,19 +186,15 @@ defmodule Xqlite.NIF.ExecutionTest do
         bad_sql = """
         CREATE TABLE ok_table (id INT);
         INSERT INTO ok_table VALUES (1);
-        SELECT * FROM non_existent_table; -- This will fail
+        SELECT * FROM non_existent_table; -- This SELECT fails at runtime
         INSERT INTO ok_table VALUES (2); -- This won't run
         """
 
-        # Expect an error related to the failing statement within the batch
-        # Observed error is sqlite_failure with "no such table" message
-        assert {:error, {:sqlite_failure, _code, _ext_code, msg}} =
-                 NIF.execute_batch(conn, bad_sql)
-
-        # Verify the message confirms the expected failure reason
+        # Expect :no_such_table error from the SELECT statement
+        assert {:error, {:no_such_table, msg}} = NIF.execute_batch(conn, bad_sql)
         assert String.contains?(msg || "", "no such table: non_existent_table")
 
-        # Verify that statements *before* the error executed successfully (SQLite behavior)
+        # Verify statements before the error might have executed
         assert {:ok, %{rows: [[1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT * FROM ok_table;", [])
       end
@@ -208,9 +203,40 @@ defmodule Xqlite.NIF.ExecutionTest do
         assert {:error, {:sql_input_error, %{message: msg}}} =
                  NIF.execute(conn, "CREATE TABLET bad (id INT);", [])
 
-        # Check the message indicates the likely problem
         assert String.contains?(msg, "syntax error")
         assert String.contains?(msg, "TABLET")
+      end
+
+      test "execute/3 returns error for NoSuchTable on INSERT", %{conn: conn} do
+        # Try inserting into a table that doesn't exist
+        sql = "INSERT INTO non_existent_table (col) VALUES (1);"
+        assert {:error, {:no_such_table, msg}} = NIF.execute(conn, sql, [])
+        assert String.contains?(msg || "", "no such table: non_existent_table")
+      end
+
+      test "execute/3 returns error for TableExists", %{conn: conn} do
+        # Use distinct name
+        table_name = "already_exists_test_exec"
+        # Create the table first
+        setup_named_table(conn, table_name)
+        # Try creating it again
+        create_sql = "CREATE TABLE #{table_name} (id INT);"
+        assert {:error, {:table_exists, msg}} = NIF.execute(conn, create_sql, [])
+        assert String.contains?(msg || "", "table #{table_name} already exists")
+      end
+
+      test "execute/3 returns error for IndexExists", %{conn: conn} do
+        # Use distinct name
+        table_name = "index_exists_test_exec"
+        # Use distinct name
+        index_name = "idx_exists_test_exec"
+        setup_named_table(conn, table_name)
+        # Create the index first
+        create_index_sql = "CREATE INDEX #{index_name} ON #{table_name}(name);"
+        assert {:ok, 0} = NIF.execute(conn, create_index_sql, [])
+        # Try creating it again
+        assert {:error, {:index_exists, msg}} = NIF.execute(conn, create_index_sql, [])
+        assert String.contains?(msg || "", "index #{index_name} already exists")
       end
 
       test "execute/3 returns error for constraint violation (UNIQUE)", %{conn: conn} do
@@ -235,7 +261,7 @@ defmodule Xqlite.NIF.ExecutionTest do
                  )
 
         # Attempt to insert duplicate name, expect constraint violation
-        assert {:error, {:constraint_violation, :constraint_unique, _}} =
+        assert {:error, {:constraint_violation, :constraint_unique, _msg}} =
                  NIF.execute(
                    conn,
                    "INSERT INTO #{table_name} (id, name) VALUES (2, 'UniqueName');",
@@ -244,22 +270,30 @@ defmodule Xqlite.NIF.ExecutionTest do
       end
 
       test "execute/3 returns error for constraint violation (NOT NULL)", %{conn: conn} do
-        # This test needs a specific schema, define it directly here
-        # Use distinct name
         table_name = "notnull_test_exec"
 
         create_notnull_sql =
           "CREATE TABLE #{table_name} (id INTEGER PRIMARY KEY, name TEXT NOT NULL);"
 
         assert {:ok, 0} = NIF.execute(conn, create_notnull_sql, [])
-
         # Attempt to insert NULL into the NOT NULL column
-        assert {:error, {:constraint_violation, :constraint_not_null, _}} =
+        assert {:error, {:constraint_violation, :constraint_not_null, _msg}} =
                  NIF.execute(
                    conn,
                    "INSERT INTO #{table_name} (id, name) VALUES (1, NULL);",
                    []
                  )
+      end
+
+      test "execute/3 returns error for constraint violation (CHECK)", %{conn: conn} do
+        # Use distinct name
+        table_name = "check_test_exec"
+        create_sql = "CREATE TABLE #{table_name} (id INT, val INT CHECK(val > 10));"
+        assert {:ok, 0} = NIF.execute(conn, create_sql, [])
+        assert {:ok, 1} = NIF.execute(conn, "INSERT INTO #{table_name} VALUES (1, 15);", [])
+        # Attempt to insert an invalid row violating the CHECK
+        assert {:error, {:constraint_violation, :constraint_check, _msg}} =
+                 NIF.execute(conn, "INSERT INTO #{table_name} VALUES (2, 5);", [])
       end
 
       test "execute/3 returns error for incorrect parameter count", %{conn: conn} do
