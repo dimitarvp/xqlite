@@ -16,9 +16,10 @@ use crate::{
     unsupported_data_type, utf8_error,
 };
 use rusqlite::{ffi, Error as RusqliteError};
-use rustler::types::atom::nil;
-use rustler::types::map::map_new;
-use rustler::{Atom, Encoder, Env, Term, TermType};
+use rustler::{
+    types::{atom::nil, map::map_new},
+    Atom, Encoder, Env, Term, TermType,
+};
 use std::fmt::{self, Display};
 use std::panic::RefUnwindSafe;
 

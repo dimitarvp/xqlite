@@ -1,12 +1,11 @@
 use crate::error::XqliteError;
-use crate::XqliteConn;
-use rusqlite::Connection;
-use rusqlite::{types::Value, Rows};
-use rustler::types::atom::{false_, nil, true_};
-use rustler::{resource_impl, Resource};
+use crate::nif::XqliteConn;
+use rusqlite::{types::Value, Connection, Rows};
 use rustler::{
-    Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, ResourceArc, Term,
-    TermType,
+    resource_impl,
+    types::atom::{false_, nil, true_},
+    Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, Resource, ResourceArc,
+    Term, TermType,
 };
 use std::fmt::Debug;
 use std::vec::Vec;
