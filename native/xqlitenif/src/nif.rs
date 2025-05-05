@@ -66,8 +66,8 @@ struct TempObjectInfo {
     name: String,
     obj_type_atom: Result<Atom, String>,
     column_count: i64,
-    wr_flag: i64,     // Raw value from PRAGMA 'wr' column (0 or 1)
-    strict_flag: i64, // Raw value from PRAGMA 'strict' column (0 or 1)
+    wr_flag: i64,
+    strict_flag: i64,
 }
 
 /// Temporary struct for holding intermediate results during column info parsing.
@@ -75,7 +75,7 @@ struct TempObjectInfo {
 struct TempColumnData {
     cid: i64,
     name: String,
-    type_str: String, // This holds the original declared type string
+    type_str: String,
     notnull_flag: i64,
     dflt_value: Option<String>,
     pk_flag: i64,
@@ -97,11 +97,11 @@ struct TempForeignKeyData {
 /// Temporary struct for holding intermediate results during index list parsing.
 #[derive(Debug)]
 struct TempIndexData {
-    // seq: i64, // Sequence number of index, typically not needed by user
+    // seq: i64,
     name: String,
-    unique: i64,        // PRAGMA returns 0 or 1
-    origin_str: String, // PRAGMA returns 'c', 'u', 'pk'
-    partial: i64,       // PRAGMA returns 0 or 1
+    unique: i64,
+    origin_str: String,
+    partial: i64,
 }
 
 /// Temporary struct for holding intermediate results during index column parsing.
@@ -205,7 +205,6 @@ fn execute<'a>(
         let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
         let params_slice: Vec<&dyn ToSql> =
             positional_values.iter().map(|v| v as &dyn ToSql).collect();
-        // Use `?` which will now invoke the refined `From<rusqlite::Error>` impl
         Ok(conn.execute(sql.as_str(), params_slice.as_slice())?)
     })
 }
@@ -228,13 +227,11 @@ fn get_pragma(
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
 ) -> Result<Term<'_>, XqliteError> {
-    // This function contains the logic previously in Step 2 of pragma_write_and_read
     with_conn(&handle, |conn| {
-        // Assuming with_conn is available (e.g., pub(crate) in util.rs)
         let read_sql = format!("PRAGMA {};", pragma_name);
         match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
-            Ok(value) => Ok(encode_val(env, value)), // Assuming encode_val is available
-            Err(RusqliteError::QueryReturnedNoRows) => Ok(no_value().to_term(env)), // Use atoms module
+            Ok(value) => Ok(encode_val(env, value)),
+            Err(RusqliteError::QueryReturnedNoRows) => Ok(no_value().to_term(env)),
             Err(e) => Err(XqliteError::CannotExecutePragma {
                 pragma: read_sql,
                 reason: e.to_string(),
@@ -253,34 +250,21 @@ fn set_pragma<'a>(
     pragma_name: String,
     value_term: Term<'a>,
 ) -> Result<bool, XqliteError> {
-    // Returns bool now
-    // Convert Elixir term to SQL literal string suitable for PRAGMA value
     let value_literal = format_term_for_pragma(env, value_term)?;
 
     with_conn(&handle, |conn| {
-        // Construct the full SQL command for setting the PRAGMA.
         let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
         {
-            // Scope for statement finalization via Drop
-            // Prepare the statement. This can fail (e.g., syntax error in pragma name).
             let mut write_stmt =
                 conn.prepare(&write_sql)
                     .map_err(|e| XqliteError::CannotExecutePragma {
-                        // Use the fully formatted SQL in the error context.
                         pragma: write_sql.clone(),
                         reason: e.to_string(),
                     })?;
 
-            // Execute using query([]), immediately consuming and discarding the Rows iterator.
-            // This robustly handles PRAGMA SET commands regardless of whether they
-            // internally return rows or not, using only public rusqlite API.
-            // The '?' propagates any execution errors (like constraint issues, invalid values).
             let _ = write_stmt.query([])?;
-
-            // If query([]) succeeded, the PRAGMA SET command executed without error.
-            // Statement finalized automatically when write_stmt goes out of scope here.
         }
-        Ok(true) // Return simple success if no error occurred
+        Ok(true)
     })
 }
 
@@ -356,7 +340,6 @@ fn schema_list_objects(
         // Step 1: Query and map, returning Vec<Result<TempObjectInfo, rusqlite::Error>>
         let temp_results: Vec<Result<TempObjectInfo, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                // PRAGMA table_list columns: schema(0), name(1), type(2), ncol(3), wr(4), strict(5)
                 let obj_schema: String = row.get(0)?;
                 let obj_name: String = row.get(1)?;
                 let obj_type_str: String = row.get(2)?;
@@ -383,14 +366,12 @@ fn schema_list_objects(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_info) => {
-                    // Apply schema filter
                     if let Some(filter_schema) = &schema {
                         if temp_info.schema != *filter_schema {
                             continue;
                         }
                     }
 
-                    // Finalize atom conversion
                     let atom = match temp_info.obj_type_atom {
                         Ok(atom) => atom,
                         Err(unexpected_val) => {
@@ -406,7 +387,6 @@ fn schema_list_objects(
                         }
                     };
 
-                    // Convert wr_flag (0/1) to boolean
                     let is_writable = match temp_info.wr_flag {
                         0 => false,
                         1 => true,
@@ -423,7 +403,6 @@ fn schema_list_objects(
                         }
                     };
 
-                    // Convert strict_flag (0/1) to boolean
                     let is_strict = match temp_info.strict_flag {
                         0 => false,
                         1 => true,
@@ -468,12 +447,11 @@ fn schema_databases(
 
         let db_infos: Vec<DatabaseInfo> = stmt
             .query_map([], |row| {
-                // PRAGMA database_list columns: seq(0), name(1), file(2)
                 let name: String = row.get(1)?;
                 let file: Option<String> = row.get(2)?;
                 Ok(DatabaseInfo { name, file })
-            })? // Propagate errors from query_map (e.g., statement execution)
-            .collect::<Result<Vec<_>, _>>()?; // Collect results, propagating row mapping errors
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(db_infos)
     })
@@ -485,7 +463,6 @@ fn schema_columns(
     table_name: String,
 ) -> Result<Vec<ColumnInfo>, XqliteError> {
     with_conn(&handle, |conn| {
-        // Quote table name for safety in PRAGMA
         let quoted_table_name = quote_identifier(&table_name);
         let sql = format!("PRAGMA table_info({});", quoted_table_name);
         let mut stmt = conn.prepare(&sql)?;
@@ -493,7 +470,6 @@ fn schema_columns(
         // Step 1: Query and map raw data, returning Vec<Result<TempColumnData, rusqlite::Error>>
         let temp_results: Vec<Result<TempColumnData, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                // Inside query_map, return Result<_, rusqlite::Error>
                 Ok(TempColumnData {
                     cid: row.get(0)?,
                     name: row.get(1)?,
@@ -502,15 +478,14 @@ fn schema_columns(
                     dflt_value: row.get(4)?,
                     pk_flag: row.get(5)?,
                 })
-            })? // Handles rusqlite errors from prepare/query
-            .collect(); // Collect into Vec<Result<TempColumnData, rusqlite::Error>>
+            })?
+            .collect();
 
         // Step 2: Process results, validate/convert, and map errors
         let mut final_columns: Vec<ColumnInfo> = Vec::with_capacity(temp_results.len());
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
-                    // Perform conversions using helpers, mapping errors to SchemaParsingError
                     let type_affinity_atom = type_affinity_to_atom(&temp_data.type_str)
                         .map_err(|unexpected_val| XqliteError::SchemaParsingError {
                             context: format!(
@@ -550,15 +525,14 @@ fn schema_columns(
                         column_id: temp_data.cid,
                         name: temp_data.name,
                         type_affinity: type_affinity_atom,
-                        declared_type: temp_data.type_str, // Assign the original type string
+                        declared_type: temp_data.type_str,
                         nullable,
                         default_value: temp_data.dflt_value,
                         primary_key_index,
                     });
                 }
                 Err(rusqlite_err) => {
-                    // Propagate rusqlite errors encountered during row mapping
-                    return Err(rusqlite_err.into()); // Use From trait
+                    return Err(rusqlite_err.into());
                 }
             }
         }
@@ -580,14 +554,12 @@ fn schema_foreign_keys(
         // Step 1: Query and map raw data
         let temp_results: Vec<Result<TempForeignKeyData, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                // PRAGMA foreign_key_list columns:
-                // id(0), seq(1), table(2), from(3), to(4), on_update(5), on_delete(6), match(7)
                 Ok(TempForeignKeyData {
                     id: row.get(0)?,
                     seq: row.get(1)?,
                     table: row.get(2)?,
                     from: row.get(3)?,
-                    to: row.get(4)?, // Column 'to' can be NULL for FKs targeting a UNIQUE constraint not on the PK
+                    to: row.get(4)?,
                     on_update_str: row.get(5)?,
                     on_delete_str: row.get(6)?,
                     match_str: row.get(7)?,
@@ -600,7 +572,6 @@ fn schema_foreign_keys(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
-                    // Perform atom conversions, mapping errors
                     let on_update_atom = fk_action_to_atom(&temp_data.on_update_str).map_err(
                         |unexpected_val| XqliteError::SchemaParsingError {
                             context: format!(
@@ -638,20 +609,18 @@ fn schema_foreign_keys(
                             }
                         })?;
 
-                    // Construct final struct
                     final_fks.push(ForeignKeyInfo {
                         id: temp_data.id,
                         column_sequence: temp_data.seq,
                         target_table: temp_data.table,
                         from_column: temp_data.from,
-                        to_column: temp_data.to, // Keep as String, handles NULL from get()
+                        to_column: temp_data.to,
                         on_update: on_update_atom,
                         on_delete: on_delete_atom,
                         match_clause: match_clause_atom,
                     });
                 }
                 Err(rusqlite_err) => {
-                    // Propagate rusqlite errors
                     return Err(rusqlite_err.into());
                 }
             }
@@ -674,7 +643,6 @@ fn schema_indexes(
         // Step 1: Query and map raw data
         let temp_results: Vec<Result<TempIndexData, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                // PRAGMA index_list columns: seq(0), name(1), unique(2), origin(3), partial(4)
                 Ok(TempIndexData {
                     name: row.get(1)?,
                     unique: row.get(2)?,
@@ -689,7 +657,6 @@ fn schema_indexes(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
-                    // Convert origin string to atom
                     let origin_atom = index_origin_to_atom(&temp_data.origin_str).map_err(
                         |unexpected_val| XqliteError::SchemaParsingError {
                             context: format!(
@@ -702,7 +669,6 @@ fn schema_indexes(
                         },
                     )?;
 
-                    // Convert integer flags to booleans (simple check)
                     let unique_bool = match temp_data.unique {
                         0 => false,
                         1 => true,
@@ -734,7 +700,6 @@ fn schema_indexes(
                         }
                     };
 
-                    // Construct final struct
                     final_indexes.push(IndexInfo {
                         name: temp_data.name,
                         unique: unique_bool,
@@ -743,7 +708,6 @@ fn schema_indexes(
                     });
                 }
                 Err(rusqlite_err) => {
-                    // Propagate rusqlite errors
                     return Err(rusqlite_err.into());
                 }
             }
@@ -766,8 +730,6 @@ fn schema_index_columns(
         // Step 1: Query and map raw data
         let temp_results: Vec<Result<TempIndexColumnData, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                // PRAGMA index_xinfo columns:
-                // seqno(0), cid(1), name(2), desc(3), coll(4), key(5)
                 Ok(TempIndexColumnData {
                     seqno: row.get(0)?,
                     cid: row.get(1)?,
@@ -784,7 +746,6 @@ fn schema_index_columns(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
-                    // Convert sort order flag to atom
                     let sort_order_atom =
                         sort_order_to_atom(temp_data.desc).map_err(|unexpected_val| {
                             XqliteError::SchemaParsingError {
@@ -798,10 +759,9 @@ fn schema_index_columns(
                             }
                         })?;
 
-                    // Convert key flag to boolean
                     let is_key_bool = match temp_data.key {
-                        0 => false, // Included column
-                        1 => true,  // Key column
+                        0 => false,
+                        1 => true,
                         _ => {
                             return Err(XqliteError::SchemaParsingError {
                                 context: format!(
@@ -815,7 +775,6 @@ fn schema_index_columns(
                         }
                     };
 
-                    // Construct final struct
                     final_cols.push(IndexColumnInfo {
                         index_column_sequence: temp_data.seqno,
                         table_column_id: temp_data.cid,
@@ -841,24 +800,14 @@ fn get_create_sql(
     object_name: String,
 ) -> Result<Option<String>, XqliteError> {
     with_conn(&handle, |conn| {
-        // Prefer sqlite_schema as it includes temporary objects,
-        // but sqlite_master is the traditional one. A simple query works.
-        // We don't strictly need a fallback mechanism here unless specifically required.
-        // Let's use sqlite_schema for modern compatibility.
         let sql = "SELECT sql FROM sqlite_schema WHERE name = ?1 LIMIT 1;";
         let mut stmt = conn.prepare(sql)?;
-
-        // Use query_row to expect exactly zero or one row.
-        // Map the result row to Option<String>.
         let result = stmt.query_row([&object_name], |row| row.get::<usize, Option<String>>(0));
 
         match result {
-            // Successfully found the row and got the SQL (which might be NULL in schema, hence Option)
             Ok(sql_string_option) => Ok(sql_string_option),
-            // `query_row` returns this specific error if no rows were found
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            // Any other error during query execution or conversion
-            Err(e) => Err(e.into()), // Convert rusqlite::Error to XqliteError
+            Err(e) => Err(e.into()),
         }
     })
 }

@@ -91,8 +91,6 @@ pub(crate) fn type_affinity_to_atom(s: &str) -> Result<Atom, &str> {
         "INTEGER" => Ok(integer()),
         "REAL" => Ok(float()),
         "BLOB" => Ok(binary()),
-        // NOTE: "NONE" affinity technically exists but is resolved to BLOB
-        // by SQLite before PRAGMA table_info reports it.
         _ => Err(s),
     }
 }
@@ -137,11 +135,10 @@ pub(crate) fn index_origin_to_atom(s: &str) -> Result<Atom, &str> {
 /// Assumes the input 'val' is derived from an integer column.
 #[inline]
 pub(crate) fn sort_order_to_atom(val: i64) -> Result<Atom, String> {
-    // Final version returns Result<Atom, String>
     match val {
         0 => Ok(asc()),
         1 => Ok(desc()),
-        _ => Err(val.to_string()), // Convert unexpected i64 to String for consistent error detail
+        _ => Err(val.to_string()),
     }
 }
 
@@ -150,9 +147,9 @@ pub(crate) fn sort_order_to_atom(val: i64) -> Result<Atom, String> {
 #[inline]
 pub(crate) fn notnull_to_nullable(notnull_flag: i64) -> Result<bool, String> {
     match notnull_flag {
-        0 => Ok(true),                      // 0 means NULL allowed -> nullable = true
-        1 => Ok(false),                     // 1 means NOT NULL -> nullable = false
-        _ => Err(notnull_flag.to_string()), // Unexpected value
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(notnull_flag.to_string()),
     }
 }
 
@@ -160,5 +157,5 @@ pub(crate) fn notnull_to_nullable(notnull_flag: i64) -> Result<bool, String> {
 /// Returns Err with the unexpected value as String if input is negative or > 255.
 #[inline]
 pub(crate) fn pk_value_to_index(pk_flag: i64) -> Result<u8, String> {
-    u8::try_from(pk_flag).map_err(|_| pk_flag.to_string()) // Handles negative and overflow
+    u8::try_from(pk_flag).map_err(|_| pk_flag.to_string())
 }
