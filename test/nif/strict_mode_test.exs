@@ -404,6 +404,142 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, %{rows: [[nil]]}} =
                  NIF.query(conn, "SELECT val FROM strict_any_col_test5 WHERE val IS NULL;", [])
       end
+
+      # --- WITHOUT ROWID, STRICT Table Tests ---
+      test "WITHOUT ROWID, STRICT table with INTEGER PK: allows valid INTEGER PK, rejects TEXT PK",
+           %{
+             conn: conn
+           } do
+        ddl = "CREATE TABLE wr_strict_int_pk (id INTEGER PRIMARY KEY) WITHOUT ROWID, STRICT;"
+        assert {:ok, 0} = NIF.execute(conn, ddl, [])
+
+        # Valid INTEGER PK
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO wr_strict_int_pk (id) VALUES (?1);", [100])
+
+        # Invalid TEXT PK for INTEGER column
+        assert {:error, {:constraint_violation, :constraint_datatype, _msg}} =
+                 NIF.execute(conn, "INSERT INTO wr_strict_int_pk (id) VALUES (?1);", [
+                   "not_an_int"
+                 ])
+
+        # Verify data
+        assert {:ok, %{rows: [[100]]}} =
+                 NIF.query(conn, "SELECT id FROM wr_strict_int_pk WHERE id = 100;", [])
+      end
+
+      test "WITHOUT ROWID, STRICT table with TEXT PK: allows valid TEXT PK, allows INTEGER PK (coerced)",
+           %{conn: conn} do
+        ddl = "CREATE TABLE wr_strict_text_pk (name TEXT PRIMARY KEY) WITHOUT ROWID, STRICT;"
+        assert {:ok, 0} = NIF.execute(conn, ddl, [])
+
+        # Valid TEXT PK
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO wr_strict_text_pk (name) VALUES (?1);", [
+                   "alpha"
+                 ])
+
+        # INTEGER PK coerced to TEXT in a STRICT TEXT column
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO wr_strict_text_pk (name) VALUES (?1);", [12345])
+
+        # Verify data and sort order (numerals often sort before alpha)
+        assert {:ok, %{rows: [["12345"], ["alpha"]]}} =
+                 NIF.query(conn, "SELECT name FROM wr_strict_text_pk ORDER BY name;", [])
+      end
+
+      test "WITHOUT ROWID, STRICT table with BLOB PK: allows valid BLOB PK, rejects TEXT PK",
+           %{
+             conn: conn
+           } do
+        ddl = "CREATE TABLE wr_strict_blob_pk (key BLOB PRIMARY KEY) WITHOUT ROWID, STRICT;"
+        assert {:ok, 0} = NIF.execute(conn, ddl, [])
+
+        # Use an invalid UTF-8 sequence to ensure our NIF binds this as Value::Blob,
+        # which a STRICT BLOB PK column should accept.
+        blob_pk = <<0xC3, 0x28>>
+
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO wr_strict_blob_pk (key) VALUES (?1);", [
+                   blob_pk
+                 ])
+
+        # Invalid TEXT PK for BLOB column (STRICT BLOB doesn't coerce text)
+        assert {:error, {:constraint_violation, :constraint_datatype, _msg}} =
+                 NIF.execute(conn, "INSERT INTO wr_strict_blob_pk (key) VALUES (?1);", [
+                   "not_a_blob"
+                 ])
+
+        # Verify data
+        assert {:ok, %{rows: [[^blob_pk]]}} =
+                 NIF.query(conn, "SELECT key FROM wr_strict_blob_pk WHERE key = ?1;", [blob_pk])
+      end
+
+      test "WITHOUT ROWID, STRICT table with compound PK: enforces types for each part", %{
+        conn: conn
+      } do
+        ddl = """
+        CREATE TABLE wr_strict_compound_pk (
+          part1 INTEGER,
+          part2 TEXT,
+          PRIMARY KEY (part1, part2)
+        ) WITHOUT ROWID, STRICT;
+        """
+
+        assert {:ok, 0} = NIF.execute(conn, ddl, [])
+
+        # Valid compound PK
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO wr_strict_compound_pk (part1, part2) VALUES (?1, ?2);",
+                   [
+                     1,
+                     "one"
+                   ]
+                 )
+
+        # Invalid type for part1 (INTEGER)
+        assert {:error, {:constraint_violation, :constraint_datatype, _msg}} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO wr_strict_compound_pk (part1, part2) VALUES (?1, ?2);",
+                   [
+                     # <- error here: part1 expects INTEGER
+                     "not_int",
+                     "two"
+                   ]
+                 )
+
+        # For part2 TEXT, a BLOB (like <<1>>, which is invalid UTF-8 for a string)
+        # will be accepted by a STRICT TEXT column and stored as those bytes.
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO wr_strict_compound_pk (part1, part2) VALUES (?1, ?2);",
+                   [
+                     3,
+                     # This will be stored as a blob in the TEXT column part2
+                     <<1>>
+                   ]
+                 )
+
+        # Verify data
+        assert {:ok, %{rows: [[1, "one"]]}} =
+                 NIF.query(
+                   conn,
+                   "SELECT part1, part2 FROM wr_strict_compound_pk WHERE part1 = 1;",
+                   []
+                 )
+
+        # Verify the BLOB was stored for part2
+        assert {:ok, %{rows: [[3, <<1>>]]}} =
+                 NIF.query(
+                   conn,
+                   "SELECT part1, part2 FROM wr_strict_compound_pk WHERE part1 = 3;",
+                   []
+                 )
+      end
     end
 
     # End of describe "using #{prefix}..."
