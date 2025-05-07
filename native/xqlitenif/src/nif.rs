@@ -1,5 +1,5 @@
-use crate::error::SchemaErrorDetail;
-use crate::error::XqliteError;
+use crate::cancel::{ProgressHandlerGuard, XqliteCancelToken};
+use crate::error::{SchemaErrorDetail, XqliteError};
 use crate::schema::{
     fk_action_to_atom, fk_match_to_atom, hidden_int_to_atom, index_origin_to_atom,
     notnull_to_nullable, object_type_to_atom, pk_value_to_index, sort_order_to_atom,
@@ -197,6 +197,83 @@ fn query<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn query_cancellable<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+) -> Result<XqliteQueryResult<'a>, XqliteError> {
+    let sql_for_err = sql.clone();
+    // Clone the Arc<AtomicBool> from the token *before* locking the connection mutex
+    let token_bool = token.0.clone();
+
+    with_conn(&handle, |conn| {
+        // Create the RAII guard to set the progress handler.
+        // This returns Self directly now, panic on failure is unlikely here with valid types.
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
+
+        // --- Query preparation and execution ---
+        let mut stmt = conn
+            .prepare(sql.as_str())
+            .map_err(|e| XqliteError::CannotPrepareStatement(sql_for_err, e.to_string()))?;
+        let column_names: Vec<String> =
+            stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let column_count = column_names.len();
+
+        // --- Parameter Binding and Query Execution ---
+        let rows_result = match params_term.get_type() {
+            TermType::List => {
+                if is_keyword(params_term) {
+                    // Decode named parameters
+                    let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                    let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                        .collect();
+                    // Execute query with named parameters
+                    stmt.query(params_for_rusqlite.as_slice())
+                } else {
+                    // Decode positional parameters
+                    let positional_values: Vec<Value> =
+                        decode_plain_list_params(env, params_term)?;
+                    let params_slice: Vec<&dyn ToSql> =
+                        positional_values.iter().map(|v| v as &dyn ToSql).collect();
+                    // Execute query with positional parameters
+                    stmt.query(params_slice.as_slice())
+                }
+            }
+            // Handle empty list or :nil for parameters
+            _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
+                stmt.query([])
+            }
+            // Invalid parameter type
+            _ => {
+                return Err(XqliteError::ExpectedList {
+                    value_str: format!("{:?}", params_term),
+                });
+            }
+        }; // End of match - `rows_result` is Result<Rows, rusqlite::Error>
+
+        // Check the result of the query execution.
+        // This is where SQLITE_INTERRUPT (mapped to OperationCancelled) would surface.
+        let rows = rows_result?; // Use '?' to propagate errors, including cancellation.
+
+        // --- Row Processing ---
+        // If we reach here, the query executed without cancellation or other errors.
+        let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
+        let num_rows = results_vec.len();
+
+        Ok(XqliteQueryResult {
+            columns: column_names,
+            rows: results_vec,
+            num_rows,
+        })
+        // _guard is dropped here, unregistering the progress handler.
+    }) // Connection mutex unlocked here.
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn execute<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -212,6 +289,37 @@ fn execute<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn execute_cancellable<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+) -> Result<usize, XqliteError> {
+    // Returns affected row count (usize)
+    // Clone the Arc<AtomicBool> from the token before locking the connection mutex
+    let token_bool = token.0.clone();
+
+    with_conn(&handle, |conn| {
+        // Create the RAII guard to set the progress handler.
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
+
+        // --- Parameter Binding ---
+        // execute only supports positional parameters
+        let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
+        let params_slice: Vec<&dyn ToSql> =
+            positional_values.iter().map(|v| v as &dyn ToSql).collect();
+
+        // --- Execute Statement ---
+        // The `?` will propagate errors, including OperationCancelled if interrupted.
+        let affected_rows = conn.execute(sql.as_str(), params_slice.as_slice())?;
+
+        Ok(affected_rows)
+        // _guard is dropped here, unregistering the progress handler.
+    }) // Connection mutex unlocked here.
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn execute_batch(
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
@@ -220,6 +328,27 @@ fn execute_batch(
         conn.execute_batch(&sql_batch)?;
         Ok(true)
     })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn execute_batch_cancellable(
+    handle: ResourceArc<XqliteConn>,
+    sql_batch: String,
+    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+) -> Result<bool, XqliteError> {
+    // Clone the Arc<AtomicBool> from the token before locking
+    let token_bool = token.0.clone();
+
+    with_conn(&handle, |conn| {
+        // Create the RAII guard to set the progress handler.
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
+
+        // The `?` will propagate errors, including OperationCancelled if interrupted.
+        conn.execute_batch(&sql_batch)?;
+
+        Ok(true)
+        // _guard is dropped here, unregistering the progress handler.
+    }) // Connection mutex unlocked here.
 }
 
 /// Reads the current value of an SQLite PRAGMA.
@@ -838,6 +967,17 @@ fn get_create_sql(
 #[rustler::nif(schedule = "DirtyIo")]
 fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError> {
     with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
+}
+
+#[rustler::nif]
+fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> {
+    Ok(ResourceArc::new(XqliteCancelToken::new()))
+}
+
+#[rustler::nif]
+fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<bool, XqliteError> {
+    token.cancel();
+    Ok(true)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

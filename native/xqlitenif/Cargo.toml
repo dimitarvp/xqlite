@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 rusqlite = { version = "0.35", features = [
   "buildtime_bindgen",
+  "hooks",
   "modern_sqlite",
 ] }
 rustler = { version = "0.36.1" }
