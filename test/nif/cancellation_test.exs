@@ -35,7 +35,7 @@ defmodule Xqlite.NIF.CancellationTest do
   """
 
   @batch_cancel_statement_count 50_000
-  @batch_cancel_sleep 10
+  @batch_cancel_sleep 1
   @batch_cancel_table "cancel_batch_test"
   @batch_cancel_setup "CREATE TABLE #{@batch_cancel_table} (id INTEGER PRIMARY KEY, data TEXT); INSERT INTO #{@batch_cancel_table} (id, data) VALUES (0, 'initial');"
   @await_timeout 5_000
