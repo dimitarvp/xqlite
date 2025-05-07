@@ -74,7 +74,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
       # --- Cancellation Tests ---
 
-      test "#{prefix} - query_cancellable/4 successfully cancels a running query", %{
+      test "query_cancellable/4 successfully cancels a running query", %{
         conn: conn
       } do
         {:ok, token} = NIF.create_cancel_token()
@@ -94,7 +94,7 @@ defmodule Xqlite.NIF.CancellationTest do
         assert {:error, :operation_cancelled} == result
       end
 
-      test "#{prefix} - query_cancellable/4 completes normally if token is not cancelled", %{
+      test "query_cancellable/4 completes normally if token is not cancelled", %{
         conn: conn
       } do
         {:ok, token} = NIF.create_cancel_token()
@@ -104,7 +104,7 @@ defmodule Xqlite.NIF.CancellationTest do
                  NIF.query_cancellable(conn, @slow_query, [], token)
       end
 
-      test "#{prefix} - normal query works after a cancelled query (handler unregistered)", %{
+      test "normal query works after a cancelled query (handler unregistered)", %{
         conn: conn
       } do
         # --- Part 1: Run and cancel a query ---
@@ -120,7 +120,7 @@ defmodule Xqlite.NIF.CancellationTest do
                  NIF.query(conn, "SELECT 1;", [])
       end
 
-      test "#{prefix} - normal query works after a completed cancellable query (handler unregistered)",
+      test "normal query works after a completed cancellable query (handler unregistered)",
            %{conn: conn} do
         # --- Part 1: Run a cancellable query to completion ---
         {:ok, token2} = NIF.create_cancel_token()
@@ -134,7 +134,7 @@ defmodule Xqlite.NIF.CancellationTest do
                  NIF.query(conn, "SELECT 1;", [])
       end
 
-      test "#{prefix} - execute_cancellable/4 successfully cancels a triggered slow operation",
+      test "execute_cancellable/4 successfully cancels a triggered slow operation",
            %{
              conn: conn
            } do
@@ -161,7 +161,7 @@ defmodule Xqlite.NIF.CancellationTest do
         assert {:error, :operation_cancelled} == result
       end
 
-      test "#{prefix} - execute_cancellable/4 completes normally if token is not cancelled", %{
+      test "execute_cancellable/4 completes normally if token is not cancelled", %{
         conn: conn
       } do
         # Create the table and trigger
@@ -179,7 +179,7 @@ defmodule Xqlite.NIF.CancellationTest do
                  )
       end
 
-      test "#{prefix} - normal execute works after a cancelled execute_cancellable (handler unregistered)",
+      test "normal execute works after a cancelled execute_cancellable (handler unregistered)",
            %{conn: conn} do
         # Create the table and trigger
         assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
@@ -209,7 +209,7 @@ defmodule Xqlite.NIF.CancellationTest do
                  NIF.execute(conn, "INSERT INTO normal_exec_test (id) VALUES (1);", [])
       end
 
-      test "#{prefix} - execute_batch_cancellable/3 successfully cancels a running batch", %{
+      test "execute_batch_cancellable/3 successfully cancels a running batch", %{
         conn: conn
       } do
         # Setup the table for this test
@@ -233,7 +233,7 @@ defmodule Xqlite.NIF.CancellationTest do
         assert {:error, :operation_cancelled} == result
       end
 
-      test "#{prefix} - execute_batch_cancellable/3 completes normally if token is not cancelled",
+      test "execute_batch_cancellable/3 completes normally if token is not cancelled",
            %{conn: conn} do
         # Setup the table for this test
         assert {:ok, true} = NIF.execute_batch(conn, @batch_cancel_setup)
@@ -249,7 +249,7 @@ defmodule Xqlite.NIF.CancellationTest do
                  NIF.query(conn, "SELECT data FROM #{@batch_cancel_table} WHERE id = 0;", [])
       end
 
-      test "#{prefix} - normal batch works after a cancelled execute_batch_cancellable (handler unregistered)",
+      test "normal batch works after a cancelled execute_batch_cancellable (handler unregistered)",
            %{conn: conn} do
         # Setup the table for this test
         assert {:ok, true} = NIF.execute_batch(conn, @batch_cancel_setup)
