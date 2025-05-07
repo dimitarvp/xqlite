@@ -15,6 +15,7 @@ defmodule Xqlite.Schema.ColumnInfo do
   * `:nullable` - `true` if the column allows NULL values, `false` otherwise (derived from `NOT NULL` constraint).
   * `:default_value` - The default value expression as a string literal (e.g., "'default'", "123", "CURRENT_TIMESTAMP"), or `nil` if no default.
   * `:primary_key_index` - If this column is part of the primary key, its 1-based index within the key (e.g., 1 for single PK, 1 or 2 for compound PK). `0` if not part of the primary key.
+  * `:hidden_kind` - Indicates if and how a column is hidden/generated (see `t:Types.column_hidden_kind/0`).
   """
   @type t :: %__MODULE__{
           column_id: integer(),
@@ -23,7 +24,8 @@ defmodule Xqlite.Schema.ColumnInfo do
           declared_type: String.t(),
           nullable: boolean(),
           default_value: String.t() | nil,
-          primary_key_index: non_neg_integer()
+          primary_key_index: non_neg_integer(),
+          hidden_kind: Types.column_hidden_kind()
         }
 
   defstruct [
@@ -33,6 +35,7 @@ defmodule Xqlite.Schema.ColumnInfo do
     :declared_type,
     :nullable,
     :default_value,
-    :primary_key_index
+    :primary_key_index,
+    :hidden_kind
   ]
 end

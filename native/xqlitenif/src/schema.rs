@@ -1,7 +1,8 @@
 use crate::{
-    asc, binary, cascade, create_index, desc, float, full, integer, no_action, none, numeric,
-    partial, primary_key_constraint, r#virtual, restrict, sequence, set_default, set_null,
-    shadow, simple, table, text, unique_constraint, view,
+    asc, binary, cascade, create_index, desc, float, full, hidden_alias, integer, no_action,
+    none, normal, numeric, partial, primary_key_constraint, r#virtual, restrict, sequence,
+    set_default, set_null, shadow, simple, stored_generated, table, text, unique_constraint,
+    view, virtual_generated,
 };
 use rustler::{Atom, NifStruct};
 use std::convert::TryFrom;
@@ -34,6 +35,7 @@ pub(crate) struct ColumnInfo {
     pub nullable: bool,
     pub default_value: Option<String>,
     pub primary_key_index: u8,
+    pub hidden_kind: Atom,
 }
 
 #[derive(Debug, Clone, NifStruct)]
@@ -83,15 +85,48 @@ pub(crate) fn object_type_to_atom(s: &str) -> Result<Atom, &str> {
 }
 
 /// Maps PRAGMA table_info type affinity string to an atom.
+pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Result<Atom, &str> {
+    // Convert to uppercase for case-insensitive matching of common patterns
+    let upper_declared_type = declared_type_str.to_uppercase();
+
+    if upper_declared_type.contains("INT") {
+        // Catches INT, INTEGER, BIGINT etc.
+        Ok(integer())
+    } else if upper_declared_type.contains("CHAR") || // VARCHAR, CHARACTER
+                  upper_declared_type.contains("CLOB") || // CLOB
+                  upper_declared_type.contains("TEXT")
+    // TEXT
+    {
+        Ok(text())
+    } else if upper_declared_type.contains("BLOB") ||
+                  upper_declared_type.is_empty() || // No type specified means BLOB affinity
+                  upper_declared_type == "ANY"
+    // ANY type columns also get BLOB affinity if no data type is forced by content
+    {
+        Ok(binary()) // For 'ANY' this is a simplification; typeof() would be more accurate for content.
+                     // But for PRAGMA table_info, this is a reasonable default mapping.
+    } else if upper_declared_type.contains("REAL") || // REAL
+                  upper_declared_type.contains("FLOA") || // FLOAT
+                  upper_declared_type.contains("DOUB")
+    // DOUBLE
+    {
+        Ok(float())
+    } else {
+        // Default to NUMERIC affinity for anything else.
+        // This covers BOOLEAN, DATE, DATETIME etc. which don't have their own affinity.
+        Ok(numeric())
+    }
+}
+
+/// Maps the integer 'hidden' value from PRAGMA table_xinfo to an atom.
 #[inline]
-pub(crate) fn type_affinity_to_atom(s: &str) -> Result<Atom, &str> {
-    match s {
-        "TEXT" => Ok(text()),
-        "NUMERIC" => Ok(numeric()),
-        "INTEGER" => Ok(integer()),
-        "REAL" => Ok(float()),
-        "BLOB" => Ok(binary()),
-        _ => Err(s),
+pub(crate) fn hidden_int_to_atom(hidden_val: i64) -> Result<Atom, String> {
+    match hidden_val {
+        0 => Ok(normal()),
+        1 => Ok(hidden_alias()),
+        2 => Ok(virtual_generated()),
+        3 => Ok(stored_generated()),
+        _ => Err(hidden_val.to_string()),
     }
 }
 
