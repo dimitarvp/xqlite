@@ -15,7 +15,7 @@ use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
 use rustler::{
     resource_impl,
     types::{
-        atom::{error, nil, ok},
+        atom::{error, nil},
         map::map_new,
     },
     Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
@@ -924,9 +924,9 @@ fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> 
 }
 
 #[rustler::nif]
-fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<Atom, XqliteError> {
+fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<bool, XqliteError> {
     token.cancel();
-    Ok(ok())
+    Ok(true)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
