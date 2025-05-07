@@ -9,6 +9,7 @@ defmodule XqliteNIF do
   def execute(_conn, _sql, _params \\ []), do: err()
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute_batch(_conn, _sql), do: err()
+  def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
   def close(_conn), do: err()
   def get_pragma(_conn, _name), do: err()
   def set_pragma(_conn, _name, _value), do: err()

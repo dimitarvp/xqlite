@@ -330,6 +330,27 @@ fn execute_batch(
     })
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+fn execute_batch_cancellable(
+    handle: ResourceArc<XqliteConn>,
+    sql_batch: String,
+    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+) -> Result<bool, XqliteError> {
+    // Clone the Arc<AtomicBool> from the token before locking
+    let token_bool = token.0.clone();
+
+    with_conn(&handle, |conn| {
+        // Create the RAII guard to set the progress handler.
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
+
+        // The `?` will propagate errors, including OperationCancelled if interrupted.
+        conn.execute_batch(&sql_batch)?;
+
+        Ok(true)
+        // _guard is dropped here, unregistering the progress handler.
+    }) // Connection mutex unlocked here.
+}
+
 /// Reads the current value of an SQLite PRAGMA.
 #[rustler::nif(schedule = "DirtyIo")]
 fn get_pragma(
