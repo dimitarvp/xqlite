@@ -38,6 +38,7 @@ rustler::atoms! {
     from_sql_conversion_failure,
     full,
     function,
+    hidden_alias,
     index_exists,
     integer,
     integral_value_out_of_range,
@@ -57,6 +58,7 @@ rustler::atoms! {
     no_such_table,
     no_value,
     none,
+    normal,
     null_byte_in_string,
     num_rows,
     numeric,
@@ -81,6 +83,7 @@ rustler::atoms! {
     sql,
     sql_input_error,
     sqlite_failure,
+    stored_generated,
     table,
     table_exists,
     text,
@@ -93,6 +96,7 @@ rustler::atoms! {
     unsupported_data_type,
     utf8_error,
     r#virtual,
+    virtual_generated,
     view
 }
 

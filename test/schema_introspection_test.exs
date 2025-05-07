@@ -109,7 +109,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "INTEGER",
             nullable: true,
             default_value: nil,
-            primary_key_index: 1
+            primary_key_index: 1,
+            hidden_kind: :normal
           },
           %Schema.ColumnInfo{
             column_id: 1,
@@ -118,7 +119,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "INTEGER",
             nullable: true,
             default_value: nil,
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           },
           %Schema.ColumnInfo{
             column_id: 2,
@@ -127,7 +129,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "TEXT",
             nullable: false,
             default_value: nil,
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           },
           %Schema.ColumnInfo{
             column_id: 3,
@@ -136,7 +139,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "TEXT",
             nullable: true,
             default_value: nil,
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           },
           %Schema.ColumnInfo{
             column_id: 4,
@@ -145,7 +149,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "REAL",
             nullable: true,
             default_value: "0.0",
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           },
           %Schema.ColumnInfo{
             column_id: 5,
@@ -154,7 +159,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "BLOB",
             nullable: true,
             default_value: nil,
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           }
         ]
 
@@ -170,7 +176,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "TEXT",
             nullable: false,
             default_value: nil,
-            primary_key_index: 1
+            primary_key_index: 1,
+            hidden_kind: :normal
           },
           %Schema.ColumnInfo{
             column_id: 1,
@@ -179,7 +186,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "TEXT",
             nullable: true,
             default_value: nil,
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           },
           # Corrected nullable: true for value column (CHECK > 0 doesn't imply NOT NULL)
           %Schema.ColumnInfo{
@@ -189,7 +197,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
             declared_type: "REAL",
             nullable: true,
             default_value: nil,
-            primary_key_index: 0
+            primary_key_index: 0,
+            hidden_kind: :normal
           }
         ]
 

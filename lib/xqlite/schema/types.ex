@@ -32,4 +32,14 @@ defmodule Xqlite.Schema.Types do
   The sort order for a column within an index.
   """
   @type sort_order :: :asc | :desc
+
+  @typedoc """
+  Indicates if and how a column is hidden/generated.
+  From PRAGMA table_xinfo:
+  * `:normal` - A normal, visible column.
+  * `:hidden_alias` - A hidden column (e.g., a rowid alias in a WITHOUT ROWID table).
+  * `:virtual_generated` - A VIRTUAL generated column.
+  * `:stored_generated` - A STORED generated column.
+  """
+  @type column_hidden_kind :: :normal | :hidden_alias | :virtual_generated | :stored_generated
 end

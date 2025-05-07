@@ -1,9 +1,10 @@
 use crate::error::SchemaErrorDetail;
 use crate::error::XqliteError;
 use crate::schema::{
-    fk_action_to_atom, fk_match_to_atom, index_origin_to_atom, notnull_to_nullable,
-    object_type_to_atom, pk_value_to_index, sort_order_to_atom, type_affinity_to_atom,
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, SchemaObjectInfo,
+    fk_action_to_atom, fk_match_to_atom, hidden_int_to_atom, index_origin_to_atom,
+    notnull_to_nullable, object_type_to_atom, pk_value_to_index, sort_order_to_atom,
+    type_affinity_to_atom, ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo,
+    IndexInfo, SchemaObjectInfo,
 };
 use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
@@ -79,6 +80,7 @@ struct TempColumnData {
     notnull_flag: i64,
     dflt_value: Option<String>,
     pk_flag: i64,
+    hidden: i64,
 }
 
 /// Temporary struct for holding intermediate results during foreign key parsing.
@@ -464,28 +466,33 @@ fn schema_columns(
 ) -> Result<Vec<ColumnInfo>, XqliteError> {
     with_conn(&handle, |conn| {
         let quoted_table_name = quote_identifier(&table_name);
-        let sql = format!("PRAGMA table_info({});", quoted_table_name);
+        // Using PRAGMA table_xinfo as it provides the 'hidden' column
+        let sql = format!("PRAGMA table_xinfo({});", quoted_table_name);
         let mut stmt = conn.prepare(&sql)?;
 
-        // Step 1: Query and map raw data, returning Vec<Result<TempColumnData, rusqlite::Error>>
+        // Step 1: Query and map raw data from PRAGMA table_xinfo
         let temp_results: Vec<Result<TempColumnData, rusqlite::Error>> = stmt
             .query_map([], |row| {
+                // PRAGMA table_xinfo columns:
+                // cid(0), name(1), type(2), notnull(3), dflt_value(4), pk(5), hidden(6)
                 Ok(TempColumnData {
                     cid: row.get(0)?,
                     name: row.get(1)?,
-                    type_str: row.get(2)?,
+                    type_str: row.get(2)?, // This is the declared column type string
                     notnull_flag: row.get(3)?,
-                    dflt_value: row.get(4)?,
+                    dflt_value: row.get(4)?, // Will be None for generated columns from this PRAGMA
                     pk_flag: row.get(5)?,
+                    hidden: row.get(6)?, // Value indicating if/how column is hidden/generated
                 })
             })?
             .collect();
 
-        // Step 2: Process results, validate/convert, and map errors
+        // Step 2: Process results, validate/convert, and map to the Elixir-facing ColumnInfo struct
         let mut final_columns: Vec<ColumnInfo> = Vec::with_capacity(temp_results.len());
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
+                    // Convert declared type string to type affinity atom
                     let type_affinity_atom = type_affinity_to_atom(&temp_data.type_str)
                         .map_err(|unexpected_val| XqliteError::SchemaParsingError {
                             context: format!(
@@ -493,10 +500,11 @@ fn schema_columns(
                                 temp_data.name, table_name
                             ),
                             error_detail: SchemaErrorDetail::UnexpectedValue(
-                                unexpected_val.to_string(),
+                                unexpected_val.to_string(), // Pass the problematic string
                             ),
                         })?;
 
+                    // Convert 'notnull' flag (0/1) to boolean 'nullable'
                     let nullable = notnull_to_nullable(temp_data.notnull_flag).map_err(
                         |unexpected_val| XqliteError::SchemaParsingError {
                             context: format!(
@@ -507,6 +515,7 @@ fn schema_columns(
                         },
                     )?;
 
+                    // Convert 'pk' flag (0 or 1-based index) to u8
                     let primary_key_index =
                         pk_value_to_index(temp_data.pk_flag).map_err(|unexpected_val| {
                             XqliteError::SchemaParsingError {
@@ -520,23 +529,37 @@ fn schema_columns(
                             }
                         })?;
 
-                    // Construct final struct if all conversions succeeded
+                    // Convert the integer 'hidden' value to a descriptive atom
+                    let hidden_kind_atom =
+                        hidden_int_to_atom(temp_data.hidden).map_err(|unexpected_val| {
+                            XqliteError::SchemaParsingError {
+                                context: format!(
+                                    "Parsing 'hidden' kind for column '{}' in table '{}'",
+                                    temp_data.name, table_name
+                                ),
+                                error_detail: SchemaErrorDetail::UnexpectedValue(
+                                    unexpected_val,
+                                ),
+                            }
+                        })?;
+
                     final_columns.push(ColumnInfo {
                         column_id: temp_data.cid,
                         name: temp_data.name,
                         type_affinity: type_affinity_atom,
-                        declared_type: temp_data.type_str,
+                        declared_type: temp_data.type_str, // Store the original declared type
                         nullable,
-                        default_value: temp_data.dflt_value,
+                        default_value: temp_data.dflt_value, // Still None for generated cols from this PRAGMA
                         primary_key_index,
+                        hidden_kind: hidden_kind_atom, // Set the new field
                     });
                 }
                 Err(rusqlite_err) => {
+                    // Propagate errors from the .get() calls within query_map
                     return Err(rusqlite_err.into());
                 }
             }
         }
-
         Ok(final_columns)
     })
 }
