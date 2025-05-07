@@ -409,6 +409,54 @@ defmodule Xqlite.SchemaIntrospectionTest do
       test "get_create_sql returns nil for non-existent object", %{conn: conn} do
         assert {:ok, nil} == NIF.get_create_sql(conn, "non_existent_object")
       end
+
+      test "schema_columns handles various declared types and resolves correct affinity", %{
+        conn: conn
+      } do
+        # This DDL tests SQLite's type affinity rules for columns with:
+        # 1. No declared type ('c_no_type'): Should default to BLOB affinity.
+        #    PRAGMA table_xinfo reports its 'type' as an empty string.
+        # 2. A common keyword not having specific affinity rules ('c_boolean_keyword BOOLEAN'):
+        #    Should default to NUMERIC affinity.
+        # 3. Another common keyword without specific affinity ('c_datetime_keyword DATETIME'):
+        #    Should default to NUMERIC affinity.
+        # 4. A completely custom/unrecognized type name ('c_funky_type "VERY STRANGE NAME"'):
+        #    Should also default to NUMERIC affinity.
+        ddl = """
+        CREATE TABLE type_affinity_examples (
+          c_no_type,
+          c_boolean_keyword BOOLEAN,
+          c_datetime_keyword DATETIME,
+          c_funky_type "VERY STRANGE NAME"
+        );
+        """
+
+        # DDL execution can return non-zero for "rows affected"
+        assert {:ok, _} = NIF.execute(conn, ddl, [])
+
+        assert {:ok, columns_info} = NIF.schema_columns(conn, "type_affinity_examples")
+
+        no_type_col = Enum.find(columns_info, &(&1.name == "c_no_type"))
+        boolean_col = Enum.find(columns_info, &(&1.name == "c_boolean_keyword"))
+        datetime_col = Enum.find(columns_info, &(&1.name == "c_datetime_keyword"))
+        funky_col = Enum.find(columns_info, &(&1.name == "c_funky_type"))
+
+        refute is_nil(no_type_col)
+        assert no_type_col.declared_type == ""
+        assert no_type_col.type_affinity == :binary
+
+        refute is_nil(boolean_col)
+        assert boolean_col.declared_type == "BOOLEAN"
+        assert boolean_col.type_affinity == :numeric
+
+        refute is_nil(datetime_col)
+        assert datetime_col.declared_type == "DATETIME"
+        assert datetime_col.type_affinity == :numeric
+
+        refute is_nil(funky_col)
+        assert funky_col.declared_type == "VERY STRANGE NAME"
+        assert funky_col.type_affinity == :numeric
+      end
     end
 
     # end describe "using #{prefix}"
