@@ -38,27 +38,57 @@ pub(crate) fn process_rows<'a, 'rows>(
     let mut results: Vec<Vec<Term<'a>>> = Vec::new();
 
     loop {
-        match rows.next() {
+        let row_option_result = rows.next();
+
+        match row_option_result {
             Ok(Some(row)) => {
-                // Got a row
                 let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
                 for i in 0..column_count {
-                    // Use `?` here - if row.get fails, it returns rusqlite::Error,
-                    // which will be converted via From/Into by the surrounding function's
-                    // Result signature (XqliteError) if this closure doesn't map it.
-                    // Or map it explicitly if needed (as done below, which is safer).
-                    let value: Value = row.get::<usize, Value>(i)?; // This '?' uses the From impl
-                    let term = encode_val(env, value);
-                    row_values.push(term);
+                    match row.get::<usize, Value>(i) {
+                        Ok(val) => {
+                            let term = encode_val(env, val);
+                            row_values.push(term);
+                        }
+                        Err(e) => {
+                            // Check specifically for interruption *during column fetch*
+                            if e.to_string() == "interrupted" {
+                                return Err(XqliteError::OperationCancelled);
+                            }
+                            // Check specifically for Utf8Error
+                            if let rusqlite::Error::Utf8Error(utf8_err) = e {
+                                return Err(XqliteError::Utf8Error {
+                                    reason: utf8_err.to_string(),
+                                });
+                            }
+                            // Otherwise, map to CannotFetchRow
+                            return Err(XqliteError::CannotFetchRow(format!(
+                                "Error getting value for column {}: {}",
+                                i, e
+                            )));
+                        }
+                    };
                 }
                 results.push(row_values);
             }
             Ok(None) => {
-                // No more rows
-                break;
+                break; // End of rows
             }
             Err(e) => {
-                return Err(XqliteError::CannotFetchRow(e.to_string()));
+                // Check specifically for interruption *during row iteration*
+                if e.to_string() == "interrupted" {
+                    return Err(XqliteError::OperationCancelled);
+                }
+                // Check specifically for Utf8Error during iteration
+                if let rusqlite::Error::Utf8Error(utf8_err) = e {
+                    return Err(XqliteError::Utf8Error {
+                        reason: utf8_err.to_string(),
+                    });
+                }
+                // Otherwise, map other iteration errors to CannotFetchRow
+                return Err(XqliteError::CannotFetchRow(format!(
+                    "Error advancing row iterator: {}",
+                    e
+                )));
             }
         }
     }
