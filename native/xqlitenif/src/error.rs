@@ -434,6 +434,22 @@ impl From<RusqliteError> for XqliteError {
                 let message_string = msg_opt.unwrap_or_else(|| ffi_err.to_string());
                 let lower_msg = message_string.to_lowercase();
 
+                // Prioritize the SQLITE_READONLY check
+                if ffi_err.code == rusqlite::ffi::ErrorCode::ReadOnly {
+                    return XqliteError::ReadOnlyDatabase {
+                        message: message_string,
+                    };
+                }
+                // As a fallback, also check message content if code wasn't explicitly ReadOnly
+                // (though it should be if that's the root cause from SQLite)
+                if lower_msg.contains("readonly database")
+                    || lower_msg.contains("read-only database")
+                {
+                    return XqliteError::ReadOnlyDatabase {
+                        message: message_string,
+                    };
+                }
+
                 // Check common messages FIRST for logical errors often reported via code 1
                 if lower_msg.starts_with("no such table") {
                     return XqliteError::NoSuchTable {
