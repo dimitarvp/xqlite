@@ -16,6 +16,24 @@ defmodule Xqlite.NIF.CancellationTest do
   );
   """
 
+  # Setup a table and a trigger that runs a slow query on insert
+  @trigger_table_setup """
+  CREATE TABLE cancel_trigger_test (id INTEGER PRIMARY KEY);
+  CREATE TEMP TRIGGER slow_insert_trigger
+    AFTER INSERT ON cancel_trigger_test
+  BEGIN
+    -- Slow operation executed for every insert
+    -- Using the same RANDOMBLOB technique as @slow_query
+    SELECT MAX(HEX(RANDOMBLOB(16)))
+    FROM (
+        WITH RECURSIVE cnt(x) AS (
+            SELECT 1 UNION ALL SELECT x+1 FROM cnt LIMIT #{@rand_limit} -- Use limit from @slow_query
+        )
+        SELECT x FROM cnt
+    );
+  END;
+  """
+
   # Test token creation separately, doesn't need the loop/connection setup.
   test "create_cancel_token/0 returns a resource" do
     assert {:ok, token} = NIF.create_cancel_token()
@@ -102,6 +120,81 @@ defmodule Xqlite.NIF.CancellationTest do
         # Verifies the progress handler was correctly unregistered by the RAII guard in Rust.
         assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT 1;", [])
+      end
+
+      test "#{prefix} - execute_cancellable/4 successfully cancels a triggered slow operation",
+           %{
+             conn: conn
+           } do
+        # Create the table and trigger
+        assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
+        {:ok, token} = NIF.create_cancel_token()
+
+        # Start the INSERT (which triggers the slow query) in a Task
+        task =
+          Task.async(fn ->
+            NIF.execute_cancellable(
+              conn,
+              "INSERT INTO cancel_trigger_test (id) VALUES (1);",
+              [],
+              token
+            )
+          end)
+
+        # Give time for trigger to start
+        Process.sleep(200)
+        assert {:ok, true} = NIF.cancel_operation(token)
+
+        result = Task.await(task, 3000)
+        assert {:error, :operation_cancelled} == result
+      end
+
+      test "#{prefix} - execute_cancellable/4 completes normally if token is not cancelled", %{
+        conn: conn
+      } do
+        # Create the table and trigger
+        assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
+        {:ok, token} = NIF.create_cancel_token()
+
+        # Run the INSERT cancellably, but don't cancel
+        # Expect 1 row affected by INSERT
+        assert {:ok, 1} =
+                 NIF.execute_cancellable(
+                   conn,
+                   "INSERT INTO cancel_trigger_test (id) VALUES (1);",
+                   [],
+                   token
+                 )
+      end
+
+      test "#{prefix} - normal execute works after a cancelled execute_cancellable (handler unregistered)",
+           %{conn: conn} do
+        # Create the table and trigger
+        assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
+
+        # --- Part 1: Run and cancel an execute ---
+        {:ok, token1} = NIF.create_cancel_token()
+
+        task =
+          Task.async(fn ->
+            NIF.execute_cancellable(
+              conn,
+              "INSERT INTO cancel_trigger_test (id) VALUES (1);",
+              [],
+              token1
+            )
+          end)
+
+        Process.sleep(200)
+        assert {:ok, true} = NIF.cancel_operation(token1)
+        assert {:error, :operation_cancelled} == Task.await(task, 3000)
+
+        # --- Part 2: Run a normal, non-cancellable execute on the same connection ---
+        # Insert into a different table to avoid the trigger
+        assert {:ok, 0} = NIF.execute(conn, "CREATE TABLE normal_exec_test (id INT);", [])
+
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO normal_exec_test (id) VALUES (1);", [])
       end
     end
 

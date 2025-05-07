@@ -290,6 +290,37 @@ fn execute<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn execute_cancellable<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+) -> Result<usize, XqliteError> {
+    // Returns affected row count (usize)
+    // Clone the Arc<AtomicBool> from the token before locking the connection mutex
+    let token_bool = token.0.clone();
+
+    with_conn(&handle, |conn| {
+        // Create the RAII guard to set the progress handler.
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 1000); // Interval 1000
+
+        // --- Parameter Binding ---
+        // execute only supports positional parameters
+        let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
+        let params_slice: Vec<&dyn ToSql> =
+            positional_values.iter().map(|v| v as &dyn ToSql).collect();
+
+        // --- Execute Statement ---
+        // The `?` will propagate errors, including OperationCancelled if interrupted.
+        let affected_rows = conn.execute(sql.as_str(), params_slice.as_slice())?;
+
+        Ok(affected_rows)
+        // _guard is dropped here, unregistering the progress handler.
+    }) // Connection mutex unlocked here.
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn execute_batch(
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
