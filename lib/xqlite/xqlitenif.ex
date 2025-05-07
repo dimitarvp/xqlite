@@ -24,6 +24,8 @@ defmodule XqliteNIF do
   def schema_index_columns(_conn, _index_name), do: err()
   def get_create_sql(_conn, _object_name), do: err()
   def last_insert_rowid(_conn), do: err()
+  def create_cancel_token(), do: err()
+  def cancel_operation(_token_resource), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

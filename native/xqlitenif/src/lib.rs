@@ -100,6 +100,7 @@ rustler::atoms! {
     view
 }
 
+mod cancel;
 mod error;
 mod nif;
 mod schema;
