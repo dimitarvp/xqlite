@@ -211,8 +211,7 @@ fn query_cancellable<'a>(
     with_conn(&handle, |conn| {
         // Create the RAII guard to set the progress handler.
         // This returns Self directly now, panic on failure is unlikely here with valid types.
-        // Use interval 1000. The guard unregisters the handler when dropped.
-        let _guard = ProgressHandlerGuard::new(conn, token_bool, 1000);
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
 
         // --- Query preparation and execution ---
         let mut stmt = conn
@@ -303,7 +302,7 @@ fn execute_cancellable<'a>(
 
     with_conn(&handle, |conn| {
         // Create the RAII guard to set the progress handler.
-        let _guard = ProgressHandlerGuard::new(conn, token_bool, 1000); // Interval 1000
+        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
 
         // --- Parameter Binding ---
         // execute only supports positional parameters
