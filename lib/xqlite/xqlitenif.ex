@@ -5,8 +5,11 @@ defmodule XqliteNIF do
   def open_in_memory(_path \\ ":memory:"), do: err()
   def open_temporary(), do: err()
   def query(_conn, _sql, _params \\ []), do: err()
+  def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute(_conn, _sql, _params \\ []), do: err()
+  def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute_batch(_conn, _sql), do: err()
+  def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
   def close(_conn), do: err()
   def get_pragma(_conn, _name), do: err()
   def set_pragma(_conn, _name, _value), do: err()
@@ -24,6 +27,8 @@ defmodule XqliteNIF do
   def schema_index_columns(_conn, _index_name), do: err()
   def get_create_sql(_conn, _object_name), do: err()
   def last_insert_rowid(_conn), do: err()
+  def create_cancel_token(), do: err()
+  def cancel_operation(_token_resource), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
