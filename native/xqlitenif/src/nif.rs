@@ -432,16 +432,17 @@ fn rollback_to_savepoint(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn release_savepoint(
-    handle: ResourceArc<XqliteConn>,
-    name: String,
-) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
+fn release_savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
+    let execution_result: Result<usize, XqliteError> = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
         let sql = format!("RELEASE SAVEPOINT {};", quoted_name);
-        conn.execute(&sql, [])?;
-        Ok(true)
-    })
+        conn.execute(&sql, []).map_err(XqliteError::from)
+    });
+
+    match execution_result {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
