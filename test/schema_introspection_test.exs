@@ -36,7 +36,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert {:ok, conn} = apply(mod, fun, args),
                "Failed opening for :#{context[:describetag]}"
 
-        assert {:ok, true} = NIF.execute_batch(conn, @schema_ddl)
+        assert :ok = NIF.execute_batch(conn, @schema_ddl)
         on_exit(fn -> NIF.close(conn) end)
         {:ok, conn: conn}
       end

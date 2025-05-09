@@ -196,12 +196,12 @@ fn core_execute_batch(
     conn: &Connection,
     sql_batch: &str,
     token_bool_opt: Option<Arc<AtomicBool>>,
-) -> Result<bool, XqliteError> {
+) -> Result<(), XqliteError> {
     let _guard = token_bool_opt
         .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
         .transpose()?;
     conn.execute_batch(sql_batch)?;
-    Ok(true)
+    Ok(())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -253,11 +253,15 @@ fn execute<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn execute_batch(
+fn execute_batch<'a>(
+    env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
-) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None))
+) -> Term<'a> {
+    match with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None)) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -290,15 +294,18 @@ fn execute_cancellable<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn execute_batch_cancellable(
+    env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
     token: ResourceArc<XqliteCancelToken>,
-) -> Result<bool, XqliteError> {
+) -> Term<'_> {
     let token_bool = token.0.clone();
-
-    with_conn(&handle, |conn| {
+    match with_conn(&handle, |conn| {
         core_execute_batch(conn, &sql_batch, Some(token_bool))
-    })
+    }) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif]

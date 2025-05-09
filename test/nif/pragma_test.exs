@@ -29,7 +29,7 @@ defmodule Xqlite.NIF.PragmaTest do
       end
 
       test "get_pragma/2 returns :no_value for non-value pragmas", %{conn: conn} do
-        assert {:ok, true} = NIF.execute_batch(conn, "PRAGMA optimize;")
+        assert :ok = NIF.execute_batch(conn, "PRAGMA optimize;")
         assert {:ok, :no_value} = NIF.get_pragma(conn, "optimize")
       end
 

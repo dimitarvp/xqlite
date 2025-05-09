@@ -104,7 +104,7 @@ defmodule Xqlite.NIF.TransactionTest do
       # --- Savepoint Tests ---
       # Setup specific table needed for these tests
       setup %{conn: conn} do
-        assert {:ok, true} = NIF.execute_batch(conn, @savepoint_table_setup)
+        assert :ok = NIF.execute_batch(conn, @savepoint_table_setup)
         :ok
       end
 

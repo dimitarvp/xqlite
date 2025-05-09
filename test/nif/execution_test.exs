@@ -168,18 +168,18 @@ defmodule Xqlite.NIF.ExecutionTest do
         INSERT INTO batch_exec_test (id, label) VALUES (2, 'Batch Label 2');
         """
 
-        assert {:ok, true} = NIF.execute_batch(conn, create_and_insert_sql)
+        assert :ok = NIF.execute_batch(conn, create_and_insert_sql)
 
         assert {:ok, %{rows: [[1, "Batch Label 1"], [2, "Batch Label 2"]], num_rows: 2}} =
                  NIF.query(conn, "SELECT * FROM batch_exec_test ORDER BY id;", [])
       end
 
       test "execute_batch/2 handles empty string", %{conn: conn} do
-        assert {:ok, true} = NIF.execute_batch(conn, "")
+        assert :ok = NIF.execute_batch(conn, "")
       end
 
       test "execute_batch/2 handles string with only whitespace/comments", %{conn: conn} do
-        assert {:ok, true} = NIF.execute_batch(conn, "  -- comment \n ; \t ")
+        assert :ok = NIF.execute_batch(conn, "  -- comment \n ; \t ")
       end
 
       test "execute_batch/2 returns error on invalid SQL in batch", %{conn: conn} do

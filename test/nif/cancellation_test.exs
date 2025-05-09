@@ -139,7 +139,7 @@ defmodule Xqlite.NIF.CancellationTest do
              conn: conn
            } do
         # Create the table and trigger
-        assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
+        assert :ok = NIF.execute_batch(conn, @trigger_table_setup)
         {:ok, token} = NIF.create_cancel_token()
 
         # Start the INSERT (which triggers the slow query) in a Task
@@ -165,7 +165,7 @@ defmodule Xqlite.NIF.CancellationTest do
         conn: conn
       } do
         # Create the table and trigger
-        assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
+        assert :ok = NIF.execute_batch(conn, @trigger_table_setup)
         {:ok, token} = NIF.create_cancel_token()
 
         # Run the INSERT cancellably, but don't cancel
@@ -182,7 +182,7 @@ defmodule Xqlite.NIF.CancellationTest do
       test "normal execute works after a cancelled execute_cancellable (handler unregistered)",
            %{conn: conn} do
         # Create the table and trigger
-        assert {:ok, true} = NIF.execute_batch(conn, @trigger_table_setup)
+        assert :ok = NIF.execute_batch(conn, @trigger_table_setup)
 
         # --- Part 1: Run and cancel an execute ---
         {:ok, token1} = NIF.create_cancel_token()
@@ -213,7 +213,7 @@ defmodule Xqlite.NIF.CancellationTest do
         conn: conn
       } do
         # Setup the table for this test
-        assert {:ok, true} = NIF.execute_batch(conn, @batch_cancel_setup)
+        assert :ok = NIF.execute_batch(conn, @batch_cancel_setup)
         {:ok, token} = NIF.create_cancel_token()
         # Generate batch using the larger count
         long_batch = generate_long_batch(@batch_cancel_table, @batch_cancel_statement_count)
@@ -236,13 +236,13 @@ defmodule Xqlite.NIF.CancellationTest do
       test "execute_batch_cancellable/3 completes normally if token is not cancelled",
            %{conn: conn} do
         # Setup the table for this test
-        assert {:ok, true} = NIF.execute_batch(conn, @batch_cancel_setup)
+        assert :ok = NIF.execute_batch(conn, @batch_cancel_setup)
         {:ok, token} = NIF.create_cancel_token()
         # Use a much smaller batch that should complete quickly
         short_batch = generate_long_batch(@batch_cancel_table, 5)
 
         # Run the batch cancellably, but don't cancel
-        assert {:ok, true} = NIF.execute_batch_cancellable(conn, short_batch, token)
+        assert :ok = NIF.execute_batch_cancellable(conn, short_batch, token)
 
         # Verify the last update from the short batch took effect
         assert {:ok, %{rows: [["batch_5"]]}} =
@@ -252,7 +252,7 @@ defmodule Xqlite.NIF.CancellationTest do
       test "normal batch works after a cancelled execute_batch_cancellable (handler unregistered)",
            %{conn: conn} do
         # Setup the table for this test
-        assert {:ok, true} = NIF.execute_batch(conn, @batch_cancel_setup)
+        assert :ok = NIF.execute_batch(conn, @batch_cancel_setup)
 
         # --- Part 1: Run and cancel a batch ---
         {:ok, token1} = NIF.create_cancel_token()
@@ -273,7 +273,7 @@ defmodule Xqlite.NIF.CancellationTest do
         # --- Part 2: Run a normal, non-cancellable batch on the same connection ---
         # Verifies the progress handler was correctly unregistered by the RAII guard in Rust.
         normal_batch = "UPDATE #{@batch_cancel_table} SET data = 'normal_batch' WHERE id = 0;"
-        assert {:ok, true} = NIF.execute_batch(conn, normal_batch)
+        assert :ok = NIF.execute_batch(conn, normal_batch)
 
         assert {:ok, %{rows: [["normal_batch"]]}} =
                  NIF.query(conn, "SELECT data FROM #{@batch_cancel_table} WHERE id = 0;", [])
