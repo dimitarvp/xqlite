@@ -341,23 +341,32 @@ fn set_pragma<'a>(
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
     value_term: Term<'a>,
-) -> Result<bool, XqliteError> {
-    let value_literal = format_term_for_pragma(env, value_term)?;
+) -> Term<'a> {
+    let execution_result: Result<(), XqliteError> = (|| {
+        let value_literal = format_term_for_pragma(env, value_term)?;
 
-    with_conn(&handle, |conn| {
-        let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
-        {
-            let mut write_stmt =
-                conn.prepare(&write_sql)
-                    .map_err(|e| XqliteError::CannotExecutePragma {
+        with_conn(&handle, |conn| {
+            let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
+            {
+                let mut write_stmt = conn.prepare(&write_sql).map_err(|e| {
+                    XqliteError::CannotExecutePragma {
                         pragma: write_sql.clone(),
                         reason: e.to_string(),
-                    })?;
+                    }
+                })?;
+                let mut rows = write_stmt.query([])?;
+                if let Some(row_result) = rows.next()? {
+                    let _value_from_pragma_set: Value = row_result.get(0)?;
+                }
+            }
+            Ok(())
+        })
+    })();
 
-            let _ = write_stmt.query([])?;
-        }
-        Ok(true)
-    })
+    match execution_result {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
