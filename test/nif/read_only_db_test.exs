@@ -118,7 +118,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     # BEGIN DEFERRED might succeed as it does nothing until the first write.
     # The crucial part is that the write operation itself fails.
     case NIF.begin(ro_conn) do
-      {:ok, true} ->
+      :ok ->
         write_attempt_result =
           NIF.execute(
             ro_conn,
@@ -151,7 +151,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     conn: ro_conn
   } do
     # Deferred transaction starts
-    assert {:ok, true} = NIF.begin(ro_conn)
+    assert :ok = NIF.begin(ro_conn)
 
     # On a read-only DB with mode=ro, a COMMIT with no preceding write operations
     # is a no-op and should succeed.
@@ -161,7 +161,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     # Verify connection is no longer in a transaction (is_autocommit would be true)
     # We can test this by trying to start another transaction. If it succeeds,
     # the previous one was properly closed.
-    assert {:ok, true} = NIF.begin(ro_conn)
+    assert :ok = NIF.begin(ro_conn)
     # Clean up the new transaction
     assert {:ok, true} = NIF.rollback(ro_conn)
   end

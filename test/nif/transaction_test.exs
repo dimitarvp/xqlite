@@ -52,7 +52,7 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "insert a record and commit transaction", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
 
         assert {:ok, 1} =
                  NIF.execute(
@@ -68,7 +68,7 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "insert a record and rollback transaction", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
 
         assert {:ok, 1} =
                  NIF.execute(
@@ -94,7 +94,7 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "begin within begin fails", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:error, {:sqlite_failure, code, _, msg}} = NIF.begin(conn)
         assert code == 21 or String.contains?(msg || "", "within a transaction")
         # Clean up outer transaction
@@ -110,7 +110,7 @@ defmodule Xqlite.NIF.TransactionTest do
 
       test "rollback_to_savepoint reverts changes", %{conn: conn} do
         assert_savepoint_record_present(conn, 1, "one")
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:ok, 1} = NIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
         assert_savepoint_record_present(conn, 2, "two")
         assert {:ok, true} = NIF.savepoint(conn, "sp1")
@@ -130,7 +130,7 @@ defmodule Xqlite.NIF.TransactionTest do
 
       test "release_savepoint incorporates changes", %{conn: conn} do
         assert_savepoint_record_present(conn, 1, "one")
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:ok, 1} = NIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
         assert_savepoint_record_present(conn, 2, "two")
         assert {:ok, true} = NIF.savepoint(conn, "sp1")
@@ -149,7 +149,7 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "rollback_to_savepoint after release fails", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:ok, true} = NIF.savepoint(conn, "sp1")
         assert {:ok, true} = NIF.release_savepoint(conn, "sp1")
 

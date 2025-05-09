@@ -370,11 +370,13 @@ fn set_pragma<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
-        conn.execute("BEGIN;", [])?;
-        Ok(true)
-    })
+fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    match with_conn(&handle, |conn| {
+        conn.execute("BEGIN;", []).map_err(XqliteError::from)
+    }) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
