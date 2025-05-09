@@ -119,7 +119,7 @@ defmodule Xqlite.NIF.TransactionTest do
                  NIF.execute(conn, "INSERT INTO savepoint_test VALUES (3, 'three')", [])
 
         assert_savepoint_record_present(conn, 3, "three")
-        assert {:ok, true} = NIF.rollback_to_savepoint(conn, "sp1")
+        assert :ok = NIF.rollback_to_savepoint(conn, "sp1")
         assert_savepoint_record_missing(conn, 3)
         assert_savepoint_record_present(conn, 2, "two")
         assert :ok = NIF.commit(conn)
