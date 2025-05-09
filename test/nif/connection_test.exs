@@ -27,7 +27,7 @@ defmodule Xqlite.NIF.ConnectionTest do
       # These tests inherit the simple atom tag (e.g. :memory_private or :file_temp etc.)
 
       test "connection is usable (set/get pragma)", %{conn: conn} do
-        assert {:ok, true} = NIF.set_pragma(conn, "cache_size", 4000)
+        assert :ok = NIF.set_pragma(conn, "cache_size", 4000)
         assert {:ok, 4000} = NIF.get_pragma(conn, "cache_size")
       end
 
@@ -92,7 +92,7 @@ defmodule Xqlite.NIF.ConnectionTest do
 
       # Check they point to the same DB using cache_size
       # Set cache_size via conn1, assert set success
-      assert {:ok, true} = NIF.set_pragma(conn1, "cache_size", 5000)
+      assert :ok = NIF.set_pragma(conn1, "cache_size", 5000)
       # Read back via conn2 using get_pragma, assert it returns the value set by conn1
       assert {:ok, 5000} = NIF.get_pragma(conn2, "cache_size")
     end
