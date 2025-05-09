@@ -15,7 +15,7 @@ use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
 use rustler::{
     resource_impl,
     types::{
-        atom::{error, nil},
+        atom::{error, nil, ok},
         map::map_new,
     },
     Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
@@ -915,6 +915,6 @@ fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    Ok(true)
+fn close(env: Env<'_>, _handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    ok().encode(env)
 }
