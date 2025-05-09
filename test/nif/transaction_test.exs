@@ -113,7 +113,7 @@ defmodule Xqlite.NIF.TransactionTest do
         assert :ok = NIF.begin(conn)
         assert {:ok, 1} = NIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.savepoint(conn, "sp1")
+        assert :ok = NIF.savepoint(conn, "sp1")
 
         assert {:ok, 1} =
                  NIF.execute(conn, "INSERT INTO savepoint_test VALUES (3, 'three')", [])
@@ -133,7 +133,7 @@ defmodule Xqlite.NIF.TransactionTest do
         assert :ok = NIF.begin(conn)
         assert {:ok, 1} = NIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.savepoint(conn, "sp1")
+        assert :ok = NIF.savepoint(conn, "sp1")
 
         assert {:ok, 1} =
                  NIF.execute(conn, "INSERT INTO savepoint_test VALUES (3, 'three')", [])
@@ -150,7 +150,7 @@ defmodule Xqlite.NIF.TransactionTest do
 
       test "rollback_to_savepoint after release fails", %{conn: conn} do
         assert :ok = NIF.begin(conn)
-        assert {:ok, true} = NIF.savepoint(conn, "sp1")
+        assert :ok = NIF.savepoint(conn, "sp1")
         assert {:ok, true} = NIF.release_savepoint(conn, "sp1")
 
         assert {:error, {:sqlite_failure, code, _, msg}} =
