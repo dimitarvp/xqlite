@@ -21,7 +21,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     {:ok, conn_rw} = NIF.open(temp_db_path)
     assert {:ok, 0} = NIF.execute(conn_rw, @create_table_sql, [])
     assert {:ok, 1} = NIF.execute(conn_rw, @insert_sql, [])
-    assert {:ok, true} = NIF.close(conn_rw)
+    assert :ok = NIF.close(conn_rw)
     temp_db_path
   end
 

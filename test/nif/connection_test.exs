@@ -32,11 +32,11 @@ defmodule Xqlite.NIF.ConnectionTest do
       end
 
       test "close returns true even when called multiple times", %{conn: conn} do
-        assert {:ok, true} = NIF.close(conn)
+        assert :ok = NIF.close(conn)
 
         # Subsequent calls are no-ops on the Rust side but should still return ok via the NIF interface.
-        assert {:ok, true} = NIF.close(conn)
-        assert {:ok, true} = NIF.close(conn)
+        assert :ok = NIF.close(conn)
+        assert :ok = NIF.close(conn)
       end
 
       test "basic query execution works", %{conn: conn} do
