@@ -15,7 +15,7 @@ This library provides direct access to core SQLite functionality. For seamless E
 SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for concurrent access ([`!Sync`](https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109)). To safely expose connections to the concurrent Elixir environment, `xqlite` wraps each `rusqlite::Connection` within an `Arc<Mutex<_>>` managed by a `ResourceArc`.
 
 - **Safety:** This ensures that only one Elixir process can access a specific SQLite connection handle at any given moment, preventing data races and ensuring compatibility with Rustler's `Resource` requirements (`Sync`).
-- **Handles:** NIF functions return opaque, thread-safe resource handles (`ResourceArc<XqliteConn>`) representing individual SQLite connections.
+- **Handles:** NIF functions return opaque, thread-safe resource handles representing individual SQLite connections.
 - **Pooling:** This NIF layer **does not** implement connection pooling. Managing a pool of connections (e.g., using `DBConnection`) is the responsibility of the calling Elixir code or higher-level libraries like the planned `xqlite_ecto3`.
 
 This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.0 recommended). While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal. **Notably, retrieving primary keys automatically after insertion into `WITHOUT ROWID` tables is only reliably supported via the `RETURNING` clause (available since SQLite 3.35.0). Using `WITHOUT ROWID` tables on older SQLite versions may require you to supply primary key values explicitly within your application, as `last_insert_rowid/1` cannot be used for these tables.**
@@ -25,181 +25,120 @@ This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.
 The `XqliteNIF` module provides the following low-level functions:
 
 - **Connection Management:**
+
   - `open(path :: String.t())`: Opens a file-based database.
-  - `open_in_memory(uri :: String.t())`: Opens an in-memory database (can use URI options like `cache=shared`).
+  - `open_in_memory(uri :: String.t() \\ ":memory:")`: Opens an in-memory database.
   - `open_temporary()`: Opens a private, temporary on-disk database.
-  - `close(conn :: ResourceArc<XqliteConn>)`: Conceptually closes the connection (relies on BEAM garbage collection of the resource handle for actual closing). Returns `{:ok, true}` immediately.
+  - `close(conn)`: Conceptually closes the connection. Returns `{:ok, true}`.
+
 - **Query Execution:**
-  - `query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements (including `INSERT/UPDATE/DELETE ... RETURNING ...`).
-    - Supports positional (`[1, "foo"]`) or named (`[val1: 1, val2: "foo"]`) parameters.
+
+  - `query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements.
+  - `query_cancellable(conn, sql :: String.t(), params :: list() | keyword(), cancel_token)`: Cancellable version.
     - Returns `{:ok, %{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}}` or `{:error, reason}`.
+
 - **Statement Execution:**
-  - `execute(conn, sql :: String.t(), params :: list())`: Executes standard `INSERT`, `UPDATE`, `DELETE`, DDL, etc., that do not return rows.
-    - Supports positional parameters only (`[1, "foo"]`).
-    - Returns `{:ok, affected_rows :: non_neg_integer()}` or `{:error, reason}`.
-  - `execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements separated by semicolons in a single string. Returns `{:ok, true}` on success.
+
+  - `execute(conn, sql :: String.t(), params :: list())`: Executes non-row-returning statements (e.g., `INSERT`, `UPDATE`, `DDL`).
+  - `execute_cancellable(conn, sql :: String.t(), params :: list(), cancel_token)`: Cancellable version.
+  - `execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements.
+  - `execute_batch_cancellable(conn, sql_batch :: String.t(), cancel_token)`: Cancellable version.
+    - `execute` variants return `{:ok, affected_rows :: non_neg_integer()}`.
+    - `execute_batch` variants return `{:ok, true}`.
+
+- **Operation Cancellation:**
+
+  - `create_cancel_token()`: Creates a token for signalling cancellation.
+  - `cancel_operation(cancel_token)`: Signals an operation associated with the token to cancel. Returns `{:ok, true}`.
+
 - **PRAGMA Handling:**
-  - `pragma_write(conn, pragma_sql :: String.t())`: Executes a PRAGMA statement that modifies state (e.g., `PRAGMA journal_mode = WAL`). Returns affected rows (usually 0).
-  - `pragma_write_and_read(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value and reads it back. Returns `{:ok, read_value}` or `{:ok, :no_value}`.
+
+  - `get_pragma(conn, pragma_name :: String.t())`: Reads a PRAGMA value.
+  - `set_pragma(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value. Returns `{:ok, true}`.
+
 - **Transaction Control:**
-  - `begin(conn)`: Executes `BEGIN;`.
-  - `commit(conn)`: Executes `COMMIT;`.
-  - `rollback(conn)`: Executes `ROLLBACK;`.
-  - `savepoint(conn, name :: String.t())`: Creates a named transaction savepoint.
-  - `release_savepoint(conn, name :: String.t())`: Releases a named savepoint, incorporating its changes.
-  - `rollback_to_savepoint(conn, name :: String.t())`: Rolls back changes to a named savepoint.
+
+  - `begin(conn)`, `commit(conn)`, `rollback(conn)`
+  - `savepoint(conn, name)`, `release_savepoint(conn, name)`, `rollback_to_savepoint(conn, name)`
+  - All return `{:ok, true}` on success.
+
 - **Inserted Row ID:**
-  - `last_insert_rowid(conn)`: Retrieves the integer `rowid` of the most recent successful `INSERT` into a standard rowid table on the given database connection. Returns `{:ok, rowid :: integer()}` or `{:error, reason}`.
-    - **Important Caveats:**
-      - This function reflects the state of the specific `conn` handle. If the _same handle_ is shared and used concurrently for `INSERT`s by multiple Elixir processes (which is discouraged), the returned value might belong to an `INSERT` from a different process than the one calling `last_insert_rowid`. Standard connection pooling (e.g., via `DBConnection`) avoids this issue by not sharing handles concurrently.
-      - It **does not work** for tables created using the `WITHOUT ROWID` option.
-      - It provides a fallback for retrieving generated IDs on **SQLite versions prior to 3.35.0**. For modern SQLite versions, using `INSERT ... RETURNING` via `query/3` is the preferred and safer atomic method (see example below).
+
+  - `last_insert_rowid(conn)`: Retrieves the `rowid` of the most recent `INSERT`.
+
 - **Schema Introspection:**
-  - `schema_databases(conn)`: Lists attached databases.
-  - `schema_list_objects(conn, schema \\ nil)`: Lists objects (tables, views, etc.) optionally filtered by schema name.
-  - `schema_columns(conn, table_name)`: Lists columns for a specific table.
-  - `schema_foreign_keys(conn, table_name)`: Lists foreign keys originating from a specific table.
-  - `schema_indexes(conn, table_name)`: Lists indexes defined on a specific table.
-  - `schema_index_columns(conn, index_name)`: Lists columns comprising a specific index.
-  - `get_create_sql(conn, object_name)`: Retrieves the original `CREATE` statement for an object.
-  - These functions return `{:ok, list_of_structs} | {:ok, string | nil} | {:error, reason}`. The structs are defined in the `Xqlite.Schema.*` modules (e.g., `Xqlite.Schema.ColumnInfo`). Please refer to those modules or generated documentation for detailed field descriptions and typespecs.
+
+  - `schema_databases(conn)`
+  - `schema_list_objects(conn, schema \\ nil)`
+  - `schema_columns(conn, table_name)` (Includes `:hidden_kind` in `Xqlite.Schema.ColumnInfo`)
+  - `schema_foreign_keys(conn, table_name)`
+  - `schema_indexes(conn, table_name)`
+  - `schema_index_columns(conn, index_name)`
+  - `get_create_sql(conn, object_name)`
+
 - **Error Handling:**
-  - All functions return `{:ok, result}` or `{:error, reason}` tuples.
-  - `reason` provides structured information about the error (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:constraint_violation, kind, message}`, `{:invalid_parameter_count, %{expected: _, provided: _}}`, `{:schema_parsing_error, context, detail}`, etc.). See `XqliteError` in the Rust code for details.
+  - Functions return `{:ok, result}` or `{:error, reason}`.
+  - `reason` is a structured tuple (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:operation_cancelled}`).
+
+## Known Limitations and Caveats
+
+- **`last_insert_rowid/1`:**
+  - Reflects the state of the specific connection handle. Avoid sharing handles for concurrent `INSERT`s outside a proper pooling mechanism.
+  - Does not work for `WITHOUT ROWID` tables. Use `INSERT ... RETURNING`.
+- **Operation Cancellation Performance:** The current cancellation mechanism uses SQLite's progress handler with a frequent check interval. This ensures testability but introduces overhead to cancellable operations. This will be benchmarked and potentially optimized in the future.
+- **Generated Column `default_value` (Schema Introspection):** `Xqlite.Schema.ColumnInfo.default_value` will be `nil` for generated columns when using `NIF.schema_columns/2`. The generation expression is not directly available in the `dflt_value` column of `PRAGMA table_xinfo`. To get the full expression, parse the output of `NIF.get_create_sql/2`.
+- **Invalid UTF-8 in TEXT Columns with SQL Functions:** Applying certain SQL text functions (e.g., `UPPER()`, `LOWER()`) to `TEXT` columns containing byte sequences that are not valid UTF-8 may cause the underlying SQLite C library to panic, leading to a NIF crash. Ensure data stored in `TEXT` columns intended for such processing is valid UTF-8, or avoid these functions on potentially corrupt data.
+- **User-Defined Functions (UDFs):** Support for UDFs is of very low priority due to its significant implementation complexity and is not currently planned.
 
 ## Basic Usage Examples
 
 ```elixir
-# --- Opening a connection ---
-case XqliteNIF.open("my_database.db") do
-  {:ok, conn} ->
-    IO.puts("Connection opened successfully.")
-    # Use conn...
-    # Remember to eventually let conn go out of scope or call close
-    # XqliteNIF.close(conn) # Optional, GC handles it
+alias XqliteNIF
+alias Xqlite # For helper functions
 
-  {:error, reason} ->
-    IO.inspect(reason, label: "Failed to open database")
-end
+# --- Opening a connection ---
+{:ok, conn} = XqliteNIF.open("my_database.db")
+
+# --- Using Xqlite helpers ---
+:ok = Xqlite.enable_foreign_key_enforcement(conn)
+:ok = Xqlite.enable_strict_mode(conn)
 
 # --- Executing a query (SELECT) ---
 sql_select = "SELECT id, name FROM users WHERE id = ?1;"
 params_select = [1]
+IO.inspect(XqliteNIF.query(conn, sql_select, params_select), label: "Query Result")
 
-case XqliteNIF.query(conn, sql_select, params_select) do
-  {:ok, %{columns: cols, rows: rows, num_rows: num}} ->
-    IO.puts("Query successful:")
-    IO.inspect(cols, label: "Columns")
-    IO.inspect(rows, label: "Rows")
-    IO.inspect(num, label: "Num Rows")
-
-  {:error, reason} ->
-    IO.inspect(reason, label: "Query failed")
-end
-
-# --- Executing a statement (INSERT) ---
-# Use this when you don't need the inserted ID back immediately,
-# or when using SQLite < 3.35.0 with standard rowid tables.
-sql_insert = "INSERT INTO users (name, email) VALUES (?1, ?2);"
-params_insert = ["Alice", "alice@example.com"]
-
-case XqliteNIF.execute(conn, sql_insert, params_insert) do
-  {:ok, affected_rows} ->
-    IO.puts("Insert successful. Rows affected: #{affected_rows}")
-    # Optionally call last_insert_rowid immediately after (see Caveats)
-    # case XqliteNIF.last_insert_rowid(conn) do
-    #   {:ok, id} -> IO.puts("Last insert ID (non-atomic): #{id}")
-    #   {:error, err} -> IO.inspect(err, label: "Failed to get last row ID")
-    # end
-
-  {:error, reason} ->
-    IO.inspect(reason, label: "Insert failed")
-    # Example: {:error, {:constraint_violation, :constraint_unique, "UNIQUE constraint failed: users.email"}}
-end
-
-# --- Executing an INSERT and retrieving ID atomically (SQLite >= 3.35.0) ---
-# This is the PREFERRED method on modern SQLite versions.
-sql_insert_return = "INSERT INTO users (name, email) VALUES (?1, ?2) RETURNING id;"
-params_insert_return = ["Bob", "bob@example.com"]
-
-# Note: Use query because INSERT...RETURNING returns rows/columns
-case XqliteNIF.query(conn, sql_insert_return, params_insert_return) do
-  {:ok, %{columns: ["id"], rows: [[inserted_id]], num_rows: 1}} ->
-    IO.puts("Insert successful. Atomically retrieved ID: #{inserted_id}")
-
-  {:error, reason} ->
-    IO.inspect(reason, label: "Insert/Returning failed")
-end
+# --- Executing a cancellable query ---
+# (Assume `slow_query_sql` is a long-running SQL. See test/nif/cancellation_test.exs for examples)
+{:ok, cancel_token} = XqliteNIF.create_cancel_token()
+long_query_task = Task.async(fn ->
+  XqliteNIF.query_cancellable(conn, slow_query_sql, [], cancel_token)
+end)
+Process.sleep(100)
+XqliteNIF.cancel_operation(cancel_token)
+IO.inspect(Task.await(long_query_task, 5000), label: "Cancelled Query Result")
 
 # --- Querying Schema Information ---
-# Example: Get column info for a table
-case XqliteNIF.schema_columns(conn, "users") do
-  {:ok, [%Schema.ColumnInfo{name: first_col_name, type_affinity: first_col_affinity} | _rest]} ->
-    IO.puts("First column in 'users': #{first_col_name} (Affinity: #{first_col_affinity})")
-  {:ok, []} ->
-    IO.puts("Table 'users' not found or has no columns.")
-  {:error, reason} ->
-     IO.inspect(reason, label: "Failed to get columns for 'users'")
-end
-
-# Example: Get the CREATE statement for an object
-case XqliteNIF.get_create_sql(conn, "users") do
-  {:ok, create_sql} when is_binary(create_sql) ->
-     IO.puts("CREATE SQL for 'users' starts with: #{String.slice(create_sql, 0, 50)}...")
-  {:ok, nil} ->
-     IO.puts("Object 'users' not found.")
-  {:error, reason} ->
-     IO.inspect(reason, label: "Failed to get CREATE SQL for 'users'")
-end
-# Other schema functions (schema_list_objects, schema_indexes, etc.) exist too.
-
-# --- Using a transaction ---
-case XqliteNIF.begin(conn) do
-  {:ok, true} ->
-    # Perform operations within the transaction
-    case XqliteNIF.execute(conn, "UPDATE accounts SET balance = balance - 100 WHERE id = 1", []) do
-      {:ok, 1} ->
-        case XqliteNIF.execute(conn, "UPDATE accounts SET balance = balance + 100 WHERE id = 2", []) do
-          {:ok, 1} ->
-            # Commit if both succeed
-            XqliteNIF.commit(conn)
-            IO.puts("Transaction committed.")
-          {:error, reason_2} ->
-            IO.inspect(reason_2, label: "Second update failed, rolling back")
-            XqliteNIF.rollback(conn)
-        end
-      {:error, reason_1} ->
-        IO.inspect(reason_1, label: "First update failed, rolling back")
-        XqliteNIF.rollback(conn)
-    end
-  {:error, reason_begin} ->
-    IO.inspect(reason_begin, label: "Failed to begin transaction")
-end
-
+{:ok, columns} = XqliteNIF.schema_columns(conn, "users")
+IO.inspect(columns, label: "Columns for 'users' table")
 ```
 
 ## Roadmap
 
-The following features and enhancements are planned for the **`xqlite`** (NIF) library, prioritized roughly as follows:
+The following features are planned for the **`xqlite`** (NIF) library:
 
-- [ ] **Query Cancellation:** Implement an explicit cancellation mechanism (using a `CancelToken` resource, `cancel/1` NIF, and `_cancellable` NIF variants) allowing long-running queries/statements to be interrupted. _Crucial for robust timeout handling in Ecto/DBConnection._
-- [ ] **Streaming Results:** Add NIFs to fetch large query results incrementally in chunks, rather than loading everything into memory at once. _Essential for supporting `Repo.stream/2` and handling large datasets efficiently._
-- [ ] **Online Backup API:** Add NIFs to interact with SQLite's Online Backup API for performing live backups of the database. _Fundamental for operational reliability._
-- [ ] **Session Extension:** Add NIFs to support SQLite's Session Extension for tracking and managing database changes (changesets/patchsets).
-- [ ] **Extension Loading:** Add a `load_extension/2` NIF to enable loading SQLite runtime extensions (e.g., FTS, JSON1, SpatiaLite, custom extensions) provided as shared libraries. _Key for unlocking advanced SQLite capabilities._
-- [ ] **Incremental Blob I/O:** Add NIFs to support reading and writing large BLOB values incrementally, avoiding high memory usage.
-- [ ] **User-Defined Functions:** Investigate and implement support for registering custom SQL functions, aggregates, and potentially window functions (UDFs) from Elixir/Rust.
-- [ ] **Optional: SQLCipher Support (build feature):** Investigate adding optional build-time support for SQLCipher database encryption via `rusqlite` Cargo features.
+1.  **Implement Streaming Results:** Fetch large query results incrementally.
+2.  **Implement Extension Loading:** Add `load_extension/2` NIF.
+3.  **Implement Online Backup API:** Add NIFs for SQLite's Online Backup API.
+4.  **Implement Session Extension:** Add NIFs for SQLite's Session Extension.
+5.  **(Lower Priority)** Implement Incremental Blob I/O.
+6.  **(Optional)** Add SQLCipher Support (build feature).
 
 The **`xqlite_ecto3`** library (separate project) will provide:
 
-- [ ] Full Ecto 3.x adapter implementation (`use Ecto.Adapters.SQL`).
-- [ ] Integration with `DBConnection` for connection pooling (using WAL and `busy_timeout` for concurrency).
-- [ ] Type handling (`dumpers`/`loaders`) for mapping Ecto types to SQLite storage (including Date/Time, Decimals, Binaries, JSON).
-- [ ] Migration support (including migration locking).
-- [ ] Structure dump/load (`mix ecto.dump`, `mix ecto.load`).
-
-Further future possibilities include exploring a high-level "Strict Mode" helper and other advanced SQLite features.
+- Full Ecto 3.x adapter implementation.
+- `DBConnection` integration.
+- Type handling, migrations, structure dump/load.
 
 ## Installation
 
@@ -217,7 +156,7 @@ Ensure you have a compatible Rust toolchain installed.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to open issues or submit pull requests. Focus on testing any new code added. Rely only on the public Elixir API provided by the `XqliteNIF` module, as internal Rust implementation details may change.
+Contributions are welcome! Please feel free to open issues or submit pull requests.
 
 ## License
 
