@@ -109,7 +109,7 @@ defmodule Xqlite.NIF.ErrorInputTest do
         INSERT INTO fk_parent_insert (id) VALUES (1);
         """
 
-        assert {:ok, true} = NIF.execute_batch(conn, fk_ddl)
+        assert :ok = NIF.execute_batch(conn, fk_ddl)
 
         # Test the violation
         # parent_id 99 doesn't exist
@@ -132,7 +132,7 @@ defmodule Xqlite.NIF.ErrorInputTest do
         INSERT INTO fk_child_delete (id, parent_id) VALUES (10, 1);
         """
 
-        assert {:ok, true} = NIF.execute_batch(conn, fk_ddl)
+        assert :ok = NIF.execute_batch(conn, fk_ddl)
 
         # Test the violation: Try deleting the parent row referenced by the child
         sql = "DELETE FROM fk_parent_delete WHERE id = 1;"

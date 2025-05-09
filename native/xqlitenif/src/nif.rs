@@ -15,7 +15,7 @@ use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
 use rustler::{
     resource_impl,
     types::{
-        atom::{error, nil},
+        atom::{error, nil, ok},
         map::map_new,
     },
     Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
@@ -196,12 +196,12 @@ fn core_execute_batch(
     conn: &Connection,
     sql_batch: &str,
     token_bool_opt: Option<Arc<AtomicBool>>,
-) -> Result<bool, XqliteError> {
+) -> Result<(), XqliteError> {
     let _guard = token_bool_opt
         .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
         .transpose()?;
     conn.execute_batch(sql_batch)?;
-    Ok(true)
+    Ok(())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -254,10 +254,14 @@ fn execute<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn execute_batch(
+    env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
-) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None))
+) -> Term<'_> {
+    match with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None)) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -290,15 +294,18 @@ fn execute_cancellable<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn execute_batch_cancellable(
+    env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
     token: ResourceArc<XqliteCancelToken>,
-) -> Result<bool, XqliteError> {
+) -> Term<'_> {
     let token_bool = token.0.clone();
-
-    with_conn(&handle, |conn| {
+    match with_conn(&handle, |conn| {
         core_execute_batch(conn, &sql_batch, Some(token_bool))
-    })
+    }) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif]
@@ -307,9 +314,9 @@ fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> 
 }
 
 #[rustler::nif]
-fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<bool, XqliteError> {
+fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term<'_> {
     token.cancel();
-    Ok(true)
+    ok().encode(env)
 }
 
 /// Reads the current value of an SQLite PRAGMA.
@@ -341,83 +348,108 @@ fn set_pragma<'a>(
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
     value_term: Term<'a>,
-) -> Result<bool, XqliteError> {
-    let value_literal = format_term_for_pragma(env, value_term)?;
+) -> Term<'a> {
+    let execution_result: Result<(), XqliteError> = (|| {
+        let value_literal = format_term_for_pragma(env, value_term)?;
 
-    with_conn(&handle, |conn| {
-        let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
-        {
-            let mut write_stmt =
-                conn.prepare(&write_sql)
-                    .map_err(|e| XqliteError::CannotExecutePragma {
+        with_conn(&handle, |conn| {
+            let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
+            {
+                let mut write_stmt = conn.prepare(&write_sql).map_err(|e| {
+                    XqliteError::CannotExecutePragma {
                         pragma: write_sql.clone(),
                         reason: e.to_string(),
-                    })?;
+                    }
+                })?;
+                let mut rows = write_stmt.query([])?;
+                if let Some(row_result) = rows.next()? {
+                    let _value_from_pragma_set: Value = row_result.get(0)?;
+                }
+            }
+            Ok(())
+        })
+    })();
 
-            let _ = write_stmt.query([])?;
-        }
-        Ok(true)
-    })
+    match execution_result {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn begin(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
-        conn.execute("BEGIN;", [])?;
-        Ok(true)
-    })
+fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    match with_conn(&handle, |conn| {
+        conn.execute("BEGIN;", []).map_err(XqliteError::from)
+    }) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn commit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
-        conn.execute("COMMIT;", [])?;
-        Ok(true)
-    })
+fn commit(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    match with_conn(&handle, |conn| {
+        conn.execute("COMMIT;", []).map_err(XqliteError::from)
+    }) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn rollback(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
-        conn.execute("ROLLBACK;", [])?;
-        Ok(true)
-    })
+fn rollback(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    match with_conn(&handle, |conn| {
+        conn.execute("ROLLBACK;", []).map_err(XqliteError::from)
+    }) {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn savepoint(handle: ResourceArc<XqliteConn>, name: String) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
+fn savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
+    let execution_result: Result<usize, XqliteError> = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
         let sql = format!("SAVEPOINT {};", quoted_name);
-        conn.execute(&sql, [])?;
-        Ok(true)
-    })
+        conn.execute(&sql, []).map_err(XqliteError::from)
+    });
+
+    match execution_result {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn rollback_to_savepoint(
+    env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     name: String,
-) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
+) -> Term<'_> {
+    let execution_result: Result<usize, XqliteError> = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
         let sql = format!("ROLLBACK TO SAVEPOINT {};", quoted_name);
-        conn.execute(&sql, [])?;
-        Ok(true)
-    })
+        conn.execute(&sql, []).map_err(XqliteError::from)
+    });
+
+    match execution_result {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn release_savepoint(
-    handle: ResourceArc<XqliteConn>,
-    name: String,
-) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
+fn release_savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
+    let execution_result: Result<usize, XqliteError> = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
         let sql = format!("RELEASE SAVEPOINT {};", quoted_name);
-        conn.execute(&sql, [])?;
-        Ok(true)
-    })
+        conn.execute(&sql, []).map_err(XqliteError::from)
+    });
+
+    match execution_result {
+        Ok(_) => ok().encode(env),
+        Err(err) => (error(), err.encode(env)).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -915,6 +947,6 @@ fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn close(_handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
-    Ok(true)
+fn close(env: Env<'_>, _handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    ok().encode(env)
 }

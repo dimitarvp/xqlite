@@ -29,7 +29,7 @@ The `XqliteNIF` module provides the following low-level functions:
   - `open(path :: String.t())`: Opens a file-based database.
   - `open_in_memory(uri :: String.t() \\ ":memory:")`: Opens an in-memory database.
   - `open_temporary()`: Opens a private, temporary on-disk database.
-  - `close(conn)`: Conceptually closes the connection. Returns `{:ok, true}`.
+  - `close(conn)`: Conceptually closes the connection. Returns `:ok` on success.
 
 - **Query Execution:**
 
@@ -41,26 +41,26 @@ The `XqliteNIF` module provides the following low-level functions:
 
   - `execute(conn, sql :: String.t(), params :: list())`: Executes non-row-returning statements (e.g., `INSERT`, `UPDATE`, `DDL`).
   - `execute_cancellable(conn, sql :: String.t(), params :: list(), cancel_token)`: Cancellable version.
-  - `execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements.
-  - `execute_batch_cancellable(conn, sql_batch :: String.t(), cancel_token)`: Cancellable version.
+  - `execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements. Returns `:ok` on success.
+  - `execute_batch_cancellable(conn, sql_batch :: String.t(), cancel_token)`: Cancellable version. Returns `:ok` on success.
     - `execute` variants return `{:ok, affected_rows :: non_neg_integer()}`.
-    - `execute_batch` variants return `{:ok, true}`.
+    - `execute_batch` variants return `:ok` on success or `{:error, reason}`.
 
 - **Operation Cancellation:**
 
-  - `create_cancel_token()`: Creates a token for signalling cancellation.
-  - `cancel_operation(cancel_token)`: Signals an operation associated with the token to cancel. Returns `{:ok, true}`.
+  - `create_cancel_token()`: Creates a token for signalling cancellation. Returns `{:ok, token_resource}`.
+  - `cancel_operation(cancel_token)`: Signals an operation associated with the token to cancel. Returns `:ok` on success.
 
 - **PRAGMA Handling:**
 
   - `get_pragma(conn, pragma_name :: String.t())`: Reads a PRAGMA value.
-  - `set_pragma(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value. Returns `{:ok, true}`.
+  - `set_pragma(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value. Returns `:ok` on success.
 
 - **Transaction Control:**
 
   - `begin(conn)`, `commit(conn)`, `rollback(conn)`
   - `savepoint(conn, name)`, `release_savepoint(conn, name)`, `rollback_to_savepoint(conn, name)`
-  - All return `{:ok, true}` on success.
+  - All return `:ok` on success or `{:error, reason}`.
 
 - **Inserted Row ID:**
 
@@ -77,7 +77,7 @@ The `XqliteNIF` module provides the following low-level functions:
   - `get_create_sql(conn, object_name)`
 
 - **Error Handling:**
-  - Functions return `{:ok, result}` or `{:error, reason}`.
+  - Functions return `{:ok, result}`, `:ok` (for simple success), or `{:error, reason}`.
   - `reason` is a structured tuple (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:operation_cancelled}`).
 
 ## Known Limitations and Caveats
@@ -115,12 +115,29 @@ long_query_task = Task.async(fn ->
   XqliteNIF.query_cancellable(conn, slow_query_sql, [], cancel_token)
 end)
 Process.sleep(100)
-XqliteNIF.cancel_operation(cancel_token)
+:ok = XqliteNIF.cancel_operation(cancel_token)
 IO.inspect(Task.await(long_query_task, 5000), label: "Cancelled Query Result")
 
 # --- Querying Schema Information ---
 {:ok, columns} = XqliteNIF.schema_columns(conn, "users")
 IO.inspect(columns, label: "Columns for 'users' table")
+
+# --- Using a transaction ---
+case XqliteNIF.begin(conn) do
+  :ok ->
+    # ... perform operations ...
+    case XqliteNIF.execute(conn, "UPDATE accounts SET balance = 0 WHERE id = 1", []) do
+      {:ok, _affected_rows} ->
+        :ok = XqliteNIF.commit(conn)
+        IO.puts("Transaction committed.")
+      {:error, reason_update} ->
+        IO.inspect(reason_update, label: "Update failed, rolling back")
+        :ok = XqliteNIF.rollback(conn)
+    end
+  {:error, reason_begin} ->
+    IO.inspect(reason_begin, label: "Failed to begin transaction")
+end
+
 ```
 
 ## Roadmap
@@ -133,12 +150,19 @@ The following features are planned for the **`xqlite`** (NIF) library:
 4.  **Implement Session Extension:** Add NIFs for SQLite's Session Extension.
 5.  **(Lower Priority)** Implement Incremental Blob I/O.
 6.  **(Optional)** Add SQLCipher Support (build feature).
+7.  **(Lowest Priority / Tentative)** User-Defined Functions (UDFs).
 
 The **`xqlite_ecto3`** library (separate project) will provide:
 
 - Full Ecto 3.x adapter implementation.
 - `DBConnection` integration.
 - Type handling, migrations, structure dump/load.
+
+**Future Considerations (Post Core Roadmap):**
+
+- Benchmark cancellation progress handler overhead.
+- Investigate `sqlite3_interrupt` via `InterruptHandle` again if performance of progress handler is problematic.
+- Report `UPPER(invalid_utf8)` panic behavior observed with SQLite to relevant projects if appropriate.
 
 ## Installation
 
