@@ -20,6 +20,7 @@ use rustler::{
     },
     Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
 };
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -117,6 +118,92 @@ struct TempIndexColumnData {
     key: i64,             // Key column (1) or included column (0)
 }
 
+fn core_query<'a>(
+    env: Env<'a>,
+    conn: &Connection,
+    sql: &str,
+    params_term: Term<'a>,
+    token_bool_opt: Option<Arc<AtomicBool>>,
+) -> Result<XqliteQueryResult<'a>, XqliteError> {
+    let _guard = token_bool_opt
+        .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
+        .transpose()?;
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| XqliteError::CannotPrepareStatement(sql.to_string(), e.to_string()))?;
+    let column_names: Vec<String> =
+        stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let column_count = column_names.len();
+
+    let rows_result = match params_term.get_type() {
+        TermType::List => {
+            if is_keyword(params_term) {
+                let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                    .collect();
+                stmt.query(params_for_rusqlite.as_slice())
+            } else {
+                let positional_values: Vec<Value> =
+                    decode_plain_list_params(env, params_term)?;
+                let params_slice: Vec<&dyn ToSql> =
+                    positional_values.iter().map(|v| v as &dyn ToSql).collect();
+                stmt.query(params_slice.as_slice())
+            }
+        }
+        _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
+            stmt.query([])
+        }
+        _ => {
+            return Err(XqliteError::ExpectedList {
+                value_str: format!("{:?}", params_term),
+            });
+        }
+    };
+    let rows = rows_result?;
+
+    let results_vec = process_rows(env, rows, column_count)?;
+    let num_rows = results_vec.len();
+
+    Ok(XqliteQueryResult {
+        columns: column_names,
+        rows: results_vec,
+        num_rows,
+    })
+}
+
+fn core_execute<'a>(
+    env: Env<'a>,
+    conn: &Connection,
+    sql: &str,
+    params_term: Term<'a>,
+    token_bool_opt: Option<Arc<AtomicBool>>,
+) -> Result<usize, XqliteError> {
+    let _guard = token_bool_opt
+        .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
+        .transpose()?;
+
+    let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
+    let params_slice: Vec<&dyn ToSql> =
+        positional_values.iter().map(|v| v as &dyn ToSql).collect();
+    let affected_rows = conn.execute(sql, params_slice.as_slice())?;
+    Ok(affected_rows)
+}
+
+fn core_execute_batch(
+    conn: &Connection,
+    sql_batch: &str,
+    token_bool_opt: Option<Arc<AtomicBool>>,
+) -> Result<bool, XqliteError> {
+    let _guard = token_bool_opt
+        .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
+        .transpose()?;
+    conn.execute_batch(sql_batch)?;
+    Ok(true)
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let conn = Connection::open(&path)
@@ -148,129 +235,9 @@ fn query<'a>(
     sql: String,
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    let sql_for_err = sql.clone();
-
     with_conn(&handle, |conn| {
-        let mut stmt = conn
-            .prepare(sql.as_str())
-            .map_err(|e| XqliteError::CannotPrepareStatement(sql_for_err, e.to_string()))?;
-        let column_names: Vec<String> =
-            stmt.column_names().iter().map(|s| s.to_string()).collect();
-        let column_count = column_names.len();
-
-        let rows = match params_term.get_type() {
-            TermType::List => {
-                if is_keyword(params_term) {
-                    let named_params_vec = decode_exec_keyword_params(env, params_term)?;
-                    let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                        .collect();
-                    stmt.query(params_for_rusqlite.as_slice())?
-                } else {
-                    let positional_values: Vec<Value> =
-                        decode_plain_list_params(env, params_term)?;
-                    let params_slice: Vec<&dyn ToSql> =
-                        positional_values.iter().map(|v| v as &dyn ToSql).collect();
-                    stmt.query(params_slice.as_slice())?
-                }
-            }
-            _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
-                stmt.query([])?
-            }
-            _ => {
-                return Err(XqliteError::ExpectedList {
-                    value_str: format!("{:?}", params_term),
-                });
-            }
-        };
-
-        let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
-        let num_rows = results_vec.len();
-
-        Ok(XqliteQueryResult {
-            columns: column_names,
-            rows: results_vec,
-            num_rows,
-        })
+        core_query(env, conn, &sql, params_term, None)
     })
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn query_cancellable<'a>(
-    env: Env<'a>,
-    handle: ResourceArc<XqliteConn>,
-    sql: String,
-    params_term: Term<'a>,
-    token: ResourceArc<XqliteCancelToken>, // Mandatory token
-) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    let sql_for_err = sql.clone();
-    // Clone the Arc<AtomicBool> from the token *before* locking the connection mutex
-    let token_bool = token.0.clone();
-
-    with_conn(&handle, |conn| {
-        // Create the RAII guard to set the progress handler.
-        // This returns Self directly now, panic on failure is unlikely here with valid types.
-        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
-
-        // --- Query preparation and execution ---
-        let mut stmt = conn
-            .prepare(sql.as_str())
-            .map_err(|e| XqliteError::CannotPrepareStatement(sql_for_err, e.to_string()))?;
-        let column_names: Vec<String> =
-            stmt.column_names().iter().map(|s| s.to_string()).collect();
-        let column_count = column_names.len();
-
-        // --- Parameter Binding and Query Execution ---
-        let rows_result = match params_term.get_type() {
-            TermType::List => {
-                if is_keyword(params_term) {
-                    // Decode named parameters
-                    let named_params_vec = decode_exec_keyword_params(env, params_term)?;
-                    let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                        .collect();
-                    // Execute query with named parameters
-                    stmt.query(params_for_rusqlite.as_slice())
-                } else {
-                    // Decode positional parameters
-                    let positional_values: Vec<Value> =
-                        decode_plain_list_params(env, params_term)?;
-                    let params_slice: Vec<&dyn ToSql> =
-                        positional_values.iter().map(|v| v as &dyn ToSql).collect();
-                    // Execute query with positional parameters
-                    stmt.query(params_slice.as_slice())
-                }
-            }
-            // Handle empty list or :nil for parameters
-            _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
-                stmt.query([])
-            }
-            // Invalid parameter type
-            _ => {
-                return Err(XqliteError::ExpectedList {
-                    value_str: format!("{:?}", params_term),
-                });
-            }
-        }; // End of match - `rows_result` is Result<Rows, rusqlite::Error>
-
-        // Check the result of the query execution.
-        // This is where SQLITE_INTERRUPT (mapped to OperationCancelled) would surface.
-        let rows = rows_result?; // Use '?' to propagate errors, including cancellation.
-
-        // --- Row Processing ---
-        // If we reach here, the query executed without cancellation or other errors.
-        let results_vec: Vec<Vec<Term<'a>>> = process_rows(env, rows, column_count)?;
-        let num_rows = results_vec.len();
-
-        Ok(XqliteQueryResult {
-            columns: column_names,
-            rows: results_vec,
-            num_rows,
-        })
-        // _guard is dropped here, unregistering the progress handler.
-    }) // Connection mutex unlocked here.
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -281,10 +248,29 @@ fn execute<'a>(
     params_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
     with_conn(&handle, |conn| {
-        let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
-        let params_slice: Vec<&dyn ToSql> =
-            positional_values.iter().map(|v| v as &dyn ToSql).collect();
-        Ok(conn.execute(sql.as_str(), params_slice.as_slice())?)
+        core_execute(env, conn, &sql, params_term, None)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn execute_batch(
+    handle: ResourceArc<XqliteConn>,
+    sql_batch: String,
+) -> Result<bool, XqliteError> {
+    with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn query_cancellable<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+    token: ResourceArc<XqliteCancelToken>,
+) -> Result<XqliteQueryResult<'a>, XqliteError> {
+    let token_bool = token.0.clone();
+    with_conn(&handle, |conn| {
+        core_query(env, conn, &sql, params_term, Some(token_bool))
     })
 }
 
@@ -294,39 +280,11 @@ fn execute_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+    token: ResourceArc<XqliteCancelToken>,
 ) -> Result<usize, XqliteError> {
-    // Returns affected row count (usize)
-    // Clone the Arc<AtomicBool> from the token before locking the connection mutex
     let token_bool = token.0.clone();
-
     with_conn(&handle, |conn| {
-        // Create the RAII guard to set the progress handler.
-        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
-
-        // --- Parameter Binding ---
-        // execute only supports positional parameters
-        let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
-        let params_slice: Vec<&dyn ToSql> =
-            positional_values.iter().map(|v| v as &dyn ToSql).collect();
-
-        // --- Execute Statement ---
-        // The `?` will propagate errors, including OperationCancelled if interrupted.
-        let affected_rows = conn.execute(sql.as_str(), params_slice.as_slice())?;
-
-        Ok(affected_rows)
-        // _guard is dropped here, unregistering the progress handler.
-    }) // Connection mutex unlocked here.
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn execute_batch(
-    handle: ResourceArc<XqliteConn>,
-    sql_batch: String,
-) -> Result<bool, XqliteError> {
-    with_conn(&handle, |conn| {
-        conn.execute_batch(&sql_batch)?;
-        Ok(true)
+        core_execute(env, conn, &sql, params_term, Some(token_bool))
     })
 }
 
@@ -334,21 +292,24 @@ fn execute_batch(
 fn execute_batch_cancellable(
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
-    token: ResourceArc<XqliteCancelToken>, // Mandatory token
+    token: ResourceArc<XqliteCancelToken>,
 ) -> Result<bool, XqliteError> {
-    // Clone the Arc<AtomicBool> from the token before locking
     let token_bool = token.0.clone();
 
     with_conn(&handle, |conn| {
-        // Create the RAII guard to set the progress handler.
-        let _guard = ProgressHandlerGuard::new(conn, token_bool, 8);
+        core_execute_batch(conn, &sql_batch, Some(token_bool))
+    })
+}
 
-        // The `?` will propagate errors, including OperationCancelled if interrupted.
-        conn.execute_batch(&sql_batch)?;
+#[rustler::nif]
+fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> {
+    Ok(ResourceArc::new(XqliteCancelToken::new()))
+}
 
-        Ok(true)
-        // _guard is dropped here, unregistering the progress handler.
-    }) // Connection mutex unlocked here.
+#[rustler::nif]
+fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<bool, XqliteError> {
+    token.cancel();
+    Ok(true)
 }
 
 /// Reads the current value of an SQLite PRAGMA.
@@ -460,6 +421,24 @@ fn release_savepoint(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn schema_databases(
+    handle: ResourceArc<XqliteConn>,
+) -> Result<Vec<DatabaseInfo>, XqliteError> {
+    with_conn(&handle, |conn| {
+        let mut stmt = conn.prepare("PRAGMA database_list;")?;
+        let db_infos: Vec<DatabaseInfo> = stmt
+            .query_map([], |row| {
+                Ok(DatabaseInfo {
+                    name: row.get(1)?,
+                    file: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(db_infos)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn schema_list_objects(
     handle: ResourceArc<XqliteConn>,
     schema: Option<String>,
@@ -471,23 +450,14 @@ fn schema_list_objects(
         // Step 1: Query and map, returning Vec<Result<TempObjectInfo, rusqlite::Error>>
         let temp_results: Vec<Result<TempObjectInfo, rusqlite::Error>> = stmt
             .query_map([], |row| {
-                let obj_schema: String = row.get(0)?;
-                let obj_name: String = row.get(1)?;
-                let obj_type_str: String = row.get(2)?;
-                let column_count: i64 = row.get(3)?;
-                let wr_flag: i64 = row.get(4)?;
-                let strict_flag: i64 = row.get(5)?;
-
-                let obj_type_atom_result =
-                    object_type_to_atom(&obj_type_str).map_err(|s| s.to_string());
-
                 Ok(TempObjectInfo {
-                    schema: obj_schema,
-                    name: obj_name,
-                    obj_type_atom: obj_type_atom_result,
-                    column_count,
-                    wr_flag,
-                    strict_flag,
+                    schema: row.get(0)?,
+                    name: row.get(1)?,
+                    obj_type_atom: object_type_to_atom(&row.get::<_, String>(2)?)
+                        .map_err(|s| s.to_string()),
+                    column_count: row.get(3)?,
+                    wr_flag: row.get(4)?,
+                    strict_flag: row.get(5)?,
                 })
             })?
             .collect();
@@ -503,21 +473,18 @@ fn schema_list_objects(
                         }
                     }
 
-                    let atom = match temp_info.obj_type_atom {
-                        Ok(atom) => atom,
-                        Err(unexpected_val) => {
-                            return Err(XqliteError::SchemaParsingError {
-                                context: format!(
-                                    "Parsing object type for '{}'.'{}'",
-                                    temp_info.schema, temp_info.name
-                                ),
-                                error_detail: SchemaErrorDetail::UnexpectedValue(
-                                    unexpected_val,
-                                ),
-                            });
+                    let schema_name_for_error = temp_info.schema.clone();
+                    let object_name_for_error = temp_info.name.clone();
+                    let atom = temp_info.obj_type_atom.map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing object type for '{}'.'{}'",
+                                schema_name_for_error,
+                                object_name_for_error // Use the extracted values
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
                         }
-                    };
-
+                    })?;
                     let is_writable = match temp_info.wr_flag {
                         0 => false,
                         1 => true,
@@ -564,27 +531,7 @@ fn schema_list_objects(
                 }
             }
         }
-
         Ok(final_objects)
-    })
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn schema_databases(
-    handle: ResourceArc<XqliteConn>,
-) -> Result<Vec<DatabaseInfo>, XqliteError> {
-    with_conn(&handle, |conn| {
-        let mut stmt = conn.prepare("PRAGMA database_list;")?;
-
-        let db_infos: Vec<DatabaseInfo> = stmt
-            .query_map([], |row| {
-                let name: String = row.get(1)?;
-                let file: Option<String> = row.get(2)?;
-                Ok(DatabaseInfo { name, file })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(db_infos)
     })
 }
 
@@ -621,7 +568,6 @@ fn schema_columns(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
-                    // Convert declared type string to type affinity atom
                     let type_affinity_atom = type_affinity_to_atom(&temp_data.type_str)
                         .map_err(|unexpected_val| XqliteError::SchemaParsingError {
                             context: format!(
@@ -777,7 +723,6 @@ fn schema_foreign_keys(
                 }
             }
         }
-
         Ok(final_fks)
     })
 }
@@ -967,17 +912,6 @@ fn get_create_sql(
 #[rustler::nif(schedule = "DirtyIo")]
 fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError> {
     with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
-}
-
-#[rustler::nif]
-fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> {
-    Ok(ResourceArc::new(XqliteCancelToken::new()))
-}
-
-#[rustler::nif]
-fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<bool, XqliteError> {
-    token.cancel();
-    Ok(true)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
