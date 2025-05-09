@@ -307,9 +307,9 @@ fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> 
 }
 
 #[rustler::nif]
-fn cancel_operation(token: ResourceArc<XqliteCancelToken>) -> Result<bool, XqliteError> {
+fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term<'_> {
     token.cancel();
-    Ok(true)
+    ok().encode(env)
 }
 
 /// Reads the current value of an SQLite PRAGMA.

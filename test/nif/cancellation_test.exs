@@ -54,9 +54,9 @@ defmodule Xqlite.NIF.CancellationTest do
 
   test "cancel_operation/1 is idempotent" do
     {:ok, token} = NIF.create_cancel_token()
-    assert {:ok, true} = NIF.cancel_operation(token)
+    assert :ok = NIF.cancel_operation(token)
     # Calling again is safe
-    assert {:ok, true} = NIF.cancel_operation(token)
+    assert :ok = NIF.cancel_operation(token)
   end
 
   # --- Shared test code (generated via `for` loop) ---
@@ -86,7 +86,7 @@ defmodule Xqlite.NIF.CancellationTest do
         # Adjust if needed, might need longer for file DBs
         Process.sleep(200)
 
-        assert {:ok, true} = NIF.cancel_operation(token)
+        assert :ok = NIF.cancel_operation(token)
 
         # Await the task result, expect cancellation error
         # Generous timeout
@@ -111,7 +111,7 @@ defmodule Xqlite.NIF.CancellationTest do
         {:ok, token1} = NIF.create_cancel_token()
         task = Task.async(fn -> NIF.query_cancellable(conn, @slow_query, [], token1) end)
         Process.sleep(200)
-        assert {:ok, true} = NIF.cancel_operation(token1)
+        assert :ok = NIF.cancel_operation(token1)
         assert {:error, :operation_cancelled} == Task.await(task, 3000)
 
         # --- Part 2: Run a normal, non-cancellable query on the same connection ---
@@ -155,7 +155,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
         # Give time for trigger to start
         Process.sleep(200)
-        assert {:ok, true} = NIF.cancel_operation(token)
+        assert :ok = NIF.cancel_operation(token)
 
         result = Task.await(task, 3000)
         assert {:error, :operation_cancelled} == result
@@ -198,7 +198,7 @@ defmodule Xqlite.NIF.CancellationTest do
           end)
 
         Process.sleep(200)
-        assert {:ok, true} = NIF.cancel_operation(token1)
+        assert :ok = NIF.cancel_operation(token1)
         assert {:error, :operation_cancelled} == Task.await(task, 3000)
 
         # --- Part 2: Run a normal, non-cancellable execute on the same connection ---
@@ -226,7 +226,7 @@ defmodule Xqlite.NIF.CancellationTest do
         # Use the short sleep before cancelling
         # e.g., 10ms
         Process.sleep(@batch_cancel_sleep)
-        assert {:ok, true} = NIF.cancel_operation(token)
+        assert :ok = NIF.cancel_operation(token)
 
         # Expect cancellation error
         result = Task.await(task, @await_timeout)
@@ -266,7 +266,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
         # Use short sleep
         Process.sleep(@batch_cancel_sleep)
-        assert {:ok, true} = NIF.cancel_operation(token1)
+        assert :ok = NIF.cancel_operation(token1)
         # Expect cancellation error, even if timing is tight
         assert {:error, :operation_cancelled} == Task.await(task, @await_timeout)
 
