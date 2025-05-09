@@ -156,7 +156,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     # On a read-only DB with mode=ro, a COMMIT with no preceding write operations
     # is a no-op and should succeed.
     # Expect success for vacuous commit
-    assert {:ok, true} = NIF.commit(ro_conn)
+    assert :ok = NIF.commit(ro_conn)
 
     # Verify connection is no longer in a transaction (is_autocommit would be true)
     # We can test this by trying to start another transaction. If it succeeds,

@@ -61,7 +61,7 @@ defmodule Xqlite.NIF.TransactionTest do
                    []
                  )
 
-        assert {:ok, true} = NIF.commit(conn)
+        assert :ok = NIF.commit(conn)
 
         assert {:ok, %{rows: [[100, "Committed"]], num_rows: 1}} =
                  NIF.query(conn, "SELECT * FROM tx_test where id = 100;", [])
@@ -122,7 +122,7 @@ defmodule Xqlite.NIF.TransactionTest do
         assert {:ok, true} = NIF.rollback_to_savepoint(conn, "sp1")
         assert_savepoint_record_missing(conn, 3)
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.commit(conn)
+        assert :ok = NIF.commit(conn)
         assert_savepoint_record_present(conn, 1, "one")
         assert_savepoint_record_present(conn, 2, "two")
         assert_savepoint_record_missing(conn, 3)
@@ -142,7 +142,7 @@ defmodule Xqlite.NIF.TransactionTest do
         assert {:ok, true} = NIF.release_savepoint(conn, "sp1")
         assert_savepoint_record_present(conn, 3, "three")
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.commit(conn)
+        assert :ok = NIF.commit(conn)
         assert_savepoint_record_present(conn, 1, "one")
         assert_savepoint_record_present(conn, 2, "two")
         assert_savepoint_record_present(conn, 3, "three")
