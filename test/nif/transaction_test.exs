@@ -77,7 +77,7 @@ defmodule Xqlite.NIF.TransactionTest do
                    []
                  )
 
-        assert {:ok, true} = NIF.rollback(conn)
+        assert :ok = NIF.rollback(conn)
 
         assert {:ok, %{rows: [], num_rows: 0}} =
                  NIF.query(conn, "SELECT * FROM tx_test where id = 101;", [])
@@ -98,7 +98,7 @@ defmodule Xqlite.NIF.TransactionTest do
         assert {:error, {:sqlite_failure, code, _, msg}} = NIF.begin(conn)
         assert code == 21 or String.contains?(msg || "", "within a transaction")
         # Clean up outer transaction
-        assert {:ok, true} = NIF.rollback(conn)
+        assert :ok = NIF.rollback(conn)
       end
 
       # --- Savepoint Tests ---
@@ -158,7 +158,7 @@ defmodule Xqlite.NIF.TransactionTest do
 
         assert code == 21 or String.contains?(msg || "", "no such savepoint")
         # Clean up main transaction
-        assert {:ok, true} = NIF.rollback(conn)
+        assert :ok = NIF.rollback(conn)
       end
     end
 

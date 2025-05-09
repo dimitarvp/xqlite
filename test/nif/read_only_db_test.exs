@@ -129,7 +129,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
         # Corrected assertion
         assert {:error, {:read_only_database, _msg}} = write_attempt_result
         # Clean up the transaction state
-        assert {:ok, true} = NIF.rollback(ro_conn)
+        assert :ok = NIF.rollback(ro_conn)
 
       # Some SQLite versions/configurations might make BEGIN itself fail on a mode=ro DB
       # if it tries to acquire even a read lock that implies eventual write capability.
@@ -163,6 +163,6 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     # the previous one was properly closed.
     assert :ok = NIF.begin(ro_conn)
     # Clean up the new transaction
-    assert {:ok, true} = NIF.rollback(ro_conn)
+    assert :ok = NIF.rollback(ro_conn)
   end
 end
