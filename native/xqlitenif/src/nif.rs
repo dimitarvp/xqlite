@@ -253,11 +253,11 @@ fn execute<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn execute_batch<'a>(
-    env: Env<'a>,
+fn execute_batch(
+    env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
-) -> Term<'a> {
+) -> Term<'_> {
     match with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None)) {
         Ok(_) => ok().encode(env),
         Err(err) => (error(), err.encode(env)).encode(env),
