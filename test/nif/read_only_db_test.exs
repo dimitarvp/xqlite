@@ -79,35 +79,30 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   @tag :expect_read_only_error
   test "execute/3 (INSERT) fails with :read_only_database", %{conn: ro_conn} do
     sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (2, 'new data');"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute/3 (UPDATE) fails with :read_only_database", %{conn: ro_conn} do
     sql = "UPDATE #{@test_table_name} SET data = 'updated' WHERE id = 1;"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute/3 (DELETE) fails with :read_only_database", %{conn: ro_conn} do
     sql = "DELETE FROM #{@test_table_name} WHERE id = 1;"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute/3 (CREATE TABLE) fails with :read_only_database", %{conn: ro_conn} do
     sql = "CREATE TABLE new_ro_table (id INTEGER);"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute_batch/2 with write statements fails with :read_only_database", %{conn: ro_conn} do
     sql_batch = "INSERT INTO #{@test_table_name} (id, data) VALUES (3, 'batch data');"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute_batch(ro_conn, sql_batch)
   end
 
@@ -126,7 +121,6 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
             []
           )
 
-        # Corrected assertion
         assert {:error, {:read_only_database, _msg}} = write_attempt_result
         # Clean up the transaction state
         assert :ok = NIF.rollback(ro_conn)

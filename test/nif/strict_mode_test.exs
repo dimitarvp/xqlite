@@ -149,7 +149,6 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert text_val == "123.45" or text_val == "123.450000"
       end
 
-      # Corrected expectation
       test "TEXT column: allows BLOB insert (stores bytes)", %{conn: conn} do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_text_col_test4 (val TEXT) STRICT;", [])
