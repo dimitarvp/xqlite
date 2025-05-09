@@ -2,7 +2,11 @@ name: Xqlite Elixir & Rust checks
 
 on:
   push:
+    branches:
+      - "main"
   pull_request:
+    branches:
+      - "main"
 
 jobs:
   format_and_lint:
@@ -82,7 +86,9 @@ jobs:
         # Add OS matrix if needed: os: [ubuntu-latest, macos-latest, windows-latest]
         exclude:
           - otp: "27"
-            elixir: ["1.15", "1.16"]
+            elixir: "1.15"
+          - otp: "27"
+            elixir: "1.16"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
