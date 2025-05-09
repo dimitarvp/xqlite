@@ -21,7 +21,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     {:ok, conn_rw} = NIF.open(temp_db_path)
     assert {:ok, 0} = NIF.execute(conn_rw, @create_table_sql, [])
     assert {:ok, 1} = NIF.execute(conn_rw, @insert_sql, [])
-    assert {:ok, true} = NIF.close(conn_rw)
+    assert :ok = NIF.close(conn_rw)
     temp_db_path
   end
 
@@ -79,35 +79,30 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   @tag :expect_read_only_error
   test "execute/3 (INSERT) fails with :read_only_database", %{conn: ro_conn} do
     sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (2, 'new data');"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute/3 (UPDATE) fails with :read_only_database", %{conn: ro_conn} do
     sql = "UPDATE #{@test_table_name} SET data = 'updated' WHERE id = 1;"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute/3 (DELETE) fails with :read_only_database", %{conn: ro_conn} do
     sql = "DELETE FROM #{@test_table_name} WHERE id = 1;"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute/3 (CREATE TABLE) fails with :read_only_database", %{conn: ro_conn} do
     sql = "CREATE TABLE new_ro_table (id INTEGER);"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
   end
 
   @tag :expect_read_only_error
   test "execute_batch/2 with write statements fails with :read_only_database", %{conn: ro_conn} do
     sql_batch = "INSERT INTO #{@test_table_name} (id, data) VALUES (3, 'batch data');"
-    # Corrected assertion
     assert {:error, {:read_only_database, _msg}} = NIF.execute_batch(ro_conn, sql_batch)
   end
 
@@ -118,7 +113,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     # BEGIN DEFERRED might succeed as it does nothing until the first write.
     # The crucial part is that the write operation itself fails.
     case NIF.begin(ro_conn) do
-      {:ok, true} ->
+      :ok ->
         write_attempt_result =
           NIF.execute(
             ro_conn,
@@ -126,10 +121,9 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
             []
           )
 
-        # Corrected assertion
         assert {:error, {:read_only_database, _msg}} = write_attempt_result
         # Clean up the transaction state
-        assert {:ok, true} = NIF.rollback(ro_conn)
+        assert :ok = NIF.rollback(ro_conn)
 
       # Some SQLite versions/configurations might make BEGIN itself fail on a mode=ro DB
       # if it tries to acquire even a read lock that implies eventual write capability.
@@ -151,18 +145,18 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     conn: ro_conn
   } do
     # Deferred transaction starts
-    assert {:ok, true} = NIF.begin(ro_conn)
+    assert :ok = NIF.begin(ro_conn)
 
     # On a read-only DB with mode=ro, a COMMIT with no preceding write operations
     # is a no-op and should succeed.
     # Expect success for vacuous commit
-    assert {:ok, true} = NIF.commit(ro_conn)
+    assert :ok = NIF.commit(ro_conn)
 
     # Verify connection is no longer in a transaction (is_autocommit would be true)
     # We can test this by trying to start another transaction. If it succeeds,
     # the previous one was properly closed.
-    assert {:ok, true} = NIF.begin(ro_conn)
+    assert :ok = NIF.begin(ro_conn)
     # Clean up the new transaction
-    assert {:ok, true} = NIF.rollback(ro_conn)
+    assert :ok = NIF.rollback(ro_conn)
   end
 end

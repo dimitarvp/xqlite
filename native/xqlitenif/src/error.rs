@@ -382,7 +382,6 @@ impl Encoder for XqliteError {
             XqliteError::IntegralValueOutOfRange { index, value } => {
                 (integral_value_out_of_range(), index, value).encode(env)
             }
-            // <<< Corrected map encoding for SqlInputError >>>
             XqliteError::SqlInputError {
                 code,
                 message,

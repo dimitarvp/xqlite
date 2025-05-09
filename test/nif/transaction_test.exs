@@ -52,7 +52,7 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "insert a record and commit transaction", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
 
         assert {:ok, 1} =
                  NIF.execute(
@@ -61,14 +61,14 @@ defmodule Xqlite.NIF.TransactionTest do
                    []
                  )
 
-        assert {:ok, true} = NIF.commit(conn)
+        assert :ok = NIF.commit(conn)
 
         assert {:ok, %{rows: [[100, "Committed"]], num_rows: 1}} =
                  NIF.query(conn, "SELECT * FROM tx_test where id = 100;", [])
       end
 
       test "insert a record and rollback transaction", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
 
         assert {:ok, 1} =
                  NIF.execute(
@@ -77,7 +77,7 @@ defmodule Xqlite.NIF.TransactionTest do
                    []
                  )
 
-        assert {:ok, true} = NIF.rollback(conn)
+        assert :ok = NIF.rollback(conn)
 
         assert {:ok, %{rows: [], num_rows: 0}} =
                  NIF.query(conn, "SELECT * FROM tx_test where id = 101;", [])
@@ -94,35 +94,35 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "begin within begin fails", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:error, {:sqlite_failure, code, _, msg}} = NIF.begin(conn)
         assert code == 21 or String.contains?(msg || "", "within a transaction")
         # Clean up outer transaction
-        assert {:ok, true} = NIF.rollback(conn)
+        assert :ok = NIF.rollback(conn)
       end
 
       # --- Savepoint Tests ---
       # Setup specific table needed for these tests
       setup %{conn: conn} do
-        assert {:ok, true} = NIF.execute_batch(conn, @savepoint_table_setup)
+        assert :ok = NIF.execute_batch(conn, @savepoint_table_setup)
         :ok
       end
 
       test "rollback_to_savepoint reverts changes", %{conn: conn} do
         assert_savepoint_record_present(conn, 1, "one")
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:ok, 1} = NIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.savepoint(conn, "sp1")
+        assert :ok = NIF.savepoint(conn, "sp1")
 
         assert {:ok, 1} =
                  NIF.execute(conn, "INSERT INTO savepoint_test VALUES (3, 'three')", [])
 
         assert_savepoint_record_present(conn, 3, "three")
-        assert {:ok, true} = NIF.rollback_to_savepoint(conn, "sp1")
+        assert :ok = NIF.rollback_to_savepoint(conn, "sp1")
         assert_savepoint_record_missing(conn, 3)
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.commit(conn)
+        assert :ok = NIF.commit(conn)
         assert_savepoint_record_present(conn, 1, "one")
         assert_savepoint_record_present(conn, 2, "two")
         assert_savepoint_record_missing(conn, 3)
@@ -130,35 +130,35 @@ defmodule Xqlite.NIF.TransactionTest do
 
       test "release_savepoint incorporates changes", %{conn: conn} do
         assert_savepoint_record_present(conn, 1, "one")
-        assert {:ok, true} = NIF.begin(conn)
+        assert :ok = NIF.begin(conn)
         assert {:ok, 1} = NIF.execute(conn, "INSERT INTO savepoint_test VALUES (2, 'two')", [])
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.savepoint(conn, "sp1")
+        assert :ok = NIF.savepoint(conn, "sp1")
 
         assert {:ok, 1} =
                  NIF.execute(conn, "INSERT INTO savepoint_test VALUES (3, 'three')", [])
 
         assert_savepoint_record_present(conn, 3, "three")
-        assert {:ok, true} = NIF.release_savepoint(conn, "sp1")
+        assert :ok = NIF.release_savepoint(conn, "sp1")
         assert_savepoint_record_present(conn, 3, "three")
         assert_savepoint_record_present(conn, 2, "two")
-        assert {:ok, true} = NIF.commit(conn)
+        assert :ok = NIF.commit(conn)
         assert_savepoint_record_present(conn, 1, "one")
         assert_savepoint_record_present(conn, 2, "two")
         assert_savepoint_record_present(conn, 3, "three")
       end
 
       test "rollback_to_savepoint after release fails", %{conn: conn} do
-        assert {:ok, true} = NIF.begin(conn)
-        assert {:ok, true} = NIF.savepoint(conn, "sp1")
-        assert {:ok, true} = NIF.release_savepoint(conn, "sp1")
+        assert :ok = NIF.begin(conn)
+        assert :ok = NIF.savepoint(conn, "sp1")
+        assert :ok = NIF.release_savepoint(conn, "sp1")
 
         assert {:error, {:sqlite_failure, code, _, msg}} =
                  NIF.rollback_to_savepoint(conn, "sp1")
 
         assert code == 21 or String.contains?(msg || "", "no such savepoint")
         # Clean up main transaction
-        assert {:ok, true} = NIF.rollback(conn)
+        assert :ok = NIF.rollback(conn)
       end
     end
 

@@ -1,4 +1,4 @@
-name: Xqlite Elixir & Rust checks
+name: Xqlite
 
 on:
   push:

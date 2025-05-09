@@ -36,7 +36,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert {:ok, conn} = apply(mod, fun, args),
                "Failed opening for :#{context[:describetag]}"
 
-        assert {:ok, true} = NIF.execute_batch(conn, @schema_ddl)
+        assert :ok = NIF.execute_batch(conn, @schema_ddl)
         on_exit(fn -> NIF.close(conn) end)
         {:ok, conn: conn}
       end
@@ -189,7 +189,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             primary_key_index: 0,
             hidden_kind: :normal
           },
-          # Corrected nullable: true for value column (CHECK > 0 doesn't imply NOT NULL)
+          # nullable: true for value column (CHECK > 0 doesn't imply NOT NULL)
           %Schema.ColumnInfo{
             column_id: 2,
             name: "value",
@@ -206,7 +206,6 @@ defmodule Xqlite.SchemaIntrospectionTest do
       end
 
       test "schema_foreign_keys returns info for join table ('user_items')", %{conn: conn} do
-        # Corrected expected order/IDs based on actual test results
         expected_fks = [
           # ID 0 actually references items
           %Schema.ForeignKeyInfo{
@@ -349,7 +348,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
 
         # Index on expression users(LOWER(full_name))
         expected_expr = [
-          # Corrected table_column_id for expression is -2
+          # table_column_id for expression is -2
           %Schema.IndexColumnInfo{
             index_column_sequence: 0,
             table_column_id: -2,
