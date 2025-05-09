@@ -1,0 +1,134 @@
+name: Xqlite Elixir & Rust checks
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+    branches:
+      - "main"
+
+jobs:
+  format_and_lint:
+    name: Format & Lint Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18" # Specify your target Elixir version
+          otp-version: "27" # Specify your target OTP version
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check Elixir formatting
+        run: mix format --check-formatted
+
+      # Add credo for linting if you use it
+      # - name: Run Credo
+      #   run: mix credo --strict
+
+  dialyzer:
+    name: Dialyzer Type Check
+    runs-on: ubuntu-latest
+    needs: format_and_lint # Optional: run after formatting passes
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18"
+          otp-version: "27"
+
+      - name: Restore PLT cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            priv/plts
+          key: ${{ runner.os }}-plt-${{ hashFiles('**/mix.lock') }} # Key includes mix.lock
+          restore-keys: |
+            ${{ runner.os }}-plt-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Create PLT (if not cached or outdated)
+        run: mix dialyzer --plt # Or just `mix dialyzer` which builds PLT if needed
+
+      - name: Run Dialyzer
+        run: mix dialyzer --format short # Or your preferred format
+
+  test:
+    name: Run Tests (Elixir & Rust NIF)
+    runs-on: ubuntu-latest # You might want to add macos-latest, windows-latest for NIFs
+    needs: format_and_lint # Optional
+    strategy:
+      matrix:
+        elixir: ["1.15", "1.16", "1.17", "1.18"] # Example: Test against multiple Elixir versions
+        otp: ["26", "27"] # Example: Test against multiple OTP versions
+        rust: ["stable"] # Can specify Rust toolchain versions
+        # Add OS matrix if needed: os: [ubuntu-latest, macos-latest, windows-latest]
+        exclude:
+          - otp: "27"
+            elixir: "1.15"
+          - otp: "27"
+            elixir: "1.16"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable # Or actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Restore Elixir dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-elixir-${{ matrix.elixir }}-otp-${{ matrix.otp }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-elixir-${{ matrix.elixir }}-otp-${{ matrix.otp }}-mix-
+
+      - name: Restore Rust (Cargo) cache
+        uses: Swatinem/rust-cache@v2 # Excellent action for Cargo caching
+        # It caches target directory and ~/.cargo/registry
+
+      - name: Install Elixir dependencies
+        run: mix deps.get
+
+      - name: Compile project (includes NIF)
+        run: mix compile
+
+      - name: Check Rust formatting (optional, but good for PRs)
+        run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
+
+      - name: Run Rust clippy (optional, but good for PRs)
+        run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
+
+      - name: Run tests
+        run: mix test
