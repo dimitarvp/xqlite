@@ -30,5 +30,59 @@ defmodule XqliteNIF do
   def create_cancel_token(), do: err()
   def cancel_operation(_token_resource), do: err()
 
+  @doc """
+  Prepares a SQL query for streaming and returns an opaque stream handle resource.
+
+  This function does not execute the query immediately but prepares it for
+  row-by-row fetching. The returned handle is opaque and must be used with
+  other `stream_*` NIF functions or managed by a higher-level streaming abstraction
+  like `Xqlite.stream/4`.
+
+  `conn` is the database connection resource.
+  `sql` is the SQL query string.
+  `params` is a list of positional parameters or a keyword list of named parameters.
+  `opts` is a keyword list for future stream-specific options (currently unused).
+
+  Returns `{:ok, stream_handle_resource}` or `{:error, reason}`.
+  The `stream_handle_resource` is an opaque reference.
+  """
+  @spec stream_open(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword(),
+          opts :: keyword()
+        ) ::
+          {:ok, reference()} | {:error, Xqlite.error()}
+  def stream_open(_conn, _sql, _params, _opts \\ []), do: err()
+
+  @doc """
+  Retrieves the column names for an opened stream.
+
+  `stream_handle` is the opaque resource returned by `stream_open/4`.
+
+  Returns `{:ok, list_of_column_names}` where `list_of_column_names` is a list of strings,
+  or `{:error, reason}` if the handle is invalid or another error occurs.
+  The list of column names will be empty if the query yields no columns.
+  """
+  @spec stream_get_columns(stream_handle :: reference()) ::
+          {:ok, [String.t()]} | {:error, Xqlite.error()}
+  def stream_get_columns(_stream_handle), do: err()
+
+  @doc """
+  Closes an active stream and releases its underlying SQLite statement resources.
+
+  This function should be called when a stream is no longer needed, either
+  after all rows have been consumed or if the stream needs to be abandoned
+  prematurely. It is safe to call this function multiple times on the same handle;
+  subsequent calls after the first will be no-ops.
+
+  `stream_handle` is the opaque resource returned by `stream_open/4`.
+
+  Returns `:ok` if successful, or `{:error, reason}` if the handle is invalid
+  or an error occurs during finalization (rare).
+  """
+  @spec stream_close(stream_handle :: reference()) :: :ok | {:error, Xqlite.error()}
+  def stream_close(_stream_handle), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
