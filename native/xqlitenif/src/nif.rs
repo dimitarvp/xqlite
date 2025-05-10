@@ -1067,6 +1067,18 @@ pub(crate) fn stream_open<'a>(
     .map(ResourceArc::new)
 }
 
+#[rustler::nif(schedule = "DirtyIo")] // DirtyIo because it reads from a resource that interacts with C
+pub(crate) fn stream_get_columns(
+    stream_handle: ResourceArc<XqliteStream>,
+) -> Result<Vec<String>, XqliteError> {
+    // The column_names field is populated during stream_open and is immutable afterwards.
+    // `stream_open` guarantees `column_names` is populated (it might be empty if the
+    // query yields no columns, e.g., an empty SQL string or a DDL statement,
+    // in which case an empty Vec<String> is correctly returned).
+    // Accessing it directly is safe as long as stream_handle is a valid resource.
+    Ok(stream_handle.column_names.clone())
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn close(env: Env<'_>, _handle: ResourceArc<XqliteConn>) -> Term<'_> {
     ok().encode(env)

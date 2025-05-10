@@ -55,5 +55,18 @@ defmodule XqliteNIF do
           {:ok, reference()} | {:error, Xqlite.error()}
   def stream_open(_conn, _sql, _params, _opts \\ []), do: err()
 
+  @doc """
+  Retrieves the column names for an opened stream.
+
+  `stream_handle` is the opaque resource returned by `stream_open/4`.
+
+  Returns `{:ok, list_of_column_names}` where `list_of_column_names` is a list of strings,
+  or `{:error, reason}` if the handle is invalid or another error occurs.
+  The list of column names will be empty if the query yields no columns.
+  """
+  @spec stream_get_columns(stream_handle :: reference()) ::
+          {:ok, [String.t()]} | {:error, Xqlite.error()}
+  def stream_get_columns(_stream_handle), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
