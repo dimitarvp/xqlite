@@ -104,6 +104,7 @@ mod cancel;
 mod error;
 mod nif;
 mod schema;
+mod stream;
 mod util;
 
 use rustler::{Env, Term};

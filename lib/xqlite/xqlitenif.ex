@@ -30,5 +30,30 @@ defmodule XqliteNIF do
   def create_cancel_token(), do: err()
   def cancel_operation(_token_resource), do: err()
 
+  @doc """
+  Prepares a SQL query for streaming and returns an opaque stream handle resource.
+
+  This function does not execute the query immediately but prepares it for
+  row-by-row fetching. The returned handle is opaque and must be used with
+  other `stream_*` NIF functions or managed by a higher-level streaming abstraction
+  like `Xqlite.stream/4`.
+
+  `conn` is the database connection resource.
+  `sql` is the SQL query string.
+  `params` is a list of positional parameters or a keyword list of named parameters.
+  `opts` is a keyword list for future stream-specific options (currently unused).
+
+  Returns `{:ok, stream_handle_resource}` or `{:error, reason}`.
+  The `stream_handle_resource` is an opaque reference.
+  """
+  @spec stream_open(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword(),
+          opts :: keyword()
+        ) ::
+          {:ok, reference()} | {:error, Xqlite.error()}
+  def stream_open(_conn, _sql, _params, _opts \\ []), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

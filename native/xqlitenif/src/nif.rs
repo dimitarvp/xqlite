@@ -6,11 +6,15 @@ use crate::schema::{
     type_affinity_to_atom, ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo,
     IndexInfo, SchemaObjectInfo,
 };
+use crate::stream::{
+    bind_named_params_ffi, bind_positional_params_ffi, RawStmtPtr, XqliteStream,
+};
 use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
     is_keyword, process_rows, quote_identifier, quote_savepoint_name, with_conn,
 };
 use crate::{columns, no_value, num_rows, rows};
+use rusqlite::ffi;
 use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
 use rustler::{
     resource_impl,
@@ -20,7 +24,9 @@ use rustler::{
     },
     Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
 };
+use std::ptr::NonNull;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -944,6 +950,121 @@ fn get_create_sql(
 #[rustler::nif(schedule = "DirtyIo")]
 fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError> {
     with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+pub(crate) fn stream_open<'a>(
+    env: Env<'a>,
+    conn_handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+    _opts_term: Term<'a>,
+) -> Result<ResourceArc<XqliteStream>, XqliteError> {
+    let conn_resource_arc_clone = conn_handle.clone();
+
+    with_conn(&conn_handle, |conn| {
+        // --- Start of unsafe block ---
+        // All FFI calls and direct pointer manipulation need to be in an unsafe block.
+        // conn.handle() is unsafe.
+        unsafe {
+            let db_handle = conn.handle();
+
+            let mut raw_stmt_ptr: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+            let c_sql = std::ffi::CString::new(sql.as_str())
+                .map_err(|_| XqliteError::NulErrorInString)?;
+
+            let prepare_rc = ffi::sqlite3_prepare_v2(
+                db_handle,
+                c_sql.as_ptr(),
+                c_sql.as_bytes().len() as std::os::raw::c_int,
+                &mut raw_stmt_ptr,
+                std::ptr::null_mut(),
+            );
+
+        if prepare_rc != ffi::SQLITE_OK {
+            // We are already inside an unsafe block that covers db_handle.
+            let error_message = { // Use a simple block for scoping err_msg_ptr if desired
+                let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
+                if err_msg_ptr.is_null() {
+                    format!("SQLite preparation error (code {}) but no message available.", prepare_rc)
+                } else {
+                    std::ffi::CStr::from_ptr(err_msg_ptr).to_string_lossy().into_owned()
+                }
+            };
+
+            let ffi_err = ffi::Error::new(prepare_rc);
+            let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(error_message));
+
+            return Err(XqliteError::from(rusqlite_err));
+        }
+
+            if raw_stmt_ptr.is_null() {
+                // Safe to return Ok here, as XqliteStream's Mutex will contain None
+                return Ok(XqliteStream {
+                    raw_stmt: Mutex::new(None),
+                    conn_resource_arc: conn_resource_arc_clone,
+                    column_names: Vec::new(),
+                    column_count: 0,
+                    is_done: AtomicBool::new(true),
+                });
+            }
+            // This unwrap is now "safer" due to the .is_null() check.
+            // However, for maximum safety, NonNull::new itself should be in unsafe if from raw ptr.
+            // But since we checked is_null(), it's okay.
+            let non_null_raw_stmt = NonNull::new_unchecked(raw_stmt_ptr); // Safe due to is_null check
+
+            // Bind parameters - this section also uses FFI and the raw db_handle
+            let bind_result: Result<(), XqliteError> = match params_term.get_type() {
+                TermType::List => {
+                    if params_term.is_empty_list() {
+                        Ok(())
+                    } else if is_keyword(params_term) {
+                        let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                        // bind_named_params_ffi itself contains unsafe FFI calls
+                        bind_named_params_ffi(non_null_raw_stmt.as_ptr(), &named_params_vec, db_handle)
+                    } else {
+                        let positional_params_vec = decode_plain_list_params(env, params_term)?;
+                        // bind_positional_params_ffi itself contains unsafe FFI calls
+                        bind_positional_params_ffi(non_null_raw_stmt.as_ptr(), &positional_params_vec, db_handle)
+                    }
+                }
+                _ => Err(XqliteError::ExpectedList {
+                    value_str: format!("Parameters term was not a list: {:?}", params_term)
+                }),
+            };
+
+            if let Err(e) = bind_result {
+                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                return Err(e);
+            }
+
+            let column_count = ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
+            let mut column_names = Vec::with_capacity(column_count);
+
+            if column_count > 0 {
+                for i in 0..column_count {
+                    let name_ptr = ffi::sqlite3_column_name(non_null_raw_stmt.as_ptr(), i as std::os::raw::c_int);
+                    if name_ptr.is_null() {
+                        ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                        return Err(XqliteError::InternalEncodingError {
+                            context: format!("SQLite returned null column name for index {} during stream open", i),
+                        });
+                    }
+                    let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
+                    column_names.push(name_c_str.to_string_lossy().into_owned());
+                }
+            }
+
+            Ok(XqliteStream {
+                raw_stmt: Mutex::new(Some(RawStmtPtr(non_null_raw_stmt))),
+                conn_resource_arc: conn_resource_arc_clone,
+                column_names,
+                column_count,
+                is_done: AtomicBool::new(false),
+            })
+        } // --- End of unsafe block ---
+    })
+    .map(ResourceArc::new)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
