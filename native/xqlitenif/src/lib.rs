@@ -48,6 +48,7 @@ rustler::atoms! {
     invalid_column_type,
     invalid_parameter_count,
     invalid_parameter_name,
+    invalid_stream_handle,
     list,
     lock_error,
     map,

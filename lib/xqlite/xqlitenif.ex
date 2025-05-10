@@ -68,5 +68,21 @@ defmodule XqliteNIF do
           {:ok, [String.t()]} | {:error, Xqlite.error()}
   def stream_get_columns(_stream_handle), do: err()
 
+  @doc """
+  Closes an active stream and releases its underlying SQLite statement resources.
+
+  This function should be called when a stream is no longer needed, either
+  after all rows have been consumed or if the stream needs to be abandoned
+  prematurely. It is safe to call this function multiple times on the same handle;
+  subsequent calls after the first will be no-ops.
+
+  `stream_handle` is the opaque resource returned by `stream_open/4`.
+
+  Returns `:ok` if successful, or `{:error, reason}` if the handle is invalid
+  or an error occurs during finalization (rare).
+  """
+  @spec stream_close(stream_handle :: reference()) :: :ok | {:error, Xqlite.error()}
+  def stream_close(_stream_handle), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

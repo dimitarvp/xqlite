@@ -13,7 +13,7 @@ use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
     is_keyword, process_rows, quote_identifier, quote_savepoint_name, with_conn,
 };
-use crate::{columns, no_value, num_rows, rows};
+use crate::{columns, invalid_stream_handle, no_value, num_rows, rows};
 use rusqlite::ffi;
 use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
 use rustler::{
@@ -1077,6 +1077,31 @@ pub(crate) fn stream_get_columns(
     // in which case an empty Vec<String> is correctly returned).
     // Accessing it directly is safe as long as stream_handle is a valid resource.
     Ok(stream_handle.column_names.clone())
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+pub(crate) fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Term<'a> {
+    let stream_arc_result: Result<ResourceArc<XqliteStream>, rustler::Error> =
+        stream_handle_term.decode();
+
+    match stream_arc_result {
+        Ok(stream_arc) => {
+            match stream_arc.ensure_finalized() {
+                Ok(_) => {
+                    // Mark the stream as logically done.
+                    stream_arc.is_done.store(true, Ordering::SeqCst);
+                    ok().encode(env)
+                }
+                Err(xqlite_err) => (error(), xqlite_err.encode(env)).encode(env),
+            }
+        }
+        Err(decode_err) => {
+            let reason_string =
+                format!("Expected a valid stream handle resource: {:?}", decode_err);
+            let inner_error_tuple = (invalid_stream_handle(), reason_string).encode(env);
+            (error(), inner_error_tuple).encode(env)
+        }
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
