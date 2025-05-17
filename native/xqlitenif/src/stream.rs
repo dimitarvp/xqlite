@@ -1,11 +1,11 @@
 use crate::error::XqliteError;
 use crate::nif::XqliteConn;
+use crate::util::sqlite_row_to_elixir_terms;
 use rusqlite::ffi;
 use rusqlite::types::Value;
-use rustler::{Resource, ResourceArc};
+use rustler::{Env, Resource, ResourceArc, Term};
 use std::os::raw::c_int;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering}; // Ordering will be used by is_done
 use std::sync::Mutex;
 
 // Wrapper struct for the raw SQLite statement pointer to make it Send + Sync
@@ -18,68 +18,78 @@ pub(crate) struct RawStmtPtr(pub(crate) NonNull<ffi::sqlite3_stmt>);
 unsafe impl Send for RawStmtPtr {}
 unsafe impl Sync for RawStmtPtr {} // Safe because Mutex will protect access to Option<RawStmtPtr>
 
+// #[derive(Debug)]
+pub(crate) struct StreamState {
+    pub(crate) raw_stmt: Option<RawStmtPtr>,
+    pub(crate) is_done: bool, // Now a simple bool
+}
+
 // Represents an active SQLite prepared statement for streaming
 pub(crate) struct XqliteStream {
-    pub(crate) raw_stmt: Mutex<Option<RawStmtPtr>>, // Store the wrapped pointer
+    // This Mutex protects all state that changes during the stream's lifecycle
+    // (is_done and the presence of raw_stmt).
+    pub(crate) state: Mutex<StreamState>,
 
+    // These are immutable after stream_open completes
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
-
     pub(crate) column_names: Vec<String>,
     pub(crate) column_count: usize,
-
-    pub(crate) is_done: AtomicBool,
 }
 
 #[rustler::resource_impl]
 impl Resource for XqliteStream {}
 
 impl XqliteStream {
+    // ensure_finalized now operates on the state within the Mutex
     pub(crate) fn ensure_finalized(&self) -> Result<(), XqliteError> {
-        let mut stmt_option_guard = self.raw_stmt.lock().map_err(|_| {
-            XqliteError::LockError(
-                "Failed to lock raw_stmt mutex for finalization".to_string(),
-            )
+        // Lock the entire state to check and finalize raw_stmt
+        let mut state_guard = self.state.lock().map_err(|poison_err| {
+            XqliteError::LockError(format!(
+                "Failed to lock stream state for finalization: {:?}",
+                poison_err
+            ))
         })?;
 
-        if let Some(wrapped_ptr) = stmt_option_guard.take() {
+        // state_guard is a MutexGuard<StreamState>
+        if let Some(wrapped_ptr) = state_guard.raw_stmt.take() {
+            // take() from the Option within StreamState
             let result_code = unsafe { ffi::sqlite3_finalize(wrapped_ptr.0.as_ptr()) };
             if result_code != ffi::SQLITE_OK {
-                let lock_result = self.conn_resource_arc.0.lock();
-                match lock_result {
-                    Ok(_conn_guard) => {
-                        // Construct ffi::Error from the code.
+                // state_guard is still held, so conn_resource_arc is accessible.
+                // Drop the state_guard before attempting to lock the connection mutex,
+                // to avoid potential (though unlikely here) deadlock if they were related.
+                drop(state_guard);
+
+                let conn_lock_result = self.conn_resource_arc.0.lock();
+                match conn_lock_result {
+                    Ok(_conn_guard_for_error) => {
                         let ffi_err = ffi::Error::new(result_code);
-                        // Create a RusqliteError::SqliteFailure.
-                        // The message will be fetched from sqlite3_errmsg by rusqlite
-                        // when it converts ffi::Error to a string, or if not, it uses a generic one.
-                        let rusqlite_err = rusqlite::Error::SqliteFailure(
-                            ffi_err,
-                            None,
-                            // Some(format!(
-                            //     "Failed to finalize SQLite statement (code: {})",
-                            //     result_code
-                            // )),
-                        );
+                        let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, None);
                         return Err(XqliteError::from(rusqlite_err));
                     }
-                    Err(_) => {
+                    Err(poison_err_conn) => {
                         return Err(XqliteError::SqliteFailure {
                             code: result_code,
                             extended_code: result_code,
-                            message: Some("Failed to finalize statement and could not lock connection for details.".into()),
+                            message: Some(format!(
+                                "Failed to finalize statement (code: {}) and could not lock connection for details: {:?}",
+                                result_code, poison_err_conn
+                            )),
                         });
                     }
                 }
             }
         }
+        // If raw_stmt was None, it was already finalized.
+        // Mark as done if not already, for consistency after finalization attempt.
+        state_guard.is_done = true;
         Ok(())
     }
 }
 
 impl Drop for XqliteStream {
     fn drop(&mut self) {
-        // The `raw_stmt` field is a Mutex, so we access it through `self.raw_stmt.lock()`.
-        // `ensure_finalized` handles the locking.
+        // `ensure_finalized` takes `&self` because `state` is `Mutex<StreamState>`
         if let Err(e) = self.ensure_finalized() {
             eprintln!(
                 "[xqlite] Error finalizing SQLite statement during stream resource drop: {:?}",
@@ -187,4 +197,53 @@ pub(crate) fn bind_named_params_ffi(
         bind_value_to_raw_stmt(raw_stmt_ptr, bind_idx, value, db_handle)?;
     }
     Ok(())
+}
+
+// Helper to process a single sqlite3_step.
+// Returns Ok(Some(row_data)) if a row is fetched.
+// Returns Ok(None) if SQLITE_DONE is reached.
+// Returns Err(XqliteError) if a step or conversion error occurs.
+// This function does NOT modify stream_handle.state itself.
+pub(crate) unsafe fn process_single_step(
+    env: Env<'_>,
+    stmt_ptr: *mut ffi::sqlite3_stmt,
+    column_count: usize, // Pass column_count directly
+    // Pass the raw db_handle for error reporting from SQLite if step fails
+    db_handle_for_error_reporting: *mut ffi::sqlite3,
+) -> Result<Option<Vec<Term<'_>>>, XqliteError> {
+    let step_result = ffi::sqlite3_step(stmt_ptr);
+
+    match step_result {
+        ffi::SQLITE_ROW => {
+            match sqlite_row_to_elixir_terms(env, stmt_ptr, column_count) {
+                Ok(row_terms) => Ok(Some(row_terms)),
+                Err(e) => Err(e), // Propagate row conversion error
+            }
+        }
+        ffi::SQLITE_DONE => {
+            Ok(None) // Signal DONE to the caller
+        }
+        err_code => {
+            // Get specific error message from the connection
+            let specific_message = {
+                // Scoped for err_msg_ptr
+                let err_msg_ptr = ffi::sqlite3_errmsg(db_handle_for_error_reporting);
+                if err_msg_ptr.is_null() {
+                    format!(
+                        "SQLite error {} during step; no specific message.",
+                        err_code
+                    )
+                } else {
+                    std::ffi::CStr::from_ptr(err_msg_ptr)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            };
+            let rusqlite_err = rusqlite::Error::SqliteFailure(
+                ffi::Error::new(err_code),
+                Some(specific_message),
+            );
+            Err(XqliteError::from(rusqlite_err))
+        }
+    }
 }

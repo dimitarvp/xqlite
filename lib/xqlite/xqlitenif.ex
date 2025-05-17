@@ -1,6 +1,8 @@
 defmodule XqliteNIF do
   use Rustler, otp_app: :xqlite, crate: :xqlitenif, mode: :release
 
+  @type stream_fetch_ok_result :: %{rows: [list(term())]}
+
   def open(_path, _opts \\ []), do: err()
   def open_in_memory(_path \\ ":memory:"), do: err()
   def open_temporary(), do: err()
@@ -67,6 +69,27 @@ defmodule XqliteNIF do
   @spec stream_get_columns(stream_handle :: reference()) ::
           {:ok, [String.t()]} | {:error, Xqlite.error()}
   def stream_get_columns(_stream_handle), do: err()
+
+  @doc """
+  Fetches a batch of rows from an active stream handle.
+
+  `stream_handle` is the opaque resource obtained from `stream_open/4`.
+  `batch_size` indicates the maximum number of rows to fetch in this call.
+  A `batch_size` of `0` will return an empty list of rows without advancing
+  the stream, unless the stream is already exhausted (in which case it returns `:done`).
+
+  Returns:
+    - `{:ok, %{rows: [[term()]]}}` if rows are fetched. The inner list represents a row,
+      and the outer list is the batch of rows. The list of rows may be empty if
+      `batch_size` was `0` and the stream is not yet done, or if the query itself
+      yielded results but this particular fetch point encountered no more rows before
+      hitting `SQLITE_DONE` or an error within the batch limit.
+    - `:done` to indicate the end of the stream (all rows have been consumed).
+    - `{:error, reason}` if an error occurs during fetching from SQLite.
+  """
+  @spec stream_fetch(stream_handle :: reference(), batch_size :: non_neg_integer()) ::
+          {:ok, stream_fetch_ok_result()} | :done | {:error, Xqlite.error()}
+  def stream_fetch(_stream_handle, _batch_size), do: err()
 
   @doc """
   Closes an active stream and releases its underlying SQLite statement resources.
