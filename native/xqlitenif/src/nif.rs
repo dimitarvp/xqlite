@@ -1196,7 +1196,16 @@ pub(crate) fn stream_fetch<'a>(
         return done().encode(env);
     }
 
-    let stmt_ptr = state_guard.raw_stmt.as_ref().unwrap().0.as_ptr();
+    let stmt_ptr = if let Some(raw_stmt_wrapper) = state_guard.raw_stmt.as_ref() {
+        raw_stmt_wrapper.0.as_ptr()
+    } else {
+        // This case should ideally not be reached if initial checks are correct
+        // and state_guard is held continuously.
+        // If it is reached, it means raw_stmt became None unexpectedly.
+        state_guard.is_done = true; // Mark as done
+        drop(state_guard); // Release lock
+        return done().encode(env);
+    };
 
     let db_handle_for_errors = match stream_handle.conn_resource_arc.0.lock() {
         Ok(conn_g) => unsafe { conn_g.handle() },
