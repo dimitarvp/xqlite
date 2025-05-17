@@ -6,10 +6,8 @@ use crate::schema::{
     type_affinity_to_atom, ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo,
     IndexInfo, SchemaObjectInfo,
 };
-use crate::stream::StreamState;
 use crate::stream::{
-    bind_named_params_ffi, bind_positional_params_ffi, process_single_step, RawStmtPtr,
-    XqliteStream,
+    bind_named_params_ffi, bind_positional_params_ffi, process_single_step, XqliteStream,
 };
 use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
@@ -28,6 +26,7 @@ use rustler::{
 };
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -959,7 +958,7 @@ pub(crate) fn stream_open<'a>(
     conn_handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    _opts_term: Term<'a>,
+    _opts_term: Term<'a>, // Opts not used initially
 ) -> Result<ResourceArc<XqliteStream>, XqliteError> {
     let conn_resource_arc_clone = conn_handle.clone();
 
@@ -980,45 +979,43 @@ pub(crate) fn stream_open<'a>(
             );
 
             if prepare_rc != ffi::SQLITE_OK {
-                // Get the specific error message from the connection handle *now*.
                 let error_message = {
                     let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
                     if err_msg_ptr.is_null() {
-                        // Should not happen if prepare_rc indicates an error, but defensive
                         format!("SQLite preparation error (code {}) but no message available. SQL: {}", prepare_rc, sql)
                     } else {
                         std::ffi::CStr::from_ptr(err_msg_ptr).to_string_lossy().into_owned()
                     }
                 };
-
                 let ffi_err = ffi::Error::new(prepare_rc);
-                // Use the specific message we just retrieved.
-                let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(error_message));
-                return Err(XqliteError::from(rusqlite_err)); // XqliteError::from will parse this
+                let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(error_message)); 
+                return Err(XqliteError::from(rusqlite_err));
             }
 
+            // If SQL was empty/comments, raw_stmt_ptr will be null.
+            // Initialize with a null AtomicPtr, signifying an immediately "done" stream.
             if raw_stmt_ptr.is_null() {
-                let initial_state = StreamState {
-                    raw_stmt: None,
-                    is_done: true,
-                };
                 return Ok(XqliteStream {
-                    state: Mutex::new(initial_state),
+                    atomic_raw_stmt: AtomicPtr::new(std::ptr::null_mut()),
                     conn_resource_arc: conn_resource_arc_clone,
                     column_names: Vec::new(),
                     column_count: 0,
                 });
             }
+            // This unwrap is safe due to the .is_null() check above.
             let non_null_raw_stmt = NonNull::new_unchecked(raw_stmt_ptr);
 
+            // Bind parameters
             let bind_result: Result<(), XqliteError> = match params_term.get_type() {
                 TermType::List => {
                     if params_term.is_empty_list() { Ok(()) }
                     else if is_keyword(params_term) {
                         let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                        // Ensure bind_named_params_ffi is correctly imported or defined if it moved from stream.rs
                         bind_named_params_ffi(non_null_raw_stmt.as_ptr(), &named_params_vec, db_handle)
                     } else {
                         let positional_params_vec = decode_plain_list_params(env, params_term)?;
+                        // Ensure bind_positional_params_ffi is correctly imported or defined
                         bind_positional_params_ffi(non_null_raw_stmt.as_ptr(), &positional_params_vec, db_handle)
                     }
                 }
@@ -1028,10 +1025,11 @@ pub(crate) fn stream_open<'a>(
             };
 
             if let Err(e) = bind_result {
-                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr()); 
                 return Err(e);
             }
 
+            // Get column names and count
             let column_count = ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
             let mut column_names = Vec::with_capacity(column_count);
 
@@ -1039,7 +1037,7 @@ pub(crate) fn stream_open<'a>(
                 for i in 0..column_count {
                     let name_ptr = ffi::sqlite3_column_name(non_null_raw_stmt.as_ptr(), i as std::os::raw::c_int);
                     if name_ptr.is_null() {
-                        ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                        ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr()); 
                         return Err(XqliteError::InternalEncodingError {
                             context: format!("SQLite returned null column name for index {} during stream open", i),
                         });
@@ -1049,17 +1047,13 @@ pub(crate) fn stream_open<'a>(
                 }
             }
 
-            let initial_state = StreamState {
-                raw_stmt: Some(RawStmtPtr(non_null_raw_stmt)),
-                is_done: false,
-            };
             Ok(XqliteStream {
-                state: Mutex::new(initial_state),
+                atomic_raw_stmt: AtomicPtr::new(non_null_raw_stmt.as_ptr()), // Store the prepared stmt_ptr
                 conn_resource_arc: conn_resource_arc_clone,
                 column_names,
                 column_count,
             })
-        }
+        } 
     })
     .map(ResourceArc::new)
 }
@@ -1080,27 +1074,17 @@ pub(crate) fn stream_get_columns(
 pub(crate) fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Term<'a> {
     match stream_handle_term.decode::<ResourceArc<XqliteStream>>() {
         Ok(stream_arc) => {
-            match stream_arc.ensure_finalized() {
-                // ensure_finalized sets state.is_done = true
-                Ok(_) => {
-                    // ensure_finalized already attempts to set is_done.
-                    // We could re-set it here for absolute certainty if the lock succeeds.
-                    if let Ok(mut state_guard) = stream_arc.state.lock() {
-                        state_guard.is_done = true;
-                    } // If lock poisoned, ensure_finalized path would have logged.
-                    ok().encode(env)
-                }
+            // Use the method on XqliteStream to handle atomic swap and finalization.
+            // Pass Some(&stream_arc.conn_resource_arc) for better error reporting from finalize.
+            match stream_arc.take_and_finalize_atomic_stmt() {
+                Ok(_) => ok().encode(env),
                 Err(xqlite_err) => {
-                    // Attempt to mark as done even on finalization error.
-                    if let Ok(mut state_guard) = stream_arc.state.lock() {
-                        state_guard.is_done = true;
-                    }
+                    // Error from finalization itself
                     (error(), xqlite_err.encode(env)).encode(env)
                 }
             }
         }
         Err(decode_err) => {
-            // Construct and return XqliteError::InvalidStreamHandle
             let xql_err = XqliteError::InvalidStreamHandle {
                 reason: format!("Expected a valid stream handle resource: {:?}", decode_err),
             };
@@ -1118,25 +1102,10 @@ pub(crate) fn stream_fetch<'a>(
     let batch_size_i64: i64 = match batch_size_term.decode::<i64>() {
         Ok(val) => val,
         Err(_decode_err) => {
-            // If Elixir passes a term that's not an i64, Rustler's decode fails.
-            // This NIF is defined to take Term<'a> for batch_size_term.
-            // We return our custom error for this specific argument.
-            // The XqliteError::InvalidBatchSize expects an i64 for `provided`.
-            // We can use a sentinel or pass the stringified term.
-            // For test consistency with negative numbers, let's use a sentinel i64
-            // and ensure the encoder for InvalidBatchSize can perhaps show a string if it sees the sentinel.
-            // Or, for now, make the test for non-integer `batch_size` expect a different error if needed.
-            // Let's assume the test `NIF.stream_fetch(stream_handle, -1)` expects InvalidBatchSize with provided: -1.
-            // If it's not an integer at all (e.g., an atom), this decode fails.
-            // The current tests for batch_size=0 and batch_size=-1 will hit the next block.
-            // If an atom is passed, this decode_err path will be taken.
             let xql_err = XqliteError::InvalidBatchSize {
-                provided: i64::MIN, // Sentinel for "not a valid integer input"
+                provided: i64::MIN,
                 minimum: 1,
             };
-            // The Encoder for InvalidBatchSize will create the map.
-            // If we want a different *atom* for "not an integer vs out of range", we need another XqliteError variant.
-            // For now, this will result in {:error, {:invalid_batch_size, %{provided: i64::MIN, minimum: 1}}}
             return (error(), xql_err.encode(env)).encode(env);
         }
     };
@@ -1150,81 +1119,55 @@ pub(crate) fn stream_fetch<'a>(
     }
     let batch_size = batch_size_i64 as usize;
 
-    {
-        let state_guard = match stream_handle.state.lock() {
-            Ok(guard) => guard,
-            Err(p_err) => {
-                return (
-                    error(),
-                    XqliteError::LockError(format!("S1: state Mutex po: {:?}", p_err))
-                        .encode(env),
-                )
-                    .encode(env);
-            }
-        };
-        if state_guard.is_done {
-            return done().encode(env);
-        }
-        if state_guard.raw_stmt.is_none() {
-            drop(state_guard);
-            if let Ok(mut final_done_g) = stream_handle.state.lock() {
-                final_done_g.is_done = true;
-            }
-            return done().encode(env);
-        }
+    // --- Initial State Check (using atomic_raw_stmt) ---
+    let mut current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
+    if current_stmt_ptr.is_null() {
+        return done().encode(env);
     }
 
+    // --- Main Fetching Logic ---
     let mut fetched_rows: Vec<Vec<Term<'a>>> = Vec::with_capacity(batch_size);
     let mut an_error_occurred: Option<XqliteError> = None;
-    // stream_became_done_in_this_call is not strictly needed if final return always re-reads is_done
-    // let mut stream_became_done_in_this_call = false;
+    let mut stream_definitively_exhausted = false; // True if SQLITE_DONE or error from helper
 
-    let mut state_guard = match stream_handle.state.lock() {
-        Ok(guard) => guard,
-        Err(p_err) => {
-            return (
-                error(),
-                XqliteError::LockError(format!("S2: state Mutex po: {:?}", p_err)).encode(env),
-            )
-                .encode(env);
-        }
-    };
-
-    if state_guard.is_done || state_guard.raw_stmt.is_none() {
-        state_guard.is_done = true;
-        drop(state_guard);
-        return done().encode(env);
-    }
-
-    let stmt_ptr = if let Some(raw_stmt_wrapper) = state_guard.raw_stmt.as_ref() {
-        raw_stmt_wrapper.0.as_ptr()
-    } else {
-        // This case should ideally not be reached if initial checks are correct
-        // and state_guard is held continuously.
-        // If it is reached, it means raw_stmt became None unexpectedly.
-        state_guard.is_done = true; // Mark as done
-        drop(state_guard); // Release lock
-        return done().encode(env);
-    };
-
+    // db_handle is needed for process_single_step's error reporting.
     let db_handle_for_errors = match stream_handle.conn_resource_arc.0.lock() {
-        Ok(conn_g) => unsafe { conn_g.handle() },
+        Ok(conn_lock_guard) => unsafe { conn_lock_guard.handle() },
         Err(p_err_conn) => {
-            state_guard.is_done = true;
-            drop(state_guard);
+            // If we can't get the db_handle, we can't safely call process_single_step.
+            // Mark stream as done by nullifying atomic_raw_stmt.
+            let old_ptr = stream_handle
+                .atomic_raw_stmt
+                .swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if !old_ptr.is_null() {
+                unsafe {
+                    ffi::sqlite3_finalize(old_ptr);
+                }
+            } // Finalize if it wasn't null
             return (
                 error(),
-                XqliteError::LockError(format!("Conn Mutex po: {:?}", p_err_conn)).encode(env),
+                XqliteError::LockError(format!(
+                    "XqliteConn Mutex poisoned for db_handle: {:?}",
+                    p_err_conn
+                ))
+                .encode(env),
             )
                 .encode(env);
         }
     };
 
     for _ in 0..batch_size {
+        // Re-check pointer before each step in case it was concurrently finalized (e.g., by stream_close)
+        current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
+        if current_stmt_ptr.is_null() {
+            stream_definitively_exhausted = true; // Another thread/call finalized it
+            break;
+        }
+
         match unsafe {
             process_single_step(
                 env,
-                stmt_ptr,
+                current_stmt_ptr,
                 stream_handle.column_count,
                 db_handle_for_errors,
             )
@@ -1233,21 +1176,27 @@ pub(crate) fn stream_fetch<'a>(
                 fetched_rows.push(row_terms);
             }
             Ok(None) => {
-                state_guard.is_done = true;
-                // stream_became_done_in_this_call = true; // Not needed if we re-read later
-                if let Some(stf) = state_guard.raw_stmt.take() {
+                // SQLITE_DONE signaled by process_single_step
+                stream_definitively_exhausted = true;
+                let ptr_to_finalize = stream_handle
+                    .atomic_raw_stmt
+                    .swap(std::ptr::null_mut(), Ordering::AcqRel);
+                if !ptr_to_finalize.is_null() {
                     unsafe {
-                        ffi::sqlite3_finalize(stf.0.as_ptr());
+                        ffi::sqlite3_finalize(ptr_to_finalize);
                     }
                 }
                 break;
             }
             Err(e) => {
-                state_guard.is_done = true;
-                // stream_became_done_in_this_call = true; // Not needed
-                if let Some(stf) = state_guard.raw_stmt.take() {
+                // Error from process_single_step
+                stream_definitively_exhausted = true;
+                let ptr_to_finalize = stream_handle
+                    .atomic_raw_stmt
+                    .swap(std::ptr::null_mut(), Ordering::AcqRel);
+                if !ptr_to_finalize.is_null() {
                     unsafe {
-                        ffi::sqlite3_finalize(stf.0.as_ptr());
+                        ffi::sqlite3_finalize(ptr_to_finalize);
                     }
                 }
                 an_error_occurred = Some(e);
@@ -1255,41 +1204,35 @@ pub(crate) fn stream_fetch<'a>(
             }
         }
     }
-    drop(state_guard);
 
     if let Some(err) = an_error_occurred {
         return (error(), err.encode(env)).encode(env);
     }
 
-    // Final decision based on fetched rows and a fresh read of is_done
-    let final_is_done_val = match stream_handle.state.lock() {
-        // CORRECTED: access via state
-        Ok(g) => g.is_done, // CORRECTED: access field is_done from guard
-        Err(_) => true,     // Assume done if poisoned
-    };
-
     if !fetched_rows.is_empty() {
         match map_new(env).map_put(rows().encode(env), fetched_rows.encode(env)) {
-            Ok(rm) => (ok(), rm).encode(env),
+            Ok(result_map) => (ok(), result_map).encode(env),
             Err(_) => (
                 error(),
                 XqliteError::InternalEncodingError {
-                    context: "map_new for rows".into(),
+                    context: "map_new fail for fetched rows".into(),
                 }
                 .encode(env),
             )
                 .encode(env),
         }
-    } else if final_is_done_val {
+    } else if stream_definitively_exhausted {
         done().encode(env)
     } else {
+        // No rows fetched, and stream did not become definitively exhausted in this call.
+        // This means batch_size limit was met before any rows, or query yielded no rows from start.
         match map_new(env).map_put(rows().encode(env), Vec::<Vec<Term<'a>>>::new().encode(env))
         {
-            Ok(rm) => (ok(), rm).encode(env),
+            Ok(result_map) => (ok(), result_map).encode(env),
             Err(_) => (
                 error(),
                 XqliteError::InternalEncodingError {
-                    context: "map_new for empty".into(),
+                    context: "map_new fail for empty non-done".into(),
                 }
                 .encode(env),
             )
