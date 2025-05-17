@@ -7,13 +7,13 @@ use crate::{
     constraint_violation, constraint_vtab, database_busy_or_locked, error,
     execute_returned_results, expected_keyword_list, expected_keyword_tuple, expected_list,
     float, from_sql_conversion_failure, function, index_exists, integer,
-    integral_value_out_of_range, internal_encoding_error, invalid_column_index,
-    invalid_column_name, invalid_column_type, invalid_parameter_count, invalid_parameter_name,
-    list, lock_error, map, multiple_statements, no_such_index, no_such_table,
-    null_byte_in_string, operation_cancelled, pid, port, read_only_database, reference,
-    schema_changed, schema_parsing_error, sql_input_error, sqlite_failure, table_exists, text,
-    to_sql_conversion_failure, tuple, unexpected_value, unknown, unsupported_atom,
-    unsupported_data_type, utf8_error,
+    integral_value_out_of_range, internal_encoding_error, invalid_batch_size,
+    invalid_column_index, invalid_column_name, invalid_column_type, invalid_parameter_count,
+    invalid_parameter_name, invalid_stream_handle, list, lock_error, map, multiple_statements,
+    no_such_index, no_such_table, null_byte_in_string, operation_cancelled, pid, port,
+    read_only_database, reference, schema_changed, schema_parsing_error, sql_input_error,
+    sqlite_failure, table_exists, text, to_sql_conversion_failure, tuple, unexpected_value,
+    unknown, unsupported_atom, unsupported_data_type, utf8_error,
 };
 use rusqlite::{ffi, Error as RusqliteError};
 use rustler::{
@@ -220,6 +220,14 @@ pub(crate) enum XqliteError {
         error_detail: SchemaErrorDetail,
     },
 
+    InvalidStreamHandle {
+        reason: String,
+    },
+    InvalidBatchSize {
+        provided: i64, // Use i64 to show what Elixir sent (can be negative)
+        minimum: usize,
+    },
+
     // Internal
     InternalEncodingError {
         context: String,
@@ -267,6 +275,10 @@ impl Display for XqliteError {
             XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{}': {}", path, reason),
             XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {}", reason),
             XqliteError::LockError(reason) => write!(f, "Failed to lock connection mutex: {}", reason),
+            XqliteError::InvalidStreamHandle { reason } => write!(f, "Invalid stream handle: {}", reason),
+            XqliteError::InvalidBatchSize { provided, minimum } => {
+                write!(f, "Invalid batch_size: provided {}, minimum allowed is {}", provided, minimum)
+            }
             XqliteError::InternalEncodingError { context } => write!(f, "Internal error during result encoding: {}", context),
             XqliteError::InvalidParameterCount { provided, expected } => write!(f, "Invalid parameter count: provided {}, expected {}", provided, expected),
             XqliteError::InvalidParameterName(name) => write!(f, "Invalid parameter name: '{}'", name),
@@ -340,6 +352,26 @@ impl Encoder for XqliteError {
                 (cannot_convert_atom_to_string(), reason).encode(env)
             }
             XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
+            XqliteError::InvalidStreamHandle { reason } => {
+                (invalid_stream_handle(), reason).encode(env)
+            }
+            XqliteError::InvalidBatchSize { provided, minimum } => {
+                match map_new(env)
+                    .map_put(crate::provided(), provided.encode(env))
+                    .and_then(|map| map.map_put(crate::minimum(), minimum.encode(env)))
+                {
+                    Ok(details_map) => (invalid_batch_size(), details_map).encode(env),
+                    Err(map_err) => {
+                        // map_err is rustler::Error
+                        XqliteError::InternalEncodingError {
+                            context: format!(
+                                "Failed to create details map for InvalidBatchSize (provided: {}, minimum: {}): {:?}",
+                                provided, minimum, map_err
+                            ),
+                        }.encode(env)
+                    }
+                }
+            }
             XqliteError::InternalEncodingError { context } => {
                 (internal_encoding_error(), context).encode(env)
             }

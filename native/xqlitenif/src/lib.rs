@@ -28,6 +28,7 @@ rustler::atoms! {
     create_index,
     database_busy_or_locked,
     desc,
+    done,
     error,
     execute_returned_results,
     expected,
@@ -43,15 +44,18 @@ rustler::atoms! {
     integer,
     integral_value_out_of_range,
     internal_encoding_error,
+    invalid_batch_size,
     invalid_column_index,
     invalid_column_name,
     invalid_column_type,
     invalid_parameter_count,
     invalid_parameter_name,
+    invalid_stream_handle,
     list,
     lock_error,
     map,
     message,
+    minimum,
     multiple_statements,
     no_action,
     no_such_index,
@@ -104,6 +108,7 @@ mod cancel;
 mod error;
 mod nif;
 mod schema;
+mod stream;
 mod util;
 
 use rustler::{Env, Term};
