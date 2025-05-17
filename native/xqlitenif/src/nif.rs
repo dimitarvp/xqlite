@@ -988,7 +988,7 @@ pub(crate) fn stream_open<'a>(
                     }
                 };
                 let ffi_err = ffi::Error::new(prepare_rc);
-                let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(error_message)); 
+                let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(error_message));
                 return Err(XqliteError::from(rusqlite_err));
             }
 
@@ -1025,7 +1025,7 @@ pub(crate) fn stream_open<'a>(
             };
 
             if let Err(e) = bind_result {
-                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr()); 
+                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
                 return Err(e);
             }
 
@@ -1037,7 +1037,7 @@ pub(crate) fn stream_open<'a>(
                 for i in 0..column_count {
                     let name_ptr = ffi::sqlite3_column_name(non_null_raw_stmt.as_ptr(), i as std::os::raw::c_int);
                     if name_ptr.is_null() {
-                        ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr()); 
+                        ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
                         return Err(XqliteError::InternalEncodingError {
                             context: format!("SQLite returned null column name for index {} during stream open", i),
                         });
@@ -1053,7 +1053,7 @@ pub(crate) fn stream_open<'a>(
                 column_names,
                 column_count,
             })
-        } 
+        }
     })
     .map(ResourceArc::new)
 }
