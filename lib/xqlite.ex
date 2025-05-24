@@ -23,10 +23,7 @@ defmodule Xqlite do
   """
   @spec enable_strict_mode(conn()) :: :ok | error()
   def enable_strict_mode(conn) do
-    case XqliteNIF.set_pragma(conn, "strict", :on) do
-      {:ok, true} -> :ok
-      error -> error
-    end
+    XqliteNIF.set_pragma(conn, "strict", :on)
   end
 
   @doc """
@@ -36,10 +33,7 @@ defmodule Xqlite do
   """
   @spec disable_strict_mode(conn()) :: :ok | error()
   def disable_strict_mode(conn) do
-    case XqliteNIF.set_pragma(conn, "strict", :off) do
-      {:ok, true} -> :ok
-      error -> error
-    end
+    XqliteNIF.set_pragma(conn, "strict", :off)
   end
 
   @doc """
@@ -52,10 +46,7 @@ defmodule Xqlite do
   """
   @spec enable_foreign_key_enforcement(conn()) :: :ok | error()
   def enable_foreign_key_enforcement(conn) do
-    case XqliteNIF.set_pragma(conn, "foreign_keys", :on) do
-      {:ok, true} -> :ok
-      error -> error
-    end
+    XqliteNIF.set_pragma(conn, "foreign_keys", :on)
   end
 
   @doc """
@@ -65,9 +56,6 @@ defmodule Xqlite do
   """
   @spec disable_foreign_key_enforcement(conn()) :: :ok | error()
   def disable_foreign_key_enforcement(conn) do
-    case XqliteNIF.set_pragma(conn, "foreign_keys", :off) do
-      {:ok, true} -> :ok
-      error -> error
-    end
+    XqliteNIF.set_pragma(conn, "foreign_keys", :off)
   end
 end
