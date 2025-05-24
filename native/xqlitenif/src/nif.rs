@@ -1246,7 +1246,7 @@ pub(crate) fn stream_fetch<'a>(
     }
 
     if !fetched_rows.is_empty() {
-        match map_new(env).map_put(rows().encode(env), fetched_rows.encode(env)) {
+        match map_new(env).map_put(rows(), fetched_rows) {
             Ok(result_map) => (ok(), result_map).encode(env),
             Err(_) => (
                 error(),
