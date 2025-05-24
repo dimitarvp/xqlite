@@ -47,15 +47,15 @@ impl Encoder for XqliteQueryResult<'_> {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         let map_value_result: Result<Term, String> = Ok(map_new(env))
             .and_then(|map| {
-                map.map_put(columns(), self.columns.encode(env))
+                map.map_put(columns(), self.columns.clone())
                     .map_err(|_| "Failed to insert :columns key".to_string())
             })
             .and_then(|map| {
-                map.map_put(rows(), self.rows.encode(env))
+                map.map_put(rows(), self.rows.clone())
                     .map_err(|_| "Failed to insert :rows key".to_string())
             })
             .and_then(|map| {
-                map.map_put(num_rows(), self.num_rows.encode(env))
+                map.map_put(num_rows(), self.num_rows)
                     .map_err(|_| "Failed to insert :num_rows key".to_string())
             });
 
