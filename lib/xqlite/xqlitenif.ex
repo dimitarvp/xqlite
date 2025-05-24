@@ -86,7 +86,39 @@ defmodule XqliteNIF do
           | {:error, Xqlite.error()}
   def query(_conn, _sql, _params \\ []), do: err()
 
+  @doc """
+  Executes a SQL query that returns rows, with support for cancellation.
+
+  This is a cancellable version of `query/3`.
+  See `query/3` for details on parameters, return values, and general behavior.
+
+  `conn` is the database connection resource.
+  `sql` is the SQL query string.
+  `params` is an optional list of positional or keyword parameters.
+  `cancel_token` is a resource created by `create_cancel_token/0`. If this token
+  is cancelled via `cancel_operation/1` while the query is executing, the
+  query will be interrupted.
+
+  Returns `{:ok, result_map}` on successful completion, where `result_map` is
+  `%{columns: [...], rows: [...], num_rows: ...}`.
+  Returns `{:error, :operation_cancelled}` if the operation was cancelled.
+  Returns `{:error, other_reason}` for other types of failures.
+  """
+  @spec query_cancellable(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword(),
+          cancel_token :: reference()
+        ) ::
+          {:ok,
+           %{
+             columns: [String.t()],
+             rows: [list(term())],
+             num_rows: non_neg_integer()
+           }}
+          | {:error, Xqlite.error()}
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
+
   def execute(_conn, _sql, _params \\ []), do: err()
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute_batch(_conn, _sql), do: err()
