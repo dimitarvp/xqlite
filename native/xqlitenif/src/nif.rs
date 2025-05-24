@@ -266,10 +266,10 @@ fn execute_batch(
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
 ) -> Term<'_> {
-    match with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None)) {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    let execution_result =
+        with_conn(&handle, |conn| core_execute_batch(conn, &sql_batch, None));
+
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
