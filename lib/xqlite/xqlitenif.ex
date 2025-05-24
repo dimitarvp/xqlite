@@ -1,4 +1,36 @@
 defmodule XqliteNIF do
+  @moduledoc """
+  Low-level Native Implemented Functions (NIFs) for interacting with SQLite.
+
+  This module provides direct, performant access to SQLite operations, powered by
+  Rust and the `rusqlite` crate. It forms the foundation of the `Xqlite` library.
+
+  **Connection Lifecycle:**
+  1. Open a database connection using `open/2`, `open_in_memory/1`, or `open_temporary/0`.
+     These return an opaque connection resource (`t:Xqlite.conn/0`).
+  2. Perform operations (queries, executes, pragmas, etc.) using this resource.
+  3. Conceptually close the connection with `close/1` when done.
+
+  **Operation Cancellation:**
+  For long-running queries or executions, cancellable versions of NIFs are provided
+  (e.g., `query_cancellable/4`, `execute_cancellable/4`):
+  1. Create a `t:reference/0` token with `create_cancel_token/0`.
+  2. Pass this token to a cancellable NIF.
+  3. To interrupt the NIF, call `cancel_operation/1` with the token from another process.
+     The NIF will then typically return `{:error, :operation_cancelled}`.
+
+  **Error Handling:**
+  Most functions return `{:ok, value}` or `:ok` on success, and
+  `{:error, reason_tuple}` on failure. The `reason_tuple` provides structured
+  error information (e.g., `{:sqlite_failure, code, extended_code, message}`).
+
+  **Usage Note:**
+  These are low-level functions. For more idiomatic Elixir usage, consider
+  the helper functions in the `Xqlite` module or higher-level abstractions
+  if available (e.g., an Ecto adapter). This module is intended for direct
+  SQLite control or for building such abstractions.
+  """
+
   use Rustler, otp_app: :xqlite, crate: :xqlitenif, mode: :release
 
   @type stream_fetch_ok_result :: %{rows: [list(term())]}
