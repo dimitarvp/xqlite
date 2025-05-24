@@ -1152,7 +1152,7 @@ pub(crate) fn stream_fetch<'a>(
                     batch_size_i64
                 ),
             };
-            return (error(), xql_err.encode(env)).encode(env);
+            return (error(), xql_err).encode(env);
         }
     };
 
