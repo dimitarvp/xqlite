@@ -262,7 +262,35 @@ defmodule XqliteNIF do
           {:ok, term() | :no_value} | {:error, Xqlite.error()}
   def get_pragma(_conn, _name), do: err()
 
+  @doc """
+  Sets the value of an SQLite PRAGMA.
+
+  `conn` is the database connection resource.
+  `name` is the string name of the PRAGMA to set (e.g., "user_version", "foreign_keys").
+  `value` is the Elixir term to set the PRAGMA to. Supported Elixir types include:
+    - Integers
+    - Strings
+    - Booleans (`true` typically maps to `ON` or `1`, `false` to `OFF` or `0`)
+    - Atoms that SQLite can interpret (e.g., `:on`, `:off`, `:wal`, `:delete`).
+      Refer to SQLite documentation for valid values for specific PRAGMAs.
+
+  The NIF attempts to format the Elixir `value` into a string literal suitable
+  for the `PRAGMA name = value_literal;` SQL statement.
+
+  Returns `:ok` if SQLite accepts the PRAGMA assignment. Note that SQLite
+  might silently ignore invalid PRAGMA names or invalid values for a valid PRAGMA,
+  still resulting in an `:ok` return from this function. To verify the change,
+  subsequently call `get_pragma/2` or query the relevant state.
+  Returns `{:error, reason}` if there's an issue preparing or executing the
+  PRAGMA statement (e.g., unsupported Elixir type for `value`, syntax error).
+
+  The `Xqlite.Pragma` module provides higher-level helpers for setting many
+  common PRAGMAs with more type safety.
+  """
+  @spec set_pragma(conn :: Xqlite.conn(), name :: String.t(), value :: term()) ::
+          :ok | {:error, Xqlite.error()}
   def set_pragma(_conn, _name, _value), do: err()
+
   def begin(_conn), do: err()
   def commit(_conn), do: err()
   def rollback(_conn), do: err()
