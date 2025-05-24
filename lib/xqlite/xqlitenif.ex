@@ -3,7 +3,21 @@ defmodule XqliteNIF do
 
   @type stream_fetch_ok_result :: %{rows: [list(term())]}
 
+  @doc """
+  Opens a connection to an SQLite database file.
+
+  `path` is the file path to the database. If the file does not exist,
+  SQLite will attempt to create it. URI filenames are supported
+  (e.g., "file:my_db.sqlite?mode=ro").
+
+  `opts` is a keyword list for future options (currently unused at the NIF level).
+
+  Returns `{:ok, conn_resource}` on success, where `conn_resource` is an
+  opaque reference to the database connection. Returns `{:error, reason}`
+  on failure, e.g., if the path is invalid or permissions are insufficient.
+  """
   def open(_path, _opts \\ []), do: err()
+
   def open_in_memory(_path \\ ":memory:"), do: err()
   def open_temporary(), do: err()
   def query(_conn, _sql, _params \\ []), do: err()
