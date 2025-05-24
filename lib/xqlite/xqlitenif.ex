@@ -119,7 +119,30 @@ defmodule XqliteNIF do
           | {:error, Xqlite.error()}
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
 
+  @doc """
+  Executes a SQL statement that does not return rows (e.g., `INSERT`, `UPDATE`, `DELETE`, DDL).
+
+  `conn` is the database connection resource.
+  `sql` is the SQL statement string.
+  `params` is an optional list of positional parameters. Named parameters are not
+  supported for `execute/3`; use `query/3` with `INSERT ... RETURNING` if named
+  parameters and result retrieval are needed for DML.
+  Use an empty list `[]` if the statement has no parameters.
+
+  Supported Elixir parameter types are integers, floats, strings, `nil`,
+  booleans (`true`/`false`), and binaries (blobs).
+
+  Returns `{:ok, affected_rows}` on success, where `affected_rows` is a non-negative
+  integer indicating the number of rows modified, inserted, or deleted. For DDL
+  statements like `CREATE TABLE`, `affected_rows` is typically `0`.
+  Returns `{:error, reason}` on failure. For example, `{:error, :execute_returned_results}`
+  if a statement unexpectedly returns data (e.g., a `SELECT` statement or an
+  `INSERT ... RETURNING` statement was passed).
+  """
+  @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list()) ::
+          {:ok, non_neg_integer()} | {:error, Xqlite.error()}
   def execute(_conn, _sql, _params \\ []), do: err()
+
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute_batch(_conn, _sql), do: err()
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
