@@ -581,7 +581,35 @@ defmodule XqliteNIF do
           {:ok, String.t() | nil} | {:error, Xqlite.error()}
   def get_create_sql(_conn, _object_name), do: err()
 
+  @doc """
+  Retrieves the rowid of the most recent successful `INSERT` into a rowid table.
+
+  This function calls SQLite's `sqlite3_last_insert_rowid()` for the given
+  connection. The value returned is the rowid of the last row inserted by an
+  `INSERT` statement on that specific database connection.
+
+  Important Considerations:
+    - The value is connection-specific. Inserts on other connections do not affect it.
+    - It is only updated by successful `INSERT` statements. Failed inserts, updates,
+      deletes, or other SQL statements do not change its value.
+    - **It does not work for `WITHOUT ROWID` tables.** For such tables, you must
+      use the `INSERT ... RETURNING` clause to get the primary key values of
+      inserted rows.
+    - If no successful `INSERT`s have occurred on the connection since it was
+      opened, this function typically returns `0`.
+    - The rowid can be an alias for the `INTEGER PRIMARY KEY` column if one exists.
+
+  `conn` is the database connection resource.
+
+  Returns `{:ok, rowid_integer}` on success, where `rowid_integer` is the last
+  inserted rowid.
+  Returns `{:error, reason}` only in rare cases of severe connection failure, as
+  the underlying SQLite C function itself doesn't typically return errors that
+  map to common `Xqlite.error()` types beyond connection validity.
+  """
+  @spec last_insert_rowid(conn :: Xqlite.conn()) :: {:ok, integer()} | {:error, Xqlite.error()}
   def last_insert_rowid(_conn), do: err()
+
   def create_cancel_token(), do: err()
   def cancel_operation(_token_resource), do: err()
 
