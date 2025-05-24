@@ -24,6 +24,7 @@ use rustler::{
     },
     Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
 };
+use std::convert::TryFrom;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -1099,25 +1100,39 @@ pub(crate) fn stream_fetch<'a>(
     stream_handle: ResourceArc<XqliteStream>,
     batch_size_term: Term<'a>,
 ) -> Term<'a> {
+    // Decode and validate batch size
     let batch_size_i64: i64 = match batch_size_term.decode::<i64>() {
-        Ok(val) => val,
-        Err(_decode_err) => {
+        Ok(val) if val >= 1 => val,
+        Ok(val) => {
+            // Decoded as i64, but val < 1
             let xql_err = XqliteError::InvalidBatchSize {
-                provided: i64::MIN,
+                provided: val.to_string(),
+                minimum: 1,
+            };
+            return (error(), xql_err.encode(env)).encode(env);
+        }
+        Err(_) => {
+            // Did not decode as i64
+            let xql_err = XqliteError::InvalidBatchSize {
+                provided: format!("{:?}", batch_size_term),
                 minimum: 1,
             };
             return (error(), xql_err.encode(env)).encode(env);
         }
     };
 
-    if batch_size_i64 < 1 {
-        let xql_err = XqliteError::InvalidBatchSize {
-            provided: batch_size_i64,
-            minimum: 1,
-        };
-        return (error(), xql_err.encode(env)).encode(env);
-    }
-    let batch_size = batch_size_i64 as usize;
+    let batch_size = match usize::try_from(batch_size_i64) {
+        Ok(val) => val,
+        Err(_) => {
+            let xql_err = XqliteError::InternalEncodingError {
+                context: format!(
+                    "Failed to convert valid i64 batch_size ({}) to usize",
+                    batch_size_i64
+                ),
+            };
+            return (error(), xql_err.encode(env)).encode(env);
+        }
+    };
 
     // --- Initial State Check (using atomic_raw_stmt) ---
     let mut current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);

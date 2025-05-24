@@ -224,7 +224,7 @@ pub(crate) enum XqliteError {
         reason: String,
     },
     InvalidBatchSize {
-        provided: i64, // Use i64 to show what Elixir sent (can be negative)
+        provided: String,
         minimum: usize,
     },
 
@@ -421,13 +421,12 @@ impl Encoder for XqliteError {
                 offset,
             } => {
                 let map_result = map_new(env)
-                    // Scope the atom access to avoid shadowing with the `code` variable.
                     .map_put(crate::code(), code)
-                    .and_then(|map| map.map_put(crate::message(), message)) // Use full path
-                    .and_then(|map| map.map_put(crate::sql(), sql)) // Use full path
+                    .and_then(|map| map.map_put(crate::message(), message))
+                    .and_then(|map| map.map_put(crate::sql(), sql))
                     .and_then(|map| map.map_put(crate::offset(), offset));
                 match map_result {
-                    Ok(map) => (sql_input_error(), map).encode(env), // Use atom fn for tuple key
+                    Ok(map) => (sql_input_error(), map).encode(env),
                     Err(_) => (
                         error(),
                         internal_encoding_error(),
@@ -623,7 +622,6 @@ impl From<RusqliteError> for XqliteError {
                 reason: e.to_string(),
             },
             RusqliteError::FromSqlConversionFailure(idx, sql_type, source_err) => {
-                // Keep existing comment explaining the need for sqlite_type_to_atom
                 XqliteError::FromSqlConversionFailure {
                     index: idx,
                     sqlite_type: sqlite_type_to_atom(sql_type),
@@ -642,7 +640,6 @@ impl From<RusqliteError> for XqliteError {
             RusqliteError::InvalidColumnIndex(idx) => XqliteError::InvalidColumnIndex(idx),
             RusqliteError::InvalidColumnName(name) => XqliteError::InvalidColumnName(name),
             RusqliteError::InvalidColumnType(idx, name, sql_type) => {
-                // Keep existing comment explaining the need for sqlite_type_to_atom
                 XqliteError::InvalidColumnType {
                     index: idx,
                     name,

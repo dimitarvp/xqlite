@@ -165,7 +165,7 @@ defmodule Xqlite.NIF.StreamTest do
         sql = "SELECT id FROM stream_items LIMIT 2;"
         {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
 
-        assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} ==
+        assert {:error, {:invalid_batch_size, %{provided: "0", minimum: 1}}} ==
                  NIF.stream_fetch(stream_handle, 0)
 
         # Stream should still be usable with valid batch size
@@ -178,10 +178,9 @@ defmodule Xqlite.NIF.StreamTest do
         sql = "SELECT id FROM stream_items LIMIT 1;"
         {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
 
-        assert {:error, {:invalid_batch_size, details}} = NIF.stream_fetch(stream_handle, -1)
-        # Or whatever i64 it decodes to
-        assert details.provided == -1
-        assert details.minimum == 1
+        assert {:error, {:invalid_batch_size, %{provided: "-1", minimum: 1}}} ==
+                 NIF.stream_fetch(stream_handle, -1)
+
         assert :ok == NIF.stream_close(stream_handle)
       end
 
@@ -269,11 +268,11 @@ defmodule Xqlite.NIF.StreamTest do
     sql = "SELECT id FROM iso_items ORDER BY id LIMIT 2;"
     {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
 
-    assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} ==
+    assert {:error, {:invalid_batch_size, %{provided: "0", minimum: 1}}} ==
              NIF.stream_fetch(stream_handle, 0),
            "Fetch (batch 0 should error)"
 
-    assert {:error, {:invalid_batch_size, %{provided: -1, minimum: 1}}} =
+    assert {:error, {:invalid_batch_size, %{provided: "-1", minimum: 1}}} ==
              NIF.stream_fetch(stream_handle, -1),
            "Fetch (batch -1 should error)"
 
