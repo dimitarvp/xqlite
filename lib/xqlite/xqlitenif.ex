@@ -1,6 +1,8 @@
 defmodule XqliteNIF do
   use Rustler, otp_app: :xqlite, crate: :xqlitenif, mode: :release
 
+  @type stream_fetch_ok_result :: %{rows: [list(term())]}
+
   def open(_path, _opts \\ []), do: err()
   def open_in_memory(_path \\ ":memory:"), do: err()
   def open_temporary(), do: err()
@@ -29,6 +31,81 @@ defmodule XqliteNIF do
   def last_insert_rowid(_conn), do: err()
   def create_cancel_token(), do: err()
   def cancel_operation(_token_resource), do: err()
+
+  @doc """
+  Prepares a SQL query for streaming and returns an opaque stream handle resource.
+
+  This function does not execute the query immediately but prepares it for
+  row-by-row fetching. The returned handle is opaque and must be used with
+  other `stream_*` NIF functions or managed by a higher-level streaming abstraction
+  like `Xqlite.stream/4`.
+
+  `conn` is the database connection resource.
+  `sql` is the SQL query string.
+  `params` is a list of positional parameters or a keyword list of named parameters.
+  `opts` is a keyword list for future stream-specific options (currently unused).
+
+  Returns `{:ok, stream_handle_resource}` or `{:error, reason}`.
+  The `stream_handle_resource` is an opaque reference.
+  """
+  @spec stream_open(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword(),
+          opts :: keyword()
+        ) ::
+          {:ok, reference()} | {:error, Xqlite.error()}
+  def stream_open(_conn, _sql, _params, _opts \\ []), do: err()
+
+  @doc """
+  Retrieves the column names for an opened stream.
+
+  `stream_handle` is the opaque resource returned by `stream_open/4`.
+
+  Returns `{:ok, list_of_column_names}` where `list_of_column_names` is a list of strings,
+  or `{:error, reason}` if the handle is invalid or another error occurs.
+  The list of column names will be empty if the query yields no columns.
+  """
+  @spec stream_get_columns(stream_handle :: reference()) ::
+          {:ok, [String.t()]} | {:error, Xqlite.error()}
+  def stream_get_columns(_stream_handle), do: err()
+
+  @doc """
+  Fetches a batch of rows from an active stream handle.
+
+  `stream_handle` is the opaque resource obtained from `stream_open/4`.
+  `batch_size` indicates the maximum number of rows to fetch in this call.
+  A `batch_size` of `0` will return an empty list of rows without advancing
+  the stream, unless the stream is already exhausted (in which case it returns `:done`).
+
+  Returns:
+    - `{:ok, %{rows: [[term()]]}}` if rows are fetched. The inner list represents a row,
+      and the outer list is the batch of rows. The list of rows may be empty if
+      `batch_size` was `0` and the stream is not yet done, or if the query itself
+      yielded results but this particular fetch point encountered no more rows before
+      hitting `SQLITE_DONE` or an error within the batch limit.
+    - `:done` to indicate the end of the stream (all rows have been consumed).
+    - `{:error, reason}` if an error occurs during fetching from SQLite.
+  """
+  @spec stream_fetch(stream_handle :: reference(), batch_size :: non_neg_integer()) ::
+          {:ok, stream_fetch_ok_result()} | :done | {:error, Xqlite.error()}
+  def stream_fetch(_stream_handle, _batch_size), do: err()
+
+  @doc """
+  Closes an active stream and releases its underlying SQLite statement resources.
+
+  This function should be called when a stream is no longer needed, either
+  after all rows have been consumed or if the stream needs to be abandoned
+  prematurely. It is safe to call this function multiple times on the same handle;
+  subsequent calls after the first will be no-ops.
+
+  `stream_handle` is the opaque resource returned by `stream_open/4`.
+
+  Returns `:ok` if successful, or `{:error, reason}` if the handle is invalid
+  or an error occurs during finalization (rare).
+  """
+  @spec stream_close(stream_handle :: reference()) :: :ok | {:error, Xqlite.error()}
+  def stream_close(_stream_handle), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
