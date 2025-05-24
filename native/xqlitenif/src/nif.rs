@@ -12,7 +12,7 @@ use crate::stream::{
 use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
     is_keyword, process_rows, quote_identifier, quote_savepoint_name,
-    term_to_tagged_elixir_value, with_conn,
+    singular_ok_or_error_tuple, term_to_tagged_elixir_value, with_conn,
 };
 use crate::{columns, done, invalid_batch_size, no_value, num_rows, rows};
 use rusqlite::ffi;
@@ -378,10 +378,7 @@ fn set_pragma<'a>(
         })
     })();
 
-    match execution_result {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
