@@ -34,7 +34,18 @@ defmodule XqliteNIF do
           {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
   def open_in_memory(_path \\ ":memory:"), do: err()
 
+  @doc """
+  Opens a connection to a private, temporary on-disk SQLite database.
+
+  The database file is created by SQLite in a temporary location and is
+  automatically deleted when the connection is closed. Each call creates
+  a new, independent temporary database.
+
+  Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
+  """
+  @spec open_temporary() :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
   def open_temporary(), do: err()
+
   def query(_conn, _sql, _params \\ []), do: err()
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute(_conn, _sql, _params \\ []), do: err()
