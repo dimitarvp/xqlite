@@ -1112,7 +1112,7 @@ pub(crate) fn stream_fetch<'a>(
      -> Term<'a> {
         match map_new(env_closure)
             .map_put(crate::provided(), final_provided_term)
-            .and_then(|map| map.map_put(crate::minimum(), 1_usize.encode(env_closure)))
+            .and_then(|map| map.map_put(crate::minimum(), 1_usize))
         {
             Ok(details_map) => {
                 (error(), (invalid_batch_size(), details_map)).encode(env_closure)
