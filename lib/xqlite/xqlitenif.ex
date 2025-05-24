@@ -475,7 +475,35 @@ defmodule XqliteNIF do
           {:ok, [Xqlite.Schema.ColumnInfo.t()]} | {:error, Xqlite.error()}
   def schema_columns(_conn, _table_name), do: err()
 
+  @doc """
+  Retrieves information about foreign key constraints originating from a table.
+
+  Corresponds to the `PRAGMA foreign_key_list('table_name');` statement.
+  This lists foreign keys defined *on* the specified `table_name` that
+  reference other tables.
+
+  `conn` is the database connection resource.
+  `table_name` (String.t()): The name of the table whose foreign key constraints
+  are to be listed. Case-sensitive based on SQLite's handling.
+
+  Returns `{:ok, list_of_foreign_key_info}` on success. `list_of_foreign_key_info`
+  is a list of `Xqlite.Schema.ForeignKeyInfo` structs. If the table does not
+  exist or has no foreign keys, an empty list is returned within the `{:ok, []}` tuple.
+  Each struct contains:
+    - `:id` (integer()): ID of the foreign key constraint (0-based index for the table).
+    - `:column_sequence` (integer()): 0-based index of the column within the FK (for compound FKs).
+    - `:target_table` (String.t()): Name of the table referenced by the foreign key.
+    - `:from_column` (String.t()): Name of the column in the current table that is part of the FK.
+    - `:to_column` (String.t() | nil): Name of the column in the target table referenced.
+    - `:on_update` (atom): Action on update (e.g., `:cascade`, `:set_null`).
+    - `:on_delete` (atom): Action on delete (e.g., `:restrict`, `:no_action`).
+    - `:match_clause` (atom): The `MATCH` clause type (e.g., `:none`, `:simple`).
+  Returns `{:error, reason}` for other failures.
+  """
+  @spec schema_foreign_keys(conn :: Xqlite.conn(), table_name :: String.t()) ::
+          {:ok, [Xqlite.Schema.ForeignKeyInfo.t()]} | {:error, Xqlite.error()}
   def schema_foreign_keys(_conn, _table_name), do: err()
+
   def schema_indexes(_conn, _table_name), do: err()
   def schema_index_columns(_conn, _index_name), do: err()
   def get_create_sql(_conn, _object_name), do: err()
