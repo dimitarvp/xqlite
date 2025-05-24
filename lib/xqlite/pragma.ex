@@ -353,7 +353,6 @@ defmodule Xqlite.Pragma do
 
   @spec result(pragma_result(), pragma_key()) :: pragma_result()
   defp result({:error, _} = e, _k), do: e
-  defp result({:error, _, _} = e, _k), do: e
   defp result({:ok, :no_value}, _k), do: :ok
   defp result({:ok, "ok"}, _k), do: :ok
 
@@ -367,8 +366,6 @@ defmodule Xqlite.Pragma do
 
   defp result({:ok, vv}, k) when is_binary(k) and is_list(vv),
     do: {:ok, multiple(String.to_atom(k), vv)}
-
-  defp result(:ok, _k), do: :ok
 
   # Generate pragma getter functions that convert a 0/1 integer result to a boolean
   # or transform special integer values to atoms.
