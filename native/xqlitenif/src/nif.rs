@@ -1261,8 +1261,7 @@ pub(crate) fn stream_fetch<'a>(
     } else {
         // No rows fetched, and stream did not become definitively exhausted in this call.
         // This means batch_size limit was met before any rows, or query yielded no rows from start.
-        match map_new(env).map_put(rows().encode(env), Vec::<Vec<Term<'a>>>::new().encode(env))
-        {
+        match map_new(env).map_put(rows(), Vec::<Vec<Term<'a>>>::new()) {
             Ok(result_map) => (ok(), result_map).encode(env),
             Err(_) => (
                 error(),
