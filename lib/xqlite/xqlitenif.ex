@@ -530,7 +530,38 @@ defmodule XqliteNIF do
           {:ok, [Xqlite.Schema.IndexInfo.t()]} | {:error, Xqlite.error()}
   def schema_indexes(_conn, _table_name), do: err()
 
+  @doc """
+  Retrieves detailed information about the columns that make up a specific index.
+
+  Corresponds to the `PRAGMA index_xinfo('index_name');` statement, which provides
+  more details than `PRAGMA index_info`, including sort order, collation, and
+  whether a column is a key or an included column.
+
+  `conn` is the database connection resource.
+  `index_name` (String.t()): The name of the index for which to retrieve column
+  information. Index names are typically case-sensitive.
+
+  Returns `{:ok, list_of_index_column_info}` on success. `list_of_index_column_info`
+  is a list of `Xqlite.Schema.IndexColumnInfo` structs, ordered by their sequence
+  within the index definition. If the index does not exist, an empty list is
+  returned within the `{:ok, []}` tuple.
+  Each struct contains:
+    - `:index_column_sequence` (integer()): 0-based position of this column in the index key.
+    - `:table_column_id` (integer()): ID of the column in the base table (`cid` from
+      `PRAGMA table_info`). `-1` for expressions not directly on a table column,
+      or for the rowid. `-2` is sometimes used by SQLite for expressions in `PRAGMA index_xinfo`.
+    - `:name` (String.t() | nil): Name of the table column, or `nil` if the index is
+      on an expression or rowid.
+    - `:sort_order` (atom): Sort order (e.g., `:asc`, `:desc`).
+    - `:collation` (String.t()): Name of the collation sequence used.
+    - `:is_key_column` (boolean()): `true` if part of the primary index key, `false` if an
+      "included" column (SQLite >= 3.9.0).
+  Returns `{:error, reason}` for other failures.
+  """
+  @spec schema_index_columns(conn :: Xqlite.conn(), index_name :: String.t()) ::
+          {:ok, [Xqlite.Schema.IndexColumnInfo.t()]} | {:error, Xqlite.error()}
   def schema_index_columns(_conn, _index_name), do: err()
+
   def get_create_sql(_conn, _object_name), do: err()
   def last_insert_rowid(_conn), do: err()
   def create_cancel_token(), do: err()
