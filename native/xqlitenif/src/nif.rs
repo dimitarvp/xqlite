@@ -393,12 +393,16 @@ fn set_pragma<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    match with_conn(&handle, |conn| {
-        conn.execute("BEGIN;", []).map_err(XqliteError::from)
-    }) {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    let execution_result = with_conn(&handle, |conn| {
+        // conn.execute() returns Result<usize, rusqlite::Error>
+        // We want Result<(), XqliteError> for the helper.
+        // So, map Ok(usize) to Ok(()), and map Err to XqliteError.
+        conn.execute("BEGIN;", [])
+            .map(|_affected_rows| ()) // Discard affected_rows, map to Ok(())
+            .map_err(XqliteError::from)
+    });
+
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
