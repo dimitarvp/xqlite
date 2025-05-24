@@ -88,6 +88,7 @@ rustler::atoms! {
     sql_input_error,
     sqlite_failure,
     stored_generated,
+    string,
     table,
     table_exists,
     text,
