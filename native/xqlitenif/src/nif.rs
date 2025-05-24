@@ -446,16 +446,15 @@ fn rollback_to_savepoint(
     handle: ResourceArc<XqliteConn>,
     name: String,
 ) -> Term<'_> {
-    let execution_result: Result<usize, XqliteError> = with_conn(&handle, |conn| {
+    let execution_result = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
         let sql = format!("ROLLBACK TO SAVEPOINT {};", quoted_name);
-        conn.execute(&sql, []).map_err(XqliteError::from)
+        conn.execute(&sql, [])
+            .map(|_affected_rows| ())
+            .map_err(XqliteError::from)
     });
 
-    match execution_result {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
