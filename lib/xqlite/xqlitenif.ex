@@ -444,7 +444,37 @@ defmodule XqliteNIF do
           {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | {:error, Xqlite.error()}
   def schema_list_objects(_conn, _schema \\ nil), do: err()
 
+  @doc """
+  Retrieves detailed information about columns in a specific table or view.
+
+  Corresponds to the `PRAGMA table_xinfo('table_name');` statement, which provides
+  more details than `PRAGMA table_info`, including column hidden status.
+
+  `conn` is the database connection resource.
+  `table_name` (String.t()): The name of the table or view for which to retrieve
+  column information. The name is case-sensitive based on SQLite's handling.
+
+  Returns `{:ok, list_of_column_info}` on success, where `list_of_column_info`
+  is a list of `Xqlite.Schema.ColumnInfo` structs, ordered by column ID.
+  If the table does not exist, an empty list is returned within the `{:ok, []}` tuple.
+  Each struct contains:
+    - `:column_id` (integer()): 0-indexed ID of the column within the table.
+    - `:name` (String.t()): Name of the column.
+    - `:type_affinity` (atom): Resolved data type affinity (e.g., `:integer`, `:text`).
+    - `:declared_type` (String.t()): Original data type string from `CREATE TABLE`.
+    - `:nullable` (boolean()): `true` if the column allows NULL values.
+    - `:default_value` (String.t() | nil): Default value expression as a string literal,
+      or `nil`. For generated columns, this will be `nil` as the expression is not
+      in this field from `PRAGMA table_xinfo`.
+    - `:primary_key_index` (non_neg_integer()): 1-based index within the PK if part of it, else `0`.
+    - `:hidden_kind` (atom): Indicates if/how a column is hidden/generated
+      (e.g., `:normal`, `:stored_generated`, `:virtual_generated`).
+  Returns `{:error, reason}` for other failures.
+  """
+  @spec schema_columns(conn :: Xqlite.conn(), table_name :: String.t()) ::
+          {:ok, [Xqlite.Schema.ColumnInfo.t()]} | {:error, Xqlite.error()}
   def schema_columns(_conn, _table_name), do: err()
+
   def schema_foreign_keys(_conn, _table_name), do: err()
   def schema_indexes(_conn, _table_name), do: err()
   def schema_index_columns(_conn, _index_name), do: err()
