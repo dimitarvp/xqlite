@@ -306,7 +306,22 @@ defmodule XqliteNIF do
   @spec begin(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
   def begin(_conn), do: err()
 
+  @doc """
+  Commits the current database transaction.
+
+  Equivalent to executing the SQL statement `COMMIT;` or `END TRANSACTION;`.
+  All changes made within the transaction become permanent.
+
+  `conn` is the database connection resource.
+
+  Returns `:ok` on success.
+  Returns `{:error, reason}` if the transaction cannot be committed (e.g., if
+  no transaction is active, or due to other SQLite errors like deferred constraint
+  violations).
+  """
+  @spec commit(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
   def commit(_conn), do: err()
+
   def rollback(_conn), do: err()
   def savepoint(_conn, _name), do: err()
   def rollback_to_savepoint(_conn, _name), do: err()
