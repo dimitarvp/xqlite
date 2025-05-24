@@ -35,6 +35,33 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
     }
 }
 
+pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> Term<'a> {
+    match term.get_type() {
+        TermType::Atom => (crate::atom(), term).encode(env), // e.g., {:atom, :foo}
+        TermType::Binary => {
+            if let Ok(_s_val) = term.decode::<String>() {
+                // If it's a valid Elixir string, tag as :string and pass original term
+                (crate::string(), term).encode(env) // e.g., {:string, "hello"}
+            } else {
+                // Otherwise, tag as :binary and pass original term
+                (crate::binary(), term).encode(env) // e.g., {:binary, <<1,2,3>>}
+            }
+        }
+        TermType::Integer => (crate::integer(), term).encode(env), // e.g., {:integer, 123}
+        TermType::Float => (crate::float(), term).encode(env),     // e.g., {:float, 1.23}
+        TermType::List => (crate::list(), term).encode(env),       // e.g., {:list, [1,2]}
+        TermType::Map => (crate::map(), term).encode(env),         // e.g., {:map, %{a: 1}}
+        TermType::Fun => (crate::function(), term).encode(env), // e.g., {:function, &fun/0} (opaque)
+        TermType::Pid => (crate::pid(), term).encode(env), // e.g., {:pid, #Pid<...>} (opaque)
+        TermType::Port => (crate::port(), term).encode(env), // e.g., {:port, #Port<...>} (opaque)
+        TermType::Ref => (crate::reference(), term).encode(env), // e.g., {:reference, #Reference<...>} (opaque)
+        TermType::Tuple => (crate::tuple(), term).encode(env),   // e.g., {:tuple, {1,2}}
+        TermType::Unknown => {
+            (crate::unknown(), format!("Unknown TermType: {:?}", term)).encode(env)
+        }
+    }
+}
+
 pub(crate) fn process_rows<'a, 'rows>(
     env: Env<'a>,
     mut rows: Rows<'rows>,
