@@ -1085,21 +1085,17 @@ pub(crate) fn stream_get_columns(
 pub(crate) fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Term<'a> {
     match stream_handle_term.decode::<ResourceArc<XqliteStream>>() {
         Ok(stream_arc) => {
-            // Use the method on XqliteStream to handle atomic swap and finalization.
-            // Pass Some(&stream_arc.conn_resource_arc) for better error reporting from finalize.
-            match stream_arc.take_and_finalize_atomic_stmt() {
-                Ok(_) => ok().encode(env),
-                Err(xqlite_err) => {
-                    // Error from finalization itself
-                    (error(), xqlite_err.encode(env)).encode(env)
-                }
-            }
+            // take_and_finalize_atomic_stmt() returns Result<(), XqliteError>
+            let finalization_result = stream_arc.take_and_finalize_atomic_stmt();
+            singular_ok_or_error_tuple(env, finalization_result)
         }
         Err(decode_err) => {
+            // For decode errors, we still manually construct the error term
+            // as it's not an XqliteError directly from an operation.
             let xql_err = XqliteError::InvalidStreamHandle {
                 reason: format!("Expected a valid stream handle resource: {:?}", decode_err),
             };
-            (error(), xql_err.encode(env)).encode(env)
+            (error(), xql_err).encode(env)
         }
     }
 }
