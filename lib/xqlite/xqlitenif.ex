@@ -143,7 +143,32 @@ defmodule XqliteNIF do
           {:ok, non_neg_integer()} | {:error, Xqlite.error()}
   def execute(_conn, _sql, _params \\ []), do: err()
 
+  @doc """
+  Executes a SQL statement that does not return rows, with support for cancellation.
+
+  This is a cancellable version of `execute/3`.
+  See `execute/3` for details on parameters, return values, and general behavior.
+
+  `conn` is the database connection resource.
+  `sql` is the SQL statement string.
+  `params` is an optional list of positional parameters.
+  `cancel_token` is a resource created by `create_cancel_token/0`. If this token
+  is cancelled via `cancel_operation/1` while the statement is executing, the
+  operation will be interrupted.
+
+  Returns `{:ok, affected_rows}` on successful completion.
+  Returns `{:error, :operation_cancelled}` if the operation was cancelled.
+  Returns `{:error, other_reason}` for other types of failures.
+  """
+  @spec execute_cancellable(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list(),
+          cancel_token :: reference()
+        ) ::
+          {:ok, non_neg_integer()} | {:error, Xqlite.error()}
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
+
   def execute_batch(_conn, _sql), do: err()
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
   def close(_conn), do: err()
