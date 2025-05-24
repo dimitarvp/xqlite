@@ -629,6 +629,29 @@ defmodule XqliteNIF do
   @spec create_cancel_token() :: {:ok, reference()} | {:error, Xqlite.error()}
   def create_cancel_token(), do: err()
 
+  @doc """
+  Signals an intent to cancel operations associated with a given cancellation token.
+
+  When this function is called, any active SQLite operations (executed via
+  cancellable NIFs like `query_cancellable/4` or `execute_cancellable/4`)
+  that were started with the provided `token_resource` will be interrupted
+  at the next opportunity (SQLite's progress handler check).
+
+  `token_resource` is an opaque reference previously created by
+  `create_cancel_token/0`.
+
+  This function is idempotent; calling it multiple times on the same token
+  has no additional effect after the first call. The cancellation signal
+  remains active for the token.
+
+  Returns `:ok`. This function indicates the signal has been set; it does not
+  guarantee that the operation has already stopped. The cancellable NIF function
+  will return `{:error, :operation_cancelled}` when it actually terminates due
+  to the cancellation.
+  Returns `{:error, reason}` if the provided `token_resource` is not a valid
+  cancellation token resource (e.g., a different type of reference).
+  """
+  @spec cancel_operation(token_resource :: reference()) :: :ok | {:error, Xqlite.error()}
   def cancel_operation(_token_resource), do: err()
 
   @doc """
