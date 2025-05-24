@@ -418,12 +418,13 @@ fn commit(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn rollback(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    match with_conn(&handle, |conn| {
-        conn.execute("ROLLBACK;", []).map_err(XqliteError::from)
-    }) {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    let execution_result = with_conn(&handle, |conn| {
+        conn.execute("ROLLBACK;", [])
+            .map(|_affected_rows| ())
+            .map_err(XqliteError::from)
+    });
+
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
