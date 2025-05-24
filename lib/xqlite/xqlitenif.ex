@@ -291,7 +291,21 @@ defmodule XqliteNIF do
           :ok | {:error, Xqlite.error()}
   def set_pragma(_conn, _name, _value), do: err()
 
+  @doc """
+  Begins a new database transaction.
+
+  Equivalent to executing the SQL statement `BEGIN;` or `BEGIN TRANSACTION;`.
+  By default, SQLite transactions are `DEFERRED`.
+
+  `conn` is the database connection resource.
+
+  Returns `:ok` on success.
+  Returns `{:error, reason}` if a transaction cannot be started (e.g., if one
+  is already active on this connection, or due to other SQLite errors).
+  """
+  @spec begin(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
   def begin(_conn), do: err()
+
   def commit(_conn), do: err()
   def rollback(_conn), do: err()
   def savepoint(_conn, _name), do: err()
