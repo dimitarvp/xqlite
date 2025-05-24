@@ -308,12 +308,11 @@ fn execute_batch_cancellable(
     token: ResourceArc<XqliteCancelToken>,
 ) -> Term<'_> {
     let token_bool = token.0.clone();
-    match with_conn(&handle, |conn| {
+    let execution_result = with_conn(&handle, |conn| {
         core_execute_batch(conn, &sql_batch, Some(token_bool))
-    }) {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    });
+
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif]
