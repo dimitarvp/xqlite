@@ -9,11 +9,11 @@ use crate::{
     float, from_sql_conversion_failure, function, index_exists, integer,
     integral_value_out_of_range, internal_encoding_error, invalid_column_index,
     invalid_column_name, invalid_column_type, invalid_parameter_count, invalid_parameter_name,
-    list, lock_error, map, multiple_statements, no_such_index, no_such_table,
-    null_byte_in_string, operation_cancelled, pid, port, read_only_database, reference,
-    schema_changed, schema_parsing_error, sql_input_error, sqlite_failure, table_exists, text,
-    to_sql_conversion_failure, tuple, unexpected_value, unknown, unsupported_atom,
-    unsupported_data_type, utf8_error,
+    invalid_stream_handle, list, lock_error, map, multiple_statements, no_such_index,
+    no_such_table, null_byte_in_string, operation_cancelled, pid, port, read_only_database,
+    reference, schema_changed, schema_parsing_error, sql_input_error, sqlite_failure,
+    table_exists, text, to_sql_conversion_failure, tuple, unexpected_value, unknown,
+    unsupported_atom, unsupported_data_type, utf8_error,
 };
 use rusqlite::{ffi, Error as RusqliteError};
 use rustler::{
@@ -220,6 +220,10 @@ pub(crate) enum XqliteError {
         error_detail: SchemaErrorDetail,
     },
 
+    InvalidStreamHandle {
+        reason: String,
+    },
+
     // Internal
     InternalEncodingError {
         context: String,
@@ -267,6 +271,7 @@ impl Display for XqliteError {
             XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{}': {}", path, reason),
             XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {}", reason),
             XqliteError::LockError(reason) => write!(f, "Failed to lock connection mutex: {}", reason),
+            XqliteError::InvalidStreamHandle { reason } => write!(f, "Invalid stream handle: {}", reason),
             XqliteError::InternalEncodingError { context } => write!(f, "Internal error during result encoding: {}", context),
             XqliteError::InvalidParameterCount { provided, expected } => write!(f, "Invalid parameter count: provided {}, expected {}", provided, expected),
             XqliteError::InvalidParameterName(name) => write!(f, "Invalid parameter name: '{}'", name),
@@ -340,6 +345,9 @@ impl Encoder for XqliteError {
                 (cannot_convert_atom_to_string(), reason).encode(env)
             }
             XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
+            XqliteError::InvalidStreamHandle { reason } => {
+                (invalid_stream_handle(), reason).encode(env)
+            }
             XqliteError::InternalEncodingError { context } => {
                 (internal_encoding_error(), context).encode(env)
             }
@@ -389,13 +397,12 @@ impl Encoder for XqliteError {
                 offset,
             } => {
                 let map_result = map_new(env)
-                    // Scope the atom access to avoid shadowing with the `code` variable.
                     .map_put(crate::code(), code)
-                    .and_then(|map| map.map_put(crate::message(), message)) // Use full path
-                    .and_then(|map| map.map_put(crate::sql(), sql)) // Use full path
+                    .and_then(|map| map.map_put(crate::message(), message))
+                    .and_then(|map| map.map_put(crate::sql(), sql))
                     .and_then(|map| map.map_put(crate::offset(), offset));
                 match map_result {
-                    Ok(map) => (sql_input_error(), map).encode(env), // Use atom fn for tuple key
+                    Ok(map) => (sql_input_error(), map).encode(env),
                     Err(_) => (
                         error(),
                         internal_encoding_error(),
@@ -591,7 +598,6 @@ impl From<RusqliteError> for XqliteError {
                 reason: e.to_string(),
             },
             RusqliteError::FromSqlConversionFailure(idx, sql_type, source_err) => {
-                // Keep existing comment explaining the need for sqlite_type_to_atom
                 XqliteError::FromSqlConversionFailure {
                     index: idx,
                     sqlite_type: sqlite_type_to_atom(sql_type),
@@ -610,7 +616,6 @@ impl From<RusqliteError> for XqliteError {
             RusqliteError::InvalidColumnIndex(idx) => XqliteError::InvalidColumnIndex(idx),
             RusqliteError::InvalidColumnName(name) => XqliteError::InvalidColumnName(name),
             RusqliteError::InvalidColumnType(idx, name, sql_type) => {
-                // Keep existing comment explaining the need for sqlite_type_to_atom
                 XqliteError::InvalidColumnType {
                     index: idx,
                     name,
