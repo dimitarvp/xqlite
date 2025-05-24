@@ -236,7 +236,32 @@ defmodule XqliteNIF do
   @spec close(conn :: Xqlite.conn()) :: :ok
   def close(_conn), do: err()
 
+  @doc """
+  Reads the current value of an SQLite PRAGMA.
+
+  PRAGMA statements are used to modify the operation of the SQLite library or
+  to query the library for internal data. See SQLite documentation for a list
+  of available PRAGMAs.
+
+  `conn` is the database connection resource.
+  `name` is the string name of the PRAGMA to read (e.g., "user_version", "journal_mode").
+
+  Returns `{:ok, value}` where `value` is the PRAGMA's current value, converted
+  to an appropriate Elixir term (integer, string, boolean for some common 0/1 PRAGMAs).
+  Returns `{:ok, :no_value}` if the PRAGMA does not return a value (e.g., `PRAGMA optimize`)
+  or if the PRAGMA name is invalid/unknown to SQLite.
+  Returns `{:error, reason}` for other failures.
+
+  Note: Some PRAGMAs require an argument to read (e.g., `PRAGMA table_info(table_name)`).
+  This function is for PRAGMAs that are read without an argument or whose argument is
+  part of the `name` string itself if SQLite supports that syntax. For more complex
+  PRAGMA queries, use `XqliteNIF.query/3`. The `Xqlite.Pragma` module provides
+  higher-level helpers for many common PRAGMAs.
+  """
+  @spec get_pragma(conn :: Xqlite.conn(), name :: String.t()) ::
+          {:ok, term() | :no_value} | {:error, Xqlite.error()}
   def get_pragma(_conn, _name), do: err()
+
   def set_pragma(_conn, _name, _value), do: err()
   def begin(_conn), do: err()
   def commit(_conn), do: err()
