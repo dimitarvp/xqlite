@@ -1242,7 +1242,7 @@ pub(crate) fn stream_fetch<'a>(
     }
 
     if let Some(err) = an_error_occurred {
-        return (error(), err.encode(env)).encode(env);
+        return (error(), err).encode(env);
     }
 
     if !fetched_rows.is_empty() {
