@@ -415,7 +415,35 @@ defmodule XqliteNIF do
           {:ok, [Xqlite.Schema.DatabaseInfo.t()]} | {:error, Xqlite.error()}
   def schema_databases(_conn), do: err()
 
+  @doc """
+  Lists schema objects (tables, views, etc.) in a specified database schema.
+
+  Corresponds to the `PRAGMA table_list;` statement, filtered by the optional
+  `schema_name`. This PRAGMA primarily lists tables, views, and virtual tables.
+
+  `conn` is the database connection resource.
+  `schema_name` (optional String.t()): The name of the schema (e.g., "main", "temp",
+  or an attached database name). If `nil` or omitted, information for all schemas
+  accessible by the connection may be returned (behavior can depend on how `PRAGMA table_list`
+  is implemented if no schema is specified, though SQLite typically defaults to "main" or all).
+  It is recommended to specify a schema for predictable results.
+
+  Returns `{:ok, list_of_object_info}` on success, where `list_of_object_info`
+  is a list of `Xqlite.Schema.SchemaObjectInfo` structs for objects matching
+  the specified schema.
+  Each struct contains:
+    - `:schema` (String.t()): Name of the schema containing the object.
+    - `:name` (String.t()): Name of the object.
+    - `:object_type` (atom): The type of object (e.g., `:table`, `:view`, `:virtual`).
+    - `:column_count` (integer()): Number of columns (meaningful for tables/views).
+    - `:is_writable` (boolean()): `true` if data can be modified in this object.
+    - `:strict` (boolean()): `true` if the table was declared using `STRICT` mode.
+  Returns `{:error, reason}` on failure.
+  """
+  @spec schema_list_objects(conn :: Xqlite.conn(), schema_name :: String.t() | nil) ::
+          {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | {:error, Xqlite.error()}
   def schema_list_objects(_conn, _schema \\ nil), do: err()
+
   def schema_columns(_conn, _table_name), do: err()
   def schema_foreign_keys(_conn, _table_name), do: err()
   def schema_indexes(_conn, _table_name), do: err()
