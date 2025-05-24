@@ -322,7 +322,22 @@ defmodule XqliteNIF do
   @spec commit(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
   def commit(_conn), do: err()
 
+  @doc """
+  Rolls back the current database transaction.
+
+  Equivalent to executing the SQL statement `ROLLBACK;` or `ROLLBACK TRANSACTION;`.
+  All changes made within the transaction since the last `COMMIT` or `SAVEPOINT`
+  are discarded.
+
+  `conn` is the database connection resource.
+
+  Returns `:ok` on success.
+  Returns `{:error, reason}` if the transaction cannot be rolled back (e.g., if
+  no transaction is active, or due to other SQLite errors).
+  """
+  @spec rollback(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
   def rollback(_conn), do: err()
+
   def savepoint(_conn, _name), do: err()
   def rollback_to_savepoint(_conn, _name), do: err()
   def release_savepoint(_conn, _name), do: err()
