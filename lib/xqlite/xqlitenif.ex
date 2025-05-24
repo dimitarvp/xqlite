@@ -16,6 +16,8 @@ defmodule XqliteNIF do
   opaque reference to the database connection. Returns `{:error, reason}`
   on failure, e.g., if the path is invalid or permissions are insufficient.
   """
+  @spec open(path :: String.t(), opts :: keyword()) ::
+          {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
   def open(_path, _opts \\ []), do: err()
 
   @doc """
@@ -28,6 +30,8 @@ defmodule XqliteNIF do
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
+  @spec open_in_memory(uri :: String.t()) ::
+          {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
   def open_in_memory(_path \\ ":memory:"), do: err()
 
   def open_temporary(), do: err()
