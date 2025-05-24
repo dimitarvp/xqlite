@@ -18,7 +18,18 @@ defmodule XqliteNIF do
   """
   def open(_path, _opts \\ []), do: err()
 
+  @doc """
+  Opens a connection to an in-memory SQLite database.
+
+  `uri` is typically `":memory:"` for a private, temporary in-memory database.
+  It can also be a URI filename like `"file:memdb1?mode=memory&cache=shared"`
+  to create a named in-memory database that can be shared across connections
+  in the same process.
+
+  Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
+  """
   def open_in_memory(_path \\ ":memory:"), do: err()
+
   def open_temporary(), do: err()
   def query(_conn, _sql, _params \\ []), do: err()
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
