@@ -46,7 +46,46 @@ defmodule XqliteNIF do
   @spec open_temporary() :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
   def open_temporary(), do: err()
 
+  @doc """
+  Executes a SQL query that returns rows (e.g., `SELECT`, `PRAGMA` that returns data, `INSERT ... RETURNING`).
+
+  `conn` is the database connection resource.
+  `sql` is the SQL query string.
+  `params` is an optional list of positional parameters (`[val1, val2]`) or a
+  keyword list of named parameters (`[name1: val1, name2: val2]`).
+  Use an empty list `[]` if the query has no parameters.
+
+  Supported Elixir parameter types are integers, floats, strings, `nil`,
+  booleans (`true`/`false`), and binaries (blobs).
+
+  Returns `{:ok, result_map}` on success or `{:error, reason}` on failure.
+  The `result_map` is `%{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}`.
+  `columns` is a list of column name strings.
+  `rows` is a list of lists, where each inner list represents a row and contains
+  Elixir terms corresponding to the SQLite values.
+  `num_rows` is the count of rows fetched.
+
+  If the query is an `INSERT ... RETURNING` statement, the `rows` will contain
+  the returned values. For statements that do not return rows (e.g., a simple `INSERT`
+  without `RETURNING`), this function will likely succeed but return an empty
+  `rows` list and `num_rows: 0`, or potentially an error like `:execute_returned_results`
+  if SQLite's API indicates results were returned unexpectedly for a non-query.
+  It is generally recommended to use `execute/3` for non-row-returning statements.
+  """
+  @spec query(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword()
+        ) ::
+          {:ok,
+           %{
+             columns: [String.t()],
+             rows: [list(term())],
+             num_rows: non_neg_integer()
+           }}
+          | {:error, Xqlite.error()}
   def query(_conn, _sql, _params \\ []), do: err()
+
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
   def execute(_conn, _sql, _params \\ []), do: err()
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
