@@ -177,7 +177,7 @@ defmodule XqliteNIF do
   Parameters are not supported for statements within the batch.
 
   `conn` is the database connection resource.
-  `sql` is a string containing one or more SQL statements. SQLite executes
+  `sql_batch` is a string containing one or more SQL statements. SQLite executes
   the statements sequentially. If an error occurs in one statement, subsequent
   statements in the batch are typically not executed, and the function returns
   an error. The changes made by prior successful statements within the batch
@@ -191,7 +191,30 @@ defmodule XqliteNIF do
           :ok | {:error, Xqlite.error()}
   def execute_batch(_conn, _sql), do: err()
 
+  @doc """
+  Executes one or more SQL statements separated by semicolons, with support for cancellation.
+
+  This is a cancellable version of `execute_batch/2`.
+  See `execute_batch/2` for details on parameters, return values, and general behavior.
+
+  `conn` is the database connection resource.
+  `sql_batch` is a string containing one or more SQL statements.
+  `cancel_token` is a resource created by `create_cancel_token/0`. If this token
+  is cancelled via `cancel_operation/1` while the batch is executing, the
+  operation will be interrupted.
+
+  Returns `:ok` if all statements in the batch execute successfully.
+  Returns `{:error, :operation_cancelled}` if the operation was cancelled.
+  Returns `{:error, other_reason}` for other types of failures.
+  """
+  @spec execute_batch_cancellable(
+          conn :: Xqlite.conn(),
+          sql_batch :: String.t(),
+          cancel_token :: reference()
+        ) ::
+          :ok | {:error, Xqlite.error()}
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
+
   def close(_conn), do: err()
   def get_pragma(_conn, _name), do: err()
   def set_pragma(_conn, _name, _value), do: err()
