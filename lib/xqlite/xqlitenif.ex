@@ -504,7 +504,32 @@ defmodule XqliteNIF do
           {:ok, [Xqlite.Schema.ForeignKeyInfo.t()]} | {:error, Xqlite.error()}
   def schema_foreign_keys(_conn, _table_name), do: err()
 
+  @doc """
+  Retrieves information about all indexes associated with a table.
+
+  Corresponds to the `PRAGMA index_list('table_name');` statement. This includes
+  explicitly created indexes (`CREATE INDEX`) and indexes automatically created
+  by SQLite for `PRIMARY KEY` and `UNIQUE` constraints.
+
+  `conn` is the database connection resource.
+  `table_name` (String.t()): The name of the table whose indexes are to be listed.
+  Case-sensitive based on SQLite's handling.
+
+  Returns `{:ok, list_of_index_info}` on success. `list_of_index_info` is a list
+  of `Xqlite.Schema.IndexInfo` structs. If the table does not exist or has no
+  indexes, an empty list is returned within the `{:ok, []}` tuple.
+  Each struct contains:
+    - `:name` (String.t()): Name of the index.
+    - `:unique` (boolean()): `true` if the index enforces uniqueness.
+    - `:origin` (atom): How the index was created (e.g., `:create_index`,
+      `:unique_constraint`, `:primary_key_constraint`).
+    - `:partial` (boolean()): `true` if the index is partial (has a `WHERE` clause).
+  Returns `{:error, reason}` for other failures.
+  """
+  @spec schema_indexes(conn :: Xqlite.conn(), table_name :: String.t()) ::
+          {:ok, [Xqlite.Schema.IndexInfo.t()]} | {:error, Xqlite.error()}
   def schema_indexes(_conn, _table_name), do: err()
+
   def schema_index_columns(_conn, _index_name), do: err()
   def get_create_sql(_conn, _object_name), do: err()
   def last_insert_rowid(_conn), do: err()
