@@ -562,7 +562,25 @@ defmodule XqliteNIF do
           {:ok, [Xqlite.Schema.IndexColumnInfo.t()]} | {:error, Xqlite.error()}
   def schema_index_columns(_conn, _index_name), do: err()
 
+  @doc """
+  Retrieves the original SQL text used to create a specific schema object.
+
+  This function queries the `sqlite_schema` table (formerly `sqlite_master`)
+  for the `sql` column corresponding to the given object name.
+
+  `conn` is the database connection resource.
+  `object_name` (String.t()): The name of the table, index, trigger, or view
+  whose creation SQL is to be retrieved. Object names are typically case-sensitive.
+
+  Returns `{:ok, sql_string}` on success if the object exists, where `sql_string`
+  is the `CREATE ...` statement.
+  Returns `{:ok, nil}` if no object with the given name is found in the schema.
+  Returns `{:error, reason}` for other failures.
+  """
+  @spec get_create_sql(conn :: Xqlite.conn(), object_name :: String.t()) ::
+          {:ok, String.t() | nil} | {:error, Xqlite.error()}
   def get_create_sql(_conn, _object_name), do: err()
+
   def last_insert_rowid(_conn), do: err()
   def create_cancel_token(), do: err()
   def cancel_operation(_token_resource), do: err()
