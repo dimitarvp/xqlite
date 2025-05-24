@@ -393,7 +393,28 @@ defmodule XqliteNIF do
           :ok | {:error, Xqlite.error()}
   def release_savepoint(_conn, _name), do: err()
 
+  @doc """
+  Retrieves information about all attached databases for the connection.
+
+  Corresponds to the `PRAGMA database_list;` statement. Each active connection
+  has at least a "main" database and often a "temp" database. Additional
+  databases can be attached using the `ATTACH DATABASE` SQL command.
+
+  `conn` is the database connection resource.
+
+  Returns `{:ok, list_of_database_info}` on success, where `list_of_database_info`
+  is a list of `Xqlite.Schema.DatabaseInfo` structs.
+  Each struct contains:
+    - `:name` (String.t()): The logical name of the database (e.g., "main", "temp", or attached name).
+    - `:file` (String.t() | nil): The absolute path to the database file,
+      or `nil` for in-memory databases, or an empty string for temporary databases
+      opened with `XqliteNIF.open_temporary/0`.
+  Returns `{:error, reason}` on failure.
+  """
+  @spec schema_databases(conn :: Xqlite.conn()) ::
+          {:ok, [Xqlite.Schema.DatabaseInfo.t()]} | {:error, Xqlite.error()}
   def schema_databases(_conn), do: err()
+
   def schema_list_objects(_conn, _schema \\ nil), do: err()
   def schema_columns(_conn, _table_name), do: err()
   def schema_foreign_keys(_conn, _table_name), do: err()
