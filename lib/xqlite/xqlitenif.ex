@@ -610,7 +610,25 @@ defmodule XqliteNIF do
   @spec last_insert_rowid(conn :: Xqlite.conn()) :: {:ok, integer()} | {:error, Xqlite.error()}
   def last_insert_rowid(_conn), do: err()
 
+  @doc """
+  Creates a new cancellation token resource.
+
+  This token can be passed to cancellable NIF operations (e.g.,
+  `query_cancellable/4`, `execute_cancellable/4`). To signal cancellation
+  for operations associated with this token, call `cancel_operation/1`
+  on the returned token resource.
+
+  Each token is independent. Cancelling one token does not affect others.
+  The token resource should be managed appropriately; it does not need explicit
+  closing beyond normal Elixir garbage collection of the resource reference.
+
+  Returns `{:ok, token_resource}` on success, where `token_resource` is an
+  opaque reference representing the cancellation token.
+  Returns `{:error, reason}` in the unlikely event of a resource allocation failure.
+  """
+  @spec create_cancel_token() :: {:ok, reference()} | {:error, Xqlite.error()}
   def create_cancel_token(), do: err()
+
   def cancel_operation(_token_resource), do: err()
 
   @doc """
