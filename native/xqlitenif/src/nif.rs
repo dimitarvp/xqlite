@@ -1186,8 +1186,7 @@ pub(crate) fn stream_fetch<'a>(
                 XqliteError::LockError(format!(
                     "XqliteConn Mutex poisoned for db_handle: {:?}",
                     p_err_conn
-                ))
-                .encode(env),
+                )),
             )
                 .encode(env);
         }
