@@ -5,7 +5,7 @@ use rusqlite::{types::Value, Connection, Rows};
 use rustler::{
     resource_impl,
     types::{
-        atom::{false_, nil, true_},
+        atom::{error, false_, nil, ok, true_},
         binary::OwnedBinary,
     },
     Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, Resource, ResourceArc,
@@ -59,6 +59,19 @@ pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> T
         TermType::Unknown => {
             (crate::unknown(), format!("Unknown TermType: {:?}", term)).encode(env)
         }
+    }
+}
+
+#[inline]
+pub(crate) fn singular_ok_or_error_tuple<'a>(
+    env: Env<'a>,
+    operation_result: Result<(), XqliteError>,
+) -> Term<'a> {
+    match operation_result {
+        // Returns only `:ok` to Elixir
+        Ok(()) => ok().encode(env),
+        // Returns `{:error, err}` to Elixir
+        Err(err) => (error(), err).encode(env),
     }
 }
 
