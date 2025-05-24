@@ -338,7 +338,24 @@ defmodule XqliteNIF do
   @spec rollback(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
   def rollback(_conn), do: err()
 
+  @doc """
+  Creates a new savepoint within the current transaction.
+
+  Equivalent to executing `SAVEPOINT 'name';`. Savepoints allow partial rollbacks
+  of a transaction. If the current transaction is not a `DEFERRED` transaction,
+  a `SAVEPOINT` command will implicitly start one.
+
+  `conn` is the database connection resource.
+  `name` is a string identifier for the savepoint. Savepoint names can be reused,
+  and a new savepoint with an existing name will hide the older one.
+
+  Returns `:ok` on success.
+  Returns `{:error, reason}` on failure (e.g., if SQLite cannot create the savepoint).
+  """
+  @spec savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
+          :ok | {:error, Xqlite.error()}
   def savepoint(_conn, _name), do: err()
+
   def rollback_to_savepoint(_conn, _name), do: err()
   def release_savepoint(_conn, _name), do: err()
   def schema_databases(_conn), do: err()
