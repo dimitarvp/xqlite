@@ -11,9 +11,10 @@ use crate::stream::{
 };
 use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
-    is_keyword, process_rows, quote_identifier, quote_savepoint_name, with_conn,
+    is_keyword, process_rows, quote_identifier, quote_savepoint_name,
+    term_to_tagged_elixir_value, with_conn,
 };
-use crate::{columns, done, no_value, num_rows, rows};
+use crate::{columns, done, invalid_batch_size, no_value, num_rows, rows};
 use rusqlite::ffi;
 use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
 use rustler::{
@@ -1105,19 +1106,48 @@ pub(crate) fn stream_fetch<'a>(
         Ok(val) if val >= 1 => val,
         Ok(val) => {
             // Decoded as i64, but val < 1
-            let xql_err = XqliteError::InvalidBatchSize {
-                provided: val.to_string(),
-                minimum: 1,
-            };
-            return (error(), xql_err.encode(env)).encode(env);
+            let original_term_as_term = val.encode(env); // Encode the i64 back to a Term
+            let tagged_provided_term = term_to_tagged_elixir_value(env, original_term_as_term);
+
+            let map_err_val = map_new(env)
+                .map_put(crate::provided(), tagged_provided_term)
+                .and_then(|map| map.map_put(crate::minimum(), 1_usize.encode(env)));
+
+            match map_err_val {
+                Ok(details_map) => {
+                    return (error(), (invalid_batch_size(), details_map)).encode(env);
+                }
+                Err(_map_create_err) => {
+                    let xql_err = XqliteError::InternalEncodingError {
+                        context:
+                            "Failed to create details map for InvalidBatchSize (i64 case)"
+                                .to_string(),
+                    };
+                    return (error(), xql_err.encode(env)).encode(env);
+                }
+            }
         }
         Err(_) => {
             // Did not decode as i64
-            let xql_err = XqliteError::InvalidBatchSize {
-                provided: format!("{:?}", batch_size_term),
-                minimum: 1,
-            };
-            return (error(), xql_err.encode(env)).encode(env);
+            let tagged_provided_term = term_to_tagged_elixir_value(env, batch_size_term);
+
+            let map_err_val = map_new(env)
+                .map_put(crate::provided(), tagged_provided_term)
+                .and_then(|map| map.map_put(crate::minimum(), 1_usize.encode(env)));
+
+            match map_err_val {
+                Ok(details_map) => {
+                    return (error(), (invalid_batch_size(), details_map)).encode(env);
+                }
+                Err(_map_create_err) => {
+                    let xql_err = XqliteError::InternalEncodingError {
+                        context:
+                            "Failed to create details map for InvalidBatchSize (non-i64 case)"
+                                .to_string(),
+                    };
+                    return (error(), xql_err.encode(env)).encode(env);
+                }
+            }
         }
     };
 
