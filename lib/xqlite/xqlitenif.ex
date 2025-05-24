@@ -215,7 +215,27 @@ defmodule XqliteNIF do
           :ok | {:error, Xqlite.error()}
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
 
+  @doc """
+  Conceptually closes the database connection.
+
+  After a connection is closed, any further attempts to use its resource handle
+  with other NIF functions will likely result in errors.
+  It is safe to call `close/1` multiple times on the same connection resource;
+  subsequent calls are no-ops and will also return `:ok`.
+
+  For on-disk temporary databases created with `open_temporary/0`, closing the
+  connection also deletes the underlying temporary file.
+
+  `conn` is the database connection resource.
+
+  Returns `:ok`. This function is designed to always succeed from the Elixir perspective
+  once a valid connection resource has been established, even if the underlying
+  SQLite close operation might encounter an issue (which is rare and typically
+  handled internally by `rusqlite`).
+  """
+  @spec close(conn :: Xqlite.conn()) :: :ok
   def close(_conn), do: err()
+
   def get_pragma(_conn, _name), do: err()
   def set_pragma(_conn, _name, _value), do: err()
   def begin(_conn), do: err()
