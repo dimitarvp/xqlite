@@ -1252,8 +1252,7 @@ pub(crate) fn stream_fetch<'a>(
                 error(),
                 XqliteError::InternalEncodingError {
                     context: "map_new fail for fetched rows".into(),
-                }
-                .encode(env),
+                },
             )
                 .encode(env),
         }
@@ -1269,8 +1268,7 @@ pub(crate) fn stream_fetch<'a>(
                 error(),
                 XqliteError::InternalEncodingError {
                     context: "map_new fail for empty non-done".into(),
-                }
-                .encode(env),
+                },
             )
                 .encode(env),
         }
