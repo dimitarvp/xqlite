@@ -169,7 +169,28 @@ defmodule XqliteNIF do
           {:ok, non_neg_integer()} | {:error, Xqlite.error()}
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
 
+  @doc """
+  Executes one or more SQL statements separated by semicolons.
+
+  This function is useful for running multiple DDL statements, a series of DML
+  statements without parameters, or other sequences of SQL operations.
+  Parameters are not supported for statements within the batch.
+
+  `conn` is the database connection resource.
+  `sql` is a string containing one or more SQL statements. SQLite executes
+  the statements sequentially. If an error occurs in one statement, subsequent
+  statements in the batch are typically not executed, and the function returns
+  an error. The changes made by prior successful statements within the batch
+  are usually persisted unless the batch execution occurs within an explicit
+  transaction that is later rolled back.
+
+  Returns `:ok` if all statements in the batch execute successfully.
+  Returns `{:error, reason}` if any statement fails.
+  """
+  @spec execute_batch(conn :: Xqlite.conn(), sql_batch :: String.t()) ::
+          :ok | {:error, Xqlite.error()}
   def execute_batch(_conn, _sql), do: err()
+
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
   def close(_conn), do: err()
   def get_pragma(_conn, _name), do: err()
