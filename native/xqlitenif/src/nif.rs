@@ -407,12 +407,13 @@ fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn commit(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    match with_conn(&handle, |conn| {
-        conn.execute("COMMIT;", []).map_err(XqliteError::from)
-    }) {
-        Ok(_) => ok().encode(env),
-        Err(err) => (error(), err.encode(env)).encode(env),
-    }
+    let execution_result = with_conn(&handle, |conn| {
+        conn.execute("COMMIT;", [])
+            .map(|_affected_rows| ()) // Discard affected_rows, map to Ok(())
+            .map_err(XqliteError::from)
+    });
+
+    singular_ok_or_error_tuple(env, execution_result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
