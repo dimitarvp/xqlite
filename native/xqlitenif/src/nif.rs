@@ -362,6 +362,11 @@ fn set_pragma<'a>(
 
         with_conn(&handle, |conn| {
             let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
+            // The block for executing the PRAGMA and consuming potential results remains.
+            // rusqlite's `execute` is for non-query statements, but PRAGMA assignments
+            // can sometimes return a row (e.g., the new value).
+            // Using prepare/query here is safer if the PRAGMA might return something,
+            // even if we discard the result.
             {
                 let mut write_stmt = conn.prepare(&write_sql).map_err(|e| {
                     XqliteError::CannotExecutePragma {
@@ -369,8 +374,13 @@ fn set_pragma<'a>(
                         reason: e.to_string(),
                     }
                 })?;
+                // Consume any potential rows returned by the PRAGMA statement.
+                // Some PRAGMAs when set (e.g. journal_mode) can return the new value.
+                // We don't use this returned value for the :ok contract of set_pragma,
+                // but we should consume it to properly finalize the statement.
                 let mut rows = write_stmt.query([])?;
                 if let Some(row_result) = rows.next()? {
+                    // We don't need the value, but calling .get() ensures the row is processed.
                     let _value_from_pragma_set: Value = row_result.get(0)?;
                 }
             }
