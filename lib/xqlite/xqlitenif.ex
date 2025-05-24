@@ -374,7 +374,25 @@ defmodule XqliteNIF do
           :ok | {:error, Xqlite.error()}
   def rollback_to_savepoint(_conn, _name), do: err()
 
+  @doc """
+  Releases a named savepoint.
+
+  Equivalent to executing `RELEASE SAVEPOINT 'name';` or simply `RELEASE 'name';`.
+  This removes the specified savepoint and all savepoints established after it.
+  The changes made since the savepoint was established are incorporated into the
+  current transaction (i.e., they are not rolled back). The transaction remains active.
+
+  `conn` is the database connection resource.
+  `name` is the string identifier of an existing savepoint.
+
+  Returns `:ok` on success.
+  Returns `{:error, reason}` on failure (e.g., if the named savepoint does not
+  exist, or other SQLite errors).
+  """
+  @spec release_savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
+          :ok | {:error, Xqlite.error()}
   def release_savepoint(_conn, _name), do: err()
+
   def schema_databases(_conn), do: err()
   def schema_list_objects(_conn, _schema \\ nil), do: err()
   def schema_columns(_conn, _table_name), do: err()
