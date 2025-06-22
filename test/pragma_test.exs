@@ -109,6 +109,32 @@ defmodule XqlitePragmaTest do
         end
       end
 
+      # Test for a readable PRAGMA that takes one argument.
+      test "read pragma: foreign_key_check with table name", %{db: db} do
+        # Setup: Create tables but keep foreign keys OFF initially.
+        assert :ok = P.put(db, :foreign_keys, false)
+
+        assert :ok =
+                 NIF.execute_batch(db, """
+                   CREATE TABLE parents(id INTEGER PRIMARY KEY);
+                   CREATE TABLE children(id INTEGER, parent_id INTEGER REFERENCES parents(id));
+                   INSERT INTO parents (id) VALUES (1);
+                   INSERT INTO children (id, parent_id) VALUES (10, 1);
+                 """)
+
+        # With FKs off, check should still pass as there are no violations yet.
+        assert {:ok, []} = P.get(db, :foreign_key_check, "children")
+
+        # Now, insert an invalid row. This will succeed because FKs are off.
+        assert {:ok, 1} =
+                 NIF.execute(db, "INSERT INTO children (id, parent_id) VALUES (20, 99);", [])
+
+        # Now, run the check. It should find the pre-existing violation.
+        # The rowid of the new row is 2.
+        assert {:ok, [["children", 2, "parents", 0]]} =
+                 P.get(db, :foreign_key_check, "children")
+      end
+
       # All of the readable PRAGMAs with one arg are actually instructions that change the DB.
       # We are not going to test those.
 
