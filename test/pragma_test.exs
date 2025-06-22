@@ -55,7 +55,7 @@ defmodule XqlitePragmaTest do
        {"MEMORY", :memory},
        {2, :memory}
      ]},
-    {:auto_vacuum, [{0, :none}, {1, :full}, {2, :incremental}], &verify_is_atom/3},
+    {:auto_vacuum, [{0, :none}, {1, :full}, {2, :incremental}], &verify_is_atom/4},
     {:secure_delete, [{0, false}, {1, true}, {2, :fast}]},
 
     # PRAGMAs with platform-dependent results
@@ -82,12 +82,12 @@ defmodule XqlitePragmaTest do
 
     # Advisory values
     # Test with a positive, negative (if applicable), and zero value
-    {:cache_size, [0, 5000, -10000], &verify_is_integer/3},
-    {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/3},
-    {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/3},
-    {:threads, [0, 1, 8], &verify_is_integer/3},
-    {:wal_autocheckpoint, [0, 1000], &verify_is_integer/3},
-    {:mmap_size, [0, 256 * 1024], &verify_mmap_size_value/3}
+    {:cache_size, [0, 5000, -10000], &verify_is_integer/4},
+    {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/4},
+    {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/4},
+    {:threads, [0, 1, 8], &verify_is_integer/4},
+    {:wal_autocheckpoint, [0, 1000], &verify_is_integer/4},
+    {:mmap_size, [0, 256 * 1024], &verify_mmap_size_value/4}
   ]
 
   for {type_tag, prefix, _opener_mfa} <- connection_openers() do
@@ -116,7 +116,7 @@ defmodule XqlitePragmaTest do
 
       for {name, values_to_test, verify_fun} <- @write_test_cases,
           verify_fun = Macro.escape(verify_fun) do
-        verify_fun = verify_fun || (&default_verify_values/3)
+        verify_fun = verify_fun || (&default_verify_values/4)
 
         # Generate a test for each value to be set for a given PRAGMA
         for {set_val, expected_val} <- normalize_test_values(values_to_test) do
@@ -137,8 +137,7 @@ defmodule XqlitePragmaTest do
 
             case P.get(db, unquote(name)) do
               {:ok, fetched_val} ->
-                assert verify_fun.(test_context_tag, set_val, fetched_val) or
-                         fetched_val in List.wrap(expected_val),
+                assert verify_fun.(test_context_tag, set_val, fetched_val, expected_val),
                        "Set `#{inspect(set_val)}`, but fetched `#{inspect(fetched_val)}`, expected one of `#{inspect(expected_val)}`"
 
               # For write-only PRAGMAs
