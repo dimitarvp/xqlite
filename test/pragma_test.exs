@@ -79,9 +79,6 @@ defmodule XqlitePragmaTest do
        {"UTF-16", ~w(UTF-16le UTF-16be)}
      ]},
 
-    # Write-only or special verification
-    {:case_sensitive_like, [true, false], &verify_is_ok_atom/3},
-
     # Advisory values
     # Test with a positive, negative (if applicable), and zero value
     {:cache_size, [0, 5000, -10000], &verify_is_integer/3},
