@@ -37,6 +37,7 @@ defmodule Xqlite.Pragma do
 
   @schema %{
     application_id: [r: {0, true, :int}, w: {true, :int, :nothing}],
+    analysis_limit: [r: {0, false, :int}, w: {false, :int, :int}],
     auto_vacuum: [r: {0, true, :int}, w: {true, :int, :nothing}],
     automatic_index: [r: {0, false, :bool}, w: {false, :bool, :nothing}],
     busy_timeout: [r: {0, false, :int}, w: {false, :int, :int}],
@@ -122,6 +123,7 @@ defmodule Xqlite.Pragma do
 
   @valid_write_arg_values %{
     application_id: @i32,
+    analysis_limit: @i32,
     auto_vacuum: 0..2,
     automatic_index: @bool,
     busy_timeout: @u32,
