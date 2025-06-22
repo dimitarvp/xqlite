@@ -10,6 +10,7 @@ defmodule XqlitePragmaTest do
   @write_test_cases [
     # Simple set/get with representative values
     {:application_id, [0, 12345, 98765]},
+    {:analysis_limit, [0, 100, -1]},
     {:user_version, [0, 5, 10]},
     # Can only be set on a fresh DB
     {:page_size, [2048, 4096, 8192]},
