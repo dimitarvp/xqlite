@@ -18,7 +18,7 @@ SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for c
 - **Handles:** NIF functions return opaque, thread-safe resource handles representing individual SQLite connections.
 - **Pooling:** This NIF layer **does not** implement connection pooling. Managing a pool of connections (e.g., using `DBConnection`) is the responsibility of the calling Elixir code or higher-level libraries like the planned `xqlite_ecto3`.
 
-This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.0 recommended). While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal. **Notably, retrieving primary keys automatically after insertion into `WITHOUT ROWID` tables is only reliably supported via the `RETURNING` clause (available since SQLite 3.35.0). Using `WITHOUT ROWID` tables on older SQLite versions may require you to supply primary key values explicitly within your application, as `last_insert_rowid/1` cannot be used for these tables.**
+This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.0 recommended). While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal. **Notably, retrieving primary key values automatically after insertion into `WITHOUT ROWID` tables is only reliably supported via the `RETURNING` clause (available since SQLite 3.35.0). Using `WITHOUT ROWID` tables on older SQLite versions may require you to supply primary key values explicitly within your application, as `last_insert_rowid/1` cannot be used for these tables.**
 
 ## Current Capabilities
 
@@ -46,6 +46,14 @@ The `XqliteNIF` module provides the following low-level functions:
     - `execute` variants return `{:ok, affected_rows :: non_neg_integer()}`.
     - `execute_batch` variants return `:ok` on success or `{:error, reason}`.
 
+- **Streaming Results:**
+
+  - `stream_open(conn, sql, params, opts)`: Prepares a query and returns a stream handle.
+  - `stream_get_columns(stream_handle)`: Retrieves column names from the prepared stream.
+  - `stream_fetch(stream_handle, batch_size)`: Fetches a batch of rows from the stream.
+  - `stream_close(stream_handle)`: Closes the stream and finalizes the statement.
+  - A higher-level `Xqlite.stream/4` wrapper is planned to provide an Elixir `Stream`.
+
 - **Operation Cancellation:**
 
   - `create_cancel_token()`: Creates a token for signalling cancellation. Returns `{:ok, token_resource}`.
@@ -69,8 +77,8 @@ The `XqliteNIF` module provides the following low-level functions:
 - **Schema Introspection:**
 
   - `schema_databases(conn)`
-  - `schema_list_objects(conn, schema \\ nil)`
-  - `schema_columns(conn, table_name)` (Includes `:hidden_kind` in `Xqlite.Schema.ColumnInfo`)
+  - `schema_list_objects(conn, schema \\ nil)` (Returns `Xqlite.Schema.SchemaObjectInfo` with `:is_without_rowid` flag)
+  - `schema_columns(conn, table_name)` (Returns `Xqlite.Schema.ColumnInfo` with `:hidden_kind` flag)
   - `schema_foreign_keys(conn, table_name)`
   - `schema_indexes(conn, table_name)`
   - `schema_index_columns(conn, index_name)`
@@ -114,7 +122,7 @@ IO.inspect(XqliteNIF.query(conn, sql_select, params_select), label: "Query Resul
 long_query_task = Task.async(fn ->
   XqliteNIF.query_cancellable(conn, slow_query_sql, [], cancel_token)
 end)
-Process.sleep(100)
+Process.sleep(100) # Give the query time to start before cancelling
 :ok = XqliteNIF.cancel_operation(cancel_token)
 IO.inspect(Task.await(long_query_task, 5000), label: "Cancelled Query Result")
 
@@ -144,7 +152,7 @@ end
 
 The following features are planned for the **`xqlite`** (NIF) library:
 
-1.  **Implement Streaming Results:** Fetch large query results incrementally.
+1.  **Implement Elixir `Stream` Wrapper:** Build the `Xqlite.stream/4` function to provide a high-level, idiomatic Elixir stream over the NIF streaming functions.
 2.  **Implement Extension Loading:** Add `load_extension/2` NIF.
 3.  **Implement Online Backup API:** Add NIFs for SQLite's Online Backup API.
 4.  **Implement Session Extension:** Add NIFs for SQLite's Session Extension.
@@ -161,7 +169,6 @@ The **`xqlite_ecto3`** library (separate project) will provide:
 **Future Considerations (Post Core Roadmap):**
 
 - Benchmark cancellation progress handler overhead.
-- Investigate `sqlite3_interrupt` via `InterruptHandle` again if performance of progress handler is problematic.
 - Report `UPPER(invalid_utf8)` panic behavior observed with SQLite to relevant projects if appropriate.
 
 ## Installation
