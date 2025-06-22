@@ -38,4 +38,16 @@ defmodule Xqlite.TestUtil do
     # Lookup and return the MFA using the found tag
     Map.fetch!(@tag_to_mfa_map, found_tag)
   end
+
+  def normalize_test_values(values) do
+    Enum.map(values, fn
+      {set, expected} -> {set, expected}
+      value -> {value, value}
+    end)
+  end
+
+  def default_verify_values(set_val, fetched_val), do: set_val == fetched_val
+  def verify_is_integer(_set_val, fetched_val), do: is_integer(fetched_val)
+  def verify_is_atom(_set_val, fetched_val), do: is_atom(fetched_val)
+  def verify_is_ok_atom(_set_val, fetched_val), do: fetched_val == :ok
 end

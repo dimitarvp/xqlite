@@ -137,7 +137,6 @@ defmodule Xqlite.Pragma do
     fullfsync: @bool,
     hard_heap_limit: @u32,
     ignore_check_constraints: @bool,
-    integrity_check: @nonzero_u32,
     journal_mode: ~w(DELETE TRUNCATE PERSIST MEMORY WAL OFF),
     journal_size_limit: @i32,
     legacy_alter_table: @bool,
@@ -168,6 +167,13 @@ defmodule Xqlite.Pragma do
   @returning_text of_type(@schema, :text)
   @returning_list of_type(@schema, :list)
   @returning_nothing of_type(@schema, :nothing)
+
+  @pragmas_with_special_int_mapping [
+    :auto_vacuum,
+    :secure_delete,
+    :synchronous,
+    :temp_store
+  ]
 
   @doc ~S"""
   Returns a map with keys equal to all supported PRAGMAs, and the values being detailed
@@ -229,16 +235,10 @@ defmodule Xqlite.Pragma do
   def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
-  A convenience wrapper to make the result of a `XqliteNIF.query/3` call to
-  a format that is required by the `result` processor function.
-  Note that we deliberately assert strongly on the type of success value as
-  any other would be a critical bug in this library.
+  A convenience wrapper to extract the `:rows` from a successful `XqliteNIF.query/3` call.
   """
-  def query_to_pragma_result({:ok, map}) when is_map(map) do
-    {:ok, Map.get(map, :rows)}
-  end
-
-  def query_to_pragma_result({:error, _anything} = err), do: err
+  def query_to_pragma_result({:ok, %{rows: rows}}), do: {:ok, rows}
+  def query_to_pragma_result({:error, _} = err), do: err
 
   @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra argument:
@@ -255,79 +255,143 @@ defmodule Xqlite.Pragma do
           pragma_get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
-  def get(db, key, list, _opts) when is_list(list) do
-    get0(db, key, list)
+  def get(db, key, arg, opts) when not is_list(arg) do
+    # Handles get(db, key, "some_arg") and get(db, key, "some_arg", opts)
+    # If the 3rd argument is NOT a list, it MUST be a PRAGMA argument.
+    do_get_with_arg(db, key, arg, opts)
   end
 
-  def get(db, key, arg, opts) when is_list(opts) do
-    get1(db, key, arg, opts)
+  def get(db, key, opts, []) when is_list(opts) do
+    # Handles get(db, key) -> get(db, key, [], [])
+    # and get(db, key, some: :opt) -> get(db, key, [some: :opt], [])
+    # In these cases, there is NO pragma argument.
+    do_get_no_arg(db, key, opts)
   end
 
-  @spec get0(reference(), pragma_key(), pragma_opts()) :: pragma_get_result()
-  defp get0(conn, key, _opts) do
-    XqliteNIF.query(conn, "PRAGMA #{key};")
-    |> query_to_pragma_result()
-    |> result(key)
+  def get(db, key, arg_list, opts) when is_list(arg_list) do
+    # This is the ambiguous case: get(db, key, [some_list]).
+    # Is `[some_list]` an argument (e.g. for a future PRAGMA) or is it opts?
+    # We rely on @readable_with_one_arg to decide.
+    if key in @readable_with_one_arg do
+      # Assume it's an argument
+      do_get_with_arg(db, key, arg_list, opts)
+    else
+      # Assume it's opts
+      do_get_no_arg(db, key, arg_list ++ opts)
+    end
   end
 
-  @spec get1(reference(), pragma_key(), pragma_key(), pragma_opts()) ::
-          pragma_get_result()
-  defp get1(conn, key, arg, opts) when is_atom(key) and is_atom(arg) do
-    get1(conn, Atom.to_string(key), Atom.to_string(arg), opts)
+  # Handler for PRAGMAs that take NO arguments. Dispatches based on return type.
+  defp do_get_no_arg(db, key, _opts) when key in @pragmas_with_special_int_mapping do
+    with {:ok, value} <- XqliteNIF.get_pragma(db, to_string(key)) do
+      {:ok, map_special_int_to_atom(key, value)}
+    end
   end
 
-  defp get1(conn, key, arg, opts) when is_atom(key) and is_binary(arg) do
-    get1(conn, Atom.to_string(key), arg, opts)
+  defp do_get_no_arg(db, key, _opts) when key in @returning_boolean do
+    with {:ok, value} <- XqliteNIF.get_pragma(db, to_string(key)) do
+      {:ok, int2bool(value)}
+    end
   end
 
-  defp get1(conn, key, arg, opts) when is_binary(key) and is_atom(arg) do
-    get1(conn, key, Atom.to_string(arg), opts)
+  defp do_get_no_arg(db, key, _opts) when key in @returning_int or key in @returning_text do
+    XqliteNIF.get_pragma(db, to_string(key))
   end
 
-  defp get1(conn, key, arg, _opts) do
-    XqliteNIF.query(conn, "PRAGMA #{key}(#{arg});")
-    |> query_to_pragma_result()
-    |> result(key)
+  defp do_get_no_arg(db, key, _opts) when key in @returning_list do
+    with {:ok, rows} <- do_query(db, key) do
+      {:ok, process_list_result(key, rows)}
+    end
   end
+
+  defp do_get_no_arg(db, key, _opts) when key in @returning_nothing do
+    case XqliteNIF.get_pragma(db, to_string(key)) do
+      {:ok, :no_value} -> :ok
+      other -> other
+    end
+  end
+
+  # Handler for PRAGMAs that take ONE argument.
+  defp do_get_with_arg(db, key, arg, _opts) do
+    with {:ok, rows} <- do_query(db, key, arg) do
+      # All known PRAGMAs with an argument return a list.
+      {:ok, process_list_result(key, rows)}
+    end
+  end
+
+  defp do_query(db, key, arg \\ nil)
+
+  defp do_query(db, key, nil) do
+    db |> XqliteNIF.query("PRAGMA #{key};") |> query_to_pragma_result()
+  end
+
+  defp do_query(db, key, arg) do
+    db |> XqliteNIF.query("PRAGMA #{key}(#{arg});") |> query_to_pragma_result()
+  end
+
+  defp process_list_result(key, rows) do
+    # This logic can be refined later if needed, but for now it's a direct move.
+    case key do
+      :collation_list ->
+        Enum.map(rows, fn [seq, name] -> %{seq: seq, name: name} end)
+
+      :integrity_check ->
+        values_only(rows)
+
+      :quick_check ->
+        values_only(rows)
+
+      # For single-column results like `foreign_key_check`, `optimize`, etc.
+      # this flattens [[v1], [v2]] to [v1, v2].
+      _ when is_list(rows) and rows != [] and length(hd(rows)) == 1 ->
+        values_only(rows)
+
+      # Default for multi-column lists (table_info, foreign_key_list)
+      _ ->
+        rows
+    end
+  end
+
+  defp map_special_int_to_atom(:auto_vacuum, value), do: get_auto_vacuum(value)
+  defp map_special_int_to_atom(:secure_delete, value), do: get_secure_delete(value)
+  defp map_special_int_to_atom(:synchronous, value), do: get_synchronous(value)
+  defp map_special_int_to_atom(:temp_store, value), do: get_temp_store(value)
 
   @spec index_list(reference(), name(), pragma_opts()) :: pragma_result()
   def index_list(db, name, opts \\ []) do
-    get1(db, "index_list", name, opts)
+    get(db, :index_list, name, opts)
   end
 
   @spec index_info(reference(), name(), pragma_opts()) :: pragma_result()
   def index_info(db, name, opts \\ []) do
-    get1(db, "index_info", name, opts)
+    get(db, :index_info, name, opts)
   end
 
   @spec index_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
   def index_xinfo(db, name, opts \\ []) do
-    get1(db, "index_xinfo", name, opts)
+    get(db, :index_xinfo, name, opts)
   end
 
   @spec table_info(reference(), name(), pragma_opts()) :: pragma_result()
   def table_info(db, name, opts \\ []) do
-    get1(db, "table_info", name, opts)
+    get(db, :table_info, name, opts)
   end
 
   @spec table_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
   def table_xinfo(db, name, opts \\ []) do
-    get1(db, "table_xinfo", name, opts)
+    get(db, :table_xinfo, name, opts)
   end
 
   @doc ~S"""
   Changes a PRAGMA's value.
   """
-  @spec put(reference(), pragma_key(), pragma_value()) :: pragma_result()
+  @spec put(reference(), pragma_key(), pragma_value()) :: :ok | {:error, Xqlite.error()}
   def put(db, key, val) when is_atom(key) do
     put(db, Atom.to_string(key), val)
   end
 
   def put(db, key, val) when is_binary(key) do
-    :ok = XqliteNIF.set_pragma(db, key, val)
-
-    XqliteNIF.get_pragma(db, key)
-    |> result(key)
+    XqliteNIF.set_pragma(db, key, val)
   end
 
   @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
@@ -350,50 +414,6 @@ defmodule Xqlite.Pragma do
   def get_temp_store(0), do: :default
   def get_temp_store(1), do: :file
   def get_temp_store(2), do: :memory
-
-  @spec result(pragma_result(), pragma_key()) :: pragma_result()
-  defp result({:error, _} = e, _k), do: e
-  defp result({:ok, :no_value}, _k), do: :ok
-  defp result({:ok, "ok"}, _k), do: :ok
-
-  defp result({:ok, v}, _k) when is_integer(v) or is_float(v) or is_binary(v),
-    do: {:ok, v}
-
-  defp result({:ok, [[{k, v}]]}, k), do: {:ok, single(String.to_atom(k), v)}
-  defp result({:ok, [[v]]}, k) when is_atom(k), do: {:ok, single(k, v)}
-  defp result({:ok, [[v]]}, k) when is_binary(k), do: {:ok, single(String.to_atom(k), v)}
-  defp result({:ok, vv}, k) when is_atom(k) and is_list(vv), do: {:ok, multiple(k, vv)}
-
-  defp result({:ok, vv}, k) when is_binary(k) and is_list(vv),
-    do: {:ok, multiple(String.to_atom(k), vv)}
-
-  # Generate pragma getter functions that convert a 0/1 integer result to a boolean
-  # or transform special integer values to atoms.
-  @spec single(pragma_key(), pragma_result()) :: pragma_result()
-  @returning_boolean
-  |> Enum.each(fn key ->
-    defp single(unquote(key), value) do
-      int2bool(value)
-    end
-  end)
-
-  defp single(:auto_vacuum, v), do: get_auto_vacuum(v)
-  defp single(:secure_delete, v), do: get_secure_delete(v)
-  defp single(:synchronous, v), do: get_synchronous(v)
-  defp single(:temp_store, v), do: get_temp_store(v)
-  defp single(_key, value), do: value
-
-  @spec multiple(pragma_key(), pragma_result()) :: pragma_result()
-  defp multiple(:collation_list, vv) do
-    Enum.map(vv, fn
-      [{"seq", i}, {"name", s}] -> [{:seq, i}, {:name, s}] |> Map.new()
-      [i, s] -> Map.new([{i, s}])
-    end)
-  end
-
-  defp multiple(:compile_options, vv), do: values_only(vv)
-  defp multiple(:integrity_check, vv), do: values_only(vv)
-  defp multiple(_, vv), do: vv
 
   defp values_only(r) do
     r
