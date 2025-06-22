@@ -89,7 +89,7 @@ defmodule XqlitePragmaTest do
     {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/3},
     {:threads, [0, 1, 8], &verify_is_integer/3},
     {:wal_autocheckpoint, [0, 1000], &verify_is_integer/3},
-    {:mmap_size, [0, 256 * 1024 * 1024], &verify_mmap_size_value/3}
+    {:mmap_size, [0, 256 * 1024], &verify_mmap_size_value/3}
   ]
 
   for {type_tag, prefix, _opener_mfa} <- connection_openers() do
