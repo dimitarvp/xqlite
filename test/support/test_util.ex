@@ -48,6 +48,10 @@ defmodule Xqlite.TestUtil do
 
   def default_verify_values(set_val, fetched_val), do: set_val == fetched_val
   def verify_is_integer(_set_val, fetched_val), do: is_integer(fetched_val)
+
+  def verify_is_integer_or_no_value_atom(_set_val, fetched_val),
+    do: is_integer(fetched_val) or fetched_val == :no_value
+
   def verify_is_atom(_set_val, fetched_val), do: is_atom(fetched_val)
   def verify_is_ok_atom(_set_val, fetched_val), do: fetched_val == :ok
 end
