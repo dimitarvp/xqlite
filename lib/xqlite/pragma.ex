@@ -117,12 +117,13 @@ defmodule Xqlite.Pragma do
   }
 
   @i32 0..0xFFFFFFFF
+  @signed_i32 -2_147_483_648..0x7FFFFFFF
   @u32 0..0x7FFFFFFF
   @nonzero_u32 1..0x7FFFFFFF
   @bool 0..1
 
   @valid_write_arg_values %{
-    application_id: @i32,
+    application_id: @signed_i32,
     analysis_limit: @i32,
     auto_vacuum: 0..2,
     automatic_index: @bool,
@@ -154,7 +155,7 @@ defmodule Xqlite.Pragma do
     temp_store: [0, 1, 2, "DEFAULT", "FILE", "MEMORY"],
     threads: @u32,
     trusted_schema: @bool,
-    user_version: @i32,
+    user_version: @signed_i32,
     wal_autocheckpoint: @i32
   }
 
