@@ -13,7 +13,7 @@ defmodule Xqlite.Schema.SchemaObjectInfo do
   * `:name` - Name of the object.
   * `:object_type` - The type of object (see `t:Types.object_type/0`).
   * `:column_count` - Number of columns (meaningful for tables/views).
-  * `:is_writable` - `true` if data can be inserted/updated/deleted in this object (typically tables/virtual tables), `false` otherwise (typically views/shadow tables).
+  * `:is_without_rowid` - `true` if the table was created with the `WITHOUT ROWID` optimization, `false` otherwise. This is derived from the `wr` column in `PRAGMA table_list`.
   * `:strict` - `true` if the table was declared using `STRICT` mode, `false` otherwise.
   """
   @type t :: %__MODULE__{
@@ -21,7 +21,7 @@ defmodule Xqlite.Schema.SchemaObjectInfo do
           name: String.t(),
           object_type: Types.object_type(),
           column_count: integer(),
-          is_writable: boolean(),
+          is_without_rowid: boolean(),
           strict: boolean()
         }
 
@@ -30,7 +30,7 @@ defmodule Xqlite.Schema.SchemaObjectInfo do
     :name,
     :object_type,
     :column_count,
-    :is_writable,
+    :is_without_rowid,
     :strict
   ]
 end

@@ -21,7 +21,7 @@ pub(crate) struct SchemaObjectInfo {
     pub name: String,
     pub object_type: Atom,
     pub column_count: i64,
-    pub is_writable: bool,
+    pub is_without_rowid: bool,
     pub strict: bool,
 }
 
