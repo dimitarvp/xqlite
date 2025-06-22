@@ -46,12 +46,13 @@ defmodule Xqlite.TestUtil do
     end)
   end
 
-  def default_verify_values(set_val, fetched_val), do: set_val == fetched_val
-  def verify_is_integer(_set_val, fetched_val), do: is_integer(fetched_val)
+  def default_verify_values(_context, expected, actual), do: expected == actual
+  def verify_is_integer(_context, _expected, actual), do: is_integer(actual)
+  def verify_is_atom(_context, _expected, actual), do: is_atom(actual)
+  def verify_is_ok_atom(_context, _expected, actual), do: actual == :ok
 
-  def verify_is_integer_or_no_value_atom(_set_val, fetched_val),
-    do: is_integer(fetched_val) or fetched_val == :no_value
+  def verify_mmap_size_value(:memory_private, _expected, actual), do: actual == :no_value
 
-  def verify_is_atom(_set_val, fetched_val), do: is_atom(fetched_val)
-  def verify_is_ok_atom(_set_val, fetched_val), do: fetched_val == :ok
+  def verify_mmap_size_value(:file_temp, _expected, actual),
+    do: is_integer(actual) or actual == :no_value
 end

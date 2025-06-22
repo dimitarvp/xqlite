@@ -5,15 +5,7 @@ defmodule XqlitePragmaTest do
   alias XqliteNIF, as: NIF
   alias Xqlite.Pragma, as: P
 
-  import Xqlite.TestUtil,
-    only: [
-      default_verify_values: 2,
-      normalize_test_values: 1,
-      verify_is_atom: 2,
-      verify_is_integer: 2,
-      verify_is_integer_or_no_value_atom: 2,
-      verify_is_ok_atom: 2
-    ]
+  import Xqlite.TestUtil
 
   @write_test_cases [
     # Simple set/get with representative values
@@ -62,7 +54,7 @@ defmodule XqlitePragmaTest do
        {"MEMORY", :memory},
        {2, :memory}
      ]},
-    {:auto_vacuum, [{0, :none}, {1, :full}, {2, :incremental}], &verify_is_atom/2},
+    {:auto_vacuum, [{0, :none}, {1, :full}, {2, :incremental}], &verify_is_atom/3},
     {:secure_delete, [{0, false}, {1, true}, {2, :fast}]},
 
     # PRAGMAs with platform-dependent results
@@ -88,72 +80,78 @@ defmodule XqlitePragmaTest do
      ]},
 
     # Write-only or special verification
-    {:case_sensitive_like, [true, false], &verify_is_ok_atom/2},
+    {:case_sensitive_like, [true, false], &verify_is_ok_atom/3},
 
     # Advisory values
     # Test with a positive, negative (if applicable), and zero value
-    {:cache_size, [0, 5000, -10000], &verify_is_integer/2},
-    {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/2},
-    {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/2},
-    {:threads, [0, 1, 8], &verify_is_integer/2},
-    {:wal_autocheckpoint, [0, 1000], &verify_is_integer/2},
-    {:mmap_size, [0, 256 * 1024 * 1024], &verify_is_integer_or_no_value_atom/2}
+    {:cache_size, [0, 5000, -10000], &verify_is_integer/3},
+    {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/3},
+    {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/3},
+    {:threads, [0, 1, 8], &verify_is_integer/3},
+    {:wal_autocheckpoint, [0, 1000], &verify_is_integer/3},
+    {:mmap_size, [0, 256 * 1024 * 1024], &verify_mmap_size_value/3}
   ]
 
-  setup do
-    {:ok, db} = NIF.open(":memory:")
-    {:ok, db: db}
-  end
+  for {type_tag, prefix, _opener_mfa} <- connection_openers() do
+    describe "PRAGMA tests using #{prefix}" do
+      @describetag type_tag
 
-  # All readable PRAGMAs with zero args.
-  describe "read pragma with no arguments:" do
-    P.readable_with_zero_args()
-    |> Enum.each(fn name ->
-      test name, %{db: db} do
-        assert valid_get_result(P.get(db, unquote(name)))
+      setup context do
+        {mod, fun, args} = find_opener_mfa!(context)
+        assert {:ok, db} = apply(mod, fun, args)
+        {:ok, db: db, test_context_tag: unquote(type_tag)}
       end
-    end)
-  end
 
-  # All of the readable PRAGMAs with one arg are actually instructions that change the DB.
-  # We are not going to test those for now.
+      # All readable PRAGMAs with zero arguments (they only fetch values and don't modify
+      # any DB behaviour).
 
-  # All writable PRAGMAs with one arg.
+      for name <- P.readable_with_zero_args() do
+        test "read pragma: #{name}", %{db: db} do
+          assert valid_get_result(P.get(db, unquote(name)))
+        end
+      end
 
-  describe "write pragma with one argument:" do
-    for {name, values_to_test, verify_fun} <- @write_test_cases,
-        verify_fun = Macro.escape(verify_fun) do
-      verify_fun = verify_fun || (&default_verify_values/2)
+      # All of the readable PRAGMAs with one arg are actually instructions that change the DB.
+      # We are not going to test those.
 
-      # Generate a test for each value to be set for a given PRAGMA
-      for {set_val, expected_val} <- normalize_test_values(values_to_test) do
-        test "#{name} = #{inspect(set_val)}", %{db: db} do
-          # We have to do `unquote(name)` several times here because Elixir's 1.18 compiler
-          # warns us that certain comparisons can never succeed.
-          set_val = unquote(set_val)
-          expected_val = unquote(expected_val)
-          verify_fun = unquote(verify_fun)
+      # All writable PRAGMAs with one arg.
 
-          # We need a clean DB for some PRAGMAs like page_size
-          db = if unquote(name) == :page_size, do: clean_db(), else: db
+      for {name, values_to_test, verify_fun} <- @write_test_cases,
+          verify_fun = Macro.escape(verify_fun) do
+        verify_fun = verify_fun || (&default_verify_values/3)
 
-          # The core of the test: put, then get and verify
-          assert :ok = P.put(db, unquote(name), set_val)
+        # Generate a test for each value to be set for a given PRAGMA
+        for {set_val, expected_val} <- normalize_test_values(values_to_test) do
+          test_name_string = "write pragma: #{name} = #{inspect(set_val)}"
 
-          case P.get(db, unquote(name)) do
-            {:ok, fetched_val} ->
-              assert verify_fun.(set_val, fetched_val) or
-                       fetched_val in List.wrap(expected_val),
-                     "Set `#{inspect(set_val)}`, but fetched `#{inspect(fetched_val)}`, expected one of `#{inspect(expected_val)}`"
+          test test_name_string, %{db: db, test_context_tag: test_context_tag} do
+            # We have to do `unquote(name)` several times here because Elixir's 1.18 compiler
+            # warns us that certain comparisons can never succeed.
+            set_val = unquote(set_val)
+            expected_val = unquote(expected_val)
+            verify_fun = unquote(verify_fun)
 
-            # For write-only PRAGMAs
-            :ok ->
-              assert verify_fun.(set_val, :ok)
+            # We need a clean DB for some PRAGMAs like page_size
+            db = if unquote(name) == :page_size, do: clean_db(), else: db
 
-            error ->
-              flunk(
-                "P.get returned an unexpected error after a successful put: `#{inspect(error)}`"
-              )
+            # The core of the test: put, then get and verify
+            assert :ok = P.put(db, unquote(name), set_val)
+
+            case P.get(db, unquote(name)) do
+              {:ok, fetched_val} ->
+                assert verify_fun.(test_context_tag, set_val, fetched_val) or
+                         fetched_val in List.wrap(expected_val),
+                       "Set `#{inspect(set_val)}`, but fetched `#{inspect(fetched_val)}`, expected one of `#{inspect(expected_val)}`"
+
+              # For write-only PRAGMAs
+              :ok ->
+                assert verify_fun.(test_context_tag, set_val, :ok)
+
+              error ->
+                flunk(
+                  "P.get returned an unexpected error after a successful put: `#{inspect(error)}`"
+                )
+            end
           end
         end
       end
