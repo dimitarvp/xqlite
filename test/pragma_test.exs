@@ -11,40 +11,93 @@ defmodule XqlitePragmaTest do
       normalize_test_values: 1,
       verify_is_atom: 2,
       verify_is_integer: 2,
+      verify_is_integer_or_no_value_atom: 2,
       verify_is_ok_atom: 2
     ]
 
   @write_test_cases [
-    # {pragma_name, [list_of_values_to_test], optional_verify_function}
-    # The verify function is `fn(set_val, fetched_val) -> boolean`
+    # Simple set/get with representative values
+    {:application_id, [0, 12345, 98765]},
+    {:user_version, [0, 5, 10]},
+    # Can only be set on a fresh DB
+    {:page_size, [2048, 4096, 8192]},
+    {:busy_timeout, [0, 1000, 5000]},
+    # -1 means no limit
+    {:journal_size_limit, [0, -1, 102_400]},
+    {:max_page_count, [1, 1_000_000]},
 
-    # Simple set/get
-    {:application_id, [12345, 98765]},
-    {:user_version, [5, 10]},
-    # Note: can only be set on a fresh DB before data is written.
-    {:page_size, [2048, 4096]},
+    # All boolean PRAGMAs
+    {:automatic_index, [true, false]},
+    {:cell_size_check, [true, false]},
+    {:checkpoint_fullfsync, [true, false]},
+    {:defer_foreign_keys, [true, false]},
+    {:foreign_keys, [true, false]},
+    {:fullfsync, [true, false]},
+    {:ignore_check_constraints, [true, false]},
+    {:legacy_alter_table, [true, false]},
+    {:query_only, [true, false]},
+    {:read_uncommitted, [true, false]},
+    {:recursive_triggers, [true, false]},
+    {:reverse_unordered_selects, [true, false]},
+    {:trusted_schema, [true, false]},
 
-    # PRAGMAs with special value mappings
-    {:synchronous, [{"NORMAL", :normal}, {1, :normal}, {"OFF", :off}, {0, :off}]},
-    {:temp_store, [{"FILE", :file}, {1, :file}, {"MEMORY", :memory}, {2, :memory}]},
+    # PRAGMAs with special value mappings (test all specified values)
+    {:synchronous,
+     [
+       {"NORMAL", :normal},
+       {1, :normal},
+       {"OFF", :off},
+       {0, :off},
+       {"FULL", :full},
+       {2, :full},
+       {"EXTRA", :extra},
+       {3, :extra}
+     ]},
+    {:temp_store,
+     [
+       {"DEFAULT", :default},
+       {0, :default},
+       {"FILE", :file},
+       {1, :file},
+       {"MEMORY", :memory},
+       {2, :memory}
+     ]},
+    {:auto_vacuum, [{0, :none}, {1, :full}, {2, :incremental}], &verify_is_atom/2},
+    {:secure_delete, [{0, false}, {1, true}, {2, :fast}]},
 
-    # PRAGMAs with platform-dependent or state-dependent results
-    {:journal_mode, [{"WAL", ~w(wal memory)}, {"DELETE", ~w(delete memory)}]},
+    # PRAGMAs with platform-dependent results
+    {:journal_mode,
+     [
+       # Most common default for file DBs
+       {"DELETE", "delete"},
+       {"TRUNCATE", "truncate"},
+       {"PERSIST", "persist"},
+       {"MEMORY", "memory"},
+       # On in-memory, WAL falls back to memory
+       {"WAL", ~w(wal memory)},
+       {"OFF", "off"}
+     ]},
     {:locking_mode, [{"NORMAL", "normal"}, {"EXCLUSIVE", "exclusive"}]},
-    {:encoding, [{"UTF-8", "UTF-8"}, {"UTF-16", ~w(UTF-16le UTF-16be)}]},
+    {:encoding,
+     [
+       {"UTF-8", "UTF-8"},
+       {"UTF-16le", "UTF-16le"},
+       {"UTF-16be", "UTF-16be"},
+       # Setting UTF-16 may result in le or be
+       {"UTF-16", ~w(UTF-16le UTF-16be)}
+     ]},
 
-    # Write-only or no-value-on-read PRAGMAs
+    # Write-only or special verification
     {:case_sensitive_like, [true, false], &verify_is_ok_atom/2},
 
-    # PRAGMAs whose values are advisory and may not be honored exactly
-    # We test that setting them doesn't error, and reading back gives *some* int.
-    # The exact value isn't asserted here as it depends on SQLite version & state.
-    {:cache_size, [-10000, 5000], &verify_is_integer/2},
-    {:threads, [0, 2], &verify_is_integer/2},
-
-    # These are best tested by observing side-effects, but for a simple write test,
-    # we just ensure they can be set without error.
-    {:auto_vacuum, [0, 1, 2], &verify_is_atom/2}
+    # Advisory values
+    # Test with a positive, negative (if applicable), and zero value
+    {:cache_size, [0, 5000, -10000], &verify_is_integer/2},
+    {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/2},
+    {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/2},
+    {:threads, [0, 1, 8], &verify_is_integer/2},
+    {:wal_autocheckpoint, [0, 1000], &verify_is_integer/2},
+    {:mmap_size, [0, 256 * 1024 * 1024], &verify_is_integer_or_no_value_atom/2}
   ]
 
   setup do
