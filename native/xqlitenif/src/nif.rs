@@ -534,7 +534,7 @@ fn schema_list_objects(
                             error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
                         }
                     })?;
-                    let is_writable = match temp_info.wr_flag {
+                    let is_without_rowid = match temp_info.wr_flag {
                         0 => false,
                         1 => true,
                         _ => {
@@ -571,7 +571,7 @@ fn schema_list_objects(
                         name: temp_info.name,
                         object_type: atom,
                         column_count: temp_info.column_count,
-                        is_writable,
+                        is_without_rowid,
                         strict: is_strict,
                     });
                 }

@@ -52,7 +52,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
               name: "categories",
               object_type: :table,
               column_count: 3,
-              is_writable: false,
+              is_without_rowid: false,
               strict: false
             },
             %Schema.SchemaObjectInfo{
@@ -60,7 +60,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
               name: "items",
               object_type: :table,
               column_count: 3,
-              is_writable: true,
+              is_without_rowid: true,
               strict: false
             },
             %Schema.SchemaObjectInfo{
@@ -68,7 +68,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
               name: "person_view",
               object_type: :view,
               column_count: 2,
-              is_writable: false,
+              is_without_rowid: false,
               strict: false
             },
             %Schema.SchemaObjectInfo{
@@ -76,7 +76,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
               name: "user_items",
               object_type: :table,
               column_count: 3,
-              is_writable: false,
+              is_without_rowid: false,
               strict: false
             },
             %Schema.SchemaObjectInfo{
@@ -84,7 +84,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
               name: "users",
               object_type: :table,
               column_count: 6,
-              is_writable: false,
+              is_without_rowid: false,
               strict: false
             }
           ]
