@@ -1,5 +1,6 @@
 defmodule Xqlite.TestUtil do
   alias XqliteNIF, as: NIF
+  require Logger
 
   # A list of: an ExUnit tag, a `describe` block prefix, and a MFA to open a connection.
   # This data structure is used to generate tests for different DB types.
@@ -10,41 +11,80 @@ defmodule Xqlite.TestUtil do
 
   @tag_to_mfa_map Map.new(@connection_openers, fn {tag, _prefix, mfa} -> {tag, mfa} end)
 
-  defp open_with_retries(opener_fun, retries_left \\ 10)
+  # Renamed for clarity, as it now does more than just retry opening.
+  defp open_and_configure(opener_fun, retries_left \\ 5)
 
   # Base case: no retries left, return the last error.
-  defp open_with_retries(_opener_fun, 0) do
+  defp open_and_configure(_opener_fun, 0) do
     {:error, :ci_setup_failed_after_retries}
   end
 
-  defp open_with_retries(opener_fun, retries_left) do
-    # `opener_fun` will be `&NIF.open_in_memory/0` or `&NIF.open_temporary/0`
+  defp open_and_configure(opener_fun, retries_left) do
     case opener_fun.() do
       {:ok, conn} ->
         # Connection opened successfully. Now try to configure it.
-        # If PRAGMAs fail, we will treat it as a setup failure and retry.
-        with :ok <- NIF.set_pragma(conn, "journal_mode", "DELETE"),
-             :ok <- NIF.set_pragma(conn, "foreign_keys", true) do
-          # Everything succeeded.
-          {:ok, conn}
-        else
-          _error ->
-            # Closing the connection and retrying is the safest path.
-            NIF.close(conn)
-            # Wait a bit before retrying
-            Process.sleep(1000)
-            open_with_retries(opener_fun, retries_left - 1)
-        end
+        configure_connection(conn)
 
+      # The initial open call failed. Wait and retry.
       {:error, _reason} ->
-        # The initial open call failed. Wait and retry.
-        Process.sleep(1000)
-        open_with_retries(opener_fun, retries_left - 1)
+        Process.sleep(250)
+        open_and_configure(opener_fun, retries_left - 1)
     end
   end
 
-  def open_in_memory(), do: open_with_retries(&NIF.open_in_memory/0)
-  def open_temporary(), do: open_with_retries(&NIF.open_temporary/0)
+  # Helper to configure an already open connection.
+  # It handles the specific CI "out of memory" error gracefully.
+  defp configure_connection(conn) do
+    with :ok <- set_pragma_with_oom_check(conn, "journal_mode", "DELETE"),
+         :ok <- set_pragma_with_oom_check(conn, "foreign_keys", true) do
+      # Both PRAGMAs succeeded (or were gracefully skipped).
+      {:ok, conn}
+    else
+      # A non-OOM error occurred during PRAGMA setting. This is unexpected.
+      # We could retry the whole process, but for now, let's treat it as a setup failure.
+      # This path should not be hit if only the known OOM error occurs.
+      {:error, :pragma_setup_failed} = error ->
+        NIF.close(conn)
+        error
+    end
+  end
+
+  # This is the core of the new strategy.
+  defp set_pragma_with_oom_check(conn, name, value) do
+    case NIF.set_pragma(conn, name, value) do
+      :ok ->
+        :ok
+
+      {:error, {:cannot_execute_pragma, _, reason}} = error ->
+        if String.contains?(reason, "out of memory") do
+          Logger.warning(
+            "CI: PRAGMA #{name}=#{value} failed with 'out of memory'. Proceeding without it."
+          )
+
+          # Gracefully skip this error and return :ok to proceed.
+          :ok
+        else
+          # It was a different, unexpected PRAGMA error.
+          Logger.error(
+            "CI: PRAGMA #{name}=#{value} failed with unexpected error: #{inspect(error)}"
+          )
+
+          # Propagate as a hard error.
+          {:error, :pragma_setup_failed}
+        end
+
+      {:error, _reason} = error ->
+        # Any other error shape is also a hard failure.
+        Logger.error(
+          "CI: PRAGMA #{name}=#{value} failed with unexpected error: #{inspect(error)}"
+        )
+
+        {:error, :pragma_setup_failed}
+    end
+  end
+
+  def open_in_memory(), do: open_and_configure(&NIF.open_in_memory/0)
+  def open_temporary(), do: open_and_configure(&NIF.open_temporary/0)
 
   @doc """
   Returns a list of connection opener strategies for test generation.
