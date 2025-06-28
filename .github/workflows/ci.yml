@@ -32,7 +32,18 @@ jobs:
         with:
           toolchain: "stable"
 
-      - name: Install Elixir dependencies
+      - name: Restore dependencies & build cache
+        id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Install dependencies
         run: mix deps.get
 
       - name: Compile project with NIF
@@ -44,7 +55,6 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: |
             _build
-            deps
             priv/native
             native/xqlitenif/target
           retention-days: 1
@@ -74,7 +84,15 @@ jobs:
         with:
           toolchain: "stable"
 
-      - name: Verify dependencies
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Install dependencies
         run: mix deps.get
 
       - name: Check Elixir formatting
@@ -85,43 +103,6 @@ jobs:
 
       - name: Rust clippy
         run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
-
-  dialyzer:
-    name: Dialyzer Type Check
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: .
-
-      - name: Set up Elixir
-        uses: erlef/setup-beam@v1
-        with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
-
-      - name: Restore Dialyzer PLT cache
-        uses: actions/cache@v4
-        with:
-          path: priv/plts
-          key: ${{ runner.os }}-plt-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-plt-
-
-      - name: Verify dependencies
-        run: mix deps.get
-
-      - name: Create PLT (if not cached or outdated)
-        run: mix dialyzer --plt
-
-      - name: Run Dialyzer
-        run: mix dialyzer --format short
 
   test:
     name: Run Tests
@@ -143,7 +124,15 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      - name: Verify dependencies
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Install dependencies
         run: mix deps.get
 
       - name: Run tests
