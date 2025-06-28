@@ -21,7 +21,7 @@ defmodule Xqlite.NIF.PragmaTest do
       # --- get_pragma/2 Tests ---
       test "get_pragma/2 reads default values", %{conn: conn} do
         assert {:ok, 0} = NIF.get_pragma(conn, "user_version")
-        assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
+        assert {:ok, 1} = NIF.get_pragma(conn, "foreign_keys")
         assert {:ok, limit} = NIF.get_pragma(conn, "journal_size_limit")
         assert is_integer(limit)
         assert {:ok, mode} = NIF.get_pragma(conn, "journal_mode")
@@ -69,8 +69,14 @@ defmodule Xqlite.NIF.PragmaTest do
       end
 
       test "set_pragma/3 succeeds silently for invalid value", %{conn: conn} do
+        # First, explicitly set the pragma to a known state (OFF/0)
+        assert :ok = NIF.set_pragma(conn, "foreign_keys", :off)
         assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
+
+        # Now, attempt to set an invalid value. This should be a no-op.
         assert :ok = NIF.set_pragma(conn, "foreign_keys", "invalid_string")
+
+        # Verify the value has not changed from our known state.
         assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
       end
 
