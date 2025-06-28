@@ -2,7 +2,7 @@ defmodule Xqlite.MixProject do
   use Mix.Project
 
   @name "Xqlite"
-  @version "0.2.0"
+  @version "0.2.9"
 
   def project do
     [
@@ -61,12 +61,40 @@ defmodule Xqlite.MixProject do
     ]
   end
 
-  defp docs(),
-    do: [
-      source_ref: "v#{@version}",
+  defp docs() do
+    [
       main: "readme",
-      extras: ["README.md"]
+      name: "Xqlite",
+      source_url: "https://github.com/dimitarvp/xqlite",
+      source_ref: "v#{@version}",
+      extras: ["README.md", "LICENSE.md"],
+      # Group modules for better navigation in the sidebar.
+      groups_for_modules: [
+        "High-Level API": [
+          Xqlite,
+          Xqlite.Pragma,
+          # It will be hidden but good to group
+          Xqlite.StreamResourceCallbacks
+        ],
+        "Schema Structs": [
+          Xqlite.Schema.ColumnInfo,
+          Xqlite.Schema.DatabaseInfo,
+          Xqlite.Schema.ForeignKeyInfo,
+          Xqlite.Schema.IndexColumnInfo,
+          Xqlite.Schema.IndexInfo,
+          Xqlite.Schema.SchemaObjectInfo,
+          Xqlite.Schema.Types
+        ],
+        "Low-Level NIFs": [
+          XqliteNIF
+        ],
+        "Internal Helpers": [
+          Xqlite.PragmaUtil,
+          Xqlite.TestUtil
+        ]
+      ]
     ]
+  end
 
   defp description(), do: "An Elixir SQLite database library utilising the rusqlite Rust crate"
 
