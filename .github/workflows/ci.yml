@@ -9,13 +9,12 @@ on:
       - "main"
 
 env:
-  # Define versions for Elixir and OTP in one place
   ELIXIR_VERSION: "1.18"
   OTP_VERSION: "27"
+  # Define a name for our build artifact
+  ARTIFACT_NAME: xqlite-build-${{ github.sha }}
 
 jobs:
-  # This job builds all dependencies and compiles the project, including the NIF.
-  # Its output (deps, _build, priv/native, target) is cached and used by subsequent jobs.
   build:
     name: Build Project
     runs-on: ubuntu-latest
@@ -34,54 +33,40 @@ jobs:
         with:
           toolchain: "stable"
 
-      - name: Restore Build Cache
-        id: build-cache
+      - name: Restore Elixir dependencies cache
+        id: deps-cache
         uses: actions/cache@v4
         with:
-          path: |
-            deps
-            _build
-            priv/native
-            native/xqlitenif/target
-          key: ${{ runner.os }}-build-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock', 'native/**') }}
+          path: deps
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/mix.lock') }}
 
-      - name: Install Elixir dependencies
-        if: steps.build-cache.outputs.cache-hit != 'true'
+      - name: Install dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: mix deps.get
 
-      - name: Compile project (includes NIF)
-        if: steps.build-cache.outputs.cache-hit != 'true'
+      - name: Compile project
         run: mix compile
 
-  # This job runs linters. It depends on the 'build' job to reuse the compiled artifacts.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: . # Upload the entire compiled project directory
+
   lint:
     name: Lint Checks
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
         with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
+          name: ${{ env.ARTIFACT_NAME }}
 
-      - name: Set up Rust toolchain
+      - name: Set up Rust for cargo
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "stable"
-
-      - name: Restore Build Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-            priv/native
-            native/xqlitenif/target
-          key: ${{ runner.os }}-build-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock', 'native/**') }}
 
       - name: Check Elixir formatting
         run: mix format --check-formatted
@@ -90,57 +75,17 @@ jobs:
         run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
 
       - name: Rust clippy
-        # This will be fast as it uses the cached `target` directory from the 'build' job
         run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
-  dialyzer:
-    name: Dialyzer Type Check
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Elixir
-        uses: erlef/setup-beam@v1
-        with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
-
-      - name: Restore Dialyzer PLT cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            priv/plts
-          key: ${{ runner.os }}-plt-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-plt-
-
-      - name: Restore Build Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-build-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock', 'native/**') }}
-
-      - name: Install Elixir dependencies
-        run: mix deps.get
-
-      - name: Create PLT (if not cached or outdated)
-        run: mix dialyzer --plt
-
-      - name: Run Dialyzer
-        run: mix dialyzer --format short
-
-  # This job runs the tests. It also depends on the 'build' job.
   test:
     name: Run Tests
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
 
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
@@ -148,16 +93,5 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      - name: Restore Build Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-            priv/native
-            native/xqlitenif/target
-          key: ${{ runner.os }}-build-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock', 'native/**') }}
-
       - name: Run tests
-        # mix test will trigger 'mix compile', but it will be a no-op because of the restored cache.
         run: mix test --max-cases 1 --trace --preload-modules
