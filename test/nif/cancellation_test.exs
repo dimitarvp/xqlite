@@ -29,8 +29,6 @@ defmodule Xqlite.NIF.CancellationTest do
   END;
   """
 
-  # Use a large number of lightweight statements for the batch test.
-  @batch_cancel_statement_count 100_000
   @batch_cancel_table "cancel_batch_test"
   @batch_cancel_setup "CREATE TABLE #{@batch_cancel_table} (id INTEGER PRIMARY KEY, data TEXT); INSERT INTO #{@batch_cancel_table} (id, data) VALUES (0, 'initial');"
   @await_timeout 5_000
@@ -150,8 +148,7 @@ defmodule Xqlite.NIF.CancellationTest do
       test "execute_batch_cancellable/3 successfully cancels a running batch", %{conn: conn} do
         assert :ok = NIF.execute_batch(conn, @batch_cancel_setup)
 
-        # The second argument to generate_long_batch is now ignored, but we pass it for consistency.
-        long_batch = generate_long_batch(@batch_cancel_table, 0)
+        long_batch = generate_long_batch(@batch_cancel_table)
 
         assert_cancellation(conn, fn conn, token ->
           NIF.execute_batch_cancellable(conn, long_batch, token)
@@ -179,7 +176,7 @@ defmodule Xqlite.NIF.CancellationTest do
       test "normal batch works after a cancelled execute_batch_cancellable (handler unregistered)",
            %{conn: conn} do
         assert :ok = NIF.execute_batch(conn, @batch_cancel_setup)
-        long_batch = generate_long_batch(@batch_cancel_table, 0)
+        long_batch = generate_long_batch(@batch_cancel_table)
 
         # --- Part 1: Run and cancel a batch ---
         assert_cancellation(conn, fn conn, token ->
@@ -196,8 +193,7 @@ defmodule Xqlite.NIF.CancellationTest do
     end
   end
 
-  # Generate a batch of lightweight, no-op statements.
-  defp generate_long_batch(table_name, _num_statements) do
+  defp generate_long_batch(table_name) do
     # This batch does a quick update, then runs our reliably slow query,
     # then attempts another update that should not be reached if cancelled.
     """
