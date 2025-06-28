@@ -22,7 +22,15 @@ This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.
 
 ## Current Capabilities
 
-The `XqliteNIF` module provides the following low-level functions:
+The library provides two primary modules: `Xqlite` for a higher-level Elixir API, and `XqliteNIF` for direct, low-level access.
+
+### High-Level API (`Xqlite` and `Xqlite.Pragma` modules)
+
+- **`Xqlite.stream/4`**: Creates an Elixir `Stream` to lazily fetch rows from a query. Rows are returned as maps with atom keys.
+- **PRAGMA Helpers**: `Xqlite.Pragma.get/4` and `Xqlite.Pragma.put/3` provide a structured interface for interacting with SQLite PRAGMAs.
+- **Convenience Helpers**: `Xqlite.enable_foreign_key_enforcement/1`, `Xqlite.enable_strict_mode/1`, etc.
+
+### Low-Level NIF API (`XqliteNIF` module)
 
 - **Connection Management:**
 
@@ -46,13 +54,12 @@ The `XqliteNIF` module provides the following low-level functions:
     - `execute` variants return `{:ok, affected_rows :: non_neg_integer()}`.
     - `execute_batch` variants return `:ok` on success or `{:error, reason}`.
 
-- **Streaming Results:**
+- **Streaming Primitives:**
 
   - `stream_open(conn, sql, params, opts)`: Prepares a query and returns a stream handle.
   - `stream_get_columns(stream_handle)`: Retrieves column names from the prepared stream.
   - `stream_fetch(stream_handle, batch_size)`: Fetches a batch of rows from the stream.
   - `stream_close(stream_handle)`: Closes the stream and finalizes the statement.
-  - A higher-level `Xqlite.stream/4` wrapper is planned to provide an Elixir `Stream`.
 
 - **Operation Cancellation:**
 
@@ -122,7 +129,7 @@ IO.inspect(XqliteNIF.query(conn, sql_select, params_select), label: "Query Resul
 long_query_task = Task.async(fn ->
   XqliteNIF.query_cancellable(conn, slow_query_sql, [], cancel_token)
 end)
-Process.sleep(100) # Give the query time to start before cancelling
+Process.sleep(100)
 :ok = XqliteNIF.cancel_operation(cancel_token)
 IO.inspect(Task.await(long_query_task, 5000), label: "Cancelled Query Result")
 
@@ -150,15 +157,14 @@ end
 
 ## Roadmap
 
-The following features are planned for the **`xqlite`** (NIF) library:
+The following features are planned for the **`xqlite`** library:
 
-1.  **Implement Elixir `Stream` Wrapper:** Build the `Xqlite.stream/4` function to provide a high-level, idiomatic Elixir stream over the NIF streaming functions.
-2.  **Implement Extension Loading:** Add `load_extension/2` NIF.
-3.  **Implement Online Backup API:** Add NIFs for SQLite's Online Backup API.
-4.  **Implement Session Extension:** Add NIFs for SQLite's Session Extension.
-5.  **(Lower Priority)** Implement Incremental Blob I/O.
-6.  **(Optional)** Add SQLCipher Support (build feature).
-7.  **(Lowest Priority / Tentative)** User-Defined Functions (UDFs).
+1.  **Implement Extension Loading:** Add `load_extension/2` NIF.
+2.  **Implement Online Backup API:** Add NIFs for SQLite's Online Backup API.
+3.  **Implement Session Extension:** Add NIFs for SQLite's Session Extension.
+4.  **(Lower Priority)** Implement Incremental Blob I/O.
+5.  **(Optional)** Add SQLCipher Support (build feature).
+6.  **(Lowest Priority / Tentative)** User-Defined Functions (UDFs).
 
 The **`xqlite_ecto3`** library (separate project) will provide:
 

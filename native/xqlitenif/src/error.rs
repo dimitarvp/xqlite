@@ -233,63 +233,63 @@ pub(crate) enum XqliteError {
 impl Display for XqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            XqliteError::CannotConvertToSqliteValue { value_str, reason } => write!(f, "Cannot convert Elixir value '{}' to SQLite type: {}", value_str, reason),
-            XqliteError::ToSqlConversionFailure { reason } => write!(f, "Cannot convert Rust value to SQLite type: {}", reason),
-            XqliteError::ExpectedKeywordList { value_str } => write!(f, "Expected a keyword list for named parameters, got: {}", value_str),
-            XqliteError::ExpectedKeywordTuple { value_str } => write!(f, "Expected a {{atom, value}} tuple inside keyword list, got: {}", value_str),
-            XqliteError::ExpectedList { value_str } => write!(f, "Expected a List for parameters, got: {}", value_str),
-            XqliteError::UnsupportedAtom { atom_value } => write!(f, "Unsupported atom value '{}'. Allowed values: nil, true, false", atom_value),
+            XqliteError::CannotConvertToSqliteValue { value_str, reason } => write!(f, "Cannot convert Elixir value '{value_str}' to SQLite type: {reason}"),
+            XqliteError::ToSqlConversionFailure { reason } => write!(f, "Cannot convert Rust value to SQLite type: {reason}"),
+            XqliteError::ExpectedKeywordList { value_str } => write!(f, "Expected a keyword list for named parameters, got: {value_str}"),
+            XqliteError::ExpectedKeywordTuple { value_str } => write!(f, "Expected a {{atom, value}} tuple inside keyword list, got: {value_str}"),
+            XqliteError::ExpectedList { value_str } => write!(f, "Expected a List for parameters, got: {value_str}"),
+            XqliteError::UnsupportedAtom { atom_value } => write!(f, "Unsupported atom value '{atom_value}'. Allowed values: nil, true, false"),
             XqliteError::UnsupportedDataType { term_type } => write!(f, "Unsupported data type {}. Allowed types: atom, integer, float, binary", term_type_to_string(*term_type)),
-            XqliteError::CannotPrepareStatement(sql, reason) => write!(f, "Cannot prepare statement '{}': {}", sql, reason),
-            XqliteError::CannotExecute(reason) => write!(f, "Cannot execute query/statement: {}", reason),
-            XqliteError::CannotExecutePragma { pragma, reason } => write!(f, "Cannot execute PRAGMA '{}': {}", pragma, reason),
+            XqliteError::CannotPrepareStatement(sql, reason) => write!(f, "Cannot prepare statement '{sql}': {reason}"),
+            XqliteError::CannotExecute(reason) => write!(f, "Cannot execute query/statement: {reason}"),
+            XqliteError::CannotExecutePragma { pragma, reason } => write!(f, "Cannot execute PRAGMA '{pragma}': {reason}"),
             XqliteError::DatabaseBusyOrLocked { message } => {
-                write!(f, "Database busy or locked: {}", message)
+                write!(f, "Database busy or locked: {message}")
             }
             XqliteError::OperationCancelled => {
                 write!(f, "Database operation was cancelled")
             }
             XqliteError::NoSuchTable { message } => {
-                write!(f, "No such table: {}", message) // Message usually includes table name
+                write!(f, "No such table: {message}") // Message usually includes table name
             }
             XqliteError::NoSuchIndex { message } => {
-                write!(f, "No such index: {}", message) // Message usually includes index name
+                write!(f, "No such index: {message}") // Message usually includes index name
             }
             XqliteError::TableExists { message } => {
-                write!(f, "Table already exists: {}", message) // Message usually includes table name
+                write!(f, "Table already exists: {message}") // Message usually includes table name
             }
             XqliteError::IndexExists { message } => {
-                write!(f, "Index already exists: {}", message) // Message usually includes index name
+                write!(f, "Index already exists: {message}") // Message usually includes index name
             }
             XqliteError::SchemaChanged { message } => {
-                write!(f, "Database schema changed: {}", message) // SQLITE_SCHEMA
+                write!(f, "Database schema changed: {message}") // SQLITE_SCHEMA
             }
             XqliteError::ReadOnlyDatabase { message } => {
-                write!(f, "Database is read-only: {}", message) // SQLITE_READONLY
+                write!(f, "Database is read-only: {message}") // SQLITE_READONLY
             }
-            XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {}", reason),
-            XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{}': {}", path, reason),
-            XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {}", reason),
-            XqliteError::LockError(reason) => write!(f, "Failed to lock connection mutex: {}", reason),
-            XqliteError::InvalidStreamHandle { reason } => write!(f, "Invalid stream handle: {}", reason),
-            XqliteError::InternalEncodingError { context } => write!(f, "Internal error during result encoding: {}", context),
-            XqliteError::InvalidParameterCount { provided, expected } => write!(f, "Invalid parameter count: provided {}, expected {}", provided, expected),
-            XqliteError::InvalidParameterName(name) => write!(f, "Invalid parameter name: '{}'", name),
+            XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {reason}"),
+            XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{path}': {reason}"),
+            XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {reason}"),
+            XqliteError::LockError(reason) => write!(f, "Failed to lock connection mutex: {reason}"),
+            XqliteError::InvalidStreamHandle { reason } => write!(f, "Invalid stream handle: {reason}"),
+            XqliteError::InternalEncodingError { context } => write!(f, "Internal error during result encoding: {context}"),
+            XqliteError::InvalidParameterCount { provided, expected } => write!(f, "Invalid parameter count: provided {provided}, expected {expected}"),
+            XqliteError::InvalidParameterName(name) => write!(f, "Invalid parameter name: '{name}'"),
             XqliteError::NulErrorInString => write!(f, "Input string contains embedded null byte"),
             XqliteError::MultipleStatements => write!(f, "Provided SQL string contains multiple statements"),
-            XqliteError::InvalidColumnIndex(index) => write!(f, "Invalid column index: {}", index),
-            XqliteError::InvalidColumnName(name) => write!(f, "Invalid column name: '{}'", name),
-            XqliteError::InvalidColumnType { index, name, sqlite_type } => write!(f, "Invalid column type at index {} (name: '{}'): cannot convert SQLite type '{:?}'", index, name, sqlite_type),
+            XqliteError::InvalidColumnIndex(index) => write!(f, "Invalid column index: {index}"),
+            XqliteError::InvalidColumnName(name) => write!(f, "Invalid column name: '{name}'"),
+            XqliteError::InvalidColumnType { index, name, sqlite_type } => write!(f, "Invalid column type at index {index} (name: '{name}'): cannot convert SQLite type '{sqlite_type:?}'"),
             XqliteError::ExecuteReturnedResults => write!(f, "Execute returned results, expected no rows"),
-            XqliteError::Utf8Error { reason } => write!(f, "UTF-8 decoding error: {}", reason),
-            XqliteError::FromSqlConversionFailure { index, sqlite_type, reason } => write!(f, "Failed to convert SQLite type '{:?}' at index {} to Rust type: {}", sqlite_type, index, reason),
-            XqliteError::IntegralValueOutOfRange { index, value } => write!(f, "Integral value {} at index {} out of range for requested Rust type", value, index),
-            XqliteError::SqlInputError { code, message, sql: _, offset } => write!(f, "SQL input error (Code {}): '{}' near offset {}", code, message, offset),
-            XqliteError::ConstraintViolation { kind: _, message } => write!(f, "Constraint violation: {}", message),
+            XqliteError::Utf8Error { reason } => write!(f, "UTF-8 decoding error: {reason}"),
+            XqliteError::FromSqlConversionFailure { index, sqlite_type, reason } => write!(f, "Failed to convert SQLite type '{sqlite_type:?}' at index {index} to Rust type: {reason}"),
+            XqliteError::IntegralValueOutOfRange { index, value } => write!(f, "Integral value {value} at index {index} out of range for requested Rust type"),
+            XqliteError::SqlInputError { code, message, sql: _, offset } => write!(f, "SQL input error (Code {code}): '{message}' near offset {offset}"),
+            XqliteError::ConstraintViolation { kind: _, message } => write!(f, "Constraint violation: {message}"),
             XqliteError::SchemaParsingError { context, error_detail } => {
                 let SchemaErrorDetail::UnexpectedValue(val) = error_detail;
-                write!(f, "Schema parsing error ({})", context)?;
-                write!(f, ": Unexpected value '{}'", val)
+                write!(f, "Schema parsing error ({context})")?;
+                write!(f, ": Unexpected value '{val}'")
             }
             XqliteError::SqliteFailure { code, extended_code, message } => write!(f, "SQLite failure (Code: {}, Extended: {}): {}", code, extended_code, message.as_deref().unwrap_or("No details")),
         }
