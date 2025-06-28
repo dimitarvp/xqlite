@@ -10,7 +10,7 @@ defmodule Xqlite.TestUtil do
 
   @tag_to_mfa_map Map.new(@connection_openers, fn {tag, _prefix, mfa} -> {tag, mfa} end)
 
-  defp open_with_retries(opener_fun, retries_left \\ 5)
+  defp open_with_retries(opener_fun, retries_left \\ 10)
 
   # Base case: no retries left, return the last error.
   defp open_with_retries(_opener_fun, 0) do
@@ -32,13 +32,13 @@ defmodule Xqlite.TestUtil do
             # Closing the connection and retrying is the safest path.
             NIF.close(conn)
             # Wait a bit before retrying
-            Process.sleep(300)
+            Process.sleep(1000)
             open_with_retries(opener_fun, retries_left - 1)
         end
 
       {:error, _reason} ->
         # The initial open call failed. Wait and retry.
-        Process.sleep(300)
+        Process.sleep(1000)
         open_with_retries(opener_fun, retries_left - 1)
     end
   end
