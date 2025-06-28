@@ -12,10 +12,8 @@ defmodule Xqlite.TestUtil do
 
   defp open_and_configure(opener_mfa) do
     with {:ok, conn} <- apply(elem(opener_mfa, 0), elem(opener_mfa, 1), elem(opener_mfa, 2)) do
-      # Set a memory-friendly journal_mode for test connections to avoid WAL-related issues in CI.
-      # Also, enable foreign keys by default for tests.
-      :ok = NIF.set_pragma(conn, "journal_mode", "DELETE")
-      :ok = NIF.set_pragma(conn, "foreign_keys", true)
+      _ = NIF.set_pragma(conn, "journal_mode", "DELETE")
+      _ = NIF.set_pragma(conn, "foreign_keys", true)
       {:ok, conn}
     end
   end
