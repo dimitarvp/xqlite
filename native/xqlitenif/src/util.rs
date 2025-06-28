@@ -57,7 +57,7 @@ pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> T
         TermType::Ref => (crate::reference(), term).encode(env), // e.g., {:reference, #Reference<...>} (opaque)
         TermType::Tuple => (crate::tuple(), term).encode(env),   // e.g., {:tuple, {1,2}}
         TermType::Unknown => {
-            (crate::unknown(), format!("Unknown TermType: {:?}", term)).encode(env)
+            (crate::unknown(), format!("Unknown TermType: {term:?}")).encode(env)
         }
     }
 }
@@ -107,8 +107,7 @@ pub(crate) fn process_rows<'a, 'rows>(
                             }
                             // Otherwise, map to CannotFetchRow
                             return Err(XqliteError::CannotFetchRow(format!(
-                                "Error getting value for column {}: {}",
-                                i, e
+                                "Error getting value for column {i}: {e}"
                             )));
                         }
                     };
@@ -131,8 +130,7 @@ pub(crate) fn process_rows<'a, 'rows>(
                 }
                 // Otherwise, map other iteration errors to CannotFetchRow
                 return Err(XqliteError::CannotFetchRow(format!(
-                    "Error advancing row iterator: {}",
-                    e
+                    "Error advancing row iterator: {e}"
                 )));
             }
         }
@@ -146,8 +144,8 @@ fn elixir_term_to_rusqlite_value<'a>(
 ) -> Result<Value, XqliteError> {
     let make_convert_error = |term: Term<'a>, err: RustlerError| -> XqliteError {
         XqliteError::CannotConvertToSqliteValue {
-            value_str: format!("{:?}", term),
-            reason: format!("{:?}", err),
+            value_str: format!("{term:?}"),
+            reason: format!("{err:?}"),
         }
     };
     let term_type = term.get_type();
@@ -163,7 +161,7 @@ fn elixir_term_to_rusqlite_value<'a>(
                 Err(XqliteError::UnsupportedAtom {
                     atom_value: term
                         .atom_to_string()
-                        .unwrap_or_else(|_| format!("{:?}", term)),
+                        .unwrap_or_else(|_| format!("{term:?}")),
                 })
             }
         }
@@ -194,7 +192,7 @@ pub(crate) fn decode_exec_keyword_params<'a>(
         list_term
             .decode()
             .map_err(|_| XqliteError::ExpectedKeywordList {
-                value_str: format!("{:?}", list_term),
+                value_str: format!("{list_term:?}"),
             })?;
     let mut params: Vec<(String, Value)> = Vec::new();
     for term_item in iter {
@@ -202,12 +200,12 @@ pub(crate) fn decode_exec_keyword_params<'a>(
             term_item
                 .decode()
                 .map_err(|_| XqliteError::ExpectedKeywordTuple {
-                    value_str: format!("{:?}", term_item),
+                    value_str: format!("{term_item:?}"),
                 })?;
         let mut key_string: String = key_atom
             .to_term(env)
             .atom_to_string()
-            .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{:?}", e)))?;
+            .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{e:?}")))?;
         key_string.insert(0, ':');
         let rusqlite_value = elixir_term_to_rusqlite_value(env, value_term)?;
         params.push((key_string, rusqlite_value));
@@ -221,7 +219,7 @@ pub(crate) fn decode_plain_list_params<'a>(
 ) -> Result<Vec<Value>, XqliteError> {
     let iter: ListIterator<'a> =
         list_term.decode().map_err(|_| XqliteError::ExpectedList {
-            value_str: format!("{:?}", list_term),
+            value_str: format!("{list_term:?}"),
         })?;
     let mut values = Vec::new();
     for term in iter {
@@ -245,20 +243,20 @@ pub(crate) fn format_term_for_pragma<'a>(
                 Ok("OFF".to_string())
             } else {
                 term.atom_to_string()
-                    .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{:?}", e)))
+                    .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{e:?}")))
             }
         }
         TermType::Integer => term.decode::<i64>().map(|i| i.to_string()).map_err(|e| {
             XqliteError::CannotConvertToSqliteValue {
-                value_str: format!("{:?}", term),
-                reason: format!("{:?}", e),
+                value_str: format!("{term:?}"),
+                reason: format!("{e:?}"),
             }
         }),
         // Floats are usually not set via PRAGMA, but handle just in case
         TermType::Float => term.decode::<f64>().map(|f| f.to_string()).map_err(|e| {
             XqliteError::CannotConvertToSqliteValue {
-                value_str: format!("{:?}", term),
-                reason: format!("{:?}", e),
+                value_str: format!("{term:?}"),
+                reason: format!("{e:?}"),
             }
         }),
         // Binaries interpreted as Strings, need single quotes
@@ -266,8 +264,8 @@ pub(crate) fn format_term_for_pragma<'a>(
             .decode::<String>()
             .map(|s| format!("'{}'", s.replace('\'', "''")))
             .map_err(|e| XqliteError::CannotConvertToSqliteValue {
-                value_str: format!("{:?}", term),
-                reason: format!("Failed to decode binary as string for PRAGMA: {:?}", e),
+                value_str: format!("{term:?}"),
+                reason: format!("Failed to decode binary as string for PRAGMA: {e:?}"),
             }),
         _ => Err(XqliteError::UnsupportedDataType { term_type }),
     }
@@ -320,8 +318,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                 if s_ptr.is_null() {
                     return Err(XqliteError::InternalEncodingError {
                         context: format!(
-                            "SQLite TEXT column pointer was null for column index {}",
-                            i
+                            "SQLite TEXT column pointer was null for column index {i}"
                         ),
                     });
                 }
@@ -332,8 +329,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                     Err(utf8_err) => {
                         return Err(XqliteError::Utf8Error {
                             reason: format!(
-                                "Invalid UTF-8 sequence in TEXT column index {}: {}",
-                                i, utf8_err
+                                "Invalid UTF-8 sequence in TEXT column index {i}: {utf8_err}"
                             ),
                         });
                     }
@@ -353,7 +349,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                         empty_bin.release(env).encode(env)
                     } else {
                         return Err(XqliteError::InternalEncodingError {
-                            context: format!("SQLite BLOB column pointer was null for non-empty blob (column index {})", i),
+                            context: format!("SQLite BLOB column pointer was null for non-empty blob (column index {i})"),
                         });
                     }
                 } else {
@@ -361,8 +357,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                     let mut bin = OwnedBinary::new(len).ok_or_else(|| {
                         XqliteError::InternalEncodingError {
                             context: format!(
-                                "Failed to allocate {}-byte OwnedBinary for blob",
-                                len
+                                "Failed to allocate {len}-byte OwnedBinary for blob"
                             ),
                         }
                     })?;
@@ -375,8 +370,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
             _ => {
                 return Err(XqliteError::InternalEncodingError {
                     context: format!(
-                        "Unknown SQLite column type: {} for column index {}",
-                        col_type, i
+                        "Unknown SQLite column type: {col_type} for column index {i}"
                     ),
                 });
             }

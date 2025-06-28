@@ -166,7 +166,7 @@ fn core_query<'a>(
         }
         _ => {
             return Err(XqliteError::ExpectedList {
-                value_str: format!("{:?}", params_term),
+                value_str: format!("{params_term:?}"),
             });
         }
     };
@@ -334,7 +334,7 @@ fn get_pragma(
     pragma_name: String,
 ) -> Result<Term<'_>, XqliteError> {
     with_conn(&handle, |conn| {
-        let read_sql = format!("PRAGMA {};", pragma_name);
+        let read_sql = format!("PRAGMA {pragma_name};");
         match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
             Ok(value) => Ok(encode_val(env, value)),
             Err(RusqliteError::QueryReturnedNoRows) => Ok(no_value().to_term(env)),
@@ -360,7 +360,7 @@ fn set_pragma<'a>(
         let value_literal = format_term_for_pragma(env, value_term)?;
 
         with_conn(&handle, |conn| {
-            let write_sql = format!("PRAGMA {} = {};", pragma_name, value_literal);
+            let write_sql = format!("PRAGMA {pragma_name} = {value_literal};");
             // The block for executing the PRAGMA and consuming potential results remains.
             // rusqlite's `execute` is for non-query statements, but PRAGMA assignments
             // can sometimes return a row (e.g., the new value).
@@ -430,7 +430,7 @@ fn rollback(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
 fn savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
     let execution_result = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
-        let sql = format!("SAVEPOINT {};", quoted_name);
+        let sql = format!("SAVEPOINT {quoted_name};");
         conn.execute(&sql, [])
             .map(|_affected_rows| ())
             .map_err(XqliteError::from)
@@ -447,7 +447,7 @@ fn rollback_to_savepoint(
 ) -> Term<'_> {
     let execution_result = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
-        let sql = format!("ROLLBACK TO SAVEPOINT {};", quoted_name);
+        let sql = format!("ROLLBACK TO SAVEPOINT {quoted_name};");
         conn.execute(&sql, [])
             .map(|_affected_rows| ())
             .map_err(XqliteError::from)
@@ -460,7 +460,7 @@ fn rollback_to_savepoint(
 fn release_savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
     let execution_result = with_conn(&handle, |conn| {
         let quoted_name = quote_savepoint_name(&name);
-        let sql = format!("RELEASE SAVEPOINT {};", quoted_name);
+        let sql = format!("RELEASE SAVEPOINT {quoted_name};");
         conn.execute(&sql, [])
             .map(|_affected_rows| ())
             .map_err(XqliteError::from)
@@ -527,9 +527,7 @@ fn schema_list_objects(
                     let atom = temp_info.obj_type_atom.map_err(|unexpected_val| {
                         XqliteError::SchemaParsingError {
                             context: format!(
-                                "Parsing object type for '{}'.'{}'",
-                                schema_name_for_error,
-                                object_name_for_error // Use the extracted values
+                                "Parsing object type for '{schema_name_for_error}'.'{object_name_for_error}'" // Use the extracted values
                             ),
                             error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
                         }
@@ -592,7 +590,7 @@ fn schema_columns(
     with_conn(&handle, |conn| {
         let quoted_table_name = quote_identifier(&table_name);
         // Using PRAGMA table_xinfo as it provides the 'hidden' column
-        let sql = format!("PRAGMA table_xinfo({});", quoted_table_name);
+        let sql = format!("PRAGMA table_xinfo({quoted_table_name});");
         let mut stmt = conn.prepare(&sql)?;
 
         // Step 1: Query and map raw data from PRAGMA table_xinfo
@@ -695,7 +693,7 @@ fn schema_foreign_keys(
 ) -> Result<Vec<ForeignKeyInfo>, XqliteError> {
     with_conn(&handle, |conn| {
         let quoted_table_name = quote_identifier(&table_name);
-        let sql = format!("PRAGMA foreign_key_list({});", quoted_table_name);
+        let sql = format!("PRAGMA foreign_key_list({quoted_table_name});");
         let mut stmt = conn.prepare(&sql)?;
 
         // Step 1: Query and map raw data
@@ -783,7 +781,7 @@ fn schema_indexes(
 ) -> Result<Vec<IndexInfo>, XqliteError> {
     with_conn(&handle, |conn| {
         let quoted_table_name = quote_identifier(&table_name);
-        let sql = format!("PRAGMA index_list({});", quoted_table_name);
+        let sql = format!("PRAGMA index_list({quoted_table_name});");
         let mut stmt = conn.prepare(&sql)?;
 
         // Step 1: Query and map raw data
@@ -870,7 +868,7 @@ fn schema_index_columns(
 ) -> Result<Vec<IndexColumnInfo>, XqliteError> {
     with_conn(&handle, |conn| {
         let quoted_index_name = quote_identifier(&index_name);
-        let sql = format!("PRAGMA index_xinfo({});", quoted_index_name);
+        let sql = format!("PRAGMA index_xinfo({quoted_index_name});");
         let mut stmt = conn.prepare(&sql)?;
 
         // Step 1: Query and map raw data
@@ -993,7 +991,7 @@ pub(crate) fn stream_open<'a>(
                 let error_message = {
                     let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
                     if err_msg_ptr.is_null() {
-                        format!("SQLite preparation error (code {}) but no message available. SQL: {}", prepare_rc, sql)
+                        format!("SQLite preparation error (code {prepare_rc}) but no message available. SQL: {sql}")
                     } else {
                         std::ffi::CStr::from_ptr(err_msg_ptr).to_string_lossy().into_owned()
                     }
@@ -1031,7 +1029,7 @@ pub(crate) fn stream_open<'a>(
                     }
                 }
                 _ => Err(XqliteError::ExpectedList {
-                    value_str: format!("Parameters term was not a list: {:?}", params_term)
+                    value_str: format!("Parameters term was not a list: {params_term:?}")
                 }),
             };
 
@@ -1050,7 +1048,7 @@ pub(crate) fn stream_open<'a>(
                     if name_ptr.is_null() {
                         ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
                         return Err(XqliteError::InternalEncodingError {
-                            context: format!("SQLite returned null column name for index {} during stream open", i),
+                            context: format!("SQLite returned null column name for index {i} during stream open"),
                         });
                     }
                     let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
@@ -1093,7 +1091,7 @@ pub(crate) fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Te
             // For decode errors, we still manually construct the error term
             // as it's not an XqliteError directly from an operation.
             let xql_err = XqliteError::InvalidStreamHandle {
-                reason: format!("Expected a valid stream handle resource: {:?}", decode_err),
+                reason: format!("Expected a valid stream handle resource: {decode_err:?}"),
             };
             (error(), xql_err).encode(env)
         }
@@ -1148,8 +1146,7 @@ pub(crate) fn stream_fetch<'a>(
         Err(_) => {
             let xql_err = XqliteError::InternalEncodingError {
                 context: format!(
-                    "Failed to convert valid i64 batch_size ({}) to usize",
-                    batch_size_i64
+                    "Failed to convert valid i64 batch_size ({batch_size_i64}) to usize"
                 ),
             };
             return (error(), xql_err).encode(env);
@@ -1184,8 +1181,7 @@ pub(crate) fn stream_fetch<'a>(
             return (
                 error(),
                 XqliteError::LockError(format!(
-                    "XqliteConn Mutex poisoned for db_handle: {:?}",
-                    p_err_conn
+                    "XqliteConn Mutex poisoned for db_handle: {p_err_conn:?}"
                 )),
             )
                 .encode(env);

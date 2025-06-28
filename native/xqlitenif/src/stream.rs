@@ -44,8 +44,7 @@ impl XqliteStream {
                 // Attempt to get a more detailed error message from the connection.
                 let ffi_err = ffi::Error::new(result_code);
                 let mut message = format!(
-                    "Failed to finalize SQLite statement (code: {})",
-                    result_code
+                    "Failed to finalize SQLite statement (code: {result_code})"
                 );
 
                 // Try to lock the connection to get a specific SQLite error message.
@@ -91,8 +90,7 @@ impl Drop for XqliteStream {
             // This indicates a problem during cleanup, potentially a resource leak
             // if SQLite itself failed to finalize properly.
             eprintln!(
-                "[xqlite] Error finalizing SQLite statement during stream resource drop: {:?}",
-                e
+                "[xqlite] Error finalizing SQLite statement during stream resource drop: {e:?}"
             );
         }
     }
@@ -130,8 +128,7 @@ pub(crate) unsafe fn process_single_step<'a>(
                 let err_msg_ptr = ffi::sqlite3_errmsg(db_handle_for_error_reporting);
                 if err_msg_ptr.is_null() {
                     format!(
-                        "SQLite error {} during step; no specific message.",
-                        err_code
+                        "SQLite error {err_code} during step; no specific message."
                     )
                 } else {
                     // This is an unsafe FFI call
@@ -188,8 +185,7 @@ fn bind_value_to_raw_stmt(
             let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
             if err_msg_ptr.is_null() {
                 format!(
-                    "Parameter binding failed at index {} (code {})",
-                    bind_idx, rc
+                    "Parameter binding failed at index {bind_idx} (code {rc})"
                 )
             } else {
                 std::ffi::CStr::from_ptr(err_msg_ptr)
