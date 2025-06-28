@@ -32,16 +32,7 @@ jobs:
         with:
           toolchain: "stable"
 
-      - name: Restore Elixir dependencies cache
-        id: deps-cache
-        uses: actions/cache@v4
-        with:
-          path: deps
-          key: ${{ runner.os }}-deps-${{ hashFiles('**/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-deps-
-
-      - name: Install dependencies
+      - name: Install Elixir dependencies
         run: mix deps.get
 
       - name: Compile project with NIF
@@ -83,6 +74,9 @@ jobs:
         with:
           toolchain: "stable"
 
+      - name: Verify dependencies
+        run: mix deps.get
+
       - name: Check Elixir formatting
         run: mix format --check-formatted
 
@@ -120,6 +114,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-plt-
 
+      - name: Verify dependencies
+        run: mix deps.get
+
       - name: Create PLT (if not cached or outdated)
         run: mix dialyzer --plt
 
@@ -145,6 +142,9 @@ jobs:
         with:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Verify dependencies
+        run: mix deps.get
 
       - name: Run tests
         run: mix test --max-cases 1 --trace --preload-modules
