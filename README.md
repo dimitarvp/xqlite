@@ -10,7 +10,7 @@ This library provides direct access to core SQLite functionality. For seamless E
 
 **Target Audience:** Developers needing direct, performant control over SQLite operations from Elixir, potentially as a foundation for higher-level libraries, or for those not interested in Ecto integration.
 
-## Core Design & Thread Safety
+## Core design & thread safety
 
 SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for concurrent access ([`!Sync`](https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109)). To safely expose connections to the concurrent Elixir environment, `xqlite` wraps each `rusqlite::Connection` within an `Arc<Mutex<_>>` managed by a `ResourceArc`.
 
@@ -20,17 +20,17 @@ SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for c
 
 This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.0 recommended). While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal. **Notably, retrieving primary key values automatically after insertion into `WITHOUT ROWID` tables is only reliably supported via the `RETURNING` clause (available since SQLite 3.35.0). Using `WITHOUT ROWID` tables on older SQLite versions may require you to supply primary key values explicitly within your application, as `last_insert_rowid/1` cannot be used for these tables.**
 
-## Current Capabilities
+## Current capabilities
 
 The library provides two primary modules: `Xqlite` for a higher-level Elixir API, and `XqliteNIF` for direct, low-level access.
 
-### High-Level API (`Xqlite` and `Xqlite.Pragma` modules)
+### High-level API (`Xqlite` and `Xqlite.Pragma` modules)
 
 - **`Xqlite.stream/4`**: Creates an Elixir `Stream` to lazily fetch rows from a query. Rows are returned as maps with atom keys.
 - **PRAGMA Helpers**: `Xqlite.Pragma.get/4` and `Xqlite.Pragma.put/3` provide a structured interface for interacting with SQLite PRAGMAs.
 - **Convenience Helpers**: `Xqlite.enable_foreign_key_enforcement/1`, `Xqlite.enable_strict_mode/1`, etc.
 
-### Low-Level NIF API (`XqliteNIF` module)
+### Low-level NIF API (`XqliteNIF` module)
 
 - **Connection Management:**
 
@@ -95,7 +95,7 @@ The library provides two primary modules: `Xqlite` for a higher-level Elixir API
   - Functions return `{:ok, result}`, `:ok` (for simple success), or `{:error, reason}`.
   - `reason` is a structured tuple (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:operation_cancelled}`).
 
-## Known Limitations and Caveats
+## Known limitations and caveats
 
 - **`last_insert_rowid/1`:**
   - Reflects the state of the specific connection handle. Avoid sharing handles for concurrent `INSERT`s outside a proper pooling mechanism.
@@ -105,7 +105,7 @@ The library provides two primary modules: `Xqlite` for a higher-level Elixir API
 - **Invalid UTF-8 in TEXT Columns with SQL Functions:** Applying certain SQL text functions (e.g., `UPPER()`, `LOWER()`) to `TEXT` columns containing byte sequences that are not valid UTF-8 may cause the underlying SQLite C library to panic, leading to a NIF crash. Ensure data stored in `TEXT` columns intended for such processing is valid UTF-8, or avoid these functions on potentially corrupt data.
 - **User-Defined Functions (UDFs):** Support for UDFs is of very low priority due to its significant implementation complexity and is not currently planned.
 
-## Basic Usage Examples
+## Basic usage examples
 
 ```elixir
 alias XqliteNIF
@@ -152,7 +152,6 @@ case XqliteNIF.begin(conn) do
   {:error, reason_begin} ->
     IO.inspect(reason_begin, label: "Failed to begin transaction")
 end
-
 ```
 
 ## Roadmap
@@ -172,7 +171,7 @@ The **`xqlite_ecto3`** library (separate project) will provide:
 - `DBConnection` integration.
 - Type handling, migrations, structure dump/load.
 
-**Future Considerations (Post Core Roadmap):**
+## Future considerations (post core roadmap)
 
 - Benchmark cancellation progress handler overhead.
 - Report `UPPER(invalid_utf8)` panic behavior observed with SQLite to relevant projects if appropriate.
