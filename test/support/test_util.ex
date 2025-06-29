@@ -4,11 +4,24 @@ defmodule Xqlite.TestUtil do
   # A list of: an ExUnit tag, a `describe` block prefix, and a MFA to open a connection.
   # This data structure is used to generate tests for different DB types.
   @connection_openers [
-    {:memory_private, "private in-memory DB", {NIF, :open_in_memory, []}},
-    {:file_temp, "temporary file DB", {NIF, :open_temporary, []}}
+    {:memory_private, "private in-memory DB", {__MODULE__, :open_in_memory, []}},
+    {:file_temp, "temporary file DB", {__MODULE__, :open_temporary, []}}
   ]
 
   @tag_to_mfa_map Map.new(@connection_openers, fn {tag, _prefix, mfa} -> {tag, mfa} end)
+
+  defp open_and_configure(opener_mfa) do
+    with {:ok, conn} <- apply(elem(opener_mfa, 0), elem(opener_mfa, 1), elem(opener_mfa, 2)) do
+      :ok = NIF.set_pragma(conn, "journal_mode", "WAL")
+      :ok = NIF.set_pragma(conn, "journal_size_limit", 0)
+      :ok = NIF.set_pragma(conn, "cache_size", -1000)
+      :ok = NIF.set_pragma(conn, "foreign_keys", true)
+      {:ok, conn}
+    end
+  end
+
+  def open_in_memory(), do: open_and_configure({NIF, :open_in_memory, []})
+  def open_temporary(), do: open_and_configure({NIF, :open_temporary, []})
 
   @doc """
   Returns a list of connection opener strategies for test generation.
