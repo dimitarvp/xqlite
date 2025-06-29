@@ -10,7 +10,7 @@ on:
 
 jobs:
   format_and_lint:
-    name: Format & Lint Checks
+    name: Format & lint checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -42,7 +42,7 @@ jobs:
       #   run: mix credo --strict
 
   dialyzer:
-    name: Dialyzer Type Check
+    name: Dialyzer type checks
     runs-on: ubuntu-latest
     needs: format_and_lint
     steps:
@@ -67,14 +67,14 @@ jobs:
       - name: Install dependencies
         run: mix deps.get
 
-      - name: Create PLT (if not cached or outdated)
+      - name: Create PLT
         run: mix dialyzer --plt
 
       - name: Run Dialyzer
         run: mix dialyzer --format short
 
   test:
-    name: Run Tests (Elixir & Rust NIF)
+    name: Run all tests
     runs-on: ubuntu-latest # You might want to add macos-latest, windows-latest for NIFs
     needs: format_and_lint
     strategy:
