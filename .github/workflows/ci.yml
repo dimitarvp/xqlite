@@ -119,8 +119,10 @@ jobs:
       - name: Install Elixir dependencies
         run: mix deps.get
 
-      - name: Compile project (includes NIF)
-        run: mix compile
+      - name: Compile project
+        run: |
+          ulimit -v 6291456
+          mix compile
 
       - name: Rust formatting
         run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
@@ -129,4 +131,6 @@ jobs:
         run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
       - name: Run tests
-        run: mix test --max-cases 1 --trace --preload-modules
+        run: |
+          ulimit -v 6291456
+          mix test --max-cases 1 --trace --preload-modules
