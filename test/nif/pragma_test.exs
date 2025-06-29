@@ -25,7 +25,7 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:ok, limit} = NIF.get_pragma(conn, "journal_size_limit")
         assert is_integer(limit)
         assert {:ok, mode} = NIF.get_pragma(conn, "journal_mode")
-        assert mode in ["memory", "delete", "off"]
+        assert mode in ["persist", "wal", "truncate", "memory", "delete", "off"]
       end
 
       test "get_pragma/2 returns :no_value for non-value pragmas", %{conn: conn} do
