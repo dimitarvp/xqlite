@@ -50,7 +50,7 @@ defmodule Xqlite.MixProject do
     [
       # dependencies that are always included.
 
-      {:rustler, "~> 0.36.1", runtime: false},
+      {:rustler, "~> 0.37.1", runtime: false},
 
       # dev / test dependencies.
 
