@@ -212,28 +212,48 @@ fn core_execute_batch(
     Ok(())
 }
 
+fn handle_open_result(
+    open_result: Result<Connection, RusqliteError>,
+    path: String,
+) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    match open_result {
+        Ok(conn) => {
+            let arc_mutex_conn = Arc::new(Mutex::new(conn));
+            Ok(ResourceArc::new(XqliteConn(arc_mutex_conn)))
+        }
+        Err(e) => Err(match e {
+            RusqliteError::SqliteFailure(ffi_err, msg_opt) => {
+                XqliteError::CannotOpenDatabase {
+                    path,
+                    code: ffi_err.extended_code,
+                    message: msg_opt.unwrap_or_else(|| ffi_err.to_string()),
+                }
+            }
+            other_err => XqliteError::CannotOpenDatabase {
+                path,
+                code: -1, // Sentinel for non-SQLite errors
+                message: other_err.to_string(),
+            },
+        }),
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let conn = Connection::open(&path)
-        .map_err(|e| XqliteError::CannotOpenDatabase(path, e.to_string()))?;
-    let arc_mutex_conn = Arc::new(Mutex::new(conn));
-    Ok(ResourceArc::new(XqliteConn(arc_mutex_conn)))
+    let result = Connection::open(&path);
+    handle_open_result(result, path)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let conn = Connection::open(&uri)
-        .map_err(|e| XqliteError::CannotOpenDatabase(uri, e.to_string()))?;
-    let arc_mutex_conn = Arc::new(Mutex::new(conn));
-    Ok(ResourceArc::new(XqliteConn(arc_mutex_conn)))
+    let result = Connection::open(&uri);
+    handle_open_result(result, uri)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let conn = Connection::open("")
-        .map_err(|e| XqliteError::CannotOpenDatabase("".to_string(), e.to_string()))?;
-    let arc_mutex_conn = Arc::new(Mutex::new(conn));
-    Ok(ResourceArc::new(XqliteConn(arc_mutex_conn)))
+    let result = Connection::open("");
+    handle_open_result(result, "".to_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]

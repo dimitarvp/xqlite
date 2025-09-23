@@ -120,13 +120,13 @@ defmodule Xqlite.NIF.ConnectionTest do
 
     # These tests don't depend on the opener type, so define once outside loop
     test "open/1 fails for an invalid path" do
-      assert {:error, {:cannot_open_database, @invalid_db_path, _reason}} =
+      assert {:error, {:cannot_open_database, @invalid_db_path, _error_code, _reason}} =
                NIF.open(@invalid_db_path)
     end
 
     test "open_in_memory/1 fails for an invalid URI schema" do
       # Test attempting to open non-file/memory URI via open_in_memory
-      assert {:error, {:cannot_open_database, "http://invalid", _reason}} =
+      assert {:error, {:cannot_open_database, "http://invalid", _error_code, _reason}} =
                NIF.open_in_memory("http://invalid")
     end
   end
