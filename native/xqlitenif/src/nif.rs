@@ -1294,3 +1294,28 @@ pub(crate) fn stream_fetch<'a>(
 fn close(env: Env<'_>, _handle: ResourceArc<XqliteConn>) -> Term<'_> {
     ok().encode(env)
 }
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn compile_options(handle: ResourceArc<XqliteConn>) -> Result<Vec<String>, XqliteError> {
+    with_conn(&handle, |conn| {
+        let mut stmt = conn.prepare("PRAGMA compile_options;")?;
+        let opts: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(opts)
+    })
+}
+
+#[rustler::nif]
+fn sqlite_version() -> Result<String, XqliteError> {
+    // This is safe because sqlite3_libversion() is threadsafe and requires no setup.
+    let version_ptr = unsafe { rusqlite::ffi::sqlite3_libversion() };
+    if version_ptr.is_null() {
+        return Err(XqliteError::InternalEncodingError {
+            context: "sqlite3_libversion returned a null pointer".to_string(),
+        });
+    }
+    // This is safe because the pointer is guaranteed to be a valid C string.
+    let version_cstr = unsafe { std::ffi::CStr::from_ptr(version_ptr) };
+    Ok(version_cstr.to_string_lossy().into_owned())
+}
