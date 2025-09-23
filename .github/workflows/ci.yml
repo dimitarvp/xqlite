@@ -129,4 +129,4 @@ jobs:
         run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
       - name: Run tests
-        run: mix test --max-cases 1 --trace --preload-modules
+        run: find test -name '*_test.exs' | xargs -I {} sh -c 'mix test "{}"'
