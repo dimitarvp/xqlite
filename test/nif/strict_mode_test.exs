@@ -280,22 +280,11 @@ defmodule Xqlite.NIF.StrictModeTest do
         # Use a type that's not recognizable by SQLite here
         sql = "CREATE TABLE strict_invalid_type (col VARCHAR) STRICT;"
 
-        # SQLite error for "unknown datatype" in STRICT tables is SQLITE_ERROR (1),
-        # often with an extended code related to schema issues or SQLITE_CONSTRAINT_DATATYPE if it maps that way.
-        # The error message is key: "unknown datatype for <table.column>: "<type>""
-        # Our NIF maps this to a :sqlite_failure or potentially :sql_input_error
-        # if rusqlite classifies it during prepare.
-        # Let's check for the specific message content.
-        assert {:error, error_tuple} = NIF.execute(conn, sql, [])
+        assert {:error, reason} = NIF.execute(conn, sql, [])
 
-        case error_tuple do
-          {:sqlite_failure, 23, 1, msg} ->
-            assert String.contains?(msg, "unknown datatype")
-            assert String.contains?(msg, "VARCHAR")
-
-          other_error ->
-            flunk("We did not get the error we expected, got: #{inspect(other_error)}")
-        end
+        error_message = inspect(reason)
+        assert String.contains?(error_message, "unknown datatype")
+        assert String.contains?(error_message, "VARCHAR")
       end
 
       # --- Data Type Constraint Violations in STRICT Tables: ANY column ---
