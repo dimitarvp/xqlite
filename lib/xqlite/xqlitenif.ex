@@ -761,5 +761,31 @@ defmodule XqliteNIF do
   @spec stream_close(stream_handle :: reference()) :: :ok | {:error, Xqlite.error()}
   def stream_close(_stream_handle), do: err()
 
+  @doc """
+  Retrieves the compile-time options the linked SQLite C library was built with.
+
+  Corresponds to the `PRAGMA compile_options;` statement. This is useful for
+  diagnosing which features (e.g., `THREADSAFE`, `ENABLE_FTS5`) are available.
+
+  `conn` is the database connection resource.
+
+  Returns `{:ok, list_of_options}` on success, where `list_of_options` is a
+  list of strings (e.g., `["COMPILER=clang-14.0.3", "ENABLE_FTS5", "THREADSAFE=1"]`).
+  Returns `{:error, reason}` on failure.
+  """
+  @spec compile_options(conn :: Xqlite.conn()) ::
+          {:ok, [String.t()]} | {:error, Xqlite.error()}
+  def compile_options(_conn), do: err()
+
+  @doc """
+  Returns the version string of the underlying SQLite C library.
+
+  This is a runtime check and does not require an active database connection.
+  It is useful for diagnostics to confirm which version of SQLite the NIF
+  was linked against.
+  """
+  @spec sqlite_version() :: {:ok, String.t()} | {:error, Xqlite.error()}
+  def sqlite_version(), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
