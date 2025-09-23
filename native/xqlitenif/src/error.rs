@@ -440,105 +440,65 @@ impl From<RusqliteError> for XqliteError {
                 let message_string = msg_opt.unwrap_or_else(|| ffi_err.to_string());
                 let lower_msg = message_string.to_lowercase();
 
-                // --- Priority 1: Specific SQLite Error Codes ---
-                // Check specific error codes first for unambiguous errors.
-                match ffi_err.code {
-                    rusqlite::ffi::ErrorCode::ReadOnly => {
-                        return XqliteError::ReadOnlyDatabase {
-                            message: message_string,
-                        };
-                    }
-                    rusqlite::ffi::ErrorCode::OperationInterrupted => {
-                        // This is the documented code for interruptions.
-                        return XqliteError::OperationCancelled;
-                    }
-                    rusqlite::ffi::ErrorCode::DatabaseBusy
-                    | rusqlite::ffi::ErrorCode::DatabaseLocked => {
-                        return XqliteError::DatabaseBusyOrLocked {
-                            message: message_string,
-                        };
-                    }
-                    rusqlite::ffi::ErrorCode::SchemaChanged => {
-                        return XqliteError::SchemaChanged {
-                            message: message_string,
-                        };
-                    }
-                    // We handle Constraint separately below due to extended codes.
-                    _ => {} // Continue if no specific code matched yet
-                }
+                // Match against the authoritative C-level integer constant
+                // stored in `extended_code`. We mask it with 0xFF to get the primary code.
+                let primary_code = ffi_err.extended_code & 0xFF;
 
-                // --- Priority 2: Specific Error Messages ---
-                // Check common error messages that might accompany less specific error codes.
-                if lower_msg.starts_with("no such table") {
-                    return XqliteError::NoSuchTable {
+                match primary_code {
+                    rusqlite::ffi::SQLITE_READONLY => XqliteError::ReadOnlyDatabase {
                         message: message_string,
-                    };
-                }
-                if lower_msg.starts_with("no such index") {
-                    return XqliteError::NoSuchIndex {
-                        message: message_string,
-                    };
-                }
-                if lower_msg.contains("already exists") {
-                    if lower_msg.starts_with("table") {
-                        return XqliteError::TableExists {
+                    },
+                    rusqlite::ffi::SQLITE_INTERRUPT => XqliteError::OperationCancelled,
+                    rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED => {
+                        XqliteError::DatabaseBusyOrLocked {
                             message: message_string,
-                        };
-                    } else if lower_msg.starts_with("index") {
-                        return XqliteError::IndexExists {
-                            message: message_string,
-                        };
+                        }
                     }
-                    // If 'already exists' but not table/index, fallback might catch constraint
-                }
-                // Check for the specific message returned when a progress handler interrupts.
-                if lower_msg == "interrupted" {
-                    return XqliteError::OperationCancelled;
-                }
-                // As a fallback, also check message content for read-only, in case the
-                // error code wasn't explicitly ReadOnly but the message indicates it.
-                if lower_msg.contains("readonly database")
-                    || lower_msg.contains("read-only database")
-                {
-                    return XqliteError::ReadOnlyDatabase {
+                    rusqlite::ffi::SQLITE_SCHEMA => XqliteError::SchemaChanged {
                         message: message_string,
-                    };
-                }
-
-                // --- Priority 3: Constraint Violations ---
-                // Check the primary code *and* the extended code.
-                if ffi_err.code == rusqlite::ffi::ErrorCode::ConstraintViolation {
-                    if let Some(kind) = constraint_kind_to_atom_extended(ffi_err.extended_code)
+                    },
+                    rusqlite::ffi::SQLITE_CONSTRAINT => {
+                        if let Some(kind) =
+                            constraint_kind_to_atom_extended(ffi_err.extended_code)
+                        {
+                            XqliteError::ConstraintViolation {
+                                kind: Some(kind),
+                                message: message_string,
+                            }
+                        } else {
+                            XqliteError::ConstraintViolation {
+                                kind: None,
+                                message: message_string,
+                            }
+                        }
+                    }
+                    // Handle common errors by inspecting the message text.
+                    _ if lower_msg.starts_with("no such table") => XqliteError::NoSuchTable {
+                        message: message_string,
+                    },
+                    _ if lower_msg.starts_with("no such index") => XqliteError::NoSuchIndex {
+                        message: message_string,
+                    },
+                    _ if lower_msg.starts_with("table")
+                        && lower_msg.contains("already exists") =>
                     {
-                        return XqliteError::ConstraintViolation {
-                            kind: Some(kind),
+                        XqliteError::TableExists {
                             message: message_string,
-                        };
-                    } else {
-                        // Fallback if primary is CONSTRAINT but extended code is unknown/unmapped.
-                        // Use the generic SqliteFailure but preserve the constraint code.
-                        return XqliteError::SqliteFailure {
-                            code: rusqlite::ffi::ErrorCode::ConstraintViolation as i32,
-                            extended_code: ffi_err.extended_code,
-                            message: Some(message_string),
-                        };
+                        }
                     }
-                }
-                // Also check extended code even if primary code wasn't SQLITE_CONSTRAINT,
-                // as some constraints might be reported via other primary codes + extended code.
-                if let Some(kind) = constraint_kind_to_atom_extended(ffi_err.extended_code) {
-                    return XqliteError::ConstraintViolation {
-                        kind: Some(kind),
-                        message: message_string,
-                    };
-                }
-
-                // --- Priority 4: Generic SqliteFailure Fallback ---
-                // If none of the specific codes, messages, or constraint checks matched.
-                XqliteError::SqliteFailure {
-                    code: ffi_err.code as i32, // Store the original primary code
-                    extended_code: ffi_err.extended_code,
-                    message: Some(message_string),
+                    _ if lower_msg.starts_with("index")
+                        && lower_msg.contains("already exists") =>
+                    {
+                        XqliteError::IndexExists {
+                            message: message_string,
+                        }
+                    }
+                    // Fallback for any other SQLite error.
+                    _ => XqliteError::SqliteFailure {
+                        code: ffi_err.extended_code, // Report the full code
+                        extended_code: ffi_err.extended_code,
+                        message: Some(message_string),
+                    },
                 }
             }
 
@@ -548,39 +508,25 @@ impl From<RusqliteError> for XqliteError {
                 sql,
                 offset,
             } => {
-                // Check codes/messages relevant to input errors
-                let lower_msg = msg.to_lowercase();
-                if ffi_err.code == rusqlite::ffi::ErrorCode::ReadOnly {
+                if ffi_err.extended_code == rusqlite::ffi::SQLITE_READONLY {
                     return XqliteError::ReadOnlyDatabase { message: msg };
                 }
-                if lower_msg == "interrupted" {
-                    // Check for interruption here too
-                    return XqliteError::OperationCancelled;
+                if msg.to_lowercase().starts_with("no such table") {
+                    return XqliteError::NoSuchTable { message: msg };
                 }
-                if lower_msg.contains("already exists") {
-                    if lower_msg.starts_with("table") {
-                        XqliteError::TableExists { message: msg }
-                    } else if lower_msg.starts_with("index") {
-                        XqliteError::IndexExists { message: msg }
-                    } else {
-                        // Fallback to generic SqlInputError
-                        XqliteError::SqlInputError {
-                            code: ffi_err.code as i32,
-                            message: msg,
-                            sql,
-                            offset,
-                        }
+                if msg.to_lowercase().contains("already exists") {
+                    if msg.to_lowercase().starts_with("table") {
+                        return XqliteError::TableExists { message: msg };
                     }
-                } else if lower_msg.starts_with("no such table") {
-                    XqliteError::NoSuchTable { message: msg }
-                } else {
-                    // Default for SqlInputError variant if no specific message matched
-                    XqliteError::SqlInputError {
-                        code: ffi_err.code as i32,
-                        message: msg,
-                        sql,
-                        offset,
+                    if msg.to_lowercase().starts_with("index") {
+                        return XqliteError::IndexExists { message: msg };
                     }
+                }
+                XqliteError::SqlInputError {
+                    code: ffi_err.extended_code,
+                    message: msg,
+                    sql,
+                    offset,
                 }
             }
 
@@ -627,11 +573,9 @@ impl From<RusqliteError> for XqliteError {
             // --- Final Catch-all for any other rusqlite::Error types ---
             other_err => {
                 let message_string = other_err.to_string();
-                // Final check for "interrupted" just in case it came via another Error variant
                 if message_string == "interrupted" {
                     XqliteError::OperationCancelled
                 } else {
-                    // Truly unexpected rusqlite::Error type
                     XqliteError::CannotExecute(message_string)
                 }
             }
