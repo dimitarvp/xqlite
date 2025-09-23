@@ -128,7 +128,7 @@ defmodule Xqlite.Pragma do
     auto_vacuum: 0..2,
     automatic_index: @bool,
     busy_timeout: @u32,
-    cache_size: @i32,
+    cache_size: @signed_i32,
     cache_spill: @u32,
     cell_size_check: @bool,
     checkpoint_fullfsync: @bool,
@@ -388,11 +388,52 @@ defmodule Xqlite.Pragma do
   """
   @spec put(reference(), pragma_key(), pragma_value()) :: :ok | {:error, Xqlite.error()}
   def put(db, key, val) when is_atom(key) do
-    put(db, Atom.to_string(key), val)
+    do_put(db, key, val)
   end
 
   def put(db, key, val) when is_binary(key) do
-    XqliteNIF.set_pragma(db, key, val)
+    # We must convert to an atom to perform the validation lookup.
+    # If the string doesn't convert to a known atom, the validation will
+    # correctly pass it through to the NIF.
+    do_put(db, String.to_atom(key), val)
+  end
+
+  defp do_put(db, key_atom, val) do
+    if valid_pragma_value?(key_atom, val) do
+      XqliteNIF.set_pragma(db, to_string(key_atom), val)
+    else
+      {:error, {:invalid_pragma_value, %{pragma: key_atom, value: val}}}
+    end
+  end
+
+  # Pre-flight check for an invalid PRAGMA value. This is done because SQLite silently
+  # ignores invalid values. We'd like to have some more loud failures.
+  defp valid_pragma_value?(key, val) do
+    spec = Map.get(@valid_write_arg_values, key)
+
+    case {spec, val} do
+      {nil, _any_val} ->
+        # If we have no validation spec for this pragma, we assume it's valid
+        # and let SQLite handle it. This prevents us from breaking on new/unknown pragmas.
+        true
+
+      {^spec, v} when is_boolean(v) ->
+        # Handle boolean values. SQLite uses 0 for false, 1 for true.
+        # This check is robust for any spec that is a Range (e.g., @bool, @i32).
+        if(v, do: 1, else: 0) in spec
+
+      {^spec, v} when is_list(spec) ->
+        # Spec is a list of allowed values (e.g., ["NORMAL", "EXCLUSIVE"])
+        v in spec
+
+      {^spec, v} when is_struct(spec, Range) and is_integer(v) ->
+        # Spec is a range of allowed integers (e.g., 0..2 or a signed range)
+        v in spec
+
+      # Catch-all for any other combination is considered invalid.
+      _ ->
+        false
+    end
   end
 
   @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
