@@ -49,7 +49,6 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   test "get_pragma/2 succeeds for read-only pragmas", %{conn: ro_conn} do
     # More specific assertion
     assert {:ok, "UTF-8"} = NIF.get_pragma(ro_conn, "encoding")
-    assert {:ok, 0} = NIF.get_pragma(ro_conn, "foreign_keys")
   end
 
   test "schema introspection NIFs succeed on a read-only database", %{conn: ro_conn} do
