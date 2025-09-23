@@ -136,7 +136,11 @@ pub(crate) enum XqliteError {
     MultipleStatements,
 
     // DB Open / Connection Errors
-    CannotOpenDatabase(String, String),
+    CannotOpenDatabase {
+        path: String,
+        code: i32,
+        message: String,
+    },
     LockError(String),
 
     // Statement / Execution Errors
@@ -268,7 +272,9 @@ impl Display for XqliteError {
                 write!(f, "Database is read-only: {message}") // SQLITE_READONLY
             }
             XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {reason}"),
-            XqliteError::CannotOpenDatabase(path, reason) => write!(f, "Cannot open database '{path}': {reason}"),
+            XqliteError::CannotOpenDatabase { path, code, message } => {
+                write!(f, "Cannot open database '{path}' (Code: {code}): {message}")
+            },
             XqliteError::CannotConvertAtomToString(reason) => write!(f, "Cannot convert Elixir atom to string: {reason}"),
             XqliteError::LockError(reason) => write!(f, "Failed to lock connection mutex: {reason}"),
             XqliteError::InvalidStreamHandle { reason } => write!(f, "Invalid stream handle: {reason}"),
@@ -338,9 +344,11 @@ impl Encoder for XqliteError {
                 (read_only_database(), message).encode(env)
             }
             XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
-            XqliteError::CannotOpenDatabase(path, reason) => {
-                (cannot_open_database(), path, reason).encode(env)
-            }
+            XqliteError::CannotOpenDatabase {
+                path,
+                code,
+                message,
+            } => (cannot_open_database(), path, code, message).encode(env),
             XqliteError::CannotConvertAtomToString(reason) => {
                 (cannot_convert_atom_to_string(), reason).encode(env)
             }
