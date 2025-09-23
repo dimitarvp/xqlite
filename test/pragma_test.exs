@@ -82,7 +82,7 @@ defmodule XqlitePragmaTest do
 
     # Advisory values
     # Test with a positive, negative (if applicable), and zero value
-    {:cache_size, [0, 5000, -10000], &verify_is_integer/4},
+    {:cache_size, [0, 8, -16], &verify_is_integer/4},
     {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/4},
     {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/4},
     {:threads, [0, 1, 8], &verify_is_integer/4},
