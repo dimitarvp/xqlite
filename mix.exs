@@ -2,12 +2,11 @@ defmodule Xqlite.MixProject do
   use Mix.Project
 
   @name "Xqlite"
-  @version "0.2.9"
 
   def project do
     [
       app: :xqlite,
-      version: @version,
+      version: "0.2.9",
       elixir: "~> 1.15",
       name: @name,
       start_permanent: Mix.env() == :prod,
@@ -61,7 +60,7 @@ defmodule Xqlite.MixProject do
       main: "readme",
       name: "Xqlite",
       source_url: "https://github.com/dimitarvp/xqlite",
-      source_ref: "v#{@version}",
+      source_ref: "v0.2.9",
       extras: ["README.md", "LICENSE.md"],
       groups_for_modules: [
         "High-Level API": [
