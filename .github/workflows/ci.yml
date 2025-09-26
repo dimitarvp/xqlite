@@ -102,6 +102,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable # Or actions-rs/toolchain@v1
         with:
           toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
 
       - name: Restore Elixir dependencies cache
         uses: actions/cache@v4
