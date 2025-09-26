@@ -12,7 +12,6 @@ defmodule Xqlite.MixProject do
       name: @name,
       start_permanent: Mix.env() == :prod,
       docs: docs(),
-      aliases: aliases(),
       deps: deps(),
       compilers: Mix.compilers(),
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -28,8 +27,7 @@ defmodule Xqlite.MixProject do
         "coveralls.detail": :test,
         "coveralls.post": :test,
         "coveralls.html": :test,
-        "coveralls.circle": :test,
-        t: :test
+        "coveralls.circle": :test
       ],
 
       # type checking
@@ -48,12 +46,9 @@ defmodule Xqlite.MixProject do
 
   defp deps do
     [
-      # dependencies that are always included.
-
       {:rustler, "~> 0.37.1", runtime: false},
 
-      # dev / test dependencies.
-
+      # dev / test.
       {:benchee, "~> 1.0", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:ex_doc, "~> 0.20", only: :dev, runtime: false},
@@ -68,12 +63,10 @@ defmodule Xqlite.MixProject do
       source_url: "https://github.com/dimitarvp/xqlite",
       source_ref: "v#{@version}",
       extras: ["README.md", "LICENSE.md"],
-      # Group modules for better navigation in the sidebar.
       groups_for_modules: [
         "High-Level API": [
           Xqlite,
           Xqlite.Pragma,
-          # It will be hidden but good to group
           Xqlite.StreamResourceCallbacks
         ],
         "Schema Structs": [
@@ -117,14 +110,6 @@ defmodule Xqlite.MixProject do
       plt_file: {:no_warn, "priv/plts/core.plt"},
       plt_add_apps: [:mix]
       # flags: ["-Wunmatched_returns", ...],
-    ]
-  end
-
-  defp aliases do
-    [
-      c: "compile",
-      f: ["format", "cmd cargo fmt --manifest-path native/xqlitenif/Cargo.toml"],
-      t: "test"
     ]
   end
 end
