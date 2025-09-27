@@ -35,6 +35,8 @@ defmodule XqliteNIF do
 
   @type stream_fetch_ok_result :: %{rows: [list(term())]}
 
+  @default_memory_database ":memory:"
+
   @doc """
   Opens a connection to an SQLite database file.
 
@@ -52,16 +54,21 @@ defmodule XqliteNIF do
   @doc """
   Opens a connection to an in-memory SQLite database.
 
-  `uri` is typically `":memory:"` for a private, temporary in-memory database.
-  It can also be a URI filename like `"file:memdb1?mode=memory&cache=shared"`
-  to create a named in-memory database that can be shared across connections
-  in the same process.
+    @doc \"""
+  Opens a connection to an in-memory SQLite database.
+
+  Can be called with no arguments to open a private, temporary in-memory
+  database (`":memory:"`). It can also be called with a URI filename like
+  `"file:memdb1?mode=memory&cache=shared"` to create a named in-memory
+  database that can be shared across connections in the same process.
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
-  @spec open_in_memory(uri :: String.t()) ::
-          {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
-  def open_in_memory(_path \\ ":memory:"), do: err()
+  @spec open_in_memory() :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  def open_in_memory(), do: open_in_memory(@default_memory_database)
+
+  @spec open_in_memory(uri :: String.t()) :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  def open_in_memory(_uri), do: err()
 
   @doc """
   Opens a connection to a private, temporary on-disk SQLite database.
