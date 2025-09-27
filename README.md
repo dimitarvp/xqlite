@@ -33,20 +33,17 @@ The library provides two primary modules: `Xqlite` for a higher-level Elixir API
 ### Low-level NIF API (`XqliteNIF` module)
 
 - **Connection Management:**
-
   - `open(path :: String.t())`: Opens a file-based database.
-  - `open_in_memory(uri :: String.t() \\ ":memory:")`: Opens an in-memory database.
+  - `open_in_memory()` or `open_in_memory(uri :: String.t())`: Opens an in-memory database.
   - `open_temporary()`: Opens a private, temporary on-disk database.
-  - `close(conn)`: Conceptually closes the connection. Returns `:ok` on success.
+  - `close(conn)`: Closes the connection.
 
 - **Query Execution:**
-
   - `query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements.
   - `query_cancellable(conn, sql :: String.t(), params :: list() | keyword(), cancel_token)`: Cancellable version.
     - Returns `{:ok, %{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}}` or `{:error, reason}`.
 
 - **Statement Execution:**
-
   - `execute(conn, sql :: String.t(), params :: list())`: Executes non-row-returning statements (e.g., `INSERT`, `UPDATE`, `DDL`).
   - `execute_cancellable(conn, sql :: String.t(), params :: list(), cancel_token)`: Cancellable version.
   - `execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements. Returns `:ok` on success.
@@ -55,34 +52,28 @@ The library provides two primary modules: `Xqlite` for a higher-level Elixir API
     - `execute_batch` variants return `:ok` on success or `{:error, reason}`.
 
 - **Streaming Primitives:**
-
   - `stream_open(conn, sql, params, opts)`: Prepares a query and returns a stream handle.
   - `stream_get_columns(stream_handle)`: Retrieves column names from the prepared stream.
   - `stream_fetch(stream_handle, batch_size)`: Fetches a batch of rows from the stream.
   - `stream_close(stream_handle)`: Closes the stream and finalizes the statement.
 
 - **Operation Cancellation:**
-
   - `create_cancel_token()`: Creates a token for signalling cancellation. Returns `{:ok, token_resource}`.
   - `cancel_operation(cancel_token)`: Signals an operation associated with the token to cancel. Returns `:ok` on success.
 
 - **PRAGMA Handling:**
-
   - `get_pragma(conn, pragma_name :: String.t())`: Reads a PRAGMA value.
   - `set_pragma(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value. Returns `:ok` on success.
 
 - **Transaction Control:**
-
   - `begin(conn)`, `commit(conn)`, `rollback(conn)`
   - `savepoint(conn, name)`, `release_savepoint(conn, name)`, `rollback_to_savepoint(conn, name)`
   - All return `:ok` on success or `{:error, reason}`.
 
 - **Inserted Row ID:**
-
   - `last_insert_rowid(conn)`: Retrieves the `rowid` of the most recent `INSERT`.
 
 - **Schema Introspection:**
-
   - `schema_databases(conn)`
   - `schema_list_objects(conn, schema \\ nil)` (Returns `Xqlite.Schema.SchemaObjectInfo` with `:is_without_rowid` flag)
   - `schema_columns(conn, table_name)` (Returns `Xqlite.Schema.ColumnInfo` with `:hidden_kind` flag)
