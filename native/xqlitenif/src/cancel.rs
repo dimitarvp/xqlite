@@ -58,8 +58,6 @@ impl<'conn> ProgressHandlerGuard<'conn> {
 impl Drop for ProgressHandlerGuard<'_> {
     fn drop(&mut self) {
         if self.is_registered {
-            // Unregister the handler using the correct signature
-            // Pass 0 for num_ops (ignored when handler is None), and None for handler.
             self.conn.progress_handler(0, None::<fn() -> bool>);
         }
     }

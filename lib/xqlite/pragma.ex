@@ -331,7 +331,6 @@ defmodule Xqlite.Pragma do
   end
 
   defp process_list_result(key, rows) do
-    # This logic can be refined later if needed, but for now it's a direct move.
     case key do
       :collation_list ->
         Enum.map(rows, fn [seq, name] -> %{seq: seq, name: name} end)
