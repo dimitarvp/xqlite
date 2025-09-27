@@ -99,9 +99,6 @@ The library provides two primary modules: `Xqlite` for a higher-level Elixir API
 ## Basic usage examples
 
 ```elixir
-alias XqliteNIF
-alias Xqlite # For helper functions
-
 # --- Opening a connection ---
 {:ok, conn} = XqliteNIF.open("my_database.db")
 
