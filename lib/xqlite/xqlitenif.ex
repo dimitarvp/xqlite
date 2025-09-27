@@ -42,15 +42,12 @@ defmodule XqliteNIF do
   SQLite will attempt to create it. URI filenames are supported
   (e.g., "file:my_db.sqlite?mode=ro").
 
-  `opts` is a keyword list for future options (currently unused at the NIF level).
-
   Returns `{:ok, conn_resource}` on success, where `conn_resource` is an
   opaque reference to the database connection. Returns `{:error, reason}`
   on failure, e.g., if the path is invalid or permissions are insufficient.
   """
-  @spec open(path :: String.t(), opts :: keyword()) ::
-          {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
-  def open(_path, _opts \\ []), do: err()
+  @spec open(path :: String.t()) :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  def open(_path), do: err()
 
   @doc """
   Opens a connection to an in-memory SQLite database.
