@@ -26,7 +26,8 @@ defmodule Xqlite.MixProject do
         "coveralls.detail": :test,
         "coveralls.post": :test,
         "coveralls.html": :test,
-        "coveralls.circle": :test
+        "coveralls.circle": :test,
+        "test.seq": :test
       ],
 
       # type checking
