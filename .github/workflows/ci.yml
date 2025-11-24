@@ -121,6 +121,7 @@ jobs:
       - name: Restore Rust (Cargo) cache
         uses: Swatinem/rust-cache@v2 # Caches `target` directory and `~/.cargo/registry`
         with:
+          workspaces: "native/xqlitenif"
           prefix-key: "v0-rust-${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}"
 
       - name: Install Elixir dependencies
