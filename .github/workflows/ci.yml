@@ -127,9 +127,6 @@ jobs:
       - name: Install Elixir dependencies
         run: mix deps.get
 
-      - name: Clean NIF before compile
-        run: rm -rf priv/native
-
       - name: Compile project (includes NIF)
         run: mix compile
 
