@@ -33,7 +33,7 @@ jobs:
           otp-version: ${{ env.DEFAULT_OTP }}
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -149,7 +149,7 @@ jobs:
           otp-version: ${{ matrix.otp }}
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
