@@ -1,5 +1,9 @@
 name: Xqlite
 
+env:
+  DEFAULT_ELIXIR: "1.19"
+  DEFAULT_OTP: "28"
+
 on:
   push:
     branches:
@@ -19,8 +23,18 @@ jobs:
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.19"
-          otp-version: "28"
+          elixir-version: ${{ env.DEFAULT_ELIXIR }}
+          otp-version: ${{ env.DEFAULT_OTP }}
+
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-lint-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-lint-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-mix-
 
       - name: Install dependencies
         run: mix deps.get
@@ -42,17 +56,17 @@ jobs:
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.19"
-          otp-version: "28"
+          elixir-version: ${{ env.DEFAULT_ELIXIR }}
+          otp-version: ${{ env.DEFAULT_OTP }}
 
       - name: Restore PLT cache
         uses: actions/cache@v4
         with:
           path: |
             priv/plts
-          key: ${{ runner.os }}-plt-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-plt-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-plt-
+            ${{ runner.os }}-plt-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -96,6 +110,16 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
+
+      - name: Restore Elixir dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-test-elixir-${{ matrix.elixir }}-otp-${{ matrix.otp }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-test-elixir-${{ matrix.elixir }}-otp-${{ matrix.otp }}-mix-
 
       - name: Install Elixir dependencies
         run: mix deps.get
