@@ -33,6 +33,7 @@ jobs:
           path: |
             deps
             _build
+            priv/native
           key: ${{ runner.os }}-lint-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-lint-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
@@ -124,6 +125,7 @@ jobs:
           path: |
             deps
             _build
+            priv/native
           key: ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
