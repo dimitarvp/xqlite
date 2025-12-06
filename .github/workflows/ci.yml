@@ -141,6 +141,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
 
+      - name: Restore Rust (Cargo) cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/xqlitenif
+          prefix-key: "rust-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
+
       - name: Install Elixir dependencies
         run: mix deps.get
 
