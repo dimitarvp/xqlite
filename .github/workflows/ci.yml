@@ -15,12 +15,13 @@ on:
 jobs:
   format_and_lint:
     name: Format & lint checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ env.DEFAULT_ELIXIR }}
@@ -32,9 +33,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-lint-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-lint-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-lint-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-mix-
+            ${{ runner.os }}-lint-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
 
       - name: Install dependencies
         run: mix deps.get
@@ -42,18 +43,16 @@ jobs:
       - name: Check Elixir formatting
         run: mix format --check-formatted
 
-      # - name: Run Credo
-      #   run: mix credo --strict
-
   dialyzer:
     name: Dialyzer type checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: format_and_lint
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ env.DEFAULT_ELIXIR }}
@@ -64,9 +63,9 @@ jobs:
         with:
           path: |
             priv/plts
-          key: ${{ runner.os }}-plt-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-plt-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-plt-elixir-${{ env.DEFAULT_ELIXIR }}-otp-${{ env.DEFAULT_OTP }}-
+            ${{ runner.os }}-plt-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -79,10 +78,13 @@ jobs:
 
   test:
     name: Run all tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs: format_and_lint
     strategy:
+      fail-fast: false
       matrix:
+        # os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [ubuntu-24.04]
         elixir: ["1.16", "1.17", "1.18", "1.19"]
         otp: ["26", "27", "28"]
         rust: ["stable"]
@@ -99,7 +101,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Configure Git (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - name: Set up Elixir
+        id: beam
         uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ matrix.elixir }}
@@ -117,9 +124,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-test-elixir-${{ matrix.elixir }}-otp-${{ matrix.otp }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-test-elixir-${{ matrix.elixir }}-otp-${{ matrix.otp }}-mix-
+            ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
 
       - name: Install Elixir dependencies
         run: mix deps.get
