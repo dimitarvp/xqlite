@@ -59,6 +59,17 @@ jobs:
           elixir-version: ${{ env.DEFAULT_ELIXIR }}
           otp-version: ${{ env.DEFAULT_OTP }}
 
+      - name: Restore dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            priv/native
+          key: ${{ runner.os }}-dialyzer-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-dialyzer-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
+
       - name: Restore PLT cache
         uses: actions/cache@v4
         with:
