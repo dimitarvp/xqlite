@@ -4,6 +4,9 @@ env:
   DEFAULT_ELIXIR: "1.19"
   DEFAULT_OTP: "28"
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
