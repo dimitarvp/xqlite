@@ -20,6 +20,7 @@ jobs:
   format_and_lint:
     name: Format & lints
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -69,6 +70,7 @@ jobs:
   dialyzer:
     name: Type checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: format_and_lint
     steps:
       - name: Checkout code
@@ -113,6 +115,7 @@ jobs:
   test:
     name: Tests
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     needs: format_and_lint
     strategy:
       fail-fast: false
