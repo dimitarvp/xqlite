@@ -95,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-2025]
+        os: [ubuntu-latest, macos-latest, windows-2022]
         elixir: ["1.16", "1.17", "1.18", "1.19"]
         otp: ["26", "27", "28"]
         rust: ["stable"]
