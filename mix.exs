@@ -103,7 +103,17 @@ defmodule Xqlite.MixProject do
         "Github" => "https://github.com/dimitarvp/xqlite",
         "Hexdocs" => "https://hexdocs.pm/xqlite"
       },
-      files: ~w(lib native .formatter.exs mix.exs README.md LICENSE.md)
+      files: [
+        "lib",
+        "native/xqlitenif/src",
+        "native/xqlitenif/Cargo.toml",
+        "native/xqlitenif/Cargo.lock",
+        ".formatter.exs",
+        "mix.exs",
+        "README.md",
+        "LICENSE.md"
+        # "checksum-*.exs"
+      ]
     ]
   end
 
