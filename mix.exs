@@ -102,7 +102,8 @@ defmodule Xqlite.MixProject do
       links: %{
         "Github" => "https://github.com/dimitarvp/xqlite",
         "Hexdocs" => "https://hexdocs.pm/xqlite"
-      }
+      },
+      files: ~w(lib native .formatter.exs mix.exs README.md LICENSE.md)
     ]
   end
 
