@@ -34,9 +34,9 @@ jobs:
             deps
             _build
             priv/native
-          key: ${{ runner.os }}-lint-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: v1-elixir-lint-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-lint-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
+            v1-elixir-lint-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
 
       - name: Install dependencies
         run: mix deps.get
@@ -66,18 +66,18 @@ jobs:
             deps
             _build
             priv/native
-          key: ${{ runner.os }}-dialyzer-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: v1-elixir-dialyzer-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-dialyzer-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
+            v1-elixir-dialyzer-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
 
       - name: Restore PLT cache
         uses: actions/cache@v4
         with:
           path: |
             priv/plts
-          key: ${{ runner.os }}-plt-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          key: v1-plt-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-plt-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-
+            v1-plt-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -136,15 +136,15 @@ jobs:
             deps
             _build
             priv/native
-          key: ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          key: v1-elixir-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-test-elixir-${{ steps.beam.outputs.elixir-version }}-otp-${{ steps.beam.outputs.otp-version }}-mix-
+            v1-elixir-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
 
       - name: Restore Rust (Cargo) cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: native/xqlitenif
-          prefix-key: "rust-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
+          prefix-key: "v1-rust-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
 
       - name: Install Elixir dependencies
         run: mix deps.get
