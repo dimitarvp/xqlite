@@ -28,6 +28,12 @@ jobs:
           elixir-version: ${{ env.DEFAULT_ELIXIR }}
           otp-version: ${{ env.DEFAULT_OTP }}
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
       - name: Restore dependencies cache
         uses: actions/cache@v4
         with:
@@ -39,11 +45,23 @@ jobs:
           restore-keys: |
             v0-elixir-lint-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
 
+      - name: Restore Rust (Cargo) cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/xqlitenif
+          prefix-key: "v0-rust-lint-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
+
       - name: Install dependencies
         run: mix deps.get
 
       - name: Check Elixir formatting
         run: mix format --check-formatted
+
+      - name: Rust formatting
+        run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
   dialyzer:
     name: Type checks
@@ -152,12 +170,6 @@ jobs:
 
       - name: Compile project (includes NIF)
         run: mix compile
-
-      - name: Rust formatting
-        run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
-
-      - name: Rust clippy
-        run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
       - name: Run tests
         run: mix test.seq
