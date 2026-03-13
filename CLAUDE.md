@@ -50,6 +50,7 @@ Never use `mix test` directly — always `mix test.seq`.
 10. **`-dev` suffix auto-enables `force_build`.** During development keep version as `X.Y.Z-dev` — `rustler_precompiled` detects it and compiles from Rust source. No env var or checksum file needed locally.
 11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
 12. **NIF version features in `Cargo.toml`.** Rustler 0.37 requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
+13. **Delete old checksum file before regenerating.** `mix rustler_precompiled.download --all` won't overwrite stale entries from a prior version. Always `rm -f checksum-Elixir.XqliteNIF.exs` first. If `mix hex.publish` still fails with a checksum mismatch, `--only-local` can add just the local platform's entry.
 
 ## Elixir Code Style
 
@@ -87,11 +88,17 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 
 ## Release Checklist
 
-- Audit `README.md` top to bottom before every release. Installation instructions, version numbers, feature claims, and roadmap must reflect reality.
+1. Audit `README.md` top to bottom. Installation instructions, version numbers, feature claims, and roadmap must reflect reality.
+2. Bump version in all three places: `mix.exs` (project version), `Cargo.toml`, `mix.exs` (`source_ref` in `docs/0`).
+3. Commit, push, tag `vX.Y.Z`, push tag. Wait for release workflow to finish.
+4. `rm -f checksum-Elixir.XqliteNIF.exs` — stale entries from prior versions won't be overwritten.
+5. `mix rustler_precompiled.download XqliteNIF --all --print --no-config`
+6. `mix hex.publish`
+7. Locally bump to `X.Y+1.0-dev` in `mix.exs` and `Cargo.toml` (do NOT commit — local-only so `-dev` suffix triggers source builds).
 
 ## Current State (March 2026)
 
-- v0.4.0 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
+- v0.4.1 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
 - Rust edition 2024. Rustler 0.37, rusqlite 0.37.
 - `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
