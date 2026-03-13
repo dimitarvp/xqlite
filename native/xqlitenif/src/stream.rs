@@ -162,21 +162,35 @@ fn bind_value_to_raw_stmt(
             Value::Text(s_val) => {
                 let c_text = std::ffi::CString::new(s_val.as_str())
                     .map_err(|_e| XqliteError::NulErrorInString)?;
+                let len = c_int::try_from(c_text.as_bytes().len()).map_err(|_| {
+                    XqliteError::CannotConvertToSqliteValue {
+                        value_str: format!("<text len {}>", c_text.as_bytes().len()),
+                        reason: "text length exceeds c_int range".to_string(),
+                    }
+                })?;
                 ffi::sqlite3_bind_text(
                     raw_stmt_ptr,
                     bind_idx,
                     c_text.as_ptr(),
-                    c_text.as_bytes().len() as c_int,
+                    len,
                     ffi::SQLITE_TRANSIENT(),
                 )
             }
-            Value::Blob(b_val) => ffi::sqlite3_bind_blob(
-                raw_stmt_ptr,
-                bind_idx,
-                b_val.as_ptr() as *const std::ffi::c_void,
-                b_val.len() as c_int,
-                ffi::SQLITE_TRANSIENT(),
-            ),
+            Value::Blob(b_val) => {
+                let len = c_int::try_from(b_val.len()).map_err(|_| {
+                    XqliteError::CannotConvertToSqliteValue {
+                        value_str: format!("<blob len {}>", b_val.len()),
+                        reason: "blob length exceeds c_int range".to_string(),
+                    }
+                })?;
+                ffi::sqlite3_bind_blob(
+                    raw_stmt_ptr,
+                    bind_idx,
+                    b_val.as_ptr() as *const std::ffi::c_void,
+                    len,
+                    ffi::SQLITE_TRANSIENT(),
+                )
+            }
         }
     };
 
