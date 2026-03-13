@@ -44,6 +44,7 @@ Never use `mix test` directly — always `mix test.seq`.
 4. **GHA cache split-brain.** Each CI job must: checkout code, download artifacts, run `mix deps.get`. Passing state via artifacts alone breaks lockfile checks.
 5. **`dtonlay/rust-toolchain` defaults.** Minimal toolchain — must explicitly request `components: rustfmt, clippy`.
 6. **Version string for release tools.** Tools like `versioce` can't parse `@version` module attributes in `mix.exs`. Version must be a string literal in `project/0`.
+7. **Dual version bump.** Version must be updated in both `mix.exs` and `native/xqlitenif/Cargo.toml` simultaneously. Always commit them together.
 
 ## Elixir Code Style
 
