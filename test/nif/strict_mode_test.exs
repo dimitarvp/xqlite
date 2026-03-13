@@ -609,8 +609,9 @@ defmodule Xqlite.NIF.StrictModeTest do
                  )
       end
 
-      # Test name adjusted to reflect observed behavior
-      test "STORED generated column (INTEGER declared from TEXT expr): stores TEXT value", %{
+      # SQLite now correctly enforces type constraints on STORED generated columns in STRICT tables.
+      # LOWER(a) produces TEXT, which cannot be stored in an INTEGER column.
+      test "STORED generated column (INTEGER declared from TEXT expr): rejects TEXT value", %{
         conn: conn
       } do
         ddl = """
@@ -627,16 +628,7 @@ defmodule Xqlite.NIF.StrictModeTest do
             "HELLO"
           ])
 
-        # Expect success based on observed behavior
-        assert {:ok, 1} == insert_result
-
-        # Verify that "hello" (TEXT) was stored in column 'b' (declared INTEGER STRICT)
-        assert {:ok, %{rows: [["hello"]]}} =
-                 NIF.query(
-                   conn,
-                   "SELECT b FROM gc_strict_int_from_text_expr2 WHERE a = 'HELLO';",
-                   []
-                 )
+        assert {:error, {:constraint_violation, :constraint_datatype, _msg}} = insert_result
       end
 
       test "VIRTUAL generated column: computes correctly (type check less direct)", %{

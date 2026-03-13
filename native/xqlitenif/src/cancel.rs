@@ -43,22 +43,19 @@ impl<'conn> ProgressHandlerGuard<'conn> {
             }
         };
 
-        // The progress_handler function itself doesn't return a Result we can use `?` on.
-        // It doesn't typically error in a way that prevents registration if arguments are valid.
-        // We'll assume registration works if types are correct.
-        conn.progress_handler(interval as c_int, Some(handler));
+        conn.progress_handler(interval as c_int, Some(handler))?;
 
         Ok(ProgressHandlerGuard {
             conn,
             is_registered: true,
-        }) // Assume success if we get to here
+        })
     }
 }
 
 impl Drop for ProgressHandlerGuard<'_> {
     fn drop(&mut self) {
         if self.is_registered {
-            self.conn.progress_handler(0, None::<fn() -> bool>);
+            let _ = self.conn.progress_handler(0, None::<fn() -> bool>);
         }
     }
 }
