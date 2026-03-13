@@ -48,27 +48,30 @@ impl XqliteStream {
 
                 // Try to lock the connection to get a specific SQLite error message.
                 // This lock is on a different Mutex (the one inside XqliteConn).
-                if let Ok(conn_guard) = self.conn_resource_arc.0.lock() {
-                    // These FFI calls are unsafe.
-                    let specific_sqlite_msg = unsafe {
-                        let err_msg_ptr = ffi::sqlite3_errmsg(conn_guard.handle());
-                        if !err_msg_ptr.is_null() {
-                            std::ffi::CStr::from_ptr(err_msg_ptr)
-                                .to_string_lossy()
-                                .into_owned()
-                        } else {
-                            // No specific message from SQLite, keep our formatted one.
-                            String::new()
+                match self.conn_resource_arc.0.lock() {
+                    Ok(conn_guard) => {
+                        // These FFI calls are unsafe.
+                        let specific_sqlite_msg = unsafe {
+                            let err_msg_ptr = ffi::sqlite3_errmsg(conn_guard.handle());
+                            if !err_msg_ptr.is_null() {
+                                std::ffi::CStr::from_ptr(err_msg_ptr)
+                                    .to_string_lossy()
+                                    .into_owned()
+                            } else {
+                                // No specific message from SQLite, keep our formatted one.
+                                String::new()
+                            }
+                        };
+                        if !specific_sqlite_msg.is_empty()
+                            && specific_sqlite_msg.to_lowercase() != "not an error"
+                        {
+                            message = specific_sqlite_msg;
                         }
-                    };
-                    if !specific_sqlite_msg.is_empty()
-                        && specific_sqlite_msg.to_lowercase() != "not an error"
-                    {
-                        message = specific_sqlite_msg;
                     }
-                } else {
-                    // Failed to lock the connection; append to the generic message.
-                    message.push_str(" (additionally, failed to lock connection for specific error message)");
+                    _ => {
+                        // Failed to lock the connection; append to the generic message.
+                        message.push_str(" (additionally, failed to lock connection for specific error message)");
+                    }
                 }
 
                 let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(message));
@@ -107,38 +110,40 @@ pub(crate) unsafe fn process_single_step<'a>(
     column_count: usize,
     db_handle_for_error_reporting: *mut ffi::sqlite3, // For sqlite3_errmsg
 ) -> Result<Option<Vec<Term<'a>>>, XqliteError> {
-    let step_result = ffi::sqlite3_step(stmt_ptr);
+    unsafe {
+        let step_result = ffi::sqlite3_step(stmt_ptr);
 
-    match step_result {
-        ffi::SQLITE_ROW => {
-            // sqlite_row_to_elixir_terms is also unsafe
-            match sqlite_row_to_elixir_terms(env, stmt_ptr, column_count) {
-                Ok(row_terms) => Ok(Some(row_terms)),
-                Err(e) => Err(e),
-            }
-        }
-        ffi::SQLITE_DONE => {
-            Ok(None) // Signal DONE to the caller
-        }
-        err_code => {
-            // Any other SQLite error code from sqlite3_step
-            // Get specific error message from the connection using the provided db_handle
-            let specific_message = {
-                let err_msg_ptr = ffi::sqlite3_errmsg(db_handle_for_error_reporting);
-                if err_msg_ptr.is_null() {
-                    format!("SQLite error {err_code} during step; no specific message.")
-                } else {
-                    // This is an unsafe FFI call
-                    std::ffi::CStr::from_ptr(err_msg_ptr)
-                        .to_string_lossy()
-                        .into_owned()
+        match step_result {
+            ffi::SQLITE_ROW => {
+                // sqlite_row_to_elixir_terms is also unsafe
+                match sqlite_row_to_elixir_terms(env, stmt_ptr, column_count) {
+                    Ok(row_terms) => Ok(Some(row_terms)),
+                    Err(e) => Err(e),
                 }
-            };
-            let rusqlite_err = rusqlite::Error::SqliteFailure(
-                ffi::Error::new(err_code),
-                Some(specific_message),
-            );
-            Err(XqliteError::from(rusqlite_err))
+            }
+            ffi::SQLITE_DONE => {
+                Ok(None) // Signal DONE to the caller
+            }
+            err_code => {
+                // Any other SQLite error code from sqlite3_step
+                // Get specific error message from the connection using the provided db_handle
+                let specific_message = {
+                    let err_msg_ptr = ffi::sqlite3_errmsg(db_handle_for_error_reporting);
+                    if err_msg_ptr.is_null() {
+                        format!("SQLite error {err_code} during step; no specific message.")
+                    } else {
+                        // This is an unsafe FFI call
+                        std::ffi::CStr::from_ptr(err_msg_ptr)
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                };
+                let rusqlite_err = rusqlite::Error::SqliteFailure(
+                    ffi::Error::new(err_code),
+                    Some(specific_message),
+                );
+                Err(XqliteError::from(rusqlite_err))
+            }
         }
     }
 }

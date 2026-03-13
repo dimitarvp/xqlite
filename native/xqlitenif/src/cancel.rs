@@ -1,9 +1,9 @@
 use rusqlite::Connection;
-use rustler::{resource_impl, Resource};
+use rustler::{Resource, resource_impl};
 use std::fmt::Debug;
 use std::os::raw::c_int;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub(crate) struct XqliteCancelToken(pub(crate) Arc<AtomicBool>);
