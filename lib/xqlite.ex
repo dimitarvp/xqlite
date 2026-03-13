@@ -7,6 +7,7 @@ defmodule Xqlite do
   @type conn :: reference()
   @type error :: {:error, any()}
 
+  @doc false
   @spec int2bool(0 | 1) :: true | false
   def int2bool(0), do: false
   def int2bool(1), do: true

@@ -26,7 +26,7 @@ defmodule Xqlite.Pragma do
   @type pragma_value :: String.t() | integer()
   @type pragma_result :: any()
   @type pragma_get_result :: {:ok, list()} | {:error, String.t()}
-  @type auto_vacuum_key :: 1 | 2 | 3
+  @type auto_vacuum_key :: 0 | 1 | 2
   @type auto_vacuum_value :: :none | :full | :incremental
   @type secure_delete_key :: 0 | 1 | 2
   @type secure_delete_value :: true | false | :fast
@@ -182,62 +182,75 @@ defmodule Xqlite.Pragma do
   arguments, read/write argument types, whether a schema/database prefix is allowed,
   and the return type).
   """
+  @spec schema() :: %{atom() => keyword()}
   def schema(), do: @schema
 
   @doc ~S"""
   Returns a map with keys equal to all writable PRAGMAs, and the values being a mini
   specification of allowed values.
   """
+  @spec valid_write_arg_values() :: %{atom() => Range.t() | list()}
   def valid_write_arg_values(), do: @valid_write_arg_values
 
   @doc ~S"""
   Returns the names of all PRAGMAs that are supported by this library.
   """
+  @spec all() :: [atom()]
   def all(), do: @all
 
   @doc ~S"""
   Returns the names of all readable PRAGMAs that don't require argument.
   """
+  @spec readable_with_zero_args() :: [atom()]
   def readable_with_zero_args(), do: @readable_with_zero_args
 
   @doc ~S"""
   Returns the names of all readable PRAGMAs that require one argument.
   """
+  @spec readable_with_one_arg() :: [atom()]
   def readable_with_one_arg(), do: @readable_with_one_arg
 
   @doc ~S"""
   Returns the names of all writable PRAGMAs that require one argument.
   """
+  @spec writable() :: [atom()]
   def writable(), do: @writable
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return a boolean.
   """
+  @spec returning_boolean() :: [atom()]
   def returning_boolean(), do: @returning_boolean
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return an integer.
   """
+  @spec returning_int() :: [atom()]
   def returning_int(), do: @returning_int
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return a text.
   """
+  @spec returning_text() :: [atom()]
   def returning_text(), do: @returning_text
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return a list.
   """
+  @spec returning_list() :: [atom()]
   def returning_list(), do: @returning_list
 
   @doc ~S"""
   Returns the names of all pragmas, readable and writable, that return nothing.
   """
+  @spec returning_nothing() :: [atom()]
   def returning_nothing(), do: @returning_nothing
 
   @doc ~S"""
   A convenience wrapper to extract the `:rows` from a successful `XqliteNIF.query/3` call.
   """
+  @spec query_to_pragma_result({:ok, map()} | {:error, term()}) ::
+          {:ok, list()} | {:error, term()}
   def query_to_pragma_result({:ok, %{rows: rows}}), do: {:ok, rows}
   def query_to_pragma_result({:error, _} = err), do: err
 
@@ -333,7 +346,10 @@ defmodule Xqlite.Pragma do
   defp process_list_result(key, rows) do
     case key do
       :collation_list ->
-        Enum.map(rows, fn [seq, name] -> %{seq: seq, name: name} end)
+        Enum.map(rows, fn
+          [seq, name] -> %{seq: seq, name: name}
+          other -> %{unknown: other}
+        end)
 
       :integrity_check ->
         values_only(rows)
@@ -343,14 +359,18 @@ defmodule Xqlite.Pragma do
 
       # For single-column results like `foreign_key_check`, `optimize`, etc.
       # this flattens [[v1], [v2]] to [v1, v2].
-      _ when is_list(rows) and rows != [] and length(hd(rows)) == 1 ->
-        values_only(rows)
-
-      # Default for multi-column lists (table_info, foreign_key_list)
-      _ ->
+      _ when is_list(rows) ->
         rows
+        |> single_column_rows?()
+        |> maybe_flatten(rows)
     end
   end
+
+  defp single_column_rows?([[_single] | _]), do: true
+  defp single_column_rows?(_), do: false
+
+  defp maybe_flatten(true, rows), do: values_only(rows)
+  defp maybe_flatten(false, rows), do: rows
 
   defp map_special_int_to_atom(:auto_vacuum, value), do: get_auto_vacuum(value)
   defp map_special_int_to_atom(:secure_delete, value), do: get_secure_delete(value)
@@ -435,32 +455,41 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  @spec get_auto_vacuum(auto_vacuum_key()) :: auto_vacuum_value()
+  @spec get_auto_vacuum(auto_vacuum_key()) ::
+          auto_vacuum_value() | {:error, {:unexpected_value, term()}}
   def get_auto_vacuum(0), do: :none
   def get_auto_vacuum(1), do: :full
   def get_auto_vacuum(2), do: :incremental
+  def get_auto_vacuum(val), do: {:error, {:unexpected_value, val}}
 
-  @spec get_secure_delete(secure_delete_key()) :: secure_delete_value()
+  @spec get_secure_delete(secure_delete_key()) ::
+          secure_delete_value() | {:error, {:unexpected_value, term()}}
   def get_secure_delete(0), do: false
   def get_secure_delete(1), do: true
   def get_secure_delete(2), do: :fast
+  def get_secure_delete(val), do: {:error, {:unexpected_value, val}}
 
-  @spec get_synchronous(synchronous_key()) :: synchronous_value()
+  @spec get_synchronous(synchronous_key()) ::
+          synchronous_value() | {:error, {:unexpected_value, term()}}
   def get_synchronous(0), do: :off
   def get_synchronous(1), do: :normal
   def get_synchronous(2), do: :full
   def get_synchronous(3), do: :extra
+  def get_synchronous(val), do: {:error, {:unexpected_value, val}}
 
-  @spec get_temp_store(temp_store_key()) :: temp_store_value()
+  @spec get_temp_store(temp_store_key()) ::
+          temp_store_value() | {:error, {:unexpected_value, term()}}
   def get_temp_store(0), do: :default
   def get_temp_store(1), do: :file
   def get_temp_store(2), do: :memory
+  def get_temp_store(val), do: {:error, {:unexpected_value, val}}
 
   defp values_only(r) do
     r
     |> Enum.map(fn
       [{_k, v}] -> v
       [v] -> v
+      other -> other
     end)
   end
 end
