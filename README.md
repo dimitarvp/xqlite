@@ -131,18 +131,16 @@ end
 
 ## Roadmap
 
-Planned for **xqlite**:
+**Next:** The **[xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3)** library (separate project) — full Ecto 3.x adapter, `DBConnection` integration, type handling, migrations, and structure dump/load.
+
+Planned for **xqlite** core:
 
 1. Extension loading (`load_extension/2`)
 2. Online Backup API
 3. Session Extension
-4. (Lower priority) Incremental Blob I/O
+4. Incremental Blob I/O
 5. (Optional) SQLCipher support
-6. (Lowest priority) User-Defined Functions
-
-The **[xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3)** library (separate project) will provide full Ecto 3.x adapter, `DBConnection` integration, type handling, migrations, and structure dump/load.
-
-Other future work: benchmark cancellation progress handler overhead; report `UPPER(invalid_utf8)` panic behavior to relevant projects.
+6. (Unplanned / lowest priority) User-Defined Functions — exploration showed this is extremely fiddly to get right via NIF
 
 ## Contributing
 
