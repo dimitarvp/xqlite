@@ -167,6 +167,21 @@ defmodule Xqlite.NIF.TransactionTest do
 
   # end `for` loop
 
+  # --- Edge case: savepoint without active transaction ---
+  test "isolated: savepoint without active transaction succeeds (implicitly starts one)" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE sp_no_tx (id INTEGER)", [])
+
+    assert :ok = NIF.savepoint(conn, "sp_implicit")
+    assert {:ok, 1} = NIF.execute(conn, "INSERT INTO sp_no_tx VALUES (1)", [])
+    assert :ok = NIF.release_savepoint(conn, "sp_implicit")
+
+    assert {:ok, %{rows: [[1]], num_rows: 1}} =
+             NIF.query(conn, "SELECT id FROM sp_no_tx", [])
+
+    NIF.close(conn)
+  end
+
   # --- Edge case: special characters in savepoint names ---
   test "isolated: savepoint with apostrophe in name" do
     {:ok, conn} = NIF.open_in_memory()

@@ -464,5 +464,26 @@ defmodule Xqlite.SchemaIntrospectionTest do
   # end `for` loop
 
   # --- DB type-specific or other tests (outside the `for` loop) ---
-  # None currently identified for schema introspection
+
+  describe "get_create_sql/2 isolated" do
+    setup do
+      {:ok, conn} = NIF.open_in_memory()
+
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE gcs_test (id INTEGER PRIMARY KEY, name TEXT);")
+
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "returns the CREATE statement for an existing table", %{conn: conn} do
+      assert {:ok, sql} = NIF.get_create_sql(conn, "gcs_test")
+      assert is_binary(sql)
+      assert String.starts_with?(sql, "CREATE TABLE gcs_test")
+    end
+
+    test "returns nil for a non-existent table", %{conn: conn} do
+      assert {:ok, nil} = NIF.get_create_sql(conn, "no_such_table_ever")
+    end
+  end
 end

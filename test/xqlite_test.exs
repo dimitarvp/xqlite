@@ -108,4 +108,64 @@ defmodule XqliteTest do
       end
     end
   end
+
+  describe "disable_strict_mode/1" do
+    setup do
+      {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "allows type coercion after disabling strict mode", %{conn: conn} do
+      assert :ok = Xqlite.enable_strict_mode(conn)
+      assert :ok = Xqlite.disable_strict_mode(conn)
+
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE ds_test (id INTEGER PRIMARY KEY, val INTEGER);")
+
+      # In non-strict mode, inserting a string into an INTEGER column succeeds
+      # (SQLite stores it as-is due to type affinity being flexible)
+      assert {:ok, 1} =
+               NIF.execute(conn, "INSERT INTO ds_test (id, val) VALUES (1, 'hello')", [])
+
+      assert {:ok, %{rows: [[1, "hello"]], num_rows: 1}} =
+               NIF.query(conn, "SELECT * FROM ds_test", [])
+    end
+  end
+
+  describe "disable_foreign_key_enforcement/1" do
+    setup do
+      {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "allows FK violations after disabling enforcement", %{conn: conn} do
+      assert :ok = Xqlite.enable_foreign_key_enforcement(conn)
+      assert :ok = Xqlite.disable_foreign_key_enforcement(conn)
+
+      :ok =
+        NIF.execute_batch(
+          conn,
+          """
+          CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
+          CREATE TABLE fk_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES fk_parent(id));
+          """
+        )
+
+      # With FK enforcement disabled, inserting a child with no matching parent succeeds
+      assert {:ok, 1} =
+               NIF.execute(conn, "INSERT INTO fk_child (id, parent_id) VALUES (1, 999)", [])
+    end
+  end
+
+  describe "int2bool/1" do
+    test "converts 0 to false" do
+      assert Xqlite.int2bool(0) == false
+    end
+
+    test "converts 1 to true" do
+      assert Xqlite.int2bool(1) == true
+    end
+  end
 end

@@ -332,6 +332,43 @@ defmodule Xqlite.NIF.StreamTest do
     assert :ok == NIF.close(conn)
   end
 
+  # --- Edge case: stream after connection close ---
+  test "isolated: stream still works after connection close (AtomicPtr holds stmt)" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE sc_t (id INTEGER)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO sc_t VALUES (1)", [])
+
+    {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM sc_t", [], [])
+    :ok = NIF.close(conn)
+
+    # close/1 is conceptual — the stream's AtomicPtr holds the raw sqlite3_stmt,
+    # so fetching still works even after the connection is "closed".
+    assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream, 10)
+    assert :done = NIF.stream_fetch(stream, 1)
+    :ok = NIF.stream_close(stream)
+  end
+
+  # --- Edge case: multiple streams from same connection ---
+  test "isolated: multiple streams from the same connection both work" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE ms_t (id INTEGER, val TEXT)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO ms_t VALUES (1, 'a')", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO ms_t VALUES (2, 'b')", [])
+
+    {:ok, stream1} = NIF.stream_open(conn, "SELECT id FROM ms_t ORDER BY id", [], [])
+    {:ok, stream2} = NIF.stream_open(conn, "SELECT val FROM ms_t ORDER BY id", [], [])
+
+    assert {:ok, %{rows: [[1], [2]]}} = NIF.stream_fetch(stream1, 10)
+    assert {:ok, %{rows: [["a"], ["b"]]}} = NIF.stream_fetch(stream2, 10)
+
+    assert :done = NIF.stream_fetch(stream1, 1)
+    assert :done = NIF.stream_fetch(stream2, 1)
+
+    :ok = NIF.stream_close(stream1)
+    :ok = NIF.stream_close(stream2)
+    :ok = NIF.close(conn)
+  end
+
   # --- Edge case: non-UTF-8 text via streaming ---
   test "isolated: returns utf8_error for invalid UTF-8 in TEXT column via stream" do
     {:ok, conn} = NIF.open_in_memory()

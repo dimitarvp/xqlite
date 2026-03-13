@@ -56,6 +56,43 @@ defmodule Xqlite.NIF.ConnectionTest do
   # end `for` loop that generates a bunch of tests for each DB type
 
   # --- DB type-specific or other tests (outside the `for` loop) ---
+
+  describe "sqlite_version/0" do
+    test "returns a string matching semver-ish format" do
+      assert {:ok, version} = NIF.sqlite_version()
+      assert is_binary(version)
+      assert Regex.match?(~r/^3\.\d+\.\d+/, version)
+    end
+  end
+
+  describe "compile_options/1" do
+    setup do
+      assert {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "returns a list of strings with at least one known option", %{conn: conn} do
+      assert {:ok, options} = NIF.compile_options(conn)
+      assert is_list(options)
+      assert length(options) > 0
+      assert Enum.all?(options, &is_binary/1)
+      assert Enum.any?(options, &String.starts_with?(&1, "THREADSAFE"))
+    end
+  end
+
+  describe "using a closed connection" do
+    test "query on a closed connection still succeeds (close is conceptual, Arc keeps handle)",
+         %{} do
+      {:ok, conn} = NIF.open_in_memory()
+      :ok = NIF.close(conn)
+      # close/1 is a conceptual no-op — the Arc<Mutex<Connection>> keeps the
+      # handle alive as long as the ResourceArc reference exists on the BEAM side.
+      assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
+               NIF.query(conn, "SELECT 1;", [])
+    end
+  end
+
   describe "temporary file DB" do
     setup do
       assert {:ok, conn} = NIF.open_temporary()

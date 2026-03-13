@@ -266,6 +266,33 @@ defmodule Xqlite.NIF.QueryTest do
 
   # end `for` loop
 
+  # --- Edge case: i64 boundary values ---
+  test "isolated: i64 max value round-trips correctly" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE i64_t (val INTEGER)", [])
+
+    i64_max = 9_223_372_036_854_775_807
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO i64_t VALUES (?1)", [i64_max])
+
+    assert {:ok, %{rows: [[^i64_max]], num_rows: 1}} =
+             NIF.query(conn, "SELECT val FROM i64_t", [])
+
+    NIF.close(conn)
+  end
+
+  test "isolated: i64 min value round-trips correctly" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE i64_min_t (val INTEGER)", [])
+
+    i64_min = -9_223_372_036_854_775_808
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO i64_min_t VALUES (?1)", [i64_min])
+
+    assert {:ok, %{rows: [[^i64_min]], num_rows: 1}} =
+             NIF.query(conn, "SELECT val FROM i64_min_t", [])
+
+    NIF.close(conn)
+  end
+
   # --- Edge case: empty blob via query ---
   test "isolated: zero-length blob returns empty binary via query" do
     {:ok, conn} = NIF.open_in_memory()
