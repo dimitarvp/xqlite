@@ -45,6 +45,7 @@ Never use `mix test` directly — always `mix test.seq`.
 5. **`dtonlay/rust-toolchain` defaults.** Minimal toolchain — must explicitly request `components: rustfmt, clippy`.
 6. **Version string for release tools.** Tools like `versioce` can't parse `@version` module attributes in `mix.exs`. Version must be a string literal in `project/0`.
 7. **Dual version bump.** Version must be updated in both `mix.exs` and `native/xqlitenif/Cargo.toml` simultaneously. Always commit them together.
+8. **No paid GHA runners.** OSS project — never use `-large`, `-xlarge`, or any paid runner labels. Use free-tier runners and cross-compile where needed (e.g., `x86_64-apple-darwin` from ARM64 `macos-14`).
 
 ## Elixir Code Style
 
