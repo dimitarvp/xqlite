@@ -166,4 +166,41 @@ defmodule Xqlite.NIF.TransactionTest do
   end
 
   # end `for` loop
+
+  # --- Edge case: special characters in savepoint names ---
+  test "isolated: savepoint with apostrophe in name" do
+    {:ok, conn} = NIF.open_in_memory()
+    :ok = NIF.begin(conn)
+    assert :ok = NIF.savepoint(conn, "it's a savepoint")
+    assert :ok = NIF.release_savepoint(conn, "it's a savepoint")
+    :ok = NIF.rollback(conn)
+    NIF.close(conn)
+  end
+
+  test "isolated: savepoint with spaces in name" do
+    {:ok, conn} = NIF.open_in_memory()
+    :ok = NIF.begin(conn)
+    assert :ok = NIF.savepoint(conn, "my save point")
+    assert :ok = NIF.release_savepoint(conn, "my save point")
+    :ok = NIF.rollback(conn)
+    NIF.close(conn)
+  end
+
+  test "isolated: savepoint with unicode in name" do
+    {:ok, conn} = NIF.open_in_memory()
+    :ok = NIF.begin(conn)
+    assert :ok = NIF.savepoint(conn, "savepoint_éàü")
+    assert :ok = NIF.release_savepoint(conn, "savepoint_éàü")
+    :ok = NIF.rollback(conn)
+    NIF.close(conn)
+  end
+
+  test "isolated: savepoint with double quotes in name" do
+    {:ok, conn} = NIF.open_in_memory()
+    :ok = NIF.begin(conn)
+    assert :ok = NIF.savepoint(conn, "sp with \"quotes\"")
+    assert :ok = NIF.release_savepoint(conn, "sp with \"quotes\"")
+    :ok = NIF.rollback(conn)
+    NIF.close(conn)
+  end
 end

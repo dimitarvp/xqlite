@@ -287,12 +287,12 @@ pub(crate) fn is_keyword<'a>(list_term: Term<'a>) -> bool {
 
 #[inline]
 pub(crate) fn quote_identifier(name: &str) -> String {
-    format!("'{}'", name.replace('\'', "''"))
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 #[inline]
 pub(crate) fn quote_savepoint_name(name: &str) -> String {
-    format!("'{}'", name.replace('\'', "''"))
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 // This function is marked unsafe because it dereferences raw pointers (stmt_ptr)
