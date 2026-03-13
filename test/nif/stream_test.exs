@@ -294,7 +294,8 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, stream} = NIF.stream_open(conn, "SELECT id, val FROM cs_t ORDER BY id", [], [])
     assert {:ok, %{rows: [[1, "a"]]}} = NIF.stream_fetch(stream, 1)
 
-    assert {:ok, %{rows: [[3]], num_rows: 1}} = NIF.query(conn, "SELECT count(*) FROM cs_t", [])
+    assert {:ok, %{rows: [[3]], num_rows: 1}} =
+             NIF.query(conn, "SELECT count(*) FROM cs_t", [])
 
     assert {:ok, %{rows: remaining}} = NIF.stream_fetch(stream, 10)
     assert remaining == [[2, "b"], [3, "c"]]

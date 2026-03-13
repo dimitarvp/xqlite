@@ -9,11 +9,11 @@ use crate::{
     float, from_sql_conversion_failure, function, index_exists, integer,
     integral_value_out_of_range, internal_encoding_error, invalid_column_index,
     invalid_column_name, invalid_column_type, invalid_parameter_count, invalid_parameter_name,
-    invalid_pragma_name, invalid_stream_handle, list, lock_error, map, multiple_statements, no_such_index,
-    no_such_table, null_byte_in_string, operation_cancelled, pid, port, read_only_database,
-    reference, schema_changed, schema_parsing_error, sql_input_error, sqlite_failure,
-    table_exists, text, to_sql_conversion_failure, tuple, unexpected_value, unknown,
-    unsupported_atom, unsupported_data_type, utf8_error,
+    invalid_pragma_name, invalid_stream_handle, list, lock_error, map, multiple_statements,
+    no_such_index, no_such_table, null_byte_in_string, operation_cancelled, pid, port,
+    read_only_database, reference, schema_changed, schema_parsing_error, sql_input_error,
+    sqlite_failure, table_exists, text, to_sql_conversion_failure, tuple, unexpected_value,
+    unknown, unsupported_atom, unsupported_data_type, utf8_error,
 };
 use rusqlite::{Error as RusqliteError, ffi};
 use rustler::{
@@ -472,9 +472,7 @@ impl Encoder for XqliteError {
             XqliteError::InvalidParameterName(name) => {
                 (invalid_parameter_name(), name).encode(env)
             }
-            XqliteError::InvalidPragmaName(name) => {
-                (invalid_pragma_name(), name).encode(env)
-            }
+            XqliteError::InvalidPragmaName(name) => (invalid_pragma_name(), name).encode(env),
             XqliteError::NulErrorInString => null_byte_in_string().encode(env),
             XqliteError::MultipleStatements => multiple_statements().encode(env),
             XqliteError::InvalidColumnIndex(index) => {

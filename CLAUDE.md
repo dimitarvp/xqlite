@@ -14,6 +14,8 @@ mix dialyzer          # PLT cached in priv/plts/
 ```
 
 Never use `mix test` directly — always `mix test.seq`.
+Always run `mix format` and `cargo fmt --manifest-path native/xqlitenif/Cargo.toml` before committing.
+Prefer to cache test results in temporary text files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) and then inspect them, rather than parsing long output inline.
 
 ## Project Structure
 

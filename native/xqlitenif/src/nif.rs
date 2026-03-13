@@ -346,11 +346,7 @@ fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term
 }
 
 fn validate_pragma_name(name: &str) -> Result<(), XqliteError> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(XqliteError::InvalidPragmaName(name.to_string()));
     }
     Ok(())
