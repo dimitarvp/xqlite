@@ -6,7 +6,7 @@ defmodule Xqlite.MixProject do
   def project do
     [
       app: :xqlite,
-      version: "0.3.1",
+      version: "0.4.0-dev",
       elixir: "~> 1.15",
       name: @name,
       start_permanent: Mix.env() == :prod,
@@ -51,7 +51,8 @@ defmodule Xqlite.MixProject do
 
   defp deps do
     [
-      {:rustler, "~> 0.37.1", runtime: false},
+      {:rustler, "~> 0.37.1", optional: true},
+      {:rustler_precompiled, "~> 0.8"},
 
       # dev / test.
       {:benchee, "~> 1.0", only: :dev, runtime: false},
@@ -105,14 +106,15 @@ defmodule Xqlite.MixProject do
       },
       files: [
         "lib",
+        "native/xqlitenif/.cargo",
         "native/xqlitenif/src",
         "native/xqlitenif/Cargo.toml",
         "native/xqlitenif/Cargo.lock",
+        "checksum-*.exs",
         ".formatter.exs",
         "mix.exs",
         "README.md",
         "LICENSE.md"
-        # "checksum-*.exs"
       ]
     ]
   end
