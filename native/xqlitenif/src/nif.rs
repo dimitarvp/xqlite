@@ -1180,12 +1180,11 @@ pub(crate) fn stream_fetch<'a>(
     let mut an_error_occurred: Option<XqliteError> = None;
     let mut stream_definitively_exhausted = false; // True if SQLITE_DONE or error from helper
 
-    // db_handle is needed for process_single_step's error reporting.
-    let db_handle_for_errors = match stream_handle.conn_resource_arc.0.lock() {
-        Ok(conn_lock_guard) => unsafe { conn_lock_guard.handle() },
+    // Hold the lock for the entire fetch loop so that db_handle (used by
+    // sqlite3_errmsg in process_single_step) remains valid.
+    let conn_lock_guard = match stream_handle.conn_resource_arc.0.lock() {
+        Ok(guard) => guard,
         Err(p_err_conn) => {
-            // If we can't get the db_handle, we can't safely call process_single_step.
-            // Mark stream as done by nullifying atomic_raw_stmt.
             let old_ptr = stream_handle
                 .atomic_raw_stmt
                 .swap(std::ptr::null_mut(), Ordering::AcqRel);
@@ -1193,7 +1192,7 @@ pub(crate) fn stream_fetch<'a>(
                 unsafe {
                     ffi::sqlite3_finalize(old_ptr);
                 }
-            } // Finalize if it wasn't null
+            }
             return (
                 error(),
                 XqliteError::LockError(format!(
@@ -1203,6 +1202,7 @@ pub(crate) fn stream_fetch<'a>(
                 .encode(env);
         }
     };
+    let db_handle_for_errors = unsafe { conn_lock_guard.handle() };
 
     for _ in 0..batch_size {
         // Re-check pointer before each step in case it was concurrently finalized (e.g., by stream_close)

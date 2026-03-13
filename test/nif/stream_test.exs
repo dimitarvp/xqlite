@@ -283,6 +283,27 @@ defmodule Xqlite.NIF.StreamTest do
     end
   end
 
+  # --- Edge case: concurrent stream + query on same connection ---
+  test "isolated: query completes while stream is open, then stream continues" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE cs_t (id INTEGER, val TEXT)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (1, 'a')", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (2, 'b')", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (3, 'c')", [])
+
+    {:ok, stream} = NIF.stream_open(conn, "SELECT id, val FROM cs_t ORDER BY id", [], [])
+    assert {:ok, %{rows: [[1, "a"]]}} = NIF.stream_fetch(stream, 1)
+
+    assert {:ok, %{rows: [[3]], num_rows: 1}} = NIF.query(conn, "SELECT count(*) FROM cs_t", [])
+
+    assert {:ok, %{rows: remaining}} = NIF.stream_fetch(stream, 10)
+    assert remaining == [[2, "b"], [3, "c"]]
+
+    assert :done = NIF.stream_fetch(stream, 1)
+    assert :ok = NIF.stream_close(stream)
+    assert :ok = NIF.close(conn)
+  end
+
   # --- Isolated Test Case (Updated for new batch_size contract) ---
   test "isolated: stream_fetch behavior with exhaustion and invalid batch_size" do
     assert {:ok, conn} = NIF.open_in_memory()
