@@ -1,13 +1,13 @@
 use crate::cancel::{ProgressHandlerGuard, XqliteCancelToken};
 use crate::error::{SchemaErrorDetail, XqliteError};
 use crate::schema::{
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, SchemaObjectInfo,
     fk_action_to_atom, fk_match_to_atom, hidden_int_to_atom, index_origin_to_atom,
     notnull_to_nullable, object_type_to_atom, pk_value_to_index, sort_order_to_atom,
-    type_affinity_to_atom, ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo,
-    IndexInfo, SchemaObjectInfo,
+    type_affinity_to_atom,
 };
 use crate::stream::{
-    bind_named_params_ffi, bind_positional_params_ffi, process_single_step, XqliteStream,
+    XqliteStream, bind_named_params_ffi, bind_positional_params_ffi, process_single_step,
 };
 use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, encode_val, format_term_for_pragma,
@@ -16,14 +16,13 @@ use crate::util::{
 };
 use crate::{columns, done, invalid_batch_size, no_value, num_rows, rows};
 use rusqlite::ffi;
-use rusqlite::{types::Value, Connection, Error as RusqliteError, ToSql};
+use rusqlite::{Connection, Error as RusqliteError, ToSql, types::Value};
 use rustler::{
-    resource_impl,
+    Atom, Encoder, Env, Resource, ResourceArc, Term, TermType, resource_impl,
     types::{
         atom::{error, nil, ok},
         map::map_new,
     },
-    Atom, Encoder, Env, Resource, ResourceArc, Term, TermType,
 };
 use std::convert::TryFrom;
 use std::ptr::NonNull;
@@ -536,10 +535,10 @@ fn schema_list_objects(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_info) => {
-                    if let Some(filter_schema) = &schema {
-                        if temp_info.schema != *filter_schema {
-                            continue;
-                        }
+                    if let Some(filter_schema) = &schema
+                        && temp_info.schema != *filter_schema
+                    {
+                        continue;
                     }
 
                     let schema_name_for_error = temp_info.schema.clone();
@@ -564,7 +563,7 @@ fn schema_list_objects(
                                 error_detail: SchemaErrorDetail::UnexpectedValue(
                                     temp_info.wr_flag.to_string(),
                                 ),
-                            })
+                            });
                         }
                     };
 
@@ -580,7 +579,7 @@ fn schema_list_objects(
                                 error_detail: SchemaErrorDetail::UnexpectedValue(
                                     temp_info.strict_flag.to_string(),
                                 ),
-                            })
+                            });
                         }
                     };
 
@@ -845,7 +844,7 @@ fn schema_indexes(
                                 error_detail: SchemaErrorDetail::UnexpectedValue(
                                     temp_data.unique.to_string(),
                                 ),
-                            })
+                            });
                         }
                     };
                     let partial_bool = match temp_data.partial {
@@ -860,7 +859,7 @@ fn schema_indexes(
                                 error_detail: SchemaErrorDetail::UnexpectedValue(
                                     temp_data.partial.to_string(),
                                 ),
-                            })
+                            });
                         }
                     };
 
@@ -910,18 +909,15 @@ fn schema_index_columns(
         for temp_result in temp_results {
             match temp_result {
                 Ok(temp_data) => {
-                    let sort_order_atom =
-                        sort_order_to_atom(temp_data.desc).map_err(|unexpected_val| {
-                            XqliteError::SchemaParsingError {
-                                context: format!(
+                    let sort_order_atom = sort_order_to_atom(temp_data.desc).map_err(
+                        |unexpected_val| XqliteError::SchemaParsingError {
+                            context: format!(
                                 "Parsing sort order ('desc') for column seq {} in index '{}'",
                                 temp_data.seqno, index_name
                             ),
-                                error_detail: SchemaErrorDetail::UnexpectedValue(
-                                    unexpected_val,
-                                ),
-                            }
-                        })?;
+                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                        },
+                    )?;
 
                     let is_key_bool = match temp_data.key {
                         0 => false,
@@ -935,7 +931,7 @@ fn schema_index_columns(
                                 error_detail: SchemaErrorDetail::UnexpectedValue(
                                     temp_data.key.to_string(),
                                 ),
-                            })
+                            });
                         }
                     };
 

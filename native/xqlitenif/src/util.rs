@@ -1,15 +1,14 @@
 use crate::error::XqliteError;
 use crate::nif::XqliteConn;
 use rusqlite::ffi;
-use rusqlite::{types::Value, Connection, Rows};
+use rusqlite::{Connection, Rows, types::Value};
 use rustler::{
-    resource_impl,
+    Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, Resource, ResourceArc,
+    Term, TermType, resource_impl,
     types::{
         atom::{error, false_, nil, ok, true_},
         binary::OwnedBinary,
     },
-    Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, Resource, ResourceArc,
-    Term, TermType,
 };
 use std::fmt::Debug;
 use std::ops::DerefMut;
@@ -39,12 +38,15 @@ pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> T
     match term.get_type() {
         TermType::Atom => (crate::atom(), term).encode(env), // e.g., {:atom, :foo}
         TermType::Binary => {
-            if let Ok(_s_val) = term.decode::<String>() {
-                // If it's a valid Elixir string, tag as :string and pass original term
-                (crate::string(), term).encode(env) // e.g., {:string, "hello"}
-            } else {
-                // Otherwise, tag as :binary and pass original term
-                (crate::binary(), term).encode(env) // e.g., {:binary, <<1,2,3>>}
+            match term.decode::<String>() {
+                Ok(_s_val) => {
+                    // If it's a valid Elixir string, tag as :string and pass original term
+                    (crate::string(), term).encode(env) // e.g., {:string, "hello"}
+                }
+                _ => {
+                    // Otherwise, tag as :binary and pass original term
+                    (crate::binary(), term).encode(env) // e.g., {:binary, <<1,2,3>>}
+                }
             }
         }
         TermType::Integer => (crate::integer(), term).encode(env), // e.g., {:integer, 123}
@@ -300,84 +302,89 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
     stmt_ptr: *mut ffi::sqlite3_stmt,
     column_count: usize,
 ) -> Result<Vec<Term<'_>>, XqliteError> {
-    let mut row_values = Vec::with_capacity(column_count);
-    for i in 0..column_count {
-        let col_idx = i as std::os::raw::c_int;
-        let col_type = ffi::sqlite3_column_type(stmt_ptr, col_idx);
-        let term = match col_type {
-            ffi::SQLITE_INTEGER => {
-                let val = ffi::sqlite3_column_int64(stmt_ptr, col_idx);
-                val.encode(env)
-            }
-            ffi::SQLITE_FLOAT => {
-                let val = ffi::sqlite3_column_double(stmt_ptr, col_idx);
-                val.encode(env)
-            }
-            ffi::SQLITE_TEXT => {
-                let s_ptr = ffi::sqlite3_column_text(stmt_ptr, col_idx);
-                if s_ptr.is_null() {
+    unsafe {
+        let mut row_values = Vec::with_capacity(column_count);
+        for i in 0..column_count {
+            let col_idx = i as std::os::raw::c_int;
+            let col_type = ffi::sqlite3_column_type(stmt_ptr, col_idx);
+            let term = match col_type {
+                ffi::SQLITE_INTEGER => {
+                    let val = ffi::sqlite3_column_int64(stmt_ptr, col_idx);
+                    val.encode(env)
+                }
+                ffi::SQLITE_FLOAT => {
+                    let val = ffi::sqlite3_column_double(stmt_ptr, col_idx);
+                    val.encode(env)
+                }
+                ffi::SQLITE_TEXT => {
+                    let s_ptr = ffi::sqlite3_column_text(stmt_ptr, col_idx);
+                    if s_ptr.is_null() {
+                        return Err(XqliteError::InternalEncodingError {
+                            context: format!(
+                                "SQLite TEXT column pointer was null for column index {i}"
+                            ),
+                        });
+                    }
+                    let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx);
+                    let text_slice = std::slice::from_raw_parts(s_ptr, len as usize);
+                    match std::str::from_utf8(text_slice) {
+                        Ok(s) => s.encode(env),
+                        Err(utf8_err) => {
+                            return Err(XqliteError::Utf8Error {
+                                reason: format!(
+                                    "Invalid UTF-8 sequence in TEXT column index {i}: {utf8_err}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                ffi::SQLITE_BLOB => {
+                    let b_ptr = ffi::sqlite3_column_blob(stmt_ptr, col_idx);
+                    let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx) as usize;
+                    if b_ptr.is_null() {
+                        if len == 0 {
+                            let empty_bin = OwnedBinary::new(0).ok_or_else(|| {
+                                XqliteError::InternalEncodingError {
+                                    context: "Failed to allocate 0-byte OwnedBinary"
+                                        .to_string(),
+                                }
+                            })?;
+                            // For an empty OwnedBinary, no copy is needed after creation.
+                            empty_bin.release(env).encode(env)
+                        } else {
+                            return Err(XqliteError::InternalEncodingError {
+                                context: format!(
+                                    "SQLite BLOB column pointer was null for non-empty blob (column index {i})"
+                                ),
+                            });
+                        }
+                    } else {
+                        let data_slice = std::slice::from_raw_parts(b_ptr as *const u8, len);
+                        let mut bin = OwnedBinary::new(len).ok_or_else(|| {
+                            XqliteError::InternalEncodingError {
+                                context: format!(
+                                    "Failed to allocate {len}-byte OwnedBinary for blob"
+                                ),
+                            }
+                        })?;
+                        // Use deref_mut to get &mut [u8] to copy into.
+                        bin.deref_mut().copy_from_slice(data_slice);
+                        bin.release(env).encode(env)
+                    }
+                }
+                ffi::SQLITE_NULL => nil().encode(env), // Corrected
+                _ => {
                     return Err(XqliteError::InternalEncodingError {
                         context: format!(
-                            "SQLite TEXT column pointer was null for column index {i}"
+                            "Unknown SQLite column type: {col_type} for column index {i}"
                         ),
                     });
                 }
-                let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx);
-                let text_slice = std::slice::from_raw_parts(s_ptr, len as usize);
-                match std::str::from_utf8(text_slice) {
-                    Ok(s) => s.encode(env),
-                    Err(utf8_err) => {
-                        return Err(XqliteError::Utf8Error {
-                            reason: format!(
-                                "Invalid UTF-8 sequence in TEXT column index {i}: {utf8_err}"
-                            ),
-                        });
-                    }
-                }
-            }
-            ffi::SQLITE_BLOB => {
-                let b_ptr = ffi::sqlite3_column_blob(stmt_ptr, col_idx);
-                let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx) as usize;
-                if b_ptr.is_null() {
-                    if len == 0 {
-                        let empty_bin = OwnedBinary::new(0).ok_or_else(|| {
-                            XqliteError::InternalEncodingError {
-                                context: "Failed to allocate 0-byte OwnedBinary".to_string(),
-                            }
-                        })?;
-                        // For an empty OwnedBinary, no copy is needed after creation.
-                        empty_bin.release(env).encode(env)
-                    } else {
-                        return Err(XqliteError::InternalEncodingError {
-                            context: format!("SQLite BLOB column pointer was null for non-empty blob (column index {i})"),
-                        });
-                    }
-                } else {
-                    let data_slice = std::slice::from_raw_parts(b_ptr as *const u8, len);
-                    let mut bin = OwnedBinary::new(len).ok_or_else(|| {
-                        XqliteError::InternalEncodingError {
-                            context: format!(
-                                "Failed to allocate {len}-byte OwnedBinary for blob"
-                            ),
-                        }
-                    })?;
-                    // Use deref_mut to get &mut [u8] to copy into.
-                    bin.deref_mut().copy_from_slice(data_slice);
-                    bin.release(env).encode(env)
-                }
-            }
-            ffi::SQLITE_NULL => nil().encode(env), // Corrected
-            _ => {
-                return Err(XqliteError::InternalEncodingError {
-                    context: format!(
-                        "Unknown SQLite column type: {col_type} for column index {i}"
-                    ),
-                });
-            }
-        };
-        row_values.push(term);
+            };
+            row_values.push(term);
+        }
+        Ok(row_values)
     }
-    Ok(row_values)
 }
 
 pub(crate) fn with_conn<F, R>(

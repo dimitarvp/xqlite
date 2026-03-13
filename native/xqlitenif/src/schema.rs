@@ -1,8 +1,8 @@
 use crate::{
     asc, binary, cascade, create_index, desc, float, full, hidden_alias, integer, no_action,
-    none, normal, numeric, partial, primary_key_constraint, r#virtual, restrict, sequence,
-    set_default, set_null, shadow, simple, stored_generated, table, text, unique_constraint,
-    view, virtual_generated,
+    none, normal, numeric, partial, primary_key_constraint, restrict, sequence, set_default,
+    set_null, shadow, simple, stored_generated, table, text, unique_constraint, view,
+    r#virtual, virtual_generated,
 };
 use rustler::{Atom, NifStruct};
 use std::convert::TryFrom;
@@ -104,7 +104,7 @@ pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Result<Atom, &st
     // ANY type columns also get BLOB affinity if no data type is forced by content
     {
         Ok(binary()) // For 'ANY' this is a simplification; typeof() would be more accurate for content.
-                     // But for PRAGMA table_info, this is a reasonable default mapping.
+    // But for PRAGMA table_info, this is a reasonable default mapping.
     } else if upper_declared_type.contains("REAL") || // REAL
                   upper_declared_type.contains("FLOA") || // FLOAT
                   upper_declared_type.contains("DOUB")
