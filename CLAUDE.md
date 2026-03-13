@@ -73,10 +73,18 @@ Never use `mix test` directly — always `mix test.seq`.
 - No "tests passing", no internal TODOs, no fluff.
 - Audience: tired devs who skim.
 
+## Reference Projects for `rustler_precompiled` Patterns
+
+- **Explorer** (`elixir-explorer/explorer`) — large-scale usage, variants, `macos-15` runners, NIF 2.15.
+- **Tokenizers** (`elixir-nx/tokenizers`) — simpler setup, `-dev` suffix for force-build, RISC-V target via `cross`.
+- **MDEx** (`leandrocp/mdex`) — similar to Explorer, uses reusable GHA workflows.
+
+All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
+
 ## Current State (March 2026)
 
 - v0.3.1 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
 - Rust edition 2024.
-- `rustler_precompiled` is greenfield. Plan: GHA-native runners, NIF 2.17 only, 7 targets (RISC-V dropped — no GHA runner). No Docker/cross.
+- `rustler_precompiled` integration in progress. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.16–1.19 × OTP 26–28).
 - Windows support: best-effort, untested locally, relies on community reports.

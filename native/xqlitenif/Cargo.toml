@@ -15,7 +15,13 @@ rusqlite = { version = "0.37.0", features = [
   "hooks",
   "modern_sqlite",
 ] }
-rustler = { version = "0.37.0" }
+rustler = { version = "0.37.0", default-features = false, features = ["nif_version_2_15"] }
+
+[features]
+default = ["nif_version_2_17"]
+nif_version_2_15 = ["rustler/nif_version_2_15"]
+nif_version_2_16 = ["rustler/nif_version_2_16"]
+nif_version_2_17 = ["rustler/nif_version_2_17"]
 
 [profile.release]
 lto = true
