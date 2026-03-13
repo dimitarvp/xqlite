@@ -345,6 +345,17 @@ fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term
     ok().encode(env)
 }
 
+fn validate_pragma_name(name: &str) -> Result<(), XqliteError> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(XqliteError::InvalidPragmaName(name.to_string()));
+    }
+    Ok(())
+}
+
 /// Reads the current value of an SQLite PRAGMA.
 #[rustler::nif(schedule = "DirtyIo")]
 fn get_pragma(
@@ -352,6 +363,7 @@ fn get_pragma(
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
 ) -> Result<Term<'_>, XqliteError> {
+    validate_pragma_name(&pragma_name)?;
     with_conn(&handle, |conn| {
         let read_sql = format!("PRAGMA {pragma_name};");
         match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
@@ -376,6 +388,7 @@ fn set_pragma<'a>(
     value_term: Term<'a>,
 ) -> Term<'a> {
     let execution_result: Result<(), XqliteError> = (|| {
+        validate_pragma_name(&pragma_name)?;
         let value_literal = format_term_for_pragma(env, value_term)?;
 
         with_conn(&handle, |conn| {

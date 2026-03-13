@@ -112,6 +112,33 @@ defmodule Xqlite.NIF.PragmaTest do
     end
   end
 
+  # --- Edge case: pragma name injection ---
+  describe "pragma name validation" do
+    setup do
+      {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "set_pragma rejects names with semicolons", %{conn: conn} do
+      assert {:error, {:invalid_pragma_name, _}} =
+               NIF.set_pragma(conn, "x; DROP TABLE foo; --", "1")
+    end
+
+    test "get_pragma rejects names with semicolons", %{conn: conn} do
+      assert {:error, {:invalid_pragma_name, _}} =
+               NIF.get_pragma(conn, "x; DROP TABLE foo; --")
+    end
+
+    test "set_pragma rejects empty name", %{conn: conn} do
+      assert {:error, {:invalid_pragma_name, _}} = NIF.set_pragma(conn, "", "1")
+    end
+
+    test "set_pragma accepts valid pragma names", %{conn: conn} do
+      assert :ok = NIF.set_pragma(conn, "cache_size", -1000)
+    end
+  end
+
   describe "using Temporary Disk DB (Specific PRAGMA tests)" do
     # Tag specific block
     @tag :file_temp

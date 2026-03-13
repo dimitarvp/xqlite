@@ -9,7 +9,7 @@ use crate::{
     float, from_sql_conversion_failure, function, index_exists, integer,
     integral_value_out_of_range, internal_encoding_error, invalid_column_index,
     invalid_column_name, invalid_column_type, invalid_parameter_count, invalid_parameter_name,
-    invalid_stream_handle, list, lock_error, map, multiple_statements, no_such_index,
+    invalid_pragma_name, invalid_stream_handle, list, lock_error, map, multiple_statements, no_such_index,
     no_such_table, null_byte_in_string, operation_cancelled, pid, port, read_only_database,
     reference, schema_changed, schema_parsing_error, sql_input_error, sqlite_failure,
     table_exists, text, to_sql_conversion_failure, tuple, unexpected_value, unknown,
@@ -132,6 +132,7 @@ pub(crate) enum XqliteError {
         expected: usize,
     },
     InvalidParameterName(String),
+    InvalidPragmaName(String),
     NulErrorInString,
     MultipleStatements,
 
@@ -324,6 +325,9 @@ impl Display for XqliteError {
             XqliteError::InvalidParameterName(name) => {
                 write!(f, "Invalid parameter name: '{name}'")
             }
+            XqliteError::InvalidPragmaName(name) => {
+                write!(f, "Invalid pragma name: '{name}'")
+            }
             XqliteError::NulErrorInString => {
                 write!(f, "Input string contains embedded null byte")
             }
@@ -467,6 +471,9 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidParameterName(name) => {
                 (invalid_parameter_name(), name).encode(env)
+            }
+            XqliteError::InvalidPragmaName(name) => {
+                (invalid_pragma_name(), name).encode(env)
             }
             XqliteError::NulErrorInString => null_byte_in_string().encode(env),
             XqliteError::MultipleStatements => multiple_statements().encode(env),
