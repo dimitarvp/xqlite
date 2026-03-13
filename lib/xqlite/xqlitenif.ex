@@ -31,7 +31,25 @@ defmodule XqliteNIF do
   SQLite control or for building such abstractions.
   """
 
-  use Rustler, otp_app: :xqlite, crate: :xqlitenif, mode: :release
+  @version Mix.Project.config()[:version]
+
+  use RustlerPrecompiled,
+    otp_app: :xqlite,
+    crate: "xqlitenif",
+    base_url: "https://github.com/dimitarvp/xqlite/releases/download/v#{@version}",
+    version: @version,
+    force_build: System.get_env("XQLITE_BUILD") in ["1", "true"],
+    targets: ~w(
+      aarch64-apple-darwin
+      aarch64-unknown-linux-gnu
+      aarch64-unknown-linux-musl
+      riscv64gc-unknown-linux-gnu
+      x86_64-apple-darwin
+      x86_64-pc-windows-msvc
+      x86_64-unknown-linux-gnu
+      x86_64-unknown-linux-musl
+    ),
+    nif_versions: ["2.17"]
 
   @type stream_fetch_ok_result :: %{rows: [list(term())]}
 

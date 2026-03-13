@@ -31,3 +31,6 @@ xqlite-*.tar
 
 # Dialyzer artifacts.
 /priv/plts
+
+# Precompiled NIF checksums (generated per release, included in hex package).
+checksum-*.exs
