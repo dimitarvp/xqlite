@@ -36,7 +36,7 @@ impl<'conn> ProgressHandlerGuard<'conn> {
         interval: i32,
     ) -> Result<Self, rusqlite::Error> {
         let handler = move || -> bool {
-            if token_bool.load(Ordering::Relaxed) {
+            if token_bool.load(Ordering::Acquire) {
                 true // Return true (non-zero) to interrupt
             } else {
                 false // Return false (zero) to keep going

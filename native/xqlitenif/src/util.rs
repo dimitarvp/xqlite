@@ -97,17 +97,18 @@ pub(crate) fn process_rows<'a, 'rows>(
                             row_values.push(term);
                         }
                         Err(e) => {
-                            // Check specifically for interruption *during column fetch*
-                            if e.to_string() == "interrupted" {
+                            if matches!(
+                                &e,
+                                rusqlite::Error::SqliteFailure(ffi_err, _)
+                                    if ffi_err.extended_code == ffi::SQLITE_INTERRUPT
+                            ) {
                                 return Err(XqliteError::OperationCancelled);
                             }
-                            // Check specifically for Utf8Error
                             if let rusqlite::Error::Utf8Error(utf8_err) = e {
                                 return Err(XqliteError::Utf8Error {
                                     reason: utf8_err.to_string(),
                                 });
                             }
-                            // Otherwise, map to CannotFetchRow
                             return Err(XqliteError::CannotFetchRow(format!(
                                 "Error getting value for column {i}: {e}"
                             )));
@@ -120,17 +121,18 @@ pub(crate) fn process_rows<'a, 'rows>(
                 break; // End of rows
             }
             Err(e) => {
-                // Check specifically for interruption *during row iteration*
-                if e.to_string() == "interrupted" {
+                if matches!(
+                    &e,
+                    rusqlite::Error::SqliteFailure(ffi_err, _)
+                        if ffi_err.extended_code == ffi::SQLITE_INTERRUPT
+                ) {
                     return Err(XqliteError::OperationCancelled);
                 }
-                // Check specifically for Utf8Error during iteration
                 if let rusqlite::Error::Utf8Error(utf8_err) = e {
                     return Err(XqliteError::Utf8Error {
                         reason: utf8_err.to_string(),
                     });
                 }
-                // Otherwise, map other iteration errors to CannotFetchRow
                 return Err(XqliteError::CannotFetchRow(format!(
                     "Error advancing row iterator: {e}"
                 )));

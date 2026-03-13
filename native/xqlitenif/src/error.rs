@@ -579,7 +579,7 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
         }
         // Fallback for any other SQLite error.
         _ => XqliteError::SqliteFailure {
-            code: ffi_err.extended_code, // Report the full code
+            code: ffi_err.extended_code & 0xFF,
             extended_code: ffi_err.extended_code,
             message: Some(message_string),
         },
