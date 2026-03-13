@@ -3,6 +3,7 @@ name: Xqlite
 env:
   DEFAULT_ELIXIR: "1.19"
   DEFAULT_OTP: "28"
+  XQLITE_BUILD: "true"
 
 permissions:
   contents: read
