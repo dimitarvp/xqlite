@@ -330,4 +330,31 @@ defmodule Xqlite.NIF.StreamTest do
     assert :ok == NIF.stream_close(stream_handle)
     assert :ok == NIF.close(conn)
   end
+
+  # --- Edge case: non-UTF-8 text via streaming ---
+  test "isolated: returns utf8_error for invalid UTF-8 in TEXT column via stream" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE utf8_t (val TEXT)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO utf8_t VALUES (CAST(X'FFFE8041' AS TEXT))", [])
+
+    {:ok, stream} = NIF.stream_open(conn, "SELECT val FROM utf8_t", [], [])
+    assert {:error, {:utf8_error, reason}} = NIF.stream_fetch(stream, 10)
+    assert is_binary(reason)
+    assert String.contains?(reason, "UTF-8")
+    NIF.stream_close(stream)
+    NIF.close(conn)
+  end
+
+  # --- Edge case: empty blob via stream ---
+  test "isolated: zero-length blob returns empty binary via stream" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE blob_s (data BLOB)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO blob_s VALUES (x'')", [])
+
+    {:ok, stream} = NIF.stream_open(conn, "SELECT data FROM blob_s", [], [])
+    assert {:ok, %{rows: [[val]]}} = NIF.stream_fetch(stream, 10)
+    assert val == <<>>
+    NIF.stream_close(stream)
+    NIF.close(conn)
+  end
 end

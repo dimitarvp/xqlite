@@ -266,6 +266,14 @@ defmodule Xqlite.NIF.QueryTest do
 
   # end `for` loop
 
-  # --- DB type-specific or other tests (outside the `for` loop) ---
-  # None currently identified specifically for query logic
+  # --- Edge case: empty blob via query ---
+  test "isolated: zero-length blob returns empty binary via query" do
+    {:ok, conn} = NIF.open_in_memory()
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE blob_q (data BLOB)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO blob_q VALUES (x'')", [])
+
+    {:ok, %{rows: [[val]]}} = NIF.query(conn, "SELECT data FROM blob_q", [])
+    assert val == <<>>
+    NIF.close(conn)
+  end
 end

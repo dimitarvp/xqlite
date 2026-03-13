@@ -364,6 +364,34 @@ defmodule Xqlite.NIF.ExecutionTest do
 
   # end `for` loop
 
-  # --- DB type-specific or other tests (outside the `for` loop) ---
-  # None currently identified for execute/execute_batch
+  # --- Edge case: large parameter count ---
+  test "isolated: INSERT with 120 positional parameters succeeds" do
+    {:ok, conn} = NIF.open_in_memory()
+
+    col_defs =
+      1..120
+      |> Enum.map(fn i -> "c#{i} INTEGER" end)
+      |> Enum.join(", ")
+
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE big_t (#{col_defs})", [])
+
+    placeholders =
+      1..120
+      |> Enum.map(fn i -> "?#{i}" end)
+      |> Enum.join(", ")
+
+    col_names =
+      1..120
+      |> Enum.map(fn i -> "c#{i}" end)
+      |> Enum.join(", ")
+
+    params = Enum.to_list(1..120)
+    sql = "INSERT INTO big_t (#{col_names}) VALUES (#{placeholders})"
+    assert {:ok, 1} = NIF.execute(conn, sql, params)
+
+    {:ok, %{rows: [row]}} = NIF.query(conn, "SELECT * FROM big_t", [])
+    assert length(row) == 120
+    assert row == params
+    NIF.close(conn)
+  end
 end
