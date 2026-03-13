@@ -490,7 +490,7 @@ defmodule XqliteNIF do
     - `:name` (String.t()): Name of the object.
     - `:object_type` (atom): The type of object (e.g., `:table`, `:view`, `:virtual`).
     - `:column_count` (integer()): Number of columns (meaningful for tables/views).
-    - `:is_writable` (boolean()): `true` if data can be modified in this object.
+    - `:is_without_rowid` (boolean()): `true` if the table was created with the `WITHOUT ROWID` optimization.
     - `:strict` (boolean()): `true` if the table was declared using `STRICT` mode.
   Returns `{:error, reason}` on failure.
   """

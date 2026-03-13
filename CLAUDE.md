@@ -44,8 +44,12 @@ Never use `mix test` directly — always `mix test.seq`.
 4. **GHA cache split-brain.** Each CI job must: checkout code, download artifacts, run `mix deps.get`. Passing state via artifacts alone breaks lockfile checks.
 5. **`dtonlay/rust-toolchain` defaults.** Minimal toolchain — must explicitly request `components: rustfmt, clippy`.
 6. **Version string for release tools.** Tools like `versioce` can't parse `@version` module attributes in `mix.exs`. Version must be a string literal in `project/0`.
-7. **Dual version bump.** Version must be updated in both `mix.exs` and `native/xqlitenif/Cargo.toml` simultaneously. Always commit them together.
-8. **No paid GHA runners.** OSS project — never use `-large`, `-xlarge`, or any paid runner labels. Use free-tier runners and cross-compile where needed (e.g., `x86_64-apple-darwin` from ARM64 `macos-14`).
+7. **Triple version bump.** Version must be updated in `mix.exs` (project version), `native/xqlitenif/Cargo.toml`, and `mix.exs` (`source_ref` in `docs/0`) simultaneously. Always commit them together.
+8. **No paid GHA runners.** OSS project — never use `-large`, `-xlarge`, or any paid runner labels. Use free-tier runners and cross-compile where needed (e.g., `x86_64-apple-darwin` from ARM64 `macos-15`).
+9. **Checksum generation requires `--no-config`.** `mix rustler_precompiled.download XqliteNIF --all --print --no-config` — without `--no-config`, compilation triggers the `use RustlerPrecompiled` macro which fails if the checksum file doesn't exist yet.
+10. **`-dev` suffix auto-enables `force_build`.** During development keep version as `X.Y.Z-dev` — `rustler_precompiled` detects it and compiles from Rust source. No env var or checksum file needed locally.
+11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
+12. **NIF version features in `Cargo.toml`.** Rustler 0.37 requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
 
 ## Elixir Code Style
 
@@ -81,10 +85,15 @@ Never use `mix test` directly — always `mix test.seq`.
 
 All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 
+## Release Checklist
+
+- Audit `README.md` top to bottom before every release. Installation instructions, version numbers, feature claims, and roadmap must reflect reality.
+
 ## Current State (March 2026)
 
-- v0.3.1 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
-- Rust edition 2024.
-- `rustler_precompiled` integration in progress. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
-- CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.16–1.19 × OTP 26–28).
+- v0.4.0 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
+- Rust edition 2024. Rustler 0.37, rusqlite 0.37.
+- `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
+- GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
+- CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.16–1.19 × OTP 26–28). Uses `XQLITE_BUILD=true` to force source compilation.
 - Windows support: best-effort, untested locally, relies on community reports.

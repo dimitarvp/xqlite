@@ -1,7 +1,7 @@
 # Xqlite
 
 [![Hex version](https://img.shields.io/hexpm/v/xqlite.svg?style=flat)](https://hex.pm/packages/xqlite)
-[![Build Status](https://github.com/dimitarvp/xqlite/workflows/CI/badge.svg)](https://github.com/dimitarvp/xqlite/actions)
+[![Build Status](https://github.com/dimitarvp/xqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/dimitarvp/xqlite/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Low-level, safe, and fast NIF bindings to SQLite 3 for Elixir, powered by Rust and the excellent [rusqlite](https://crates.io/crates/rusqlite) crate.
@@ -9,6 +9,35 @@ Low-level, safe, and fast NIF bindings to SQLite 3 for Elixir, powered by Rust a
 This library provides direct access to core SQLite functionality. For seamless Ecto 3.x integration (including connection pooling, migrations, and Ecto types), please see the planned [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) library (work in progress).
 
 **Target Audience:** Developers needing direct, performant control over SQLite operations from Elixir, potentially as a foundation for higher-level libraries, or for those not interested in Ecto integration.
+
+## Installation
+
+Add `xqlite` to your list of dependencies in `mix.exs`:
+
+```elixir
+def deps do
+  [
+    {:xqlite, "~> 0.4.1"}
+  ]
+end
+```
+
+Precompiled NIF binaries are available for the following targets — no Rust toolchain required:
+
+- `aarch64-apple-darwin` (Apple Silicon macOS)
+- `x86_64-apple-darwin` (Intel macOS)
+- `aarch64-unknown-linux-gnu`
+- `aarch64-unknown-linux-musl`
+- `x86_64-unknown-linux-gnu`
+- `x86_64-unknown-linux-musl`
+- `x86_64-pc-windows-msvc`
+- `riscv64gc-unknown-linux-gnu`
+
+To force compilation from source (requires a Rust toolchain):
+
+```bash
+XQLITE_BUILD=true mix deps.compile xqlite
+```
 
 ## Core design & thread safety
 
@@ -22,7 +51,7 @@ This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.
 
 ## Current capabilities
 
-The library provides two primary modules: `Xqlite` for a higher-level Elixir API, and `XqliteNIF` for direct, low-level access.
+The library provides two primary modules: `Xqlite` for a higher-level Elixir API, and `XqliteNIF` for direct, low-level access. See [hexdocs](https://hexdocs.pm/xqlite) for full parameter and return type details.
 
 ### High-level API (`Xqlite` and `Xqlite.Pragma` modules)
 
@@ -32,59 +61,17 @@ The library provides two primary modules: `Xqlite` for a higher-level Elixir API
 
 ### Low-level NIF API (`XqliteNIF` module)
 
-- **Connection management:**
-  - `open(path :: String.t())`: Opens a file-based database.
-  - `open_in_memory()` or `open_in_memory(uri :: String.t())`: Opens an in-memory database.
-  - `open_temporary()`: Opens a private, temporary on-disk database.
-  - `close(conn)`: Closes the connection.
-
-- **Query execution:**
-  - `query(conn, sql :: String.t(), params :: list() | keyword())`: Executes `SELECT` or other row-returning statements.
-  - `query_cancellable(conn, sql :: String.t(), params :: list() | keyword(), cancel_token)`: Cancellable version.
-    - Returns `{:ok, %{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}}` or `{:error, reason}`.
-
-- **Statement execution:**
-  - `execute(conn, sql :: String.t(), params :: list())`: Executes non-row-returning statements (e.g., `INSERT`, `UPDATE`, `DDL`).
-  - `execute_cancellable(conn, sql :: String.t(), params :: list(), cancel_token)`: Cancellable version.
-  - `execute_batch(conn, sql_batch :: String.t())`: Executes multiple SQL statements. Returns `:ok` on success.
-  - `execute_batch_cancellable(conn, sql_batch :: String.t(), cancel_token)`: Cancellable version. Returns `:ok` on success.
-    - `execute` variants return `{:ok, affected_rows :: non_neg_integer()}`.
-    - `execute_batch` variants return `:ok` on success or `{:error, reason}`.
-
-- **Streaming primitives:**
-  - `stream_open(conn, sql, params, opts)`: Prepares a query and returns a stream handle.
-  - `stream_get_columns(stream_handle)`: Retrieves column names from the prepared stream.
-  - `stream_fetch(stream_handle, batch_size)`: Fetches a batch of rows from the stream.
-  - `stream_close(stream_handle)`: Closes the stream and finalizes the statement.
-
-- **Operation cancellation:**
-  - `create_cancel_token()`: Creates a token for signalling cancellation. Returns `{:ok, token_resource}`.
-  - `cancel_operation(cancel_token)`: Signals an operation associated with the token to cancel. Returns `:ok` on success.
-
-- **PRAGMA handling:**
-  - `get_pragma(conn, pragma_name :: String.t())`: Reads a PRAGMA value.
-  - `set_pragma(conn, pragma_name :: String.t(), value :: term())`: Sets a PRAGMA value. Returns `:ok` on success.
-
-- **Transaction control:**
-  - `begin(conn)`, `commit(conn)`, `rollback(conn)`
-  - `savepoint(conn, name)`, `release_savepoint(conn, name)`, `rollback_to_savepoint(conn, name)`
-  - All return `:ok` on success or `{:error, reason}`.
-
-- **Inserted row ID:**
-  - `last_insert_rowid(conn)`: Retrieves the `rowid` of the most recent `INSERT`.
-
-- **Schema introspection:**
-  - `schema_databases(conn)`
-  - `schema_list_objects(conn, schema \\ nil)` (Returns `Xqlite.Schema.SchemaObjectInfo` with `:is_without_rowid` flag)
-  - `schema_columns(conn, table_name)` (Returns `Xqlite.Schema.ColumnInfo` with `:hidden_kind` flag)
-  - `schema_foreign_keys(conn, table_name)`
-  - `schema_indexes(conn, table_name)`
-  - `schema_index_columns(conn, index_name)`
-  - `get_create_sql(conn, object_name)`
-
-- **Error handling:**
-  - Functions return `{:ok, result}`, `:ok` (for simple success), or `{:error, reason}`.
-  - `reason` is a structured tuple (e.g., `{:sqlite_failure, code, extended_code, message}`, `{:operation_cancelled}`).
+- **Connection:** `open/1`, `open_in_memory/0`, `open_temporary/0`, `close/1`
+- **Queries:** `query/3`, `query_cancellable/4` — returns `%{columns, rows, num_rows}`
+- **Execution:** `execute/3`, `execute_cancellable/4` — returns `{:ok, affected_rows}`; `execute_batch/2`, `execute_batch_cancellable/3` — returns `:ok`
+- **Streaming:** `stream_open/4`, `stream_get_columns/1`, `stream_fetch/2`, `stream_close/1`
+- **Cancellation:** `create_cancel_token/0`, `cancel_operation/1`
+- **PRAGMAs:** `get_pragma/2`, `set_pragma/3`
+- **Transactions:** `begin/1`, `commit/1`, `rollback/1`, `savepoint/2`, `release_savepoint/2`, `rollback_to_savepoint/2`
+- **Row ID:** `last_insert_rowid/1`
+- **Schema:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
+- **Diagnostics:** `compile_options/1`, `sqlite_version/0`
+- **Errors:** `{:ok, result}` / `:ok` on success; `{:error, {reason_atom, ...}}` on failure with structured tuples (e.g., `{:sqlite_failure, code, extended_code, message}`)
 
 ## Known limitations and caveats
 
@@ -144,39 +131,18 @@ end
 
 ## Roadmap
 
-The following features are planned for the **`xqlite`** library:
+Planned for **xqlite**:
 
-1.  **Implement Extension Loading:** Add `load_extension/2` NIF.
-2.  **Implement Online Backup API:** Add NIFs for SQLite's Online Backup API.
-3.  **Implement Session Extension:** Add NIFs for SQLite's Session Extension.
-4.  **(Lower Priority)** Implement Incremental Blob I/O.
-5.  **(Optional)** Add SQLCipher Support (build feature).
-6.  **(Lowest Priority / Tentative)** User-Defined Functions (UDFs).
+1. Extension loading (`load_extension/2`)
+2. Online Backup API
+3. Session Extension
+4. (Lower priority) Incremental Blob I/O
+5. (Optional) SQLCipher support
+6. (Lowest priority) User-Defined Functions
 
-The **`xqlite_ecto3`** library (separate project) will provide:
+The **[xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3)** library (separate project) will provide full Ecto 3.x adapter, `DBConnection` integration, type handling, migrations, and structure dump/load.
 
-- Full Ecto 3.x adapter implementation.
-- `DBConnection` integration.
-- Type handling, migrations, structure dump/load.
-
-## Future considerations (post core roadmap)
-
-- Benchmark cancellation progress handler overhead.
-- Report `UPPER(invalid_utf8)` panic behavior observed with SQLite to relevant projects if appropriate.
-
-## Installation
-
-This package is not yet published on hex.pm. To use it, add this to your list of dependencies in `mix.exs`:
-
-```elixir
-def deps do
-  [
-    {:xqlite, github: "dimitarvp/xqlite"}
-  ]
-end
-```
-
-Ensure you have a compatible Rust toolchain installed.
+Other future work: benchmark cancellation progress handler overhead; report `UPPER(invalid_utf8)` panic behavior to relevant projects.
 
 ## Contributing
 
