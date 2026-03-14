@@ -126,6 +126,7 @@ defmodule Xqlite.NIF.ConnectionTest do
 
     test "concurrent operations during close get success or connection_closed" do
       {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
 
       tasks =
         Enum.map(1..20, fn _ ->
