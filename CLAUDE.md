@@ -16,6 +16,7 @@ mix dialyzer          # PLT cached in priv/plts/
 Never use `mix test` directly — always `mix test.seq`.
 Always run `mix format` and `cargo fmt --manifest-path native/xqlitenif/Cargo.toml` before committing.
 Prefer to cache test results in temporary text files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) and then inspect them, rather than parsing long output inline.
+Run targeted tests first (`mix test.seq test/path/to/relevant_test.exs`), then run the full suite only after those pass.
 
 ## Project Structure
 
@@ -33,7 +34,7 @@ Prefer to cache test results in temporary text files (e.g., `mix test.seq 2>&1 >
 
 ## Architecture
 
-- Thread safety: `Arc<Mutex<Connection>>` per connection handle. Serialized access is intentional — read concurrency belongs in the Ecto adapter layer (pool of independent handles).
+- Thread safety: `Mutex<Connection>` per connection handle (inside `ResourceArc`, which provides `Arc` semantics). Serialized access is intentional — read concurrency belongs in the Ecto adapter layer (pool of independent handles).
 - Streams: `ResourceArc` wraps struct, `AtomicPtr` manages raw `sqlite3_stmt` for lock-free batch iteration. Deliberate unsafe FFI — requires safety audits.
 - Cancellation: SQLite progress handler, checked every 8 VM steps (hardcoded, un-tuned). Token is `Arc<AtomicBool>`.
 - Error handling: comprehensive Rust→Elixir mapping. Constraint violations get specific atoms. Fallback: `{:sqlite_failure, code, extended_code, message}`.
@@ -65,6 +66,12 @@ Prefer to cache test results in temporary text files (e.g., `mix test.seq 2>&1 >
 - Short functions, low cyclomatic complexity. Split aggressively.
 - Minimal git diff is paramount. Don't touch code you weren't asked to change.
 - No noise comments ("added", "removed", "now uses"). Code is version-controlled.
+
+## Rust Code Style
+
+- All Rustler atoms must be referenced via the `atoms::` module prefix (e.g., `atoms::columns()`, `atoms::error()`). Never import atoms into local scope with bare `use crate::{columns, ...}`.
+- Every `unsafe` block must have a `// SAFETY:` comment explaining the invariant that makes it safe.
+- Use `#[inline]` on hot-path helpers called per-row or per-NIF-invocation.
 
 ## Commit Style
 
