@@ -66,6 +66,7 @@ Run targeted tests first (`mix test test/path/to/file.exs`), then run the full s
 - Short functions, low cyclomatic complexity. Split aggressively.
 - Minimal git diff is paramount. Don't touch code you weren't asked to change.
 - No noise comments ("added", "removed", "now uses"). Code is version-controlled.
+- Errors must always carry the most specific, structured information possible. No bare `:error` atoms, no swallowing details into generic wrappers. This is a library — callers need maximum diagnostic information.
 
 ## Rust Code Style
 
