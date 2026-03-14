@@ -66,7 +66,7 @@ defmodule XqliteNIF do
   opaque reference to the database connection. Returns `{:error, reason}`
   on failure, e.g., if the path is invalid or permissions are insufficient.
   """
-  @spec open(path :: String.t()) :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  @spec open(path :: String.t()) :: {:ok, Xqlite.conn()} | Xqlite.error()
   def open(_path), do: err()
 
   @doc """
@@ -82,10 +82,10 @@ defmodule XqliteNIF do
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
-  @spec open_in_memory() :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  @spec open_in_memory() :: {:ok, Xqlite.conn()} | Xqlite.error()
   def open_in_memory(), do: open_in_memory(@default_memory_database)
 
-  @spec open_in_memory(uri :: String.t()) :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  @spec open_in_memory(uri :: String.t()) :: {:ok, Xqlite.conn()} | Xqlite.error()
   def open_in_memory(_uri), do: err()
 
   @doc """
@@ -97,7 +97,7 @@ defmodule XqliteNIF do
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
-  @spec open_temporary() :: {:ok, Xqlite.conn()} | {:error, Xqlite.error()}
+  @spec open_temporary() :: {:ok, Xqlite.conn()} | Xqlite.error()
   def open_temporary(), do: err()
 
   @doc """
@@ -130,14 +130,7 @@ defmodule XqliteNIF do
           conn :: Xqlite.conn(),
           sql :: String.t(),
           params :: list() | keyword()
-        ) ::
-          {:ok,
-           %{
-             columns: [String.t()],
-             rows: [list(term())],
-             num_rows: non_neg_integer()
-           }}
-          | {:error, Xqlite.error()}
+        ) :: {:ok, Xqlite.query_result()} | Xqlite.error()
   def query(_conn, _sql, _params \\ []), do: err()
 
   @doc """
@@ -163,14 +156,7 @@ defmodule XqliteNIF do
           sql :: String.t(),
           params :: list() | keyword(),
           cancel_token :: reference()
-        ) ::
-          {:ok,
-           %{
-             columns: [String.t()],
-             rows: [list(term())],
-             num_rows: non_neg_integer()
-           }}
-          | {:error, Xqlite.error()}
+        ) :: {:ok, Xqlite.query_result()} | Xqlite.error()
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
 
   @doc """
@@ -193,8 +179,8 @@ defmodule XqliteNIF do
   if a statement unexpectedly returns data (e.g., a `SELECT` statement or an
   `INSERT ... RETURNING` statement was passed).
   """
-  @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list()) ::
-          {:ok, non_neg_integer()} | {:error, Xqlite.error()}
+  @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list() | keyword()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
   def execute(_conn, _sql, _params \\ []), do: err()
 
   @doc """
@@ -220,7 +206,7 @@ defmodule XqliteNIF do
           params :: list(),
           cancel_token :: reference()
         ) ::
-          {:ok, non_neg_integer()} | {:error, Xqlite.error()}
+          {:ok, non_neg_integer()} | Xqlite.error()
   def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
 
   @doc """
@@ -242,7 +228,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` if any statement fails.
   """
   @spec execute_batch(conn :: Xqlite.conn(), sql_batch :: String.t()) ::
-          :ok | {:error, Xqlite.error()}
+          :ok | Xqlite.error()
   def execute_batch(_conn, _sql), do: err()
 
   @doc """
@@ -266,7 +252,7 @@ defmodule XqliteNIF do
           sql_batch :: String.t(),
           cancel_token :: reference()
         ) ::
-          :ok | {:error, Xqlite.error()}
+          :ok | Xqlite.error()
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
 
   @doc """
@@ -313,7 +299,7 @@ defmodule XqliteNIF do
   higher-level helpers for many common PRAGMAs.
   """
   @spec get_pragma(conn :: Xqlite.conn(), name :: String.t()) ::
-          {:ok, term() | :no_value} | {:error, Xqlite.error()}
+          {:ok, term() | :no_value} | Xqlite.error()
   def get_pragma(_conn, _name), do: err()
 
   @doc """
@@ -342,7 +328,7 @@ defmodule XqliteNIF do
   common PRAGMAs with more type safety.
   """
   @spec set_pragma(conn :: Xqlite.conn(), name :: String.t(), value :: term()) ::
-          :ok | {:error, Xqlite.error()}
+          :ok | Xqlite.error()
   def set_pragma(_conn, _name, _value), do: err()
 
   @doc """
@@ -357,7 +343,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` if a transaction cannot be started (e.g., if one
   is already active on this connection, or due to other SQLite errors).
   """
-  @spec begin(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
+  @spec begin(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def begin(_conn), do: err()
 
   @doc """
@@ -373,7 +359,7 @@ defmodule XqliteNIF do
   no transaction is active, or due to other SQLite errors like deferred constraint
   violations).
   """
-  @spec commit(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
+  @spec commit(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def commit(_conn), do: err()
 
   @doc """
@@ -389,7 +375,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` if the transaction cannot be rolled back (e.g., if
   no transaction is active, or due to other SQLite errors).
   """
-  @spec rollback(conn :: Xqlite.conn()) :: :ok | {:error, Xqlite.error()}
+  @spec rollback(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def rollback(_conn), do: err()
 
   @doc """
@@ -407,7 +393,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` on failure (e.g., if SQLite cannot create the savepoint).
   """
   @spec savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
-          :ok | {:error, Xqlite.error()}
+          :ok | Xqlite.error()
   def savepoint(_conn, _name), do: err()
 
   @doc """
@@ -425,7 +411,7 @@ defmodule XqliteNIF do
   exist, or other SQLite errors).
   """
   @spec rollback_to_savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
-          :ok | {:error, Xqlite.error()}
+          :ok | Xqlite.error()
   def rollback_to_savepoint(_conn, _name), do: err()
 
   @doc """
@@ -444,7 +430,7 @@ defmodule XqliteNIF do
   exist, or other SQLite errors).
   """
   @spec release_savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
-          :ok | {:error, Xqlite.error()}
+          :ok | Xqlite.error()
   def release_savepoint(_conn, _name), do: err()
 
   @doc """
@@ -466,7 +452,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` on failure.
   """
   @spec schema_databases(conn :: Xqlite.conn()) ::
-          {:ok, [Xqlite.Schema.DatabaseInfo.t()]} | {:error, Xqlite.error()}
+          {:ok, [Xqlite.Schema.DatabaseInfo.t()]} | Xqlite.error()
   def schema_databases(_conn), do: err()
 
   @doc """
@@ -495,7 +481,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` on failure.
   """
   @spec schema_list_objects(conn :: Xqlite.conn(), schema_name :: String.t() | nil) ::
-          {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | {:error, Xqlite.error()}
+          {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | Xqlite.error()
   def schema_list_objects(_conn, _schema \\ nil), do: err()
 
   @doc """
@@ -526,7 +512,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_columns(conn :: Xqlite.conn(), table_name :: String.t()) ::
-          {:ok, [Xqlite.Schema.ColumnInfo.t()]} | {:error, Xqlite.error()}
+          {:ok, [Xqlite.Schema.ColumnInfo.t()]} | Xqlite.error()
   def schema_columns(_conn, _table_name), do: err()
 
   @doc """
@@ -555,7 +541,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_foreign_keys(conn :: Xqlite.conn(), table_name :: String.t()) ::
-          {:ok, [Xqlite.Schema.ForeignKeyInfo.t()]} | {:error, Xqlite.error()}
+          {:ok, [Xqlite.Schema.ForeignKeyInfo.t()]} | Xqlite.error()
   def schema_foreign_keys(_conn, _table_name), do: err()
 
   @doc """
@@ -581,7 +567,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_indexes(conn :: Xqlite.conn(), table_name :: String.t()) ::
-          {:ok, [Xqlite.Schema.IndexInfo.t()]} | {:error, Xqlite.error()}
+          {:ok, [Xqlite.Schema.IndexInfo.t()]} | Xqlite.error()
   def schema_indexes(_conn, _table_name), do: err()
 
   @doc """
@@ -613,7 +599,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_index_columns(conn :: Xqlite.conn(), index_name :: String.t()) ::
-          {:ok, [Xqlite.Schema.IndexColumnInfo.t()]} | {:error, Xqlite.error()}
+          {:ok, [Xqlite.Schema.IndexColumnInfo.t()]} | Xqlite.error()
   def schema_index_columns(_conn, _index_name), do: err()
 
   @doc """
@@ -632,7 +618,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` for other failures.
   """
   @spec get_create_sql(conn :: Xqlite.conn(), object_name :: String.t()) ::
-          {:ok, String.t() | nil} | {:error, Xqlite.error()}
+          {:ok, String.t() | nil} | Xqlite.error()
   def get_create_sql(_conn, _object_name), do: err()
 
   @doc """
@@ -661,7 +647,7 @@ defmodule XqliteNIF do
   the underlying SQLite C function itself doesn't typically return errors that
   map to common `Xqlite.error()` types beyond connection validity.
   """
-  @spec last_insert_rowid(conn :: Xqlite.conn()) :: {:ok, integer()} | {:error, Xqlite.error()}
+  @spec last_insert_rowid(conn :: Xqlite.conn()) :: {:ok, integer()} | Xqlite.error()
   def last_insert_rowid(_conn), do: err()
 
   @doc """
@@ -680,7 +666,7 @@ defmodule XqliteNIF do
   opaque reference representing the cancellation token.
   Returns `{:error, reason}` in the unlikely event of a resource allocation failure.
   """
-  @spec create_cancel_token() :: {:ok, reference()} | {:error, Xqlite.error()}
+  @spec create_cancel_token() :: {:ok, reference()} | Xqlite.error()
   def create_cancel_token(), do: err()
 
   @doc """
@@ -705,7 +691,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` if the provided `token_resource` is not a valid
   cancellation token resource (e.g., a different type of reference).
   """
-  @spec cancel_operation(token_resource :: reference()) :: :ok | {:error, Xqlite.error()}
+  @spec cancel_operation(token_resource :: reference()) :: :ok | Xqlite.error()
   def cancel_operation(_token_resource), do: err()
 
   @doc """
@@ -730,7 +716,7 @@ defmodule XqliteNIF do
           params :: list() | keyword(),
           opts :: keyword()
         ) ::
-          {:ok, reference()} | {:error, Xqlite.error()}
+          {:ok, reference()} | Xqlite.error()
   def stream_open(_conn, _sql, _params, _opts \\ []), do: err()
 
   @doc """
@@ -743,7 +729,7 @@ defmodule XqliteNIF do
   The list of column names will be empty if the query yields no columns.
   """
   @spec stream_get_columns(stream_handle :: reference()) ::
-          {:ok, [String.t()]} | {:error, Xqlite.error()}
+          {:ok, [String.t()]} | Xqlite.error()
   def stream_get_columns(_stream_handle), do: err()
 
   @doc """
@@ -763,8 +749,8 @@ defmodule XqliteNIF do
     - `:done` to indicate the end of the stream (all rows have been consumed).
     - `{:error, reason}` if an error occurs during fetching from SQLite.
   """
-  @spec stream_fetch(stream_handle :: reference(), batch_size :: non_neg_integer()) ::
-          {:ok, stream_fetch_ok_result()} | :done | {:error, Xqlite.error()}
+  @spec stream_fetch(stream_handle :: reference(), batch_size :: pos_integer()) ::
+          {:ok, stream_fetch_ok_result()} | :done | Xqlite.error()
   def stream_fetch(_stream_handle, _batch_size), do: err()
 
   @doc """
@@ -780,7 +766,7 @@ defmodule XqliteNIF do
   Returns `:ok` if successful, or `{:error, reason}` if the handle is invalid
   or an error occurs during finalization (rare).
   """
-  @spec stream_close(stream_handle :: reference()) :: :ok | {:error, Xqlite.error()}
+  @spec stream_close(stream_handle :: reference()) :: :ok | Xqlite.error()
   def stream_close(_stream_handle), do: err()
 
   @doc """
@@ -796,7 +782,7 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` on failure.
   """
   @spec compile_options(conn :: Xqlite.conn()) ::
-          {:ok, [String.t()]} | {:error, Xqlite.error()}
+          {:ok, [String.t()]} | Xqlite.error()
   def compile_options(_conn), do: err()
 
   @doc """
@@ -806,7 +792,7 @@ defmodule XqliteNIF do
   It is useful for diagnostics to confirm which version of SQLite the NIF
   was linked against.
   """
-  @spec sqlite_version() :: {:ok, String.t()} | {:error, Xqlite.error()}
+  @spec sqlite_version() :: {:ok, String.t()} | Xqlite.error()
   def sqlite_version(), do: err()
 
   defp err, do: :erlang.nif_error(:nif_not_loaded)

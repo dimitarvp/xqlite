@@ -131,7 +131,6 @@ pub(crate) enum XqliteError {
     LockError(String),
 
     // Statement / Execution Errors
-    CannotPrepareStatement(String, String),
     SqlInputError {
         code: i32,
         message: String,
@@ -254,9 +253,6 @@ impl Display for XqliteError {
                 "Unsupported data type {}. Allowed types: atom, integer, float, binary",
                 term_type_to_string(*term_type)
             ),
-            XqliteError::CannotPrepareStatement(sql, reason) => {
-                write!(f, "Cannot prepare statement '{sql}': {reason}")
-            }
             XqliteError::CannotExecute(reason) => {
                 write!(f, "Cannot execute query/statement: {reason}")
             }
@@ -415,9 +411,6 @@ impl Encoder for XqliteError {
                 term_type_to_atom(env, *term_type),
             )
                 .encode(env),
-            XqliteError::CannotPrepareStatement(sql, reason) => {
-                (atoms::cannot_prepare_statement(), sql, reason).encode(env)
-            }
             XqliteError::CannotExecute(reason) => {
                 (atoms::cannot_execute(), reason).encode(env)
             }

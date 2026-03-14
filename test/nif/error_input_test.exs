@@ -82,7 +82,7 @@ defmodule Xqlite.NIF.ErrorInputTest do
 
       test "query/3 returns :multiple_statements for multi-statement SQL", %{conn: conn} do
         sql = "SELECT 1; SELECT 2;"
-        assert {:error, {:cannot_prepare_statement, _sql, _reason}} = NIF.query(conn, sql, [])
+        assert {:error, :multiple_statements} = NIF.query(conn, sql, [])
       end
 
       # --- DB State / Execution Error Tests ---

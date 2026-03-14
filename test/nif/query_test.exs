@@ -128,6 +128,11 @@ defmodule Xqlite.NIF.QueryTest do
                  NIF.query(conn, sql, params)
       end
 
+      test "query/3 works with nil as params (no parameters)", %{conn: conn} do
+        assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT 1;", nil)
+      end
+
       test "query/3 returns correct structure for query with no results", %{conn: conn} do
         sql = "SELECT id FROM query_test WHERE name = ?1;"
         params = ["NonExistent"]
@@ -175,8 +180,10 @@ defmodule Xqlite.NIF.QueryTest do
       # --- Error Cases for query/3 ---
 
       test "query/3 returns error for invalid SQL syntax", %{conn: conn} do
-        assert {:error, {:cannot_prepare_statement, "SELEC * FROM query_test;", _reason}} =
+        assert {:error, {:sql_input_error, %{message: msg}}} =
                  NIF.query(conn, "SELEC * FROM query_test;", [])
+
+        assert String.contains?(msg, "near \"SELEC\"")
       end
 
       test "query/3 returns error for incorrect parameter count (positional)", %{conn: conn} do
@@ -252,12 +259,10 @@ defmodule Xqlite.NIF.QueryTest do
       end
 
       test "query/3 returns error for NoSuchTable on SELECT", %{conn: conn} do
-        # Try selecting from a table that doesn't exist
-        sql = "SELECT * FROM non_existent_table;"
-        # This fails during prepare, not execution
-        assert {:error, {:cannot_prepare_statement, ^sql, reason}} = NIF.query(conn, sql, [])
-        # Verify the reason message confirms the underlying issue
-        assert String.contains?(reason || "", "no such table: non_existent_table")
+        assert {:error, {:no_such_table, msg}} =
+                 NIF.query(conn, "SELECT * FROM non_existent_table;", [])
+
+        assert String.contains?(msg, "non_existent_table")
       end
     end
 

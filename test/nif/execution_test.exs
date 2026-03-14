@@ -45,6 +45,15 @@ defmodule Xqlite.NIF.ExecutionTest do
       # --- Shared test cases applicable to all DB types follow ---
       # These tests inherit the simple atom tag (e.g. :memory_private or :file_temp etc.)
 
+      test "execute/3 works with nil as params (no parameters)", %{conn: conn} do
+        assert {:ok, 0} =
+                 NIF.execute(
+                   conn,
+                   "CREATE TABLE nil_params_test (id INTEGER PRIMARY KEY);",
+                   nil
+                 )
+      end
+
       test "execute/3 creates a table successfully", %{conn: conn} do
         sql = "CREATE TABLE simple_create (id INTEGER PRIMARY KEY);"
         # DDL usually returns 0 affected rows
@@ -80,6 +89,44 @@ defmodule Xqlite.NIF.ExecutionTest do
         # Verify insertion using query
         assert {:ok, %{rows: [[1, "Test Name", 123, 99.9, ^blob_data, 1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT * FROM exec_test WHERE id = 1;", [])
+      end
+
+      test "execute/3 inserts data with named parameters", %{conn: conn} do
+        setup_named_table(conn)
+
+        sql = """
+        INSERT INTO exec_test (id, name, val_int)
+        VALUES (:id, :name, :val);
+        """
+
+        assert {:ok, 1} = NIF.execute(conn, sql, id: 100, name: "Named", val: 42)
+
+        assert {:ok, %{rows: [[100, "Named", 42]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT id, name, val_int FROM exec_test WHERE id = 100;", [])
+      end
+
+      test "execute/3 updates data with named parameters", %{conn: conn} do
+        setup_named_table(conn)
+
+        {:ok, 1} =
+          NIF.execute(conn, "INSERT INTO exec_test (id, name) VALUES (?1, ?2);", [
+            200,
+            "Before"
+          ])
+
+        sql = "UPDATE exec_test SET name = :new_name WHERE id = :id;"
+        assert {:ok, 1} = NIF.execute(conn, sql, new_name: "After", id: 200)
+
+        assert {:ok, %{rows: [["After"]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT name FROM exec_test WHERE id = 200;", [])
+      end
+
+      test "execute/3 returns error for invalid named parameter", %{conn: conn} do
+        setup_named_table(conn)
+        sql = "INSERT INTO exec_test (id, name) VALUES (:id, :name);"
+
+        assert {:error, {:invalid_parameter_name, ":nonexistent"}} =
+                 NIF.execute(conn, sql, id: 1, nonexistent: "oops")
       end
 
       test "execute/3 inserts data with nil values", %{conn: conn} do

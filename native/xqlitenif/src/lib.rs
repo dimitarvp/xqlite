@@ -9,7 +9,6 @@ pub(crate) mod atoms {
         cannot_execute_pragma,
         cannot_fetch_row,
         cannot_open_database,
-        cannot_prepare_statement,
         cascade,
         code,
         columns,

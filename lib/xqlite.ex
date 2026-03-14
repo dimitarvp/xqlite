@@ -5,7 +5,92 @@ defmodule Xqlite do
   """
 
   @type conn :: reference()
-  @type error :: {:error, any()}
+
+  # ---------------------------------------------------------------------------
+  # SQLite value types
+  # ---------------------------------------------------------------------------
+
+  @type sqlite_value :: integer() | float() | binary() | nil
+
+  # ---------------------------------------------------------------------------
+  # Query / execute result types
+  # ---------------------------------------------------------------------------
+
+  @type query_result :: %{
+          columns: [String.t()],
+          rows: [[sqlite_value()]],
+          num_rows: non_neg_integer()
+        }
+
+  # ---------------------------------------------------------------------------
+  # Error reason types (the inner value of {:error, reason})
+  # ---------------------------------------------------------------------------
+
+  @type constraint_kind ::
+          :constraint_check
+          | :constraint_commit_hook
+          | :constraint_datatype
+          | :constraint_foreign_key
+          | :constraint_function
+          | :constraint_not_null
+          | :constraint_pinned
+          | :constraint_primary_key
+          | :constraint_rowid
+          | :constraint_trigger
+          | :constraint_unique
+          | :constraint_vtab
+          | nil
+
+  @type sql_input_error :: %{
+          code: integer(),
+          message: String.t(),
+          sql: String.t(),
+          offset: integer()
+        }
+
+  @type error_reason ::
+          :connection_closed
+          | :execute_returned_results
+          | :multiple_statements
+          | :null_byte_in_string
+          | :operation_cancelled
+          | :unsupported_atom
+          | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
+          | {:cannot_execute, String.t()}
+          | {:cannot_execute_pragma, String.t(), String.t()}
+          | {:cannot_fetch_row, String.t()}
+          | {:cannot_open_database, String.t(), integer(), String.t()}
+          | {:constraint_violation, constraint_kind(), String.t()}
+          | {:database_busy_or_locked, String.t()}
+          | {:expected_keyword_list, String.t()}
+          | {:expected_keyword_tuple, String.t()}
+          | {:expected_list, String.t()}
+          | {:from_sql_conversion_failure, non_neg_integer(), atom(), String.t()}
+          | {:index_exists, String.t()}
+          | {:integral_value_out_of_range, non_neg_integer(), integer()}
+          | {:internal_encoding_error, String.t()}
+          | {:invalid_column_index, non_neg_integer()}
+          | {:invalid_column_name, String.t()}
+          | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
+          | {:invalid_parameter_count,
+             %{provided: non_neg_integer(), expected: non_neg_integer()}}
+          | {:invalid_parameter_name, String.t()}
+          | {:invalid_pragma_name, String.t()}
+          | {:invalid_stream_handle, String.t()}
+          | {:lock_error, String.t()}
+          | {:no_such_index, String.t()}
+          | {:no_such_table, String.t()}
+          | {:read_only_database, String.t()}
+          | {:schema_changed, String.t()}
+          | {:schema_parsing_error, String.t(), {:unexpected_value, String.t()}}
+          | {:sql_input_error, sql_input_error()}
+          | {:sqlite_failure, integer(), integer(), String.t() | nil}
+          | {:table_exists, String.t()}
+          | {:to_sql_conversion_failure, String.t()}
+          | {:unsupported_data_type, atom()}
+          | {:utf8_error, String.t()}
+
+  @type error :: {:error, error_reason()}
 
   @doc false
   @spec int2bool(0 | 1) :: true | false
@@ -86,7 +171,7 @@ defmodule Xqlite do
   mid-stream) will be logged and will cause the stream to halt.
   """
   @spec stream(conn(), String.t(), list() | keyword(), keyword()) ::
-          Enumerable.t() | {:error, Xqlite.error()}
+          Enumerable.t() | error()
   def stream(conn, sql, params \\ [], opts \\ []) do
     start_fun = &Xqlite.StreamResourceCallbacks.start_fun/1
     next_fun = &Xqlite.StreamResourceCallbacks.next_fun/1

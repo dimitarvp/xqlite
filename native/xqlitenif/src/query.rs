@@ -22,9 +22,7 @@ pub(crate) fn core_query<'a>(
         .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
         .transpose()?;
 
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| XqliteError::CannotPrepareStatement(sql.to_string(), e.to_string()))?;
+    let mut stmt = conn.prepare(sql)?;
     let column_names: Vec<String> =
         stmt.column_names().iter().map(|s| s.to_string()).collect();
     let column_count = column_names.len();
@@ -78,10 +76,35 @@ pub(crate) fn core_execute<'a>(
         .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
         .transpose()?;
 
-    let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
-    let params_slice: Vec<&dyn ToSql> =
-        positional_values.iter().map(|v| v as &dyn ToSql).collect();
-    let affected_rows = conn.execute(sql, params_slice.as_slice())?;
+    let mut stmt = conn.prepare(sql)?;
+
+    let affected_rows = match params_term.get_type() {
+        TermType::List => {
+            if is_keyword(params_term) {
+                let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+                let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                    .collect();
+                stmt.execute(params_for_rusqlite.as_slice())
+            } else {
+                let positional_values: Vec<Value> =
+                    decode_plain_list_params(env, params_term)?;
+                let params_slice: Vec<&dyn ToSql> =
+                    positional_values.iter().map(|v| v as &dyn ToSql).collect();
+                stmt.execute(params_slice.as_slice())
+            }
+        }
+        _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
+            stmt.execute([])
+        }
+        _ => {
+            return Err(XqliteError::ExpectedList {
+                value_str: format!("{params_term:?}"),
+            });
+        }
+    }?;
+
     Ok(affected_rows)
 }
 
