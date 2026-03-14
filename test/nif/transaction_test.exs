@@ -101,6 +101,76 @@ defmodule Xqlite.NIF.TransactionTest do
         assert :ok = NIF.rollback(conn)
       end
 
+      # --- Transaction Mode Tests ---
+
+      test "begin with explicit :deferred mode", %{conn: conn} do
+        assert :ok = NIF.begin(conn, :deferred)
+
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO tx_test (id, name) VALUES (200, 'deferred');",
+                   []
+                 )
+
+        assert :ok = NIF.commit(conn)
+
+        assert {:ok, %{rows: [[200, "deferred"]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT * FROM tx_test WHERE id = 200;", [])
+      end
+
+      test "begin with :immediate mode", %{conn: conn} do
+        assert :ok = NIF.begin(conn, :immediate)
+
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO tx_test (id, name) VALUES (201, 'immediate');",
+                   []
+                 )
+
+        assert :ok = NIF.commit(conn)
+
+        assert {:ok, %{rows: [[201, "immediate"]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT * FROM tx_test WHERE id = 201;", [])
+      end
+
+      test "begin with :exclusive mode", %{conn: conn} do
+        assert :ok = NIF.begin(conn, :exclusive)
+
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO tx_test (id, name) VALUES (202, 'exclusive');",
+                   []
+                 )
+
+        assert :ok = NIF.commit(conn)
+
+        assert {:ok, %{rows: [[202, "exclusive"]], num_rows: 1}} =
+                 NIF.query(conn, "SELECT * FROM tx_test WHERE id = 202;", [])
+      end
+
+      test "begin with :immediate mode and rollback", %{conn: conn} do
+        assert :ok = NIF.begin(conn, :immediate)
+
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO tx_test (id, name) VALUES (203, 'rollback_imm');",
+                   []
+                 )
+
+        assert :ok = NIF.rollback(conn)
+
+        assert {:ok, %{rows: [], num_rows: 0}} =
+                 NIF.query(conn, "SELECT * FROM tx_test WHERE id = 203;", [])
+      end
+
+      test "begin with invalid mode returns error", %{conn: conn} do
+        assert {:error, :invalid_transaction_mode} = NIF.begin(conn, :bogus)
+      end
+
       # --- Savepoint Tests ---
       # Setup specific table needed for these tests
       setup %{conn: conn} do

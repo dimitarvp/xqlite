@@ -329,20 +329,24 @@ defmodule XqliteNIF do
           {:ok, term()} | Xqlite.error()
   def set_pragma(_conn, _name, _value), do: err()
 
+  @type transaction_mode :: :deferred | :immediate | :exclusive
+
   @doc """
-  Begins a new database transaction.
+  Begins a new database transaction with the given mode.
 
-  Equivalent to executing the SQL statement `BEGIN;` or `BEGIN TRANSACTION;`.
-  By default, SQLite transactions are `DEFERRED`.
-
-  `conn` is the database connection resource.
+  Modes:
+  - `:deferred` — acquires locks lazily (default SQLite behavior)
+  - `:immediate` — acquires a write lock immediately (fails fast on contention)
+  - `:exclusive` — acquires an exclusive lock (blocks readers too)
 
   Returns `:ok` on success.
   Returns `{:error, reason}` if a transaction cannot be started (e.g., if one
   is already active on this connection, or due to other SQLite errors).
+  Returns `{:error, :invalid_transaction_mode}` for unrecognized mode atoms.
   """
-  @spec begin(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
-  def begin(_conn), do: err()
+  @spec begin(conn :: Xqlite.conn(), mode :: transaction_mode()) :: :ok | Xqlite.error()
+  def begin(conn, mode \\ :deferred)
+  def begin(_conn, _mode), do: err()
 
   @doc """
   Commits the current database transaction.

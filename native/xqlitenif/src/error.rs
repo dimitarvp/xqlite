@@ -95,6 +95,7 @@ pub(crate) enum XqliteError {
     },
     InvalidParameterName(String),
     InvalidPragmaName(String),
+    InvalidTransactionMode,
     NulErrorInString,
     MultipleStatements,
 
@@ -307,6 +308,12 @@ impl Display for XqliteError {
             XqliteError::InvalidPragmaName(name) => {
                 write!(f, "Invalid pragma name: '{name}'")
             }
+            XqliteError::InvalidTransactionMode => {
+                write!(
+                    f,
+                    "Invalid transaction mode. Allowed: :deferred, :immediate, :exclusive"
+                )
+            }
             XqliteError::NulErrorInString => {
                 write!(f, "Input string contains embedded null byte")
             }
@@ -467,6 +474,9 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidPragmaName(name) => {
                 (atoms::invalid_pragma_name(), name).encode(env)
+            }
+            XqliteError::InvalidTransactionMode => {
+                atoms::invalid_transaction_mode().encode(env)
             }
             XqliteError::NulErrorInString => atoms::null_byte_in_string().encode(env),
             XqliteError::MultipleStatements => atoms::multiple_statements().encode(env),

@@ -177,8 +177,13 @@ fn set_pragma<'a>(
 // ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let execution_result = connection::with_conn(&handle, transaction::begin);
+fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>, mode: rustler::Atom) -> Term<'_> {
+    let mode = match transaction::TransactionMode::from_atom(mode) {
+        Ok(m) => m,
+        Err(e) => return (error(), e).encode(env),
+    };
+    let execution_result =
+        connection::with_conn(&handle, |conn| transaction::begin(conn, mode));
     singular_ok_or_error_tuple(env, execution_result)
 }
 

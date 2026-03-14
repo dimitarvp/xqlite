@@ -1,9 +1,40 @@
+use crate::atoms;
 use crate::error::XqliteError;
 use crate::util::quote_identifier;
 use rusqlite::Connection;
+use rustler::Atom;
 
-pub(crate) fn begin(conn: &Connection) -> Result<(), XqliteError> {
-    conn.execute("BEGIN;", [])
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TransactionMode {
+    Deferred,
+    Immediate,
+    Exclusive,
+}
+
+impl TransactionMode {
+    pub(crate) fn from_atom(atom: Atom) -> Result<Self, XqliteError> {
+        if atom == atoms::deferred() {
+            Ok(Self::Deferred)
+        } else if atom == atoms::immediate() {
+            Ok(Self::Immediate)
+        } else if atom == atoms::exclusive() {
+            Ok(Self::Exclusive)
+        } else {
+            Err(XqliteError::InvalidTransactionMode)
+        }
+    }
+
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Deferred => "BEGIN DEFERRED;",
+            Self::Immediate => "BEGIN IMMEDIATE;",
+            Self::Exclusive => "BEGIN EXCLUSIVE;",
+        }
+    }
+}
+
+pub(crate) fn begin(conn: &Connection, mode: TransactionMode) -> Result<(), XqliteError> {
+    conn.execute(mode.as_sql(), [])
         .map(|_| ())
         .map_err(XqliteError::from)
 }
