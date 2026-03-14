@@ -1,5 +1,5 @@
 use crate::atoms;
-use crate::error::{SchemaErrorDetail, XqliteError};
+use crate::error::XqliteError;
 use crate::util::quote_identifier;
 use rusqlite::Connection;
 use rustler::{Atom, NifStruct};
@@ -184,7 +184,7 @@ fn int_flag_to_bool(val: i64, context: &str, name: &str) -> Result<bool, XqliteE
         1 => Ok(true),
         _ => Err(XqliteError::SchemaParsingError {
             context: format!("Parsing '{context}' flag for {name}"),
-            error_detail: SchemaErrorDetail::UnexpectedValue(val.to_string()),
+            unexpected_value: val.to_string(),
         }),
     }
 }
@@ -282,7 +282,7 @@ pub(crate) fn list_objects(
         })?
         .collect();
 
-    let mut final_objects: Vec<SchemaObjectInfo> = Vec::new();
+    let mut final_objects: Vec<SchemaObjectInfo> = Vec::with_capacity(temp_results.len());
     for temp_result in temp_results {
         match temp_result {
             Ok(temp_info) => {
@@ -298,7 +298,7 @@ pub(crate) fn list_objects(
                             "Parsing object type for '{}'.'{}'",
                             temp_info.schema, temp_info.name
                         ),
-                        error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                        unexpected_value: unexpected_val,
                     }
                 })?;
                 let obj_desc = format!("object '{}'.'{}'", temp_info.schema, temp_info.name);
@@ -357,7 +357,7 @@ pub(crate) fn columns(
                                 "Parsing 'notnull' flag for column '{}' in table '{}'",
                                 temp_data.name, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                            unexpected_value: unexpected_val,
                         }
                     })?;
 
@@ -368,7 +368,7 @@ pub(crate) fn columns(
                                 "Parsing 'pk' flag for column '{}' in table '{}'",
                                 temp_data.name, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                            unexpected_value: unexpected_val,
                         }
                     })?;
 
@@ -379,7 +379,7 @@ pub(crate) fn columns(
                                 "Parsing 'hidden' kind for column '{}' in table '{}'",
                                 temp_data.name, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                            unexpected_value: unexpected_val,
                         }
                     })?;
 
@@ -436,9 +436,7 @@ pub(crate) fn foreign_keys(
                                 "Parsing 'on_update' action for FK id {} on table '{}'",
                                 temp_data.id, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                unexpected_val.to_string(),
-                            ),
+                            unexpected_value: unexpected_val.to_string(),
                         }
                     })?;
 
@@ -449,9 +447,7 @@ pub(crate) fn foreign_keys(
                                 "Parsing 'on_delete' action for FK id {} on table '{}'",
                                 temp_data.id, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                unexpected_val.to_string(),
-                            ),
+                            unexpected_value: unexpected_val.to_string(),
                         }
                     })?;
 
@@ -462,9 +458,7 @@ pub(crate) fn foreign_keys(
                                 "Parsing 'match' clause for FK id {} on table '{}'",
                                 temp_data.id, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                unexpected_val.to_string(),
-                            ),
+                            unexpected_value: unexpected_val.to_string(),
                         }
                     })?;
 
@@ -517,9 +511,7 @@ pub(crate) fn indexes(
                                 "Parsing 'origin' for index '{}' on table '{}'",
                                 temp_data.name, table_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                unexpected_val.to_string(),
-                            ),
+                            unexpected_value: unexpected_val.to_string(),
                         }
                     })?;
 
@@ -575,7 +567,7 @@ pub(crate) fn index_columns(
                                 "Parsing sort order ('desc') for column seq {} in index '{}'",
                                 temp_data.seqno, index_name
                             ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                            unexpected_value: unexpected_val,
                         }
                     })?;
 

@@ -7,11 +7,6 @@ use rustler::{
 use std::fmt::{self, Display};
 use std::panic::RefUnwindSafe;
 
-#[derive(Debug, Clone)]
-pub(crate) enum SchemaErrorDetail {
-    UnexpectedValue(String),
-}
-
 // Based on libsqlite3-sys constants
 fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
     // Base constraint error code (not "primary key" — that's SQLITE_CONSTRAINT_PRIMARYKEY)
@@ -188,7 +183,7 @@ pub(crate) enum XqliteError {
     // Errors during schema introspection NIFs
     SchemaParsingError {
         context: String, // e.g., "Parsing type affinity for column 'foo'"
-        error_detail: SchemaErrorDetail,
+        unexpected_value: String,
     },
 
     InvalidStreamHandle {
@@ -360,11 +355,10 @@ impl Display for XqliteError {
             }
             XqliteError::SchemaParsingError {
                 context,
-                error_detail,
+                unexpected_value,
             } => {
-                let SchemaErrorDetail::UnexpectedValue(val) = error_detail;
                 write!(f, "Schema parsing error ({context})")?;
-                write!(f, ": Unexpected value '{val}'")
+                write!(f, ": Unexpected value '{unexpected_value}'")
             }
             XqliteError::SqliteFailure {
                 code,
@@ -531,10 +525,9 @@ impl Encoder for XqliteError {
             }
             XqliteError::SchemaParsingError {
                 context,
-                error_detail,
+                unexpected_value,
             } => {
-                let SchemaErrorDetail::UnexpectedValue(val) = error_detail;
-                let detail_term = (atoms::unexpected_value(), val).encode(env);
+                let detail_term = (atoms::unexpected_value(), unexpected_value).encode(env);
                 (atoms::schema_parsing_error(), context, detail_term).encode(env)
             }
             XqliteError::SqliteFailure {

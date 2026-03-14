@@ -351,15 +351,20 @@ fn stream_open<'a>(
                 return Err(XqliteError::from(rusqlite_err));
             }
 
-            if raw_stmt_ptr.is_null() {
-                return Ok(XqliteStream {
-                    atomic_raw_stmt: AtomicPtr::new(std::ptr::null_mut()),
-                    conn_resource_arc: conn_resource_arc_clone,
-                    column_names: Vec::new(),
-                    column_count: 0,
-                });
-            }
-            let non_null_raw_stmt = NonNull::new_unchecked(raw_stmt_ptr);
+            // SAFETY: raw_stmt_ptr was just returned by sqlite3_prepare_v2
+            // which succeeded (prepare_rc == SQLITE_OK). A null return with
+            // SQLITE_OK means the input was whitespace/comments only.
+            let non_null_raw_stmt = match NonNull::new(raw_stmt_ptr) {
+                Some(ptr) => ptr,
+                None => {
+                    return Ok(XqliteStream {
+                        atomic_raw_stmt: AtomicPtr::new(std::ptr::null_mut()),
+                        conn_resource_arc: conn_resource_arc_clone,
+                        column_names: Vec::new(),
+                        column_count: 0,
+                    });
+                }
+            };
 
             let bind_result: Result<(), XqliteError> = match params_term.get_type() {
                 TermType::List => {
