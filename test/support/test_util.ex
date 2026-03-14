@@ -67,7 +67,7 @@ defmodule Xqlite.TestUtil do
     do: is_integer(fetched_val)
 
   def verify_is_atom(_context, _set_val, fetched_val, _expected_val), do: is_atom(fetched_val)
-  def verify_is_ok_atom(_context, _set_val, fetched_val, _expected_val), do: fetched_val == :ok
+
 
   def verify_mmap_size_value(:memory_private, _set_val, actual, _expected_val),
     do: actual == :no_value
