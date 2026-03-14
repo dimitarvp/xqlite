@@ -10,9 +10,7 @@ use rustler::{
         binary::OwnedBinary,
     },
 };
-use std::fmt::Debug;
 use std::ops::DerefMut;
-use std::vec::Vec;
 
 #[derive(Debug)]
 pub(crate) struct BlobResource(pub(crate) Vec<u8>);
@@ -39,6 +37,7 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
     }
 }
 
+#[inline]
 pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> Term<'a> {
     match term.get_type() {
         TermType::Atom => (atoms::atom(), term).encode(env), // e.g., {:atom, :foo}
@@ -152,6 +151,7 @@ pub(crate) fn process_rows<'a, 'rows>(
     Ok(results)
 }
 
+#[inline]
 fn elixir_term_to_rusqlite_value<'a>(
     env: Env<'a>,
     term: Term<'a>,

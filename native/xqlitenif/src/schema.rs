@@ -82,6 +82,7 @@ pub(crate) fn object_type_to_atom(s: &str) -> Result<Atom, &str> {
 }
 
 /// Maps PRAGMA table_info type affinity string to an atom.
+#[inline]
 pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Atom {
     let upper = declared_type_str.to_uppercase();
 

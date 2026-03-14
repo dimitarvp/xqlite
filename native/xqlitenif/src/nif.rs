@@ -298,7 +298,7 @@ fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError
 // ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
-pub(crate) fn stream_open<'a>(
+fn stream_open<'a>(
     env: Env<'a>,
     conn_handle: ResourceArc<XqliteConn>,
     sql: String,
@@ -431,14 +431,14 @@ pub(crate) fn stream_open<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-pub(crate) fn stream_get_columns(
+fn stream_get_columns(
     stream_handle: ResourceArc<XqliteStream>,
 ) -> Result<Vec<String>, XqliteError> {
     Ok(stream_handle.column_names.clone())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-pub(crate) fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Term<'a> {
+fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Term<'a> {
     match stream_handle_term.decode::<ResourceArc<XqliteStream>>() {
         Ok(stream_arc) => {
             let finalization_result = stream_arc.take_and_finalize_atomic_stmt();
@@ -454,7 +454,7 @@ pub(crate) fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Te
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-pub(crate) fn stream_fetch<'a>(
+fn stream_fetch<'a>(
     env: Env<'a>,
     stream_handle: ResourceArc<XqliteStream>,
     batch_size_term: Term<'a>,

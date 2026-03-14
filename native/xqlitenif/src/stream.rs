@@ -163,6 +163,7 @@ pub(crate) unsafe fn process_single_step<'a>(
     }
 }
 
+#[inline]
 fn bind_value_to_raw_stmt(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     bind_idx: c_int,

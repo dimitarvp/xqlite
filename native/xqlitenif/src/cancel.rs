@@ -1,6 +1,5 @@
 use rusqlite::Connection;
 use rustler::{Resource, resource_impl};
-use std::fmt::Debug;
 use std::os::raw::c_int;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
