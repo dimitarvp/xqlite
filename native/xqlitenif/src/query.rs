@@ -29,7 +29,9 @@ pub(crate) fn core_query<'a>(
 
     let rows_result = match params_term.get_type() {
         TermType::List => {
-            if is_keyword(params_term) {
+            if params_term.is_empty_list() {
+                stmt.query([])
+            } else if is_keyword(params_term) {
                 let named_params_vec = decode_exec_keyword_params(env, params_term)?;
                 let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                     .iter()
@@ -44,9 +46,7 @@ pub(crate) fn core_query<'a>(
                 stmt.query(params_slice.as_slice())
             }
         }
-        _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
-            stmt.query([])
-        }
+        _ if params_term == nil().to_term(env) => stmt.query([]),
         _ => {
             return Err(XqliteError::ExpectedList {
                 value_str: format!("{params_term:?}"),
@@ -80,7 +80,9 @@ pub(crate) fn core_execute<'a>(
 
     let affected_rows = match params_term.get_type() {
         TermType::List => {
-            if is_keyword(params_term) {
+            if params_term.is_empty_list() {
+                stmt.execute([])
+            } else if is_keyword(params_term) {
                 let named_params_vec = decode_exec_keyword_params(env, params_term)?;
                 let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                     .iter()
@@ -95,9 +97,7 @@ pub(crate) fn core_execute<'a>(
                 stmt.execute(params_slice.as_slice())
             }
         }
-        _ if params_term == nil().to_term(env) || params_term.is_empty_list() => {
-            stmt.execute([])
-        }
+        _ if params_term == nil().to_term(env) => stmt.execute([]),
         _ => {
             return Err(XqliteError::ExpectedList {
                 value_str: format!("{params_term:?}"),
