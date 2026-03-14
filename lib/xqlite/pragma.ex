@@ -411,10 +411,16 @@ defmodule Xqlite.Pragma do
   end
 
   def put(db, key, val) when is_binary(key) do
-    # We must convert to an atom to perform the validation lookup.
-    # If the string doesn't convert to a known atom, the validation will
-    # correctly pass it through to the NIF.
-    do_put(db, String.to_atom(key), val)
+    case safe_pragma_atom(key) do
+      {:ok, atom_key} -> do_put(db, atom_key, val)
+      :error -> {:error, {:invalid_pragma_name, key}}
+    end
+  end
+
+  defp safe_pragma_atom(key) do
+    {:ok, String.to_existing_atom(key)}
+  rescue
+    ArgumentError -> :error
   end
 
   defp do_put(db, key_atom, val) do

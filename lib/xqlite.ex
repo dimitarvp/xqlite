@@ -146,7 +146,7 @@ defmodule Xqlite do
   end
 
   @doc """
-  Creates a stream that executes a query and emits rows as maps.
+  Creates a stream that executes a query and emits rows as string-keyed maps.
 
   This provides a high-level, idiomatic Elixir `Stream` for processing large
   result sets without loading them all into memory at once. Rows are fetched
@@ -163,7 +163,7 @@ defmodule Xqlite do
       iex> XqliteNIF.execute_batch(conn, "CREATE TABLE users(id, name); INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');")
       :ok
       iex> Xqlite.stream(conn, "SELECT id, name FROM users;") |> Enum.to_list()
-      [%{id: 1, name: "Alice"}, %{id: 2, name: "Bob"}]
+      [%{"id" => 1, "name" => "Alice"}, %{"id" => 2, "name" => "Bob"}]
 
   If the underlying query preparation or initial NIF stream setup fails, this
   function will return an `{:error, reason}` tuple directly instead of a stream.

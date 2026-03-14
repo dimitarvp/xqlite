@@ -53,7 +53,7 @@ defmodule Xqlite.StreamResourceCallbacks do
     case NIF.stream_fetch(acc.handle, acc.batch_size) do
       {:ok, %{rows: rows}} ->
         # Successfully fetched rows. Map them into Elixir maps.
-        mapped_rows = map_rows_to_structs(rows, acc.columns)
+        mapped_rows = map_rows_to_maps(rows, acc.columns)
         {mapped_rows, acc}
 
       :done ->
@@ -85,13 +85,9 @@ defmodule Xqlite.StreamResourceCallbacks do
     end
   end
 
-  defp map_rows_to_structs(rows, columns) do
-    # Convert column names (strings) to atoms once for efficiency.
-    column_atoms = Enum.map(columns, &String.to_atom/1)
-
+  defp map_rows_to_maps(rows, columns) do
     Enum.map(rows, fn row_list ->
-      # Combine atom keys with row values into a map.
-      Map.new(Enum.zip(column_atoms, row_list))
+      Map.new(Enum.zip(columns, row_list))
     end)
   end
 end

@@ -46,8 +46,12 @@ defmodule XqliteTest do
         results = Enum.to_list(stream)
 
         assert length(results) == @record_count
-        assert List.first(results) == %{id: 1, name: "User 1"}
-        assert List.last(results) == %{id: @record_count, name: "User #{@record_count}"}
+        assert List.first(results) == %{"id" => 1, "name" => "User 1"}
+
+        assert List.last(results) == %{
+                 "id" => @record_count,
+                 "name" => "User #{@record_count}"
+               }
       end
 
       test "streams correctly with a small batch size", %{conn: conn} do
@@ -57,7 +61,7 @@ defmodule XqliteTest do
             batch_size: 5
           )
 
-        results = Enum.map(stream, & &1.id)
+        results = Enum.map(stream, & &1["id"])
 
         assert results == Enum.to_list(1..@record_count)
       end
@@ -80,8 +84,8 @@ defmodule XqliteTest do
         results = Enum.to_list(stream)
 
         assert results == [
-                 %{name: "User #{@record_count - 1}"},
-                 %{name: "User #{@record_count}"}
+                 %{"name" => "User #{@record_count - 1}"},
+                 %{"name" => "User #{@record_count}"}
                ]
       end
 
@@ -92,7 +96,7 @@ defmodule XqliteTest do
           )
 
         results = Enum.to_list(stream)
-        assert results == [%{name: "User 3"}]
+        assert results == [%{"name" => "User 3"}]
       end
 
       test "returns an error tuple for invalid SQL", %{conn: conn} do
