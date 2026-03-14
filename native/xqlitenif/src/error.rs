@@ -14,8 +14,8 @@ pub(crate) enum SchemaErrorDetail {
 
 // Based on libsqlite3-sys constants
 fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
-    // Primary constraint code check
-    const SQLITE_CONSTRAINT_PRIMARY: i32 = ffi::SQLITE_CONSTRAINT;
+    // Base constraint error code (not "primary key" — that's SQLITE_CONSTRAINT_PRIMARYKEY)
+    const SQLITE_CONSTRAINT_BASE: i32 = ffi::SQLITE_CONSTRAINT;
 
     match extended_code {
         ffi::SQLITE_CONSTRAINT_CHECK => Some(atoms::constraint_check()),
@@ -35,9 +35,7 @@ fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
         // This covers cases where SQLite might return, e.g., just 19 (SQLITE_CONSTRAINT)
         // without a specific extended code like (19 | (5 << 8)) for NOTNULL.
         // It also covers *future* extended constraint codes we don't know about yet.
-        code if (code & 0xff) == SQLITE_CONSTRAINT_PRIMARY => {
-            Some(atoms::constraint_violation())
-        }
+        code if (code & 0xff) == SQLITE_CONSTRAINT_BASE => Some(atoms::constraint_violation()),
 
         _ => None,
     }
