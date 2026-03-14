@@ -41,24 +41,7 @@ fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
     }
 }
 
-fn term_type_to_string(term_type: TermType) -> &'static str {
-    match term_type {
-        TermType::Atom => "atom",
-        TermType::Binary => "binary",
-        TermType::Float => "float",
-        TermType::Fun => "function",
-        TermType::Integer => "integer",
-        TermType::List => "list",
-        TermType::Map => "map",
-        TermType::Pid => "pid",
-        TermType::Port => "port",
-        TermType::Ref => "reference",
-        TermType::Tuple => "tuple",
-        TermType::Unknown => "unknown",
-    }
-}
-
-fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
+fn term_type_to_atom(term_type: TermType) -> Atom {
     match term_type {
         TermType::Atom => atoms::atom(),
         TermType::Binary => atoms::binary(),
@@ -246,11 +229,26 @@ impl Display for XqliteError {
                 f,
                 "Unsupported atom value '{atom_value}'. Allowed values: nil, true, false"
             ),
-            XqliteError::UnsupportedDataType { term_type } => write!(
-                f,
-                "Unsupported data type {}. Allowed types: atom, integer, float, binary",
-                term_type_to_string(*term_type)
-            ),
+            XqliteError::UnsupportedDataType { term_type } => {
+                let name = match term_type {
+                    TermType::Atom => "atom",
+                    TermType::Binary => "binary",
+                    TermType::Float => "float",
+                    TermType::Fun => "function",
+                    TermType::Integer => "integer",
+                    TermType::List => "list",
+                    TermType::Map => "map",
+                    TermType::Pid => "pid",
+                    TermType::Port => "port",
+                    TermType::Ref => "reference",
+                    TermType::Tuple => "tuple",
+                    TermType::Unknown => "unknown",
+                };
+                write!(
+                    f,
+                    "Unsupported data type {name}. Allowed types: atom, integer, float, binary"
+                )
+            }
             XqliteError::CannotExecute(reason) => {
                 write!(f, "Cannot execute query/statement: {reason}")
             }
@@ -406,7 +404,7 @@ impl Encoder for XqliteError {
             }
             XqliteError::UnsupportedDataType { term_type } => (
                 atoms::unsupported_data_type(),
-                term_type_to_atom(env, *term_type),
+                term_type_to_atom(*term_type),
             )
                 .encode(env),
             XqliteError::CannotExecute(reason) => {
