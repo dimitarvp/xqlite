@@ -72,9 +72,6 @@ defmodule XqliteNIF do
   @doc """
   Opens a connection to an in-memory SQLite database.
 
-    @doc \"""
-  Opens a connection to an in-memory SQLite database.
-
   Can be called with no arguments to open a private, temporary in-memory
   database (`":memory:"`). It can also be called with a URI filename like
   `"file:memdb1?mode=memory&cache=shared"` to create a named in-memory

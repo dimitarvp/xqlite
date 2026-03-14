@@ -346,7 +346,8 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_query(db, key, arg) do
-    db |> XqliteNIF.query("PRAGMA #{key}(#{arg});") |> query_to_pragma_result()
+    quoted_arg = "\"#{String.replace(to_string(arg), "\"", "\"\"")}\""
+    db |> XqliteNIF.query("PRAGMA #{key}(#{quoted_arg});") |> query_to_pragma_result()
   end
 
   defp process_list_result(key, rows) do
