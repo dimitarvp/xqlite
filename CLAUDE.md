@@ -113,6 +113,11 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 6. `mix hex.publish`
 7. Locally bump to `X.Y+1.0-dev` in `mix.exs` and `Cargo.toml` (do NOT commit — local-only so `-dev` suffix triggers source builds).
 
+## Design Tradeoffs
+
+- **Cancellation over interrupt.** xqlite uses progress-handler cancellation (`Arc<AtomicBool>` checked every 8 VM instructions) instead of `sqlite3_interrupt()`. Interrupt is fire-and-forget, per-connection, and known to let slow operations run to completion before being noticed (reported on ElixirForum and in exqlite issues). Our approach is per-operation, fine-grained, and any process can cancel without needing the conn handle — strictly better for DBConnection/Ecto timeout wiring. Never add `sqlite3_interrupt()`.
+- **Our Mutex vs NOMUTEX.** rusqlite defaults to `SQLITE_OPEN_NO_MUTEX` (disables SQLite's internal mutex). Our `Mutex<Connection>` is still required by Rust's type system (`Connection` is `!Sync`). The two are complementary, not redundant: NOMUTEX is safe *because* our Mutex serializes access.
+
 ## Current State (March 2026)
 
 - v0.4.1 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
