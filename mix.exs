@@ -72,8 +72,7 @@ defmodule Xqlite.MixProject do
       groups_for_modules: [
         "High-Level API": [
           Xqlite,
-          Xqlite.Pragma,
-          Xqlite.StreamResourceCallbacks
+          Xqlite.Pragma
         ],
         "Schema Structs": [
           Xqlite.Schema.ColumnInfo,
