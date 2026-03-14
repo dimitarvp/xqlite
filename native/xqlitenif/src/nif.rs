@@ -19,7 +19,6 @@ use rustler::{
         map::map_new,
     },
 };
-use std::convert::TryFrom;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, Ordering};
 

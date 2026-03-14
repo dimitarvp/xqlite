@@ -3,7 +3,6 @@ use crate::error::{SchemaErrorDetail, XqliteError};
 use crate::util::quote_identifier;
 use rusqlite::Connection;
 use rustler::{Atom, NifStruct};
-use std::convert::TryFrom;
 
 #[derive(Debug, Clone, NifStruct)]
 #[module = "Xqlite.Schema.DatabaseInfo"]

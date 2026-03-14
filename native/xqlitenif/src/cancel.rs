@@ -35,13 +35,7 @@ impl<'conn> ProgressHandlerGuard<'conn> {
         token_bool: Arc<AtomicBool>,
         interval: i32,
     ) -> Result<Self, rusqlite::Error> {
-        let handler = move || -> bool {
-            if token_bool.load(Ordering::Acquire) {
-                true // Return true (non-zero) to interrupt
-            } else {
-                false // Return false (zero) to keep going
-            }
-        };
+        let handler = move || token_bool.load(Ordering::Acquire);
 
         conn.progress_handler(interval as c_int, Some(handler))?;
 

@@ -391,7 +391,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                         bin.release(env).encode(env)
                     }
                 }
-                ffi::SQLITE_NULL => nil().encode(env), // Corrected
+                ffi::SQLITE_NULL => nil().encode(env),
                 _ => {
                     return Err(XqliteError::InternalEncodingError {
                         context: format!(
