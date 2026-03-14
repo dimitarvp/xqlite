@@ -27,6 +27,10 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
         Value::Real(f) => f.encode(env),
         Value::Text(s) => s.encode(env),
         Value::Blob(owned_vec) => {
+            // Zero-copy: wrap the owned Vec<u8> in a resource and let the BEAM
+            // reference its memory directly. The resource GC keeps it alive.
+            // This differs from sqlite_row_to_elixir_terms which must copy from
+            // a raw SQLite pointer that becomes invalid after the next step.
             let resource = ResourceArc::new(BlobResource(owned_vec));
             resource
                 .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
@@ -345,6 +349,10 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                     }
                 }
                 ffi::SQLITE_BLOB => {
+                    // Must copy: the raw pointer from sqlite3_column_blob is only
+                    // valid until the next sqlite3_step call. Unlike encode_val
+                    // (which receives an owned Vec<u8> and can zero-copy via
+                    // BlobResource), we must allocate an OwnedBinary and copy.
                     let b_ptr = ffi::sqlite3_column_blob(stmt_ptr, col_idx);
                     let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx) as usize;
                     if b_ptr.is_null() {
