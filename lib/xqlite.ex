@@ -165,9 +165,12 @@ defmodule Xqlite do
       iex> Xqlite.stream(conn, "SELECT id, name FROM users;") |> Enum.to_list()
       [%{"id" => 1, "name" => "Alice"}, %{"id" => 2, "name" => "Bob"}]
 
-  If the underlying query preparation or initial NIF stream setup fails, this
-  function will return an `{:error, reason}` tuple directly instead of a stream.
-  Errors that occur during stream consumption (e.g., database connection lost
+  Returns an `Enumerable.t()` on success or `{:error, reason}` on setup failure.
+  Callers must pattern-match the result before piping — this is intentional,
+  as returning a stream that silently errors on first consume would hide
+  setup failures (e.g., invalid SQL, closed connection).
+
+  Errors that occur *during* stream consumption (e.g., database connection lost
   mid-stream) will be logged and will cause the stream to halt.
   """
   @spec stream(conn(), String.t(), list() | keyword(), keyword()) ::

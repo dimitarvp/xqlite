@@ -12,6 +12,7 @@ defmodule Xqlite.PragmaUtil do
 
   defguard is_spec(x) when is_list(x)
   defguard is_arg_type(x) when x in [:blob, :bool, :int, :list, :nothing, :real, :text]
+  # elem/2 is required here — defguard does not support pattern matching on tuple elements.
   defguard is_pragma(x) when is_tuple(x) and is_atom(elem(x, 0)) and is_spec(elem(x, 1))
   defguard is_pragma_specs(x) when is_map(x)
   defguard is_filter(x) when is_function(x, 1)
