@@ -251,7 +251,8 @@ defmodule XqlitePragmaTest do
   end
 
   defp clean_db() do
-    {:ok, db} = NIF.open(":memory:")
+    {:ok, db} = NIF.open_in_memory()
+    ExUnit.Callbacks.on_exit(fn -> NIF.close(db) end)
     db
   end
 end
