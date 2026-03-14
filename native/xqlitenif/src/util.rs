@@ -82,6 +82,11 @@ pub(crate) fn singular_ok_or_error_tuple<'a>(
     }
 }
 
+/// Converts rusqlite Rows to Vec<Vec<Term>> using the safe rusqlite API.
+/// Used by core_query/core_execute (single NIF call, Statement lifetime tied to Connection).
+/// Streaming uses sqlite_row_to_elixir_terms instead (raw FFI) because the statement
+/// outlives the Connection borrow via AtomicPtr — rusqlite's lifetime-bound Rows can't
+/// express that.
 pub(crate) fn process_rows<'a, 'rows>(
     env: Env<'a>,
     mut rows: Rows<'rows>,
