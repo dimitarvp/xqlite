@@ -123,6 +123,23 @@ defmodule Xqlite.NIF.ConnectionTest do
 
       assert {:ok, %{num_rows: ^n}} = NIF.query(conn, "SELECT * FROM conc", [])
     end
+
+    test "concurrent operations during close get success or connection_closed" do
+      {:ok, conn} = NIF.open_in_memory()
+
+      tasks =
+        Enum.map(1..20, fn _ ->
+          Task.async(fn -> NIF.query(conn, "SELECT 1;", []) end)
+        end)
+
+      :ok = NIF.close(conn)
+
+      results = Task.await_many(tasks, 5_000)
+
+      Enum.each(results, fn result ->
+        assert match?({:ok, _}, result) or match?({:error, :connection_closed}, result)
+      end)
+    end
   end
 
   describe "temporary file DB" do

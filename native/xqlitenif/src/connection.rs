@@ -87,12 +87,12 @@ pub(crate) fn with_conn<F, R>(
 where
     F: FnOnce(&Connection) -> Result<R, XqliteError>,
 {
-    if handle.closed.load(Ordering::Acquire) {
-        return Err(XqliteError::ConnectionClosed);
-    }
     let conn_guard = handle
         .conn
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    if handle.closed.load(Ordering::Acquire) {
+        return Err(XqliteError::ConnectionClosed);
+    }
     func(&conn_guard)
 }
