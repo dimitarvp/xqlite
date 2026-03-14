@@ -1,6 +1,6 @@
 # xqlite
 
-Low-level Elixir NIF library for SQLite3 via Rust (rusqlite 0.37 + Rustler 0.37). Bundled SQLite — no native install required.
+Low-level Elixir NIF library for SQLite3 via Rust (rusqlite 0.38 + Rustler 0.37). Bundled SQLite — no native install required.
 
 ## Build & Test
 
@@ -109,7 +109,7 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 ## Current State (March 2026)
 
 - v0.4.1 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
-- Rust edition 2024. Rustler 0.37, rusqlite 0.37.
+- Rust edition 2024. Rustler 0.37, rusqlite 0.38.
 - `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
 - CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.16–1.19 × OTP 26–28). Uses `XQLITE_BUILD=true` to force source compilation.
