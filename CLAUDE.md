@@ -20,6 +20,10 @@ mix dialyzer          # PLT cached in priv/plts/
 Always use `mix test.seq` to run tests — no arguments, always the full suite. It runs everything sequentially (one file per OS process) and takes ~25s. Never use `mix test` directly.
 Cache test output in temp files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) to avoid parsing long inline output.
 
+### Test pattern: compile-time `for` over connection openers
+
+NIF tests use a compile-time `for` loop over `connection_openers()` so every test runs against all SQLite connection modes (in-memory, file-backed, etc.). New NIF tests **must** go inside the `for` loop's `describe` block — never as standalone top-level tests with a hardcoded `NIF.open_in_memory()`. The only exception is truly isolated edge cases that test a single narrow behavior unrelated to connection mode.
+
 ## Project Structure
 
 - `lib/xqlite.ex` — high-level API (stream, strict mode, FK enforcement)
@@ -56,6 +60,7 @@ Cache test output in temp files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt
 11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
 12. **NIF version features in `Cargo.toml`.** Rustler 0.37 requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
 13. **Delete old checksum file before regenerating.** `mix rustler_precompiled.download --all` won't overwrite stale entries from a prior version. Always `rm -f checksum-Elixir.XqliteNIF.exs` first. If `mix hex.publish` still fails with a checksum mismatch, `--only-local` can add just the local platform's entry.
+14. **rusqlite upgrade (post-0.38.0).** PR #1819 (fixes our #1817) changes `Error::Utf8Error(err)` → `Error::Utf8Error(col, err)` and replaces `From<ValueRef> for Value` with `TryFrom`. Update the pattern match in `error.rs`; our `row.get::<_, Value>()?` calls need no changes.
 
 ## Elixir Code Style
 
