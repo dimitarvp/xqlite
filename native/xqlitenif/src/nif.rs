@@ -304,7 +304,7 @@ pub(crate) fn stream_open<'a>(
     conn_handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    _opts_term: Term<'a>,
+    _reserved_future_opts: Term<'a>,
 ) -> Result<ResourceArc<XqliteStream>, XqliteError> {
     use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
     use crate::util::{decode_exec_keyword_params, decode_plain_list_params, is_keyword};
