@@ -1,7 +1,24 @@
 defmodule Xqlite.PragmaUtil do
   @moduledoc ~S"""
-  A module with zero dependencies on the rest of the modules in this library.
-  Its functions are useful for being invoked in module definitions of other modules.
+  Utility functions for working with the PRAGMA schema at compile time.
+
+  This module has zero runtime dependencies on other modules in the library,
+  which allows its functions and guards to be used in module attribute
+  definitions (e.g., `@readable_pragmas`, `@writable_pragmas`) inside
+  `Xqlite.Pragma` — something that isn't possible with functions defined
+  in the same module.
+
+  ## Guards
+
+  - `is_pragma/1` — validates `{atom(), keyword()}` pragma tuples
+  - `is_spec/1`, `is_arg_type/1`, `is_pragma_specs/1`, `is_filter/1`
+
+  ## Functions
+
+  - `readable?/1`, `readable_with_zero_args?/1`, `readable_with_one_arg?/1` — query pragma capabilities
+  - `writable?/1` — check if a pragma supports SET
+  - `returns_type?/2` — check if a pragma returns a specific SQLite type
+  - `of_type/2`, `filter/2` — filter pragma specs by type or predicate
   """
 
   @type spec :: keyword()
