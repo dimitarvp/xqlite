@@ -87,7 +87,7 @@ defmodule Xqlite.MixProject do
           XqliteNIF
         ],
         "Internal Helpers": [
-          Xqlite.PragmaUtil
+          Xqlite.PragmaSpec
         ]
       ]
     ]
