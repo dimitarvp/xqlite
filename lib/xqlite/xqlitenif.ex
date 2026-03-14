@@ -838,5 +838,67 @@ defmodule XqliteNIF do
   @spec sqlite_version() :: {:ok, String.t()} | Xqlite.error()
   def sqlite_version(), do: err()
 
+  @doc """
+  Registers a PID to receive SQLite diagnostic log events.
+
+  SQLite's global log callback (`sqlite3_config(SQLITE_CONFIG_LOG)`) sends
+  diagnostic messages for events like auto-index creation, schema changes,
+  and warnings that don't surface as errors.
+
+  The registered PID receives messages in the form:
+  `{:xqlite_log, error_code, message}` where `error_code` is a SQLite
+  result code (integer) and `message` is a string.
+
+  This is a **global, per-process** setting — only one PID can receive log
+  events at a time. Calling `set_log_hook/1` again replaces the previous
+  listener. Use `remove_log_hook/0` to unregister.
+
+  Returns `{:ok, :ok}` on success or `{:error, reason}` on failure.
+  """
+  @spec set_log_hook(pid :: pid()) :: {:ok, :ok} | {:error, String.t()}
+  def set_log_hook(_pid), do: err()
+
+  @doc """
+  Unregisters the global SQLite log hook.
+
+  After calling this, no PID will receive `{:xqlite_log, ...}` messages.
+
+  Returns `{:ok, :ok}` on success or `{:error, reason}` on failure.
+  """
+  @spec remove_log_hook() :: {:ok, :ok} | {:error, String.t()}
+  def remove_log_hook(), do: err()
+
+  @doc """
+  Registers a PID to receive change notifications for this connection.
+
+  The registered PID receives messages in the form:
+  `{:xqlite_update, action, db_name, table_name, rowid}` where:
+  - `action` is `:insert`, `:update`, or `:delete`
+  - `db_name` is the database name (e.g., `"main"`, `"temp"`)
+  - `table_name` is the table that was modified
+  - `rowid` is the rowid of the affected row
+
+  This is a **per-connection** setting. Each connection can have at most one
+  update hook. Calling `set_update_hook/2` again replaces the previous hook.
+
+  The callback fires before the change is committed — if the enclosing
+  transaction rolls back, you will have already received the notification.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec set_update_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
+  def set_update_hook(_conn, _pid), do: err()
+
+  @doc """
+  Removes the change notification hook from this connection.
+
+  After calling this, the connection will no longer send
+  `{:xqlite_update, ...}` messages to any PID.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec remove_update_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
+  def remove_update_hook(_conn), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

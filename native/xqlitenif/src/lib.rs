@@ -108,19 +108,26 @@ pub(crate) mod atoms {
         utf8_error,
         r#virtual,
         virtual_generated,
-        view
+        view,
+        delete,
+        insert,
+        update,
+        xqlite_log,
+        xqlite_update
     }
 }
 
 mod cancel;
 mod connection;
 mod error;
+mod log_hook;
 mod nif;
 mod pragma;
 mod query;
 mod schema;
 mod stream;
 mod transaction;
+mod update_hook;
 mod util;
 
 use rustler::{Env, Term};

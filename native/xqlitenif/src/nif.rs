@@ -691,3 +691,39 @@ fn sqlite_version() -> Result<String, XqliteError> {
     let version_cstr = unsafe { std::ffi::CStr::from_ptr(version_ptr) };
     Ok(version_cstr.to_string_lossy().into_owned())
 }
+
+// ---------------------------------------------------------------------------
+// Log Hook NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn set_log_hook(pid: rustler::LocalPid) -> Result<rustler::Atom, String> {
+    crate::log_hook::set_log_hook(pid)?;
+    Ok(ok())
+}
+
+#[rustler::nif]
+fn remove_log_hook() -> Result<rustler::Atom, String> {
+    crate::log_hook::remove_log_hook()?;
+    Ok(ok())
+}
+
+// ---------------------------------------------------------------------------
+// Update Hook NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn set_update_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| crate::update_hook::set(conn, pid));
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn remove_update_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, crate::update_hook::remove);
+    singular_ok_or_error_tuple(env, result)
+}

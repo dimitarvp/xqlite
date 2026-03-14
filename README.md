@@ -52,6 +52,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Transactions:** `begin/2` (`:deferred` / `:immediate` / `:exclusive`), `commit/1`, `rollback/1`, `transaction_status/1`, `savepoint/2`, `release_savepoint/2`, `rollback_to_savepoint/2`
 - **Row ID:** `last_insert_rowid/1`
 - **Schema:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
+- **Log hook:** `set_log_hook/1`, `remove_log_hook/0` — global SQLite diagnostic log forwarded to a PID as `{:xqlite_log, code, message}`
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
 
 Errors are structured tuples: `{:error, {:constraint_violation, :constraint_foreign_key, msg}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
@@ -87,6 +88,10 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 
 # Read-only connection (writes fail with {:error, {:read_only_database, _}})
 {:ok, ro_conn} = XqliteNIF.open_readonly("my_database.db")
+
+# Receive SQLite diagnostic events (auto-index warnings, schema changes, etc.)
+{:ok, :ok} = XqliteNIF.set_log_hook(self())
+# => receive {:xqlite_log, 284, "automatic index on ..."}
 ```
 
 ## Known limitations
@@ -100,11 +105,11 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 
 Planned for **xqlite** core (before Ecto adapter work):
 
-1. Extension loading (`load_extension/2`)
-2. Serialize / deserialize database to binary
-3. Change notification hooks (`set_update_hook/2`)
-4. Online Backup API
-5. Incremental Blob I/O
+1. Change notification hook (`set_update_hook/2`)
+2. Custom type extensions (Elixir↔SQLite type coercion)
+3. Extension loading (`load_extension/2`)
+4. Serialize / deserialize database to binary
+5. Online Backup API
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
