@@ -307,8 +307,8 @@ defmodule Xqlite.Pragma do
   end
 
   # Handler for PRAGMAs that take NO arguments. Dispatches based on return type.
-  defp do_get_no_arg(db, key, _opts) when key in @pragmas_with_special_int_mapping do
-    with {:ok, value} <- XqliteNIF.get_pragma(db, to_string(key)) do
+  defp do_get_no_arg(db, key, opts) when key in @pragmas_with_special_int_mapping do
+    with {:ok, value} <- do_pragma_read(db, key, opts) do
       case map_special_int_to_atom(key, value) do
         {:error, _} = err -> err
         mapped -> {:ok, mapped}
@@ -316,24 +316,24 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  defp do_get_no_arg(db, key, _opts) when key in @returning_boolean do
-    with {:ok, value} <- XqliteNIF.get_pragma(db, to_string(key)) do
+  defp do_get_no_arg(db, key, opts) when key in @returning_boolean do
+    with {:ok, value} <- do_pragma_read(db, key, opts) do
       {:ok, int2bool(value)}
     end
   end
 
-  defp do_get_no_arg(db, key, _opts) when key in @returning_int or key in @returning_text do
-    XqliteNIF.get_pragma(db, to_string(key))
+  defp do_get_no_arg(db, key, opts) when key in @returning_int or key in @returning_text do
+    do_pragma_read(db, key, opts)
   end
 
-  defp do_get_no_arg(db, key, _opts) when key in @returning_list do
-    with {:ok, rows} <- do_query(db, key) do
+  defp do_get_no_arg(db, key, opts) when key in @returning_list do
+    with {:ok, rows} <- do_query(db, key, nil, opts) do
       {:ok, process_list_result(key, rows)}
     end
   end
 
-  defp do_get_no_arg(db, key, _opts) when key in @returning_nothing do
-    case XqliteNIF.get_pragma(db, to_string(key)) do
+  defp do_get_no_arg(db, key, opts) when key in @returning_nothing do
+    case do_pragma_read(db, key, opts) do
       {:ok, :no_value} -> :ok
       other -> other
     end
@@ -344,22 +344,51 @@ defmodule Xqlite.Pragma do
   end
 
   # Handler for PRAGMAs that take ONE argument.
-  defp do_get_with_arg(db, key, arg, _opts) do
-    with {:ok, rows} <- do_query(db, key, arg) do
-      # All known PRAGMAs with an argument return a list.
+  defp do_get_with_arg(db, key, arg, opts) do
+    with {:ok, rows} <- do_query(db, key, arg, opts) do
       {:ok, process_list_result(key, rows)}
     end
   end
 
-  defp do_query(db, key, arg \\ nil)
+  # Reads a single-value pragma. Uses get_pragma NIF when no db_name,
+  # falls back to query when schema-prefixed.
+  defp do_pragma_read(db, key, opts) do
+    case Keyword.get(opts, :db_name) do
+      nil ->
+        XqliteNIF.get_pragma(db, to_string(key))
 
-  defp do_query(db, key, nil) do
-    db |> XqliteNIF.query("PRAGMA #{key};") |> query_to_pragma_result()
+      db_name ->
+        sql = "PRAGMA #{quote_name(db_name)}.#{key};"
+
+        case XqliteNIF.query(db, sql, []) do
+          {:ok, %{rows: [[value]]}} -> {:ok, value}
+          {:ok, %{rows: []}} -> {:ok, :no_value}
+          {:error, _} = err -> err
+        end
+    end
   end
 
-  defp do_query(db, key, arg) do
-    quoted_arg = "\"#{String.replace(to_string(arg), "\"", "\"\"")}\""
-    db |> XqliteNIF.query("PRAGMA #{key}(#{quoted_arg});") |> query_to_pragma_result()
+  defp do_query(db, key, arg, opts) do
+    prefix = pragma_prefix(opts)
+
+    sql =
+      case arg do
+        nil -> "PRAGMA #{prefix}#{key};"
+        _ -> "PRAGMA #{prefix}#{key}(#{quote_name(to_string(arg))});"
+      end
+
+    db |> XqliteNIF.query(sql, []) |> query_to_pragma_result()
+  end
+
+  defp pragma_prefix(opts) do
+    case Keyword.get(opts, :db_name) do
+      nil -> ""
+      db_name -> "#{quote_name(db_name)}."
+    end
+  end
+
+  defp quote_name(name) do
+    "\"#{String.replace(to_string(name), "\"", "\"\"")}\""
   end
 
   defp process_list_result(key, rows) do
@@ -428,25 +457,47 @@ defmodule Xqlite.Pragma do
 
   @doc ~S"""
   Changes a PRAGMA's value.
+
+  ## Options
+
+    * `:db_name` (string) - Target a specific attached database schema.
+      `"main"` and `"temp"` are built-in; other values refer to ATTACH-ed databases.
   """
-  @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: :ok | Xqlite.error()
-  def put(db, key, val) when is_atom(key) do
-    do_put(db, key, val)
+  @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) :: :ok | Xqlite.error()
+  def put(db, key, val, opts \\ [])
+
+  def put(db, key, val, opts) when is_atom(key) do
+    do_put(db, key, val, opts)
   end
 
-  def put(db, key, val) when is_binary(key) do
-    do_put(db, String.to_existing_atom(key), val)
+  def put(db, key, val, opts) when is_binary(key) do
+    do_put(db, String.to_existing_atom(key), val, opts)
   rescue
     ArgumentError -> {:error, {:invalid_pragma_name, key}}
   end
 
-  defp do_put(db, key_atom, val) do
+  defp do_put(db, key_atom, val, opts) do
     if valid_pragma_value?(key_atom, val) do
-      XqliteNIF.set_pragma(db, to_string(key_atom), val)
+      case Keyword.get(opts, :db_name) do
+        nil ->
+          XqliteNIF.set_pragma(db, to_string(key_atom), val)
+
+        db_name ->
+          sql = "PRAGMA #{quote_name(db_name)}.#{key_atom} = #{format_pragma_value(val)};"
+          XqliteNIF.execute_batch(db, sql)
+      end
     else
       {:error, {:invalid_pragma_value, %{pragma: key_atom, value: val}}}
     end
   end
+
+  defp format_pragma_value(val) when is_binary(val), do: "'#{val}'"
+  defp format_pragma_value(val) when is_integer(val), do: Integer.to_string(val)
+  defp format_pragma_value(true), do: "1"
+  defp format_pragma_value(false), do: "0"
+  defp format_pragma_value(:on), do: "ON"
+  defp format_pragma_value(:off), do: "OFF"
+  defp format_pragma_value(val) when is_atom(val), do: Atom.to_string(val)
 
   # Pre-flight check for an invalid PRAGMA value. This is done because SQLite silently
   # ignores invalid values. We'd like to have some more loud failures.

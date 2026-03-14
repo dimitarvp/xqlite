@@ -181,6 +181,46 @@ defmodule XqlitePragmaTest do
     end
   end
 
+  describe "schema-prefixed pragmas via :db_name option" do
+    setup do
+      {:ok, db} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(db) end)
+      {:ok, db: db}
+    end
+
+    test "get with db_name: main reads from main schema", %{db: db} do
+      assert {:ok, cache_size} = P.get(db, :cache_size, [], db_name: "main")
+      assert is_integer(cache_size)
+    end
+
+    test "put with db_name: main writes to main schema", %{db: db} do
+      assert :ok = P.put(db, :cache_size, 5000, db_name: "main")
+      assert {:ok, 5000} = P.get(db, :cache_size, [], db_name: "main")
+    end
+
+    test "get/put on an attached database", %{db: db} do
+      NIF.execute_batch(db, "ATTACH ':memory:' AS aux;")
+
+      assert :ok = P.put(db, :cache_size, 3000, db_name: "aux")
+      assert {:ok, 3000} = P.get(db, :cache_size, [], db_name: "aux")
+
+      # main schema should be unaffected
+      {:ok, main_cache} = P.get(db, :cache_size)
+      refute main_cache == 3000
+    end
+
+    test "get list-returning pragma with db_name", %{db: db} do
+      NIF.execute_batch(
+        db,
+        "CREATE TABLE main.dbname_test (id INTEGER PRIMARY KEY, name TEXT);"
+      )
+
+      assert {:ok, rows} = P.get(db, :table_info, "dbname_test", db_name: "main")
+      assert is_list(rows)
+      assert length(rows) > 0
+    end
+  end
+
   describe "unknown pragma" do
     setup do
       {:ok, db} = NIF.open_in_memory()
