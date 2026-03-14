@@ -65,6 +65,9 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
 
+      - name: Elixir compilation (warnings as errors)
+        run: mix compile --warnings-as-errors
+
       - name: Rust clippy
         run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
