@@ -396,26 +396,31 @@ defmodule Xqlite.Pragma do
   defp map_special_int_to_atom(:synchronous, value), do: get_synchronous(value)
   defp map_special_int_to_atom(:temp_store, value), do: get_temp_store(value)
 
+  @doc "Returns the list of indexes for the given table."
   @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_list(db, name, opts \\ []) do
     get(db, :index_list, name, opts)
   end
 
+  @doc "Returns column information for the given index."
   @spec index_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_info(db, name, opts \\ []) do
     get(db, :index_info, name, opts)
   end
 
+  @doc "Returns extended column information for the given index, including key vs auxiliary columns."
   @spec index_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_xinfo(db, name, opts \\ []) do
     get(db, :index_xinfo, name, opts)
   end
 
+  @doc "Returns column information for the given table."
   @spec table_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_info(db, name, opts \\ []) do
     get(db, :table_info, name, opts)
   end
 
+  @doc "Returns extended column information for the given table, including hidden and generated columns."
   @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_xinfo(db, name, opts \\ []) do
     get(db, :table_xinfo, name, opts)
@@ -473,6 +478,7 @@ defmodule Xqlite.Pragma do
     end
   end
 
+  @doc false
   @spec get_auto_vacuum(auto_vacuum_key()) ::
           auto_vacuum_value() | {:error, {:unexpected_value, term()}}
   def get_auto_vacuum(0), do: :none
@@ -480,6 +486,7 @@ defmodule Xqlite.Pragma do
   def get_auto_vacuum(2), do: :incremental
   def get_auto_vacuum(val), do: {:error, {:unexpected_value, val}}
 
+  @doc false
   @spec get_secure_delete(secure_delete_key()) ::
           secure_delete_value() | {:error, {:unexpected_value, term()}}
   def get_secure_delete(0), do: false
@@ -487,6 +494,7 @@ defmodule Xqlite.Pragma do
   def get_secure_delete(2), do: :fast
   def get_secure_delete(val), do: {:error, {:unexpected_value, val}}
 
+  @doc false
   @spec get_synchronous(synchronous_key()) ::
           synchronous_value() | {:error, {:unexpected_value, term()}}
   def get_synchronous(0), do: :off
@@ -495,6 +503,7 @@ defmodule Xqlite.Pragma do
   def get_synchronous(3), do: :extra
   def get_synchronous(val), do: {:error, {:unexpected_value, val}}
 
+  @doc false
   @spec get_temp_store(temp_store_key()) ::
           temp_store_value() | {:error, {:unexpected_value, term()}}
   def get_temp_store(0), do: :default
