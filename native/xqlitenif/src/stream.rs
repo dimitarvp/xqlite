@@ -50,13 +50,14 @@ impl XqliteStream {
                 // Try to lock the connection to get a specific SQLite error message.
                 // This lock is on a different Mutex (the one inside XqliteConn).
                 match self.conn_resource_arc.conn.lock() {
-                    Ok(conn_guard) => {
-                        // SAFETY: conn_guard holds the mutex, so the connection handle
-                        // is valid. sqlite3_errmsg returns a pointer to SQLite's internal
-                        // error buffer, valid until the next SQLite API call on this connection.
-                        // We copy it immediately via to_string_lossy().into_owned().
+                    Ok(conn_guard) if conn_guard.is_some() => {
+                        // SAFETY: conn_guard holds the mutex and contains Some(conn),
+                        // so the connection handle is valid. sqlite3_errmsg returns a
+                        // pointer to SQLite's internal error buffer, valid until the
+                        // next SQLite API call on this connection. We copy immediately.
                         let specific_sqlite_msg = unsafe {
-                            let err_msg_ptr = ffi::sqlite3_errmsg(conn_guard.handle());
+                            let err_msg_ptr =
+                                ffi::sqlite3_errmsg(conn_guard.as_ref().unwrap().handle());
                             if !err_msg_ptr.is_null() {
                                 std::ffi::CStr::from_ptr(err_msg_ptr)
                                     .to_string_lossy()
@@ -72,9 +73,15 @@ impl XqliteStream {
                             message = specific_sqlite_msg;
                         }
                     }
-                    _ => {
-                        // Failed to lock the connection; append to the generic message.
-                        message.push_str(" (additionally, failed to lock connection for specific error message)");
+                    Ok(_) => {
+                        // Connection was closed (None) — can't get specific error message.
+                        message.push_str(" (connection was closed before finalization)");
+                    }
+                    Err(_) => {
+                        // Failed to lock the connection mutex (poisoned).
+                        message.push_str(
+                            " (failed to lock connection for specific error message)",
+                        );
                     }
                 }
 

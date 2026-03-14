@@ -538,9 +538,13 @@ pub(crate) fn stream_fetch<'a>(
                 .encode(env);
         }
     };
-    // SAFETY: conn_lock_guard holds the mutex, so the connection is valid.
-    // The handle is used only for sqlite3_errmsg within process_single_step.
-    let db_handle_for_errors = unsafe { conn_lock_guard.handle() };
+    let conn_ref = match conn_lock_guard.as_ref() {
+        Some(conn) => conn,
+        None => return (error(), XqliteError::ConnectionClosed).encode(env),
+    };
+    // SAFETY: conn_ref is valid (checked above). The handle is used only
+    // for sqlite3_errmsg within process_single_step.
+    let db_handle_for_errors = unsafe { conn_ref.handle() };
 
     for _ in 0..batch_size {
         current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);

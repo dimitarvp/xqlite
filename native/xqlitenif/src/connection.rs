@@ -1,15 +1,12 @@
+use crate::atoms;
 use crate::error::XqliteError;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use crate::atoms;
 
 #[derive(Debug)]
 pub(crate) struct XqliteConn {
-    pub(crate) conn: Mutex<Connection>,
-    pub(crate) closed: AtomicBool,
+    pub(crate) conn: Mutex<Option<Connection>>,
 }
 
 #[resource_impl]
@@ -54,8 +51,7 @@ pub(crate) fn handle_open_result(
 ) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     match open_result {
         Ok(conn) => Ok(ResourceArc::new(XqliteConn {
-            conn: Mutex::new(conn),
-            closed: AtomicBool::new(false),
+            conn: Mutex::new(Some(conn)),
         })),
         Err(e) => Err(match e {
             RusqliteError::SqliteFailure(ffi_err, msg_opt) => {
@@ -75,7 +71,13 @@ pub(crate) fn handle_open_result(
 }
 
 pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), XqliteError> {
-    handle.closed.store(true, Ordering::Release);
+    let mut conn_guard = handle
+        .conn
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    // .take() drops the Connection, releasing the SQLite handle immediately.
+    // Second close is a no-op — .take() on None returns None.
+    conn_guard.take();
     Ok(())
 }
 
@@ -91,8 +93,8 @@ where
         .conn
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    if handle.closed.load(Ordering::Acquire) {
-        return Err(XqliteError::ConnectionClosed);
+    match conn_guard.as_ref() {
+        Some(conn) => func(conn),
+        None => Err(XqliteError::ConnectionClosed),
     }
-    func(&conn_guard)
 }

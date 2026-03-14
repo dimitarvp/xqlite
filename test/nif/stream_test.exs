@@ -350,11 +350,8 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM sc_t", [], [])
     :ok = NIF.close(conn)
 
-    # close/1 is conceptual — the stream's AtomicPtr holds the raw sqlite3_stmt,
-    # so fetching still works even after the connection is "closed".
-    assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream, 10)
-    assert :done = NIF.stream_fetch(stream, 1)
-    :ok = NIF.stream_close(stream)
+    # close/1 drops the connection — stream_fetch returns connection_closed.
+    assert {:error, :connection_closed} = NIF.stream_fetch(stream, 10)
   end
 
   # --- Edge case: multiple streams from same connection ---
