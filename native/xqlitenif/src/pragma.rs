@@ -3,7 +3,7 @@ use crate::error::XqliteError;
 use crate::util::{encode_val, format_term_for_pragma};
 use rusqlite::types::Value;
 use rusqlite::{Connection, Error as RusqliteError};
-use rustler::{Env, Term};
+use rustler::{Encoder, Env, Term};
 
 pub(crate) fn validate_name(name: &str) -> Result<(), XqliteError> {
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
@@ -34,7 +34,7 @@ pub(crate) fn set<'a>(
     conn: &Connection,
     pragma_name: &str,
     value_term: Term<'a>,
-) -> Result<(), XqliteError> {
+) -> Result<Term<'a>, XqliteError> {
     validate_name(pragma_name)?;
     let value_literal = format_term_for_pragma(env, value_term)?;
     let write_sql = format!("PRAGMA {pragma_name} = {value_literal};");
@@ -45,8 +45,11 @@ pub(crate) fn set<'a>(
                 reason: e.to_string(),
             })?;
     let mut rows = write_stmt.query([])?;
-    if let Some(row_result) = rows.next()? {
-        let _value_from_pragma_set: Value = row_result.get(0)?;
+    match rows.next()? {
+        Some(row) => {
+            let value: Value = row.get(0)?;
+            Ok(encode_val(env, value))
+        }
+        None => Ok(rustler::types::atom::nil().encode(env)),
     }
-    Ok(())
 }

@@ -121,8 +121,8 @@ defmodule XqliteTest do
     end
 
     test "allows type coercion after disabling strict mode", %{conn: conn} do
-      assert :ok = Xqlite.enable_strict_mode(conn)
-      assert :ok = Xqlite.disable_strict_mode(conn)
+      assert {:ok, _} = Xqlite.enable_strict_mode(conn)
+      assert {:ok, _} = Xqlite.disable_strict_mode(conn)
 
       :ok =
         NIF.execute_batch(conn, "CREATE TABLE ds_test (id INTEGER PRIMARY KEY, val INTEGER);")
@@ -145,8 +145,8 @@ defmodule XqliteTest do
     end
 
     test "allows FK violations after disabling enforcement", %{conn: conn} do
-      assert :ok = Xqlite.enable_foreign_key_enforcement(conn)
-      assert :ok = Xqlite.disable_foreign_key_enforcement(conn)
+      assert {:ok, _} = Xqlite.enable_foreign_key_enforcement(conn)
+      assert {:ok, _} = Xqlite.disable_foreign_key_enforcement(conn)
 
       :ok =
         NIF.execute_batch(

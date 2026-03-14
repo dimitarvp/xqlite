@@ -38,42 +38,42 @@ defmodule Xqlite.NIF.PragmaTest do
 
       # --- set_pragma/3 Tests ---
       test "set_pragma/3 sets and get_pragma/2 reads integer value", %{conn: conn} do
-        assert :ok = NIF.set_pragma(conn, "cache_size", 5000)
+        assert {:ok, _} = NIF.set_pragma(conn, "cache_size", 5000)
         assert {:ok, 5000} = NIF.get_pragma(conn, "cache_size")
       end
 
       test "set_pragma/3 sets and get_pragma/2 reads boolean ON/true", %{conn: conn} do
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", :on)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", :on)
         assert {:ok, 1} = NIF.get_pragma(conn, "foreign_keys")
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", true)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", true)
         assert {:ok, 1} = NIF.get_pragma(conn, "foreign_keys")
       end
 
       test "set_pragma/3 sets and get_pragma/2 reads boolean OFF/false", %{conn: conn} do
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", :on)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", :on)
         assert {:ok, 1} = NIF.get_pragma(conn, "foreign_keys")
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", :off)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", :off)
         assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", :on)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", :on)
         assert {:ok, 1} = NIF.get_pragma(conn, "foreign_keys")
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", false)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", false)
         assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
       end
 
       # NOTE: Test for journal_mode moved outside the loop as behavior differs
 
       test "set_pragma/3 succeeds silently for invalid pragma name", %{conn: conn} do
-        assert :ok = NIF.set_pragma(conn, "invalid_pragma", 123)
+        assert {:ok, _} = NIF.set_pragma(conn, "invalid_pragma", 123)
         assert {:ok, :no_value} = NIF.get_pragma(conn, "invalid_pragma")
       end
 
       test "set_pragma/3 succeeds silently for invalid value", %{conn: conn} do
         # First, explicitly set the pragma to a known state (OFF/0)
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", :off)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", :off)
         assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
 
         # Now, attempt to set an invalid value. This should be a no-op.
-        assert :ok = NIF.set_pragma(conn, "foreign_keys", "invalid_string")
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", "invalid_string")
 
         # Verify the value has not changed from our known state.
         assert {:ok, 0} = NIF.get_pragma(conn, "foreign_keys")
@@ -103,11 +103,11 @@ defmodule Xqlite.NIF.PragmaTest do
 
     test "set_pragma/3 ignores journal_mode WAL/DELETE for :memory:", %{conn: conn} do
       assert {:ok, "memory"} = NIF.get_pragma(conn, "journal_mode")
-      # Attempt to set WAL succeeds, but readback shows it remains memory
-      assert :ok = NIF.set_pragma(conn, "journal_mode", :wal)
+      # Attempt to set WAL — journal_mode echoes actual mode (stays "memory")
+      assert {:ok, "memory"} = NIF.set_pragma(conn, "journal_mode", :wal)
       assert {:ok, "memory"} = NIF.get_pragma(conn, "journal_mode")
-      # Attempt to set DELETE succeeds, but readback shows it remains memory
-      assert :ok = NIF.set_pragma(conn, "journal_mode", "DELETE")
+      # Attempt to set DELETE — same, stays "memory"
+      assert {:ok, "memory"} = NIF.set_pragma(conn, "journal_mode", "DELETE")
       assert {:ok, "memory"} = NIF.get_pragma(conn, "journal_mode")
     end
   end
@@ -135,7 +135,7 @@ defmodule Xqlite.NIF.PragmaTest do
     end
 
     test "set_pragma accepts valid pragma names", %{conn: conn} do
-      assert :ok = NIF.set_pragma(conn, "cache_size", -1000)
+      assert {:ok, _} = NIF.set_pragma(conn, "cache_size", -1000)
     end
   end
 
@@ -153,16 +153,13 @@ defmodule Xqlite.NIF.PragmaTest do
       assert {:ok, initial_mode} = NIF.get_pragma(conn, "journal_mode")
       assert initial_mode in ["delete", "off", "memory"]
 
-      # Attempt to set WAL
-      assert :ok = NIF.set_pragma(conn, "journal_mode", :wal)
-      # Check actual resulting mode - might be WAL or a fallback like DELETE
-      assert {:ok, mode_after_wal} = NIF.get_pragma(conn, "journal_mode")
-      # Assert it's one of the expected outcomes (WAL ideally, DELETE is common fallback)
+      # Attempt to set WAL — journal_mode echoes the actual resulting mode
+      assert {:ok, mode_after_wal} = NIF.set_pragma(conn, "journal_mode", :wal)
       assert mode_after_wal in ["wal", "delete"]
+      assert {:ok, ^mode_after_wal} = NIF.get_pragma(conn, "journal_mode")
 
-      # Set DELETE explicitly
-      assert :ok = NIF.set_pragma(conn, "journal_mode", "DELETE")
-      # Expect DELETE should always work for a file DB
+      # Set DELETE explicitly — echoes "delete"
+      assert {:ok, "delete"} = NIF.set_pragma(conn, "journal_mode", "DELETE")
       assert {:ok, "delete"} = NIF.get_pragma(conn, "journal_mode")
     end
   end

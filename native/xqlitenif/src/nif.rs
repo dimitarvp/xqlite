@@ -166,11 +166,10 @@ fn set_pragma<'a>(
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
     value_term: Term<'a>,
-) -> Term<'a> {
-    let execution_result: Result<(), XqliteError> = connection::with_conn(&handle, |conn| {
+) -> Result<Term<'a>, XqliteError> {
+    connection::with_conn(&handle, |conn| {
         pragma::set(env, conn, &pragma_name, value_term)
-    });
-    singular_ok_or_error_tuple(env, execution_result)
+    })
 }
 
 // ---------------------------------------------------------------------------

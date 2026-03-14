@@ -11,11 +11,11 @@ defmodule Xqlite.TestUtil do
   @tag_to_mfa_map Map.new(@connection_openers, fn {tag, _prefix, mfa} -> {tag, mfa} end)
 
   defp open_and_configure({mod, fun, args}) do
-    with {:ok, conn} <- apply(mod, fun, args) do
-      :ok = NIF.set_pragma(conn, "journal_mode", "WAL")
-      :ok = NIF.set_pragma(conn, "journal_size_limit", 0)
-      :ok = NIF.set_pragma(conn, "cache_size", -1000)
-      :ok = NIF.set_pragma(conn, "foreign_keys", true)
+    with {:ok, conn} <- apply(mod, fun, args),
+         {:ok, _} <- NIF.set_pragma(conn, "journal_mode", "WAL"),
+         {:ok, _} <- NIF.set_pragma(conn, "journal_size_limit", 0),
+         {:ok, _} <- NIF.set_pragma(conn, "cache_size", -1000),
+         {:ok, _} <- NIF.set_pragma(conn, "foreign_keys", true) do
       {:ok, conn}
     end
   end

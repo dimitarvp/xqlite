@@ -107,7 +107,7 @@ defmodule Xqlite do
 
   See: [STRICT Tables](https://www.sqlite.org/stricttables.html)
   """
-  @spec enable_strict_mode(conn()) :: :ok | error()
+  @spec enable_strict_mode(conn()) :: {:ok, term()} | error()
   def enable_strict_mode(conn) do
     XqliteNIF.set_pragma(conn, "strict", :on)
   end
@@ -117,7 +117,7 @@ defmodule Xqlite do
 
   See `enable_strict_mode/1` for details.
   """
-  @spec disable_strict_mode(conn()) :: :ok | error()
+  @spec disable_strict_mode(conn()) :: {:ok, term()} | error()
   def disable_strict_mode(conn) do
     XqliteNIF.set_pragma(conn, "strict", :off)
   end
@@ -130,7 +130,7 @@ defmodule Xqlite do
 
   See: [SQLite PRAGMA foreign_keys](https://www.sqlite.org/pragma.html#pragma_foreign_keys)
   """
-  @spec enable_foreign_key_enforcement(conn()) :: :ok | error()
+  @spec enable_foreign_key_enforcement(conn()) :: {:ok, term()} | error()
   def enable_foreign_key_enforcement(conn) do
     XqliteNIF.set_pragma(conn, "foreign_keys", :on)
   end
@@ -140,7 +140,7 @@ defmodule Xqlite do
 
   See `enable_foreign_key_enforcement/1` for details.
   """
-  @spec disable_foreign_key_enforcement(conn()) :: :ok | error()
+  @spec disable_foreign_key_enforcement(conn()) :: {:ok, term()} | error()
   def disable_foreign_key_enforcement(conn) do
     XqliteNIF.set_pragma(conn, "foreign_keys", :off)
   end

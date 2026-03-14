@@ -12,7 +12,7 @@ defmodule Xqlite.NIF.StrictModeTest do
       setup context do
         {mod, fun, args} = find_opener_mfa!(context)
         assert {:ok, conn} = apply(mod, fun, args)
-        assert :ok = Xqlite.enable_strict_mode(conn)
+        assert {:ok, _} = Xqlite.enable_strict_mode(conn)
         on_exit(fn -> NIF.close(conn) end)
         {:ok, conn: conn}
       end

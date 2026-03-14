@@ -463,7 +463,8 @@ defmodule Xqlite.Pragma do
     * `:db_name` (string) - Target a specific attached database schema.
       `"main"` and `"temp"` are built-in; other values refer to ATTACH-ed databases.
   """
-  @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) :: :ok | Xqlite.error()
+  @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) ::
+          {:ok, term()} | Xqlite.error()
   def put(db, key, val, opts \\ [])
 
   def put(db, key, val, opts) when is_atom(key) do
@@ -484,7 +485,11 @@ defmodule Xqlite.Pragma do
 
         db_name ->
           sql = "PRAGMA #{quote_name(db_name)}.#{key_atom} = #{format_pragma_value(val)};"
-          XqliteNIF.execute_batch(db, sql)
+
+          case XqliteNIF.execute_batch(db, sql) do
+            :ok -> {:ok, nil}
+            error -> error
+          end
       end
     else
       {:error, {:invalid_pragma_value, %{pragma: key_atom, value: val}}}

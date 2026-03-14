@@ -112,7 +112,7 @@ defmodule XqlitePragmaTest do
       # Test for a readable PRAGMA that takes one argument.
       test "read pragma: foreign_key_check with table name", %{db: db} do
         # Setup: Create tables but keep foreign keys OFF initially.
-        assert :ok = P.put(db, :foreign_keys, false)
+        assert {:ok, _} = P.put(db, :foreign_keys, false)
 
         assert :ok =
                  NIF.execute_batch(db, """
@@ -159,7 +159,7 @@ defmodule XqlitePragmaTest do
             db = if unquote(name) == :page_size, do: clean_db(), else: db
 
             # The core of the test: put, then get and verify
-            assert :ok = P.put(db, unquote(name), set_val)
+            assert {:ok, _} = P.put(db, unquote(name), set_val)
 
             case P.get(db, unquote(name)) do
               {:ok, fetched_val} ->
@@ -194,14 +194,14 @@ defmodule XqlitePragmaTest do
     end
 
     test "put with db_name: main writes to main schema", %{db: db} do
-      assert :ok = P.put(db, :cache_size, 5000, db_name: "main")
+      assert {:ok, _} = P.put(db, :cache_size, 5000, db_name: "main")
       assert {:ok, 5000} = P.get(db, :cache_size, [], db_name: "main")
     end
 
     test "get/put on an attached database", %{db: db} do
       NIF.execute_batch(db, "ATTACH ':memory:' AS aux;")
 
-      assert :ok = P.put(db, :cache_size, 3000, db_name: "aux")
+      assert {:ok, _} = P.put(db, :cache_size, 3000, db_name: "aux")
       assert {:ok, 3000} = P.get(db, :cache_size, [], db_name: "aux")
 
       # main schema should be unaffected
