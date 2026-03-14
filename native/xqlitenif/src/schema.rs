@@ -192,3 +192,508 @@ pub(crate) fn notnull_to_nullable(notnull_flag: i64) -> Result<bool, String> {
 pub(crate) fn pk_value_to_index(pk_flag: i64) -> Result<u8, String> {
     u8::try_from(pk_flag).map_err(|_| pk_flag.to_string())
 }
+
+// ---------------------------------------------------------------------------
+// Temporary structs for intermediate parsing results
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct TempObjectInfo {
+    schema: String,
+    name: String,
+    obj_type_atom: Result<Atom, String>,
+    column_count: i64,
+    wr_flag: i64,
+    strict_flag: i64,
+}
+
+#[derive(Debug)]
+struct TempColumnData {
+    cid: i64,
+    name: String,
+    type_str: String,
+    notnull_flag: i64,
+    dflt_value: Option<String>,
+    pk_flag: i64,
+    hidden: i64,
+}
+
+#[derive(Debug)]
+struct TempForeignKeyData {
+    id: i64,
+    seq: i64,
+    table: String,
+    from: String,
+    to: String,
+    on_update_str: String,
+    on_delete_str: String,
+    match_str: String,
+}
+
+#[derive(Debug)]
+struct TempIndexData {
+    name: String,
+    unique: i64,
+    origin_str: String,
+    partial: i64,
+}
+
+#[derive(Debug)]
+struct TempIndexColumnData {
+    seqno: i64,
+    cid: i64,
+    name: Option<String>,
+    desc: i64,
+    coll: String,
+    key: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Schema logic functions (called from NIF wrappers)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn databases(conn: &Connection) -> Result<Vec<DatabaseInfo>, XqliteError> {
+    let mut stmt = conn.prepare("PRAGMA database_list;")?;
+    let db_infos: Vec<DatabaseInfo> = stmt
+        .query_map([], |row| {
+            Ok(DatabaseInfo {
+                name: row.get(1)?,
+                file: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(db_infos)
+}
+
+pub(crate) fn list_objects(
+    conn: &Connection,
+    schema: Option<&str>,
+) -> Result<Vec<SchemaObjectInfo>, XqliteError> {
+    let sql = "PRAGMA table_list;";
+    let mut stmt = conn.prepare(sql)?;
+
+    let temp_results: Vec<Result<TempObjectInfo, rusqlite::Error>> = stmt
+        .query_map([], |row| {
+            Ok(TempObjectInfo {
+                schema: row.get(0)?,
+                name: row.get(1)?,
+                obj_type_atom: object_type_to_atom(&row.get::<_, String>(2)?)
+                    .map_err(|s| s.to_string()),
+                column_count: row.get(3)?,
+                wr_flag: row.get(4)?,
+                strict_flag: row.get(5)?,
+            })
+        })?
+        .collect();
+
+    let mut final_objects: Vec<SchemaObjectInfo> = Vec::new();
+    for temp_result in temp_results {
+        match temp_result {
+            Ok(temp_info) => {
+                if let Some(filter_schema) = schema
+                    && temp_info.schema != *filter_schema
+                {
+                    continue;
+                }
+
+                let atom = temp_info.obj_type_atom.map_err(|unexpected_val| {
+                    XqliteError::SchemaParsingError {
+                        context: format!(
+                            "Parsing object type for '{}'.'{}'",
+                            temp_info.schema, temp_info.name
+                        ),
+                        error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                    }
+                })?;
+                let is_without_rowid = match temp_info.wr_flag {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'wr' flag for object '{}'.'{}'",
+                                temp_info.schema, temp_info.name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                temp_info.wr_flag.to_string(),
+                            ),
+                        });
+                    }
+                };
+
+                let is_strict = match temp_info.strict_flag {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'strict' flag for object '{}'.'{}'",
+                                temp_info.schema, temp_info.name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                temp_info.strict_flag.to_string(),
+                            ),
+                        });
+                    }
+                };
+
+                final_objects.push(SchemaObjectInfo {
+                    schema: temp_info.schema,
+                    name: temp_info.name,
+                    object_type: atom,
+                    column_count: temp_info.column_count,
+                    is_without_rowid,
+                    strict: is_strict,
+                });
+            }
+            Err(rusqlite_err) => {
+                return Err(rusqlite_err.into());
+            }
+        }
+    }
+    Ok(final_objects)
+}
+
+pub(crate) fn columns(
+    conn: &Connection,
+    table_name: &str,
+) -> Result<Vec<ColumnInfo>, XqliteError> {
+    let quoted_table_name = quote_identifier(table_name);
+    let sql = format!("PRAGMA table_xinfo({quoted_table_name});");
+    let mut stmt = conn.prepare(&sql)?;
+
+    let temp_results: Vec<Result<TempColumnData, rusqlite::Error>> = stmt
+        .query_map([], |row| {
+            Ok(TempColumnData {
+                cid: row.get(0)?,
+                name: row.get(1)?,
+                type_str: row.get(2)?,
+                notnull_flag: row.get(3)?,
+                dflt_value: row.get(4)?,
+                pk_flag: row.get(5)?,
+                hidden: row.get(6)?,
+            })
+        })?
+        .collect();
+
+    let mut final_columns: Vec<ColumnInfo> = Vec::with_capacity(temp_results.len());
+    for temp_result in temp_results {
+        match temp_result {
+            Ok(temp_data) => {
+                let type_affinity_atom =
+                    type_affinity_to_atom(&temp_data.type_str).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing type affinity for column '{}' in table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                unexpected_val.to_string(),
+                            ),
+                        }
+                    })?;
+
+                let nullable =
+                    notnull_to_nullable(temp_data.notnull_flag).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'notnull' flag for column '{}' in table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                        }
+                    })?;
+
+                let primary_key_index =
+                    pk_value_to_index(temp_data.pk_flag).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'pk' flag for column '{}' in table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                        }
+                    })?;
+
+                let hidden_kind_atom =
+                    hidden_int_to_atom(temp_data.hidden).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'hidden' kind for column '{}' in table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                        }
+                    })?;
+
+                final_columns.push(ColumnInfo {
+                    column_id: temp_data.cid,
+                    name: temp_data.name,
+                    type_affinity: type_affinity_atom,
+                    declared_type: temp_data.type_str,
+                    nullable,
+                    default_value: temp_data.dflt_value,
+                    primary_key_index,
+                    hidden_kind: hidden_kind_atom,
+                });
+            }
+            Err(rusqlite_err) => {
+                return Err(rusqlite_err.into());
+            }
+        }
+    }
+    Ok(final_columns)
+}
+
+pub(crate) fn foreign_keys(
+    conn: &Connection,
+    table_name: &str,
+) -> Result<Vec<ForeignKeyInfo>, XqliteError> {
+    let quoted_table_name = quote_identifier(table_name);
+    let sql = format!("PRAGMA foreign_key_list({quoted_table_name});");
+    let mut stmt = conn.prepare(&sql)?;
+
+    let temp_results: Vec<Result<TempForeignKeyData, rusqlite::Error>> = stmt
+        .query_map([], |row| {
+            Ok(TempForeignKeyData {
+                id: row.get(0)?,
+                seq: row.get(1)?,
+                table: row.get(2)?,
+                from: row.get(3)?,
+                to: row.get(4)?,
+                on_update_str: row.get(5)?,
+                on_delete_str: row.get(6)?,
+                match_str: row.get(7)?,
+            })
+        })?
+        .collect();
+
+    let mut final_fks: Vec<ForeignKeyInfo> = Vec::with_capacity(temp_results.len());
+    for temp_result in temp_results {
+        match temp_result {
+            Ok(temp_data) => {
+                let on_update_atom =
+                    fk_action_to_atom(&temp_data.on_update_str).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'on_update' action for FK id {} on table '{}'",
+                                temp_data.id, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                unexpected_val.to_string(),
+                            ),
+                        }
+                    })?;
+
+                let on_delete_atom =
+                    fk_action_to_atom(&temp_data.on_delete_str).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'on_delete' action for FK id {} on table '{}'",
+                                temp_data.id, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                unexpected_val.to_string(),
+                            ),
+                        }
+                    })?;
+
+                let match_clause_atom =
+                    fk_match_to_atom(&temp_data.match_str).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'match' clause for FK id {} on table '{}'",
+                                temp_data.id, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                unexpected_val.to_string(),
+                            ),
+                        }
+                    })?;
+
+                final_fks.push(ForeignKeyInfo {
+                    id: temp_data.id,
+                    column_sequence: temp_data.seq,
+                    target_table: temp_data.table,
+                    from_column: temp_data.from,
+                    to_column: temp_data.to,
+                    on_update: on_update_atom,
+                    on_delete: on_delete_atom,
+                    match_clause: match_clause_atom,
+                });
+            }
+            Err(rusqlite_err) => {
+                return Err(rusqlite_err.into());
+            }
+        }
+    }
+    Ok(final_fks)
+}
+
+pub(crate) fn indexes(
+    conn: &Connection,
+    table_name: &str,
+) -> Result<Vec<IndexInfo>, XqliteError> {
+    let quoted_table_name = quote_identifier(table_name);
+    let sql = format!("PRAGMA index_list({quoted_table_name});");
+    let mut stmt = conn.prepare(&sql)?;
+
+    let temp_results: Vec<Result<TempIndexData, rusqlite::Error>> = stmt
+        .query_map([], |row| {
+            Ok(TempIndexData {
+                name: row.get(1)?,
+                unique: row.get(2)?,
+                origin_str: row.get(3)?,
+                partial: row.get(4)?,
+            })
+        })?
+        .collect();
+
+    let mut final_indexes: Vec<IndexInfo> = Vec::with_capacity(temp_results.len());
+    for temp_result in temp_results {
+        match temp_result {
+            Ok(temp_data) => {
+                let origin_atom =
+                    index_origin_to_atom(&temp_data.origin_str).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'origin' for index '{}' on table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                unexpected_val.to_string(),
+                            ),
+                        }
+                    })?;
+
+                let unique_bool = match temp_data.unique {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'unique' flag for index '{}' on table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                temp_data.unique.to_string(),
+                            ),
+                        });
+                    }
+                };
+                let partial_bool = match temp_data.partial {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'partial' flag for index '{}' on table '{}'",
+                                temp_data.name, table_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                temp_data.partial.to_string(),
+                            ),
+                        });
+                    }
+                };
+
+                final_indexes.push(IndexInfo {
+                    name: temp_data.name,
+                    unique: unique_bool,
+                    origin: origin_atom,
+                    partial: partial_bool,
+                });
+            }
+            Err(rusqlite_err) => {
+                return Err(rusqlite_err.into());
+            }
+        }
+    }
+
+    Ok(final_indexes)
+}
+
+pub(crate) fn index_columns(
+    conn: &Connection,
+    index_name: &str,
+) -> Result<Vec<IndexColumnInfo>, XqliteError> {
+    let quoted_index_name = quote_identifier(index_name);
+    let sql = format!("PRAGMA index_xinfo({quoted_index_name});");
+    let mut stmt = conn.prepare(&sql)?;
+
+    let temp_results: Vec<Result<TempIndexColumnData, rusqlite::Error>> = stmt
+        .query_map([], |row| {
+            Ok(TempIndexColumnData {
+                seqno: row.get(0)?,
+                cid: row.get(1)?,
+                name: row.get(2)?,
+                desc: row.get(3)?,
+                coll: row.get(4)?,
+                key: row.get(5)?,
+            })
+        })?
+        .collect();
+
+    let mut final_cols: Vec<IndexColumnInfo> = Vec::with_capacity(temp_results.len());
+    for temp_result in temp_results {
+        match temp_result {
+            Ok(temp_data) => {
+                let sort_order_atom =
+                    sort_order_to_atom(temp_data.desc).map_err(|unexpected_val| {
+                        XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing sort order ('desc') for column seq {} in index '{}'",
+                                temp_data.seqno, index_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
+                        }
+                    })?;
+
+                let is_key_bool = match temp_data.key {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(XqliteError::SchemaParsingError {
+                            context: format!(
+                                "Parsing 'key' flag for column seq {} in index '{}'",
+                                temp_data.seqno, index_name
+                            ),
+                            error_detail: SchemaErrorDetail::UnexpectedValue(
+                                temp_data.key.to_string(),
+                            ),
+                        });
+                    }
+                };
+
+                final_cols.push(IndexColumnInfo {
+                    index_column_sequence: temp_data.seqno,
+                    table_column_id: temp_data.cid,
+                    name: temp_data.name,
+                    sort_order: sort_order_atom,
+                    collation: temp_data.coll,
+                    is_key_column: is_key_bool,
+                });
+            }
+            Err(rusqlite_err) => {
+                return Err(rusqlite_err.into());
+            }
+        }
+    }
+
+    Ok(final_cols)
+}
+
+pub(crate) fn create_sql(
+    conn: &Connection,
+    object_name: &str,
+) -> Result<Option<String>, XqliteError> {
+    let sql = "SELECT sql FROM sqlite_schema WHERE name = ?1 LIMIT 1;";
+    let mut stmt = conn.prepare(sql)?;
+    let result = stmt.query_row([object_name], |row| row.get::<usize, Option<String>>(0));
+
+    match result {
+        Ok(sql_string_option) => Ok(sql_string_option),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}

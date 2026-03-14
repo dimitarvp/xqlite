@@ -1,8 +1,7 @@
 use crate::atoms;
 use crate::error::XqliteError;
-use crate::nif::XqliteConn;
 use rusqlite::ffi;
-use rusqlite::{Connection, Rows, types::Value};
+use rusqlite::{Rows, types::Value};
 use rustler::{
     Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, Resource, ResourceArc,
     Term, TermType, resource_impl,
@@ -397,18 +396,4 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
         }
         Ok(row_values)
     }
-}
-
-pub(crate) fn with_conn<F, R>(
-    handle: &ResourceArc<XqliteConn>,
-    func: F,
-) -> Result<R, XqliteError>
-where
-    F: FnOnce(&Connection) -> Result<R, XqliteError>,
-{
-    let conn_guard = handle
-        .0
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    func(&conn_guard)
 }

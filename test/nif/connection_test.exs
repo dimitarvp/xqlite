@@ -82,14 +82,46 @@ defmodule Xqlite.NIF.ConnectionTest do
   end
 
   describe "using a closed connection" do
-    test "query on a closed connection still succeeds (close is conceptual, Arc keeps handle)",
-         %{} do
+    test "query on a closed connection returns connection_closed error", %{} do
       {:ok, conn} = NIF.open_in_memory()
       :ok = NIF.close(conn)
-      # close/1 is a conceptual no-op — the Arc<Mutex<Connection>> keeps the
-      # handle alive as long as the ResourceArc reference exists on the BEAM side.
-      assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
-               NIF.query(conn, "SELECT 1;", [])
+      assert {:error, :connection_closed} = NIF.query(conn, "SELECT 1;", [])
+    end
+
+    test "execute on a closed connection returns connection_closed error", %{} do
+      {:ok, conn} = NIF.open_in_memory()
+      :ok = NIF.close(conn)
+      assert {:error, :connection_closed} = NIF.execute(conn, "SELECT 1;", [])
+    end
+
+    test "get_pragma on a closed connection returns connection_closed error", %{} do
+      {:ok, conn} = NIF.open_in_memory()
+      :ok = NIF.close(conn)
+      assert {:error, :connection_closed} = NIF.get_pragma(conn, "cache_size")
+    end
+  end
+
+  describe "concurrent access" do
+    test "multiple tasks inserting through the same connection handle" do
+      {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+
+      {:ok, 0} =
+        NIF.execute(conn, "CREATE TABLE conc (id INTEGER PRIMARY KEY, val INTEGER)", [])
+
+      n = 50
+
+      tasks =
+        Enum.map(1..n, fn i ->
+          Task.async(fn ->
+            NIF.execute(conn, "INSERT INTO conc (id, val) VALUES (?1, ?2)", [i, i * 10])
+          end)
+        end)
+
+      results = Task.await_many(tasks, 5_000)
+      assert Enum.all?(results, &match?({:ok, 1}, &1))
+
+      assert {:ok, %{num_rows: ^n}} = NIF.query(conn, "SELECT * FROM conc", [])
     end
   end
 

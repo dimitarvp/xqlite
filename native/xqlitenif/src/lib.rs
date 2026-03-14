@@ -110,10 +110,14 @@ pub(crate) mod atoms {
 }
 
 mod cancel;
+mod connection;
 mod error;
 mod nif;
+mod pragma;
+mod query;
 mod schema;
 mod stream;
+mod transaction;
 mod util;
 
 use rustler::{Env, Term};

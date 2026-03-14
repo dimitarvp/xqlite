@@ -1,5 +1,5 @@
+use crate::connection::XqliteConn;
 use crate::error::XqliteError;
-use crate::nif::XqliteConn;
 use crate::util::sqlite_row_to_elixir_terms;
 use rusqlite::ffi;
 use rusqlite::types::Value;
@@ -37,8 +37,9 @@ impl XqliteStream {
             .swap(std::ptr::null_mut(), Ordering::AcqRel);
 
         if !old_ptr.is_null() {
-            // If the old pointer was not null, it means we are responsible for finalizing it.
-            // This is an unsafe FFI call.
+            // SAFETY: old_ptr was obtained via atomic swap from a pointer that was
+            // either set by sqlite3_prepare_v2 (valid) or already null (filtered above).
+            // The swap guarantees exclusive ownership — no other thread can finalize it.
             let result_code = unsafe { ffi::sqlite3_finalize(old_ptr) };
             if result_code != ffi::SQLITE_OK {
                 // Attempt to get a more detailed error message from the connection.
@@ -48,9 +49,12 @@ impl XqliteStream {
 
                 // Try to lock the connection to get a specific SQLite error message.
                 // This lock is on a different Mutex (the one inside XqliteConn).
-                match self.conn_resource_arc.0.lock() {
+                match self.conn_resource_arc.conn.lock() {
                     Ok(conn_guard) => {
-                        // These FFI calls are unsafe.
+                        // SAFETY: conn_guard holds the mutex, so the connection handle
+                        // is valid. sqlite3_errmsg returns a pointer to SQLite's internal
+                        // error buffer, valid until the next SQLite API call on this connection.
+                        // We copy it immediately via to_string_lossy().into_owned().
                         let specific_sqlite_msg = unsafe {
                             let err_msg_ptr = ffi::sqlite3_errmsg(conn_guard.handle());
                             if !err_msg_ptr.is_null() {
@@ -98,18 +102,22 @@ impl Drop for XqliteStream {
     }
 }
 
-// Helper to process a single sqlite3_step.
-// Returns Ok(Some(row_data)) if a row is fetched.
-// Returns Ok(None) if SQLITE_DONE is reached.
-// Returns Err(XqliteError) if a step or conversion error occurs.
-// This function does NOT modify any shared XqliteStream state (like an is_done flag).
-// It is unsafe because it dereferences stmt_ptr and calls unsafe FFI functions.
+/// Steps a prepared statement once and returns the row data if available.
+///
+/// # Safety
+///
+/// - `stmt_ptr` must be non-null and point to a valid, prepared `sqlite3_stmt`.
+/// - `db_handle_for_error_reporting` must be the `sqlite3*` handle that owns `stmt_ptr`.
+/// - `column_count` must match the statement's actual column count.
+/// - The caller must hold the connection mutex for the duration of this call.
+#[inline]
 pub(crate) unsafe fn process_single_step<'a>(
     env: Env<'a>,
-    stmt_ptr: *mut ffi::sqlite3_stmt, // Assumed to be valid and non-null by caller
+    stmt_ptr: *mut ffi::sqlite3_stmt,
     column_count: usize,
-    db_handle_for_error_reporting: *mut ffi::sqlite3, // For sqlite3_errmsg
+    db_handle_for_error_reporting: *mut ffi::sqlite3,
 ) -> Result<Option<Vec<Term<'a>>>, XqliteError> {
+    // SAFETY: Caller guarantees stmt_ptr and db_handle are valid and exclusively held.
     unsafe {
         let step_result = ffi::sqlite3_step(stmt_ptr);
 
@@ -154,6 +162,9 @@ fn bind_value_to_raw_stmt(
     value: &Value,
     db_handle: *mut ffi::sqlite3,
 ) -> Result<(), XqliteError> {
+    // SAFETY: raw_stmt_ptr and db_handle are guaranteed valid by the caller
+    // (stream_open holds the connection mutex). SQLITE_TRANSIENT tells SQLite
+    // to copy the data immediately, so our local CString/slice can be dropped safely.
     let rc = unsafe {
         match value {
             Value::Null => ffi::sqlite3_bind_null(raw_stmt_ptr, bind_idx),
@@ -196,7 +207,8 @@ fn bind_value_to_raw_stmt(
 
     if rc != ffi::SQLITE_OK {
         let ffi_err = ffi::Error::new(rc);
-        // Get specific message using db_handle if possible
+        // SAFETY: db_handle is valid (caller holds mutex). sqlite3_errmsg returns
+        // a pointer to an internal buffer valid until the next API call; we copy immediately.
         let message = unsafe {
             let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
             if err_msg_ptr.is_null() {
@@ -234,7 +246,8 @@ pub(crate) fn bind_named_params_ffi(
         let c_name = std::ffi::CString::new(name.as_str())
             .map_err(|_| XqliteError::InvalidParameterName(name.clone()))?;
 
-        // This is an unsafe FFI call
+        // SAFETY: raw_stmt_ptr is valid (caller holds mutex). c_name is a valid
+        // null-terminated CString. Returns 0 if parameter name not found (not UB).
         let bind_idx =
             unsafe { ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr()) };
 
