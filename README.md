@@ -4,15 +4,11 @@
 [![Build Status](https://github.com/dimitarvp/xqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/dimitarvp/xqlite/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Low-level, safe, and fast NIF bindings to SQLite 3 for Elixir, powered by Rust and the excellent [rusqlite](https://crates.io/crates/rusqlite) crate.
+Low-level, safe, and fast NIF bindings to SQLite 3 for Elixir, powered by Rust and [rusqlite](https://crates.io/crates/rusqlite). Bundled SQLite — no native install required.
 
-This library provides direct access to core SQLite functionality. For seamless Ecto 3.x integration (including connection pooling, migrations, and Ecto types), please see the planned [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) library (work in progress).
-
-**Target Audience:** Developers needing direct, performant control over SQLite operations from Elixir, potentially as a foundation for higher-level libraries, or for those not interested in Ecto integration.
+For Ecto 3.x integration see the planned [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) library (work in progress).
 
 ## Installation
-
-Add `xqlite` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
@@ -22,130 +18,100 @@ def deps do
 end
 ```
 
-Precompiled NIF binaries are available for the following targets — no Rust toolchain required:
-
-- `aarch64-apple-darwin` (Apple Silicon macOS)
-- `x86_64-apple-darwin` (Intel macOS)
-- `aarch64-unknown-linux-gnu`
-- `aarch64-unknown-linux-musl`
-- `x86_64-unknown-linux-gnu`
-- `x86_64-unknown-linux-musl`
-- `x86_64-pc-windows-msvc`
-- `riscv64gc-unknown-linux-gnu`
-
-To force compilation from source (requires a Rust toolchain):
+Precompiled NIF binaries ship for 8 targets (macOS, Linux, Windows, including ARM and RISC-V) — no Rust toolchain needed. To force source compilation:
 
 ```bash
 XQLITE_BUILD=true mix deps.compile xqlite
 ```
 
-## Core design & thread safety
+## Thread safety
 
-SQLite connections (`rusqlite::Connection`) are not inherently thread-safe for concurrent access ([`!Sync`](https://github.com/rusqlite/rusqlite/issues/342#issuecomment-592624109)). To safely expose connections to the concurrent Elixir environment, `xqlite` wraps each `rusqlite::Connection` within an `Arc<Mutex<_>>` managed by a `ResourceArc`.
+Each `rusqlite::Connection` is wrapped in `Arc<Mutex<_>>` via Rustler's `ResourceArc`. One Elixir process accesses a given connection at a time. Connection pooling belongs in higher layers (DBConnection / Ecto adapter).
 
-- **Safety:** This ensures that only one Elixir process can access a specific SQLite connection handle at any given moment, preventing data races and ensuring compatibility with Rustler's `Resource` requirements (`Sync`).
-- **Handles:** NIF functions return opaque, thread-safe resource handles representing individual SQLite connections.
-- **Pooling:** This NIF layer **does not** implement connection pooling. Managing a pool of connections (e.g., using `DBConnection`) is the responsibility of the calling Elixir code or higher-level libraries like the planned `xqlite_ecto3`.
+SQLite is opened with `SQLITE_OPEN_NO_MUTEX` (rusqlite's default) — the Rust Mutex replaces SQLite's internal one, not the other way around.
 
-This library prioritizes compatibility with **modern SQLite versions** (>= 3.35.0 recommended). While it may work on older versions, explicit support or workarounds for outdated SQLite features are not a primary goal. **Notably, retrieving primary key values automatically after insertion into `WITHOUT ROWID` tables is only reliably supported via the `RETURNING` clause (available since SQLite 3.35.0). Using `WITHOUT ROWID` tables on older SQLite versions may require you to supply primary key values explicitly within your application, as `last_insert_rowid/1` cannot be used for these tables.**
+## Capabilities
 
-## Current capabilities
+Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access. See [hexdocs](https://hexdocs.pm/xqlite) for full API reference.
 
-The library provides two primary modules: `Xqlite` for a higher-level Elixir API, and `XqliteNIF` for direct, low-level access. See [hexdocs](https://hexdocs.pm/xqlite) for full parameter and return type details.
+### High-level API
 
-### High-level API (`Xqlite` and `Xqlite.Pragma` modules)
+- **`Xqlite.stream/4`** — lazily fetch rows as string-keyed maps via `Stream.resource/3`
+- **`Xqlite.Result`** — query result struct implementing `Table.Reader` (works with Explorer, Kino, VegaLite)
+- **`Xqlite.Pragma`** — typed PRAGMA schema with `get/4` and `put/4`, covering 60+ PRAGMAs with validation
+- **Convenience helpers** — `enable_foreign_key_enforcement/1`, `enable_strict_mode/1`, etc.
 
-- **`Xqlite.stream/4`**: Creates an Elixir `Stream` to lazily fetch rows from a query. Rows are returned as maps with atom keys.
-- **PRAGMA Helpers**: `Xqlite.Pragma.get/4` and `Xqlite.Pragma.put/3` provide a structured interface for interacting with SQLite PRAGMAs.
-- **Convenience Helpers**: `Xqlite.enable_foreign_key_enforcement/1`, `Xqlite.enable_strict_mode/1`, etc.
+### Low-level NIF API (`XqliteNIF`)
 
-### Low-level NIF API (`XqliteNIF` module)
-
-- **Connection:** `open/1`, `open_in_memory/0`, `open_temporary/0`, `close/1`
+- **Connection:** `open/1`, `open_in_memory/0`, `open_readonly/1`, `open_in_memory_readonly/0`, `open_temporary/0`, `close/1`
 - **Queries:** `query/3`, `query_cancellable/4` — returns `%{columns, rows, num_rows}`
-- **Execution:** `execute/3`, `execute_cancellable/4` — returns `{:ok, affected_rows}`; `execute_batch/2`, `execute_batch_cancellable/3` — returns `:ok`
+- **Execution:** `execute/3`, `execute_cancellable/4` — returns `{:ok, affected_rows}`; `execute_batch/2`, `execute_batch_cancellable/3`
 - **Streaming:** `stream_open/4`, `stream_get_columns/1`, `stream_fetch/2`, `stream_close/1`
-- **Cancellation:** `create_cancel_token/0`, `cancel_operation/1`
+- **Cancellation:** `create_cancel_token/0`, `cancel_operation/1` — per-operation, progress-handler-based, fine-grained
 - **PRAGMAs:** `get_pragma/2`, `set_pragma/3`
-- **Transactions:** `begin/1`, `commit/1`, `rollback/1`, `savepoint/2`, `release_savepoint/2`, `rollback_to_savepoint/2`
+- **Transactions:** `begin/2` (`:deferred` / `:immediate` / `:exclusive`), `commit/1`, `rollback/1`, `transaction_status/1`, `savepoint/2`, `release_savepoint/2`, `rollback_to_savepoint/2`
 - **Row ID:** `last_insert_rowid/1`
 - **Schema:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
-- **Errors:** `{:ok, result}` / `:ok` on success; `{:error, {reason_atom, ...}}` on failure with structured tuples (e.g., `{:sqlite_failure, code, extended_code, message}`)
 
-## Known limitations and caveats
+Errors are structured tuples: `{:error, {:constraint_violation, :constraint_foreign_key, msg}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
 
-- **`last_insert_rowid/1`:**
-  - Reflects the state of the specific connection handle. Avoid sharing handles for concurrent `INSERT`s outside a proper pooling mechanism.
-  - Does not work for `WITHOUT ROWID` tables. Use `INSERT ... RETURNING`.
-- **Operation Cancellation Performance:** The current cancellation mechanism uses SQLite's progress handler with a frequent check interval. This ensures testability but introduces overhead to cancellable operations. This will be benchmarked and potentially optimized in the future.
-- **Generated Column `default_value` (Schema Introspection):** `Xqlite.Schema.ColumnInfo.default_value` will be `nil` for generated columns when using `XqliteNIF.schema_columns/2`. The generation expression is not directly available in the `dflt_value` column of `PRAGMA table_xinfo`. To get the full expression, parse the output of `XqliteNIF.get_create_sql/2`.
-- **Invalid UTF-8 in TEXT Columns with SQL Functions:** Applying certain SQL text functions (e.g., `UPPER()`, `LOWER()`) to `TEXT` columns containing byte sequences that are not valid UTF-8 may cause the underlying SQLite C library to panic, leading to a NIF crash. Ensure data stored in `TEXT` columns intended for such processing is valid UTF-8, or avoid these functions on potentially corrupt data.
-- **User-Defined Functions (UDFs):** Support for UDFs is of very low priority due to its significant implementation complexity and is not currently planned.
-
-## Basic usage examples
+## Usage
 
 ```elixir
-# --- Opening a connection ---
+# Open and configure
 {:ok, conn} = XqliteNIF.open("my_database.db")
-
-# --- Using Xqlite helpers ---
 :ok = Xqlite.enable_foreign_key_enforcement(conn)
-:ok = Xqlite.enable_strict_mode(conn)
 
-# --- Executing a query (SELECT) ---
-sql_select = "SELECT id, name FROM users WHERE id = ?1;"
-params_select = [1]
-IO.inspect(XqliteNIF.query(conn, sql_select, params_select), label: "Query Result")
+# Query
+{:ok, result} = XqliteNIF.query(conn, "SELECT id, name FROM users WHERE id = ?1", [1])
+# => %{columns: ["id", "name"], rows: [[1, "Alice"]], num_rows: 1}
 
-# --- Executing a cancellable query ---
-# (Assume `slow_query_sql` is a long-running SQL. See test/nif/cancellation_test.exs for examples)
-{:ok, cancel_token} = XqliteNIF.create_cancel_token()
-long_query_task = Task.async(fn ->
-  XqliteNIF.query_cancellable(conn, slow_query_sql, [], cancel_token)
-end)
-Process.sleep(100)
-:ok = XqliteNIF.cancel_operation(cancel_token)
-IO.inspect(Task.await(long_query_task, 5000), label: "Cancelled Query Result")
+# Use with Table.Reader (Explorer, Kino, etc.)
+result |> Xqlite.Result.from_map() |> Table.to_rows()
+# => [%{"id" => 1, "name" => "Alice"}]
 
-# --- Querying Schema Information ---
-{:ok, columns} = XqliteNIF.schema_columns(conn, "users")
-IO.inspect(columns, label: "Columns for 'users' table")
+# Stream large result sets
+Xqlite.stream(conn, "SELECT * FROM events") |> Enum.take(100)
 
-# --- Using a transaction ---
-case XqliteNIF.begin(conn) do
-  :ok ->
-    # ... perform operations ...
-    case XqliteNIF.execute(conn, "UPDATE accounts SET balance = 0 WHERE id = 1", []) do
-      {:ok, _affected_rows} ->
-        :ok = XqliteNIF.commit(conn)
-        IO.puts("Transaction committed.")
-      {:error, reason_update} ->
-        IO.inspect(reason_update, label: "Update failed, rolling back")
-        :ok = XqliteNIF.rollback(conn)
-    end
-  {:error, reason_begin} ->
-    IO.inspect(reason_begin, label: "Failed to begin transaction")
-end
+# Transaction with immediate lock
+:ok = XqliteNIF.begin(conn, :immediate)
+{:ok, 1} = XqliteNIF.execute(conn, "UPDATE accounts SET balance = 0 WHERE id = 1", [])
+:ok = XqliteNIF.commit(conn)
+
+# Cancel a long-running query from another process
+{:ok, token} = XqliteNIF.create_cancel_token()
+task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) end)
+:ok = XqliteNIF.cancel_operation(token)
+{:error, :operation_cancelled} = Task.await(task)
+
+# Read-only connection (writes fail with {:error, {:read_only_database, _}})
+{:ok, ro_conn} = XqliteNIF.open_readonly("my_database.db")
 ```
+
+## Known limitations
+
+- **`last_insert_rowid/1`** does not work for `WITHOUT ROWID` tables. Use `INSERT ... RETURNING` (SQLite >= 3.35.0).
+- **Generated column `default_value`** in `schema_columns/2` is `nil`. Use `get_create_sql/2` for the expression.
+- **Invalid UTF-8 in TEXT columns** — applying SQL text functions (`UPPER()`, `LOWER()`) to non-UTF-8 data may crash the SQLite C library.
+- **User-Defined Functions** — not planned due to implementation complexity across NIF boundaries.
 
 ## Roadmap
 
-**Next:** The **[xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3)** library (separate project) — full Ecto 3.x adapter, `DBConnection` integration, type handling, migrations, and structure dump/load.
-
-Planned for **xqlite** core:
+Planned for **xqlite** core (before Ecto adapter work):
 
 1. Extension loading (`load_extension/2`)
-2. Online Backup API
-3. Session Extension
-4. Incremental Blob I/O
-5. (Optional) SQLCipher support
-6. (Unplanned / lowest priority) User-Defined Functions — exploration showed this is extremely fiddly to get right via NIF
+2. Serialize / deserialize database to binary
+3. Change notification hooks (`set_update_hook/2`)
+4. Online Backup API
+5. Incremental Blob I/O
+
+**Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to open issues or submit pull requests.
+Contributions are welcome. Please open issues or submit pull requests.
 
 ## License
 
-This project is licensed under the terms of the MIT license. See the [`LICENSE.md`](LICENSE.md) file for details.
+MIT — see [`LICENSE.md`](LICENSE.md).
