@@ -28,6 +28,15 @@ defmodule Xqlite.Schema.ColumnInfo do
           hidden_kind: Types.column_hidden_kind()
         }
 
+  @enforce_keys [
+    :column_id,
+    :name,
+    :type_affinity,
+    :declared_type,
+    :nullable,
+    :primary_key_index,
+    :hidden_kind
+  ]
   defstruct [
     :column_id,
     :name,

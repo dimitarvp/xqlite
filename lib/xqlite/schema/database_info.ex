@@ -14,8 +14,6 @@ defmodule Xqlite.Schema.DatabaseInfo do
           file: String.t() | nil
         }
 
-  defstruct [
-    :name,
-    :file
-  ]
+  @enforce_keys [:name]
+  defstruct [:name, :file]
 end

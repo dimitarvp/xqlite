@@ -11,7 +11,7 @@ defmodule Xqlite.Schema.Types do
   @typedoc """
   The resolved type affinity of a column.
   """
-  @type type_affinity :: :text | :numeric | :integer | :real | :blob
+  @type type_affinity :: :text | :numeric | :integer | :float | :binary
 
   @typedoc """
   The action to take on a foreign key constraint violation.

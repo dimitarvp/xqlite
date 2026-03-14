@@ -24,6 +24,13 @@ defmodule Xqlite.Schema.IndexColumnInfo do
           is_key_column: boolean()
         }
 
+  @enforce_keys [
+    :index_column_sequence,
+    :table_column_id,
+    :sort_order,
+    :collation,
+    :is_key_column
+  ]
   defstruct [
     :index_column_sequence,
     :table_column_id,

@@ -20,10 +20,6 @@ defmodule Xqlite.Schema.IndexInfo do
           partial: boolean()
         }
 
-  defstruct [
-    :name,
-    :unique,
-    :origin,
-    :partial
-  ]
+  @enforce_keys [:name, :unique, :origin, :partial]
+  defstruct [:name, :unique, :origin, :partial]
 end

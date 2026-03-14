@@ -29,6 +29,15 @@ defmodule Xqlite.Schema.ForeignKeyInfo do
           match_clause: Types.fk_match()
         }
 
+  @enforce_keys [
+    :id,
+    :column_sequence,
+    :target_table,
+    :from_column,
+    :on_update,
+    :on_delete,
+    :match_clause
+  ]
   defstruct [
     :id,
     :column_sequence,

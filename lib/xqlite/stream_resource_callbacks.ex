@@ -69,7 +69,7 @@ defmodule Xqlite.StreamResourceCallbacks do
     end
   end
 
-  @spec after_fun(acc()) :: any()
+  @spec after_fun(acc()) :: :ok
   def after_fun(acc) do
     # Ensure the underlying NIF stream resource is closed.
     # The return value of this function is ignored by Stream.resource/3,

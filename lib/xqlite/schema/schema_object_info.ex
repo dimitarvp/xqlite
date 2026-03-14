@@ -20,17 +20,11 @@ defmodule Xqlite.Schema.SchemaObjectInfo do
           schema: String.t(),
           name: String.t(),
           object_type: Types.object_type(),
-          column_count: integer(),
+          column_count: non_neg_integer(),
           is_without_rowid: boolean(),
           strict: boolean()
         }
 
-  defstruct [
-    :schema,
-    :name,
-    :object_type,
-    :column_count,
-    :is_without_rowid,
-    :strict
-  ]
+  @enforce_keys [:schema, :name, :object_type, :column_count, :is_without_rowid, :strict]
+  defstruct [:schema, :name, :object_type, :column_count, :is_without_rowid, :strict]
 end
