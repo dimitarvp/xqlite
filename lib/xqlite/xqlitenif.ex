@@ -86,6 +86,37 @@ defmodule XqliteNIF do
   def open_in_memory(_uri), do: err()
 
   @doc """
+  Opens a read-only connection to an SQLite database file.
+
+  The database must already exist — SQLite will not create it.
+  Write operations (INSERT, UPDATE, DELETE, CREATE TABLE, etc.) will fail
+  with `{:error, {:read_only_database, message}}`.
+
+  Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_URI` flags.
+
+  Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
+  """
+  @spec open_readonly(path :: String.t()) :: {:ok, Xqlite.conn()} | Xqlite.error()
+  def open_readonly(_path), do: err()
+
+  @doc """
+  Opens a read-only connection to an in-memory SQLite database.
+
+  Useful for connecting to a named shared-cache in-memory database that was
+  opened read-write by another connection (e.g., via
+  `"file:memdb1?mode=memory&cache=shared"`).
+
+  Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_MEMORY | SQLITE_OPEN_URI` flags.
+
+  Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
+  """
+  @spec open_in_memory_readonly() :: {:ok, Xqlite.conn()} | Xqlite.error()
+  def open_in_memory_readonly(), do: open_in_memory_readonly(@default_memory_database)
+
+  @spec open_in_memory_readonly(uri :: String.t()) :: {:ok, Xqlite.conn()} | Xqlite.error()
+  def open_in_memory_readonly(_uri), do: err()
+
+  @doc """
   Opens a connection to a private, temporary on-disk SQLite database.
 
   The database file is created by SQLite in a temporary location and is

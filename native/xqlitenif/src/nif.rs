@@ -39,6 +39,25 @@ fn open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn open_readonly(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let result = Connection::open_with_flags(&path, flags);
+    connection::handle_open_result(result, path)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn open_in_memory_readonly(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | rusqlite::OpenFlags::SQLITE_OPEN_MEMORY
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let result = Connection::open_with_flags(&uri, flags);
+    connection::handle_open_result(result, uri)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let result = Connection::open("");
     connection::handle_open_result(result, "".to_string())

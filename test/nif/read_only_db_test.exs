@@ -1,10 +1,9 @@
 defmodule Xqlite.NIF.ReadOnlyDbTest do
-  # Read-only tests involve file setup once
+  # Read-only tests involve file setup; not safe for async
   use ExUnit.Case, async: false
 
   alias XqliteNIF, as: NIF
 
-  @db_file_prefix "read_only_test_"
   @test_table_name "ro_test_table"
   @create_table_sql "CREATE TABLE #{@test_table_name} (id INTEGER PRIMARY KEY, data TEXT);"
   @insert_sql "INSERT INTO #{@test_table_name} (id, data) VALUES (1, 'sample data');"
@@ -13,149 +12,149 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     temp_db_path =
       Path.join(
         System.tmp_dir!(),
-        @db_file_prefix <> Integer.to_string(:erlang.unique_integer([:positive])) <> ".db"
+        "read_only_test_" <>
+          Integer.to_string(:erlang.unique_integer([:positive])) <> ".db"
       )
 
-    # Clean up if exists
     File.rm(temp_db_path)
     {:ok, conn_rw} = NIF.open(temp_db_path)
-    assert {:ok, 0} = NIF.execute(conn_rw, @create_table_sql, [])
-    assert {:ok, 1} = NIF.execute(conn_rw, @insert_sql, [])
-    assert :ok = NIF.close(conn_rw)
+    {:ok, 0} = NIF.execute(conn_rw, @create_table_sql, [])
+    {:ok, 1} = NIF.execute(conn_rw, @insert_sql, [])
+    :ok = NIF.close(conn_rw)
     temp_db_path
   end
 
-  setup_all do
-    db_path = create_temp_db_file()
-    read_only_uri = "file:#{db_path}?mode=ro"
-    {:ok, ro_conn} = NIF.open(read_only_uri)
-
-    on_exit(fn ->
-      NIF.close(ro_conn)
-      File.rm(db_path)
-    end)
-
-    {:ok, conn: ro_conn, db_path: db_path}
+  defp open_readonly_via_uri(db_path) do
+    NIF.open("file:#{db_path}?mode=ro")
   end
 
-  # --- Read Operations on Read-Only DB ---
-
-  test "query/3 (SELECT) succeeds on a read-only database", %{conn: ro_conn} do
-    # Added column names for completeness
-    assert {:ok, %{columns: ["id", "data"], rows: [[1, "sample data"]], num_rows: 1}} =
-             NIF.query(ro_conn, "SELECT id, data FROM #{@test_table_name} WHERE id = 1;", [])
+  defp open_readonly_via_nif(db_path) do
+    NIF.open_readonly(db_path)
   end
 
-  test "get_pragma/2 succeeds for read-only pragmas", %{conn: ro_conn} do
-    # More specific assertion
-    assert {:ok, "UTF-8"} = NIF.get_pragma(ro_conn, "encoding")
-  end
+  @readonly_openers [
+    {:uri_mode_ro, "URI mode=ro", :open_readonly_via_uri},
+    {:open_readonly_nif, "open_readonly/1 NIF", :open_readonly_via_nif}
+  ]
 
-  test "schema introspection NIFs succeed on a read-only database", %{conn: ro_conn} do
-    # Check main db file path in schema_databases
-    assert {:ok, [db_info | _]} = NIF.schema_databases(ro_conn)
-    assert db_info.name == "main"
-    # Path will be absolute
-    assert String.ends_with?(db_info.file, ".db")
+  for {tag, description, opener_fun} <- @readonly_openers do
+    describe "#{description}" do
+      @describetag tag
 
-    # More robustly find the specific table
-    assert {:ok, [object_info | _]} =
-             NIF.schema_list_objects(ro_conn, "main")
-             |> then(fn {:ok, objects} ->
-               filtered = Enum.filter(objects, &(&1.name == @test_table_name))
-               {:ok, filtered}
-             end)
+      setup do
+        db_path = create_temp_db_file()
+        {:ok, ro_conn} = unquote(opener_fun)(db_path)
 
-    assert object_info.name == @test_table_name and object_info.object_type == :table
+        on_exit(fn ->
+          NIF.close(ro_conn)
+          File.rm(db_path)
+        end)
 
-    assert {:ok, columns} = NIF.schema_columns(ro_conn, @test_table_name)
-    # id, data
-    assert Enum.count(columns) == 2
-  end
+        {:ok, conn: ro_conn, db_path: db_path}
+      end
 
-  # --- Write Operations on Read-Only DB (Expect :read_only_database error) ---
+      # --- Read Operations ---
 
-  @tag :expect_read_only_error
-  test "execute/3 (INSERT) fails with :read_only_database", %{conn: ro_conn} do
-    sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (2, 'new data');"
-    assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
-  end
+      test "SELECT succeeds", %{conn: ro_conn} do
+        assert {:ok, %{columns: ["id", "data"], rows: [[1, "sample data"]], num_rows: 1}} =
+                 NIF.query(
+                   ro_conn,
+                   "SELECT id, data FROM #{@test_table_name} WHERE id = 1;",
+                   []
+                 )
+      end
 
-  @tag :expect_read_only_error
-  test "execute/3 (UPDATE) fails with :read_only_database", %{conn: ro_conn} do
-    sql = "UPDATE #{@test_table_name} SET data = 'updated' WHERE id = 1;"
-    assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
-  end
+      test "get_pragma succeeds", %{conn: ro_conn} do
+        assert {:ok, "UTF-8"} = NIF.get_pragma(ro_conn, "encoding")
+      end
 
-  @tag :expect_read_only_error
-  test "execute/3 (DELETE) fails with :read_only_database", %{conn: ro_conn} do
-    sql = "DELETE FROM #{@test_table_name} WHERE id = 1;"
-    assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
-  end
+      test "schema introspection succeeds", %{conn: ro_conn} do
+        assert {:ok, [db_info | _]} = NIF.schema_databases(ro_conn)
+        assert db_info.name == "main"
 
-  @tag :expect_read_only_error
-  test "execute/3 (CREATE TABLE) fails with :read_only_database", %{conn: ro_conn} do
-    sql = "CREATE TABLE new_ro_table (id INTEGER);"
-    assert {:error, {:read_only_database, _msg}} = NIF.execute(ro_conn, sql, [])
-  end
+        assert {:ok, objects} = NIF.schema_list_objects(ro_conn, "main")
+        assert Enum.any?(objects, &(&1.name == @test_table_name and &1.object_type == :table))
 
-  @tag :expect_read_only_error
-  test "execute_batch/2 with write statements fails with :read_only_database", %{conn: ro_conn} do
-    sql_batch = "INSERT INTO #{@test_table_name} (id, data) VALUES (3, 'batch data');"
-    assert {:error, {:read_only_database, _msg}} = NIF.execute_batch(ro_conn, sql_batch)
-  end
+        assert {:ok, columns} = NIF.schema_columns(ro_conn, @test_table_name)
+        assert length(columns) == 2
+      end
 
-  # Removed set_pragma test for user_version as it's not a reliable RO error trigger here
+      # --- Write Operations (must fail) ---
 
-  @tag :expect_read_only_error
-  test "begin/1 followed by write attempt fails with :read_only_database", %{conn: ro_conn} do
-    # BEGIN DEFERRED might succeed as it does nothing until the first write.
-    # The crucial part is that the write operation itself fails.
-    case NIF.begin(ro_conn) do
-      :ok ->
-        write_attempt_result =
-          NIF.execute(
-            ro_conn,
-            "UPDATE #{@test_table_name} SET data = 'ro_tx_update' WHERE id=1;",
-            []
-          )
+      test "INSERT fails with :read_only_database", %{conn: ro_conn} do
+        sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (2, 'new');"
+        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+      end
 
-        assert {:error, {:read_only_database, _msg}} = write_attempt_result
-        # Clean up the transaction state
+      test "UPDATE fails with :read_only_database", %{conn: ro_conn} do
+        sql = "UPDATE #{@test_table_name} SET data = 'updated' WHERE id = 1;"
+        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+      end
+
+      test "DELETE fails with :read_only_database", %{conn: ro_conn} do
+        sql = "DELETE FROM #{@test_table_name} WHERE id = 1;"
+        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+      end
+
+      test "CREATE TABLE fails with :read_only_database", %{conn: ro_conn} do
+        sql = "CREATE TABLE new_ro_table (id INTEGER);"
+        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+      end
+
+      test "execute_batch with writes fails with :read_only_database", %{conn: ro_conn} do
+        sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (3, 'batch');"
+        assert {:error, {:read_only_database, _}} = NIF.execute_batch(ro_conn, sql)
+      end
+
+      test "begin + write fails with :read_only_database", %{conn: ro_conn} do
+        case NIF.begin(ro_conn) do
+          :ok ->
+            sql = "UPDATE #{@test_table_name} SET data = 'tx_update' WHERE id = 1;"
+            assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+            :ok = NIF.rollback(ro_conn)
+
+          {:error, {:read_only_database, _}} ->
+            :ok
+        end
+      end
+
+      test "commit after begin with no writes succeeds", %{conn: ro_conn} do
+        assert :ok = NIF.begin(ro_conn)
+        assert :ok = NIF.commit(ro_conn)
+
+        # Verify connection left the transaction
+        assert :ok = NIF.begin(ro_conn)
         assert :ok = NIF.rollback(ro_conn)
-
-      # Some SQLite versions/configurations might make BEGIN itself fail on a mode=ro DB
-      # if it tries to acquire even a read lock that implies eventual write capability.
-      {:error, {:read_only_database, _msg}} ->
-        # This is also an acceptable outcome for BEGIN on a strictly read-only DB.
-        :ok
-
-      other_error ->
-        # If begin succeeded, we must roll back if an assertion below fails.
-        # However, if begin itself returned an unexpected error, flunk directly.
-        # Attempt rollback just in case
-        NIF.rollback(ro_conn)
-        flunk("begin/1 returned unexpected result on read-only DB: #{inspect(other_error)}")
+      end
     end
   end
 
-  @tag :read_only_commit_behavior
-  test "commit/1 on a read-only database after begin (with no writes) succeeds as no-op", %{
-    conn: ro_conn
-  } do
-    # Deferred transaction starts
-    assert :ok = NIF.begin(ro_conn)
+  # --- open_readonly-specific edge cases ---
 
-    # On a read-only DB with mode=ro, a COMMIT with no preceding write operations
-    # is a no-op and should succeed.
-    # Expect success for vacuous commit
-    assert :ok = NIF.commit(ro_conn)
+  test "open_readonly on nonexistent file fails" do
+    assert {:error, {:cannot_open_database, _, _, _}} =
+             NIF.open_readonly("/tmp/nonexistent_readonly_test.db")
+  end
 
-    # Verify connection is no longer in a transaction (is_autocommit would be true)
-    # We can test this by trying to start another transaction. If it succeeds,
-    # the previous one was properly closed.
-    assert :ok = NIF.begin(ro_conn)
-    # Clean up the new transaction
-    assert :ok = NIF.rollback(ro_conn)
+  test "open_readonly does not create the file" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "should_not_exist_#{:erlang.unique_integer([:positive])}.db"
+      )
+
+    NIF.open_readonly(path)
+    refute File.exists?(path)
+  end
+
+  test "open_in_memory_readonly returns a working read-only connection" do
+    {:ok, ro_conn} = NIF.open_in_memory_readonly()
+    # Can read pragmas
+    assert {:ok, _} = NIF.get_pragma(ro_conn, "encoding")
+    # Cannot create tables
+    assert {:error, {:read_only_database, _}} =
+             NIF.execute(ro_conn, "CREATE TABLE t (id INTEGER);", [])
+
+    NIF.close(ro_conn)
   end
 end
