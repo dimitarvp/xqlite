@@ -384,6 +384,7 @@ pub(crate) fn stream_open<'a>(
                         )
                     }
                 }
+                _ if params_term == rustler::types::atom::nil().to_term(env) => Ok(()),
                 _ => Err(XqliteError::ExpectedList {
                     value_str: format!(
                         "Parameters term was not a list: {params_term:?}"

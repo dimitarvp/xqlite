@@ -55,6 +55,15 @@ defmodule Xqlite.NIF.StreamTest do
         assert :ok == NIF.stream_close(stream_handle)
       end
 
+      test "stream_open/4 with nil params works (no parameters)", %{conn: conn} do
+        {:ok, stream_handle} = NIF.stream_open(conn, "SELECT 1 AS val;", nil, [])
+        assert {:ok, ["val"]} == NIF.stream_get_columns(stream_handle)
+
+        assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream_handle, 10)
+        assert :done == NIF.stream_fetch(stream_handle, 10)
+        assert :ok == NIF.stream_close(stream_handle)
+      end
+
       test "stream_open/4 with named parameters returns a handle and correct columns", %{
         conn: conn
       } do
