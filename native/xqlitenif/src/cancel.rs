@@ -32,11 +32,11 @@ impl<'conn> ProgressHandlerGuard<'conn> {
     pub(crate) fn new(
         conn: &'conn Connection,
         token_bool: Arc<AtomicBool>,
-        interval: i32,
+        interval: c_int,
     ) -> Result<Self, rusqlite::Error> {
         let handler = move || token_bool.load(Ordering::Acquire);
 
-        conn.progress_handler(interval as c_int, Some(handler))?;
+        conn.progress_handler(interval, Some(handler))?;
 
         Ok(ProgressHandlerGuard {
             conn,
