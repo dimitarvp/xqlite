@@ -83,36 +83,19 @@ pub(crate) fn object_type_to_atom(s: &str) -> Result<Atom, &str> {
 }
 
 /// Maps PRAGMA table_info type affinity string to an atom.
-pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Result<Atom, &str> {
-    // Convert to uppercase for case-insensitive matching of common patterns
-    let upper_declared_type = declared_type_str.to_uppercase();
+pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Atom {
+    let upper = declared_type_str.to_uppercase();
 
-    if upper_declared_type.contains("INT") {
-        // Catches INT, INTEGER, BIGINT etc.
-        Ok(atoms::integer())
-    } else if upper_declared_type.contains("CHAR") || // VARCHAR, CHARACTER
-                  upper_declared_type.contains("CLOB") || // CLOB
-                  upper_declared_type.contains("TEXT")
-    // TEXT
-    {
-        Ok(atoms::text())
-    } else if upper_declared_type.contains("BLOB") ||
-                  upper_declared_type.is_empty() || // No type specified means BLOB affinity
-                  upper_declared_type == "ANY"
-    // ANY type columns also get BLOB affinity if no data type is forced by content
-    {
-        Ok(atoms::binary()) // For 'ANY' this is a simplification; typeof() would be more accurate for content.
-    // But for PRAGMA table_info, this is a reasonable default mapping.
-    } else if upper_declared_type.contains("REAL") || // REAL
-                  upper_declared_type.contains("FLOA") || // FLOAT
-                  upper_declared_type.contains("DOUB")
-    // DOUBLE
-    {
-        Ok(atoms::float())
+    if upper.contains("INT") {
+        atoms::integer()
+    } else if upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT") {
+        atoms::text()
+    } else if upper.contains("BLOB") || upper.is_empty() || upper == "ANY" {
+        atoms::binary()
+    } else if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
+        atoms::float()
     } else {
-        // Default to NUMERIC affinity for anything else.
-        // This covers BOOLEAN, DATE, DATETIME etc. which don't have their own affinity.
-        Ok(atoms::numeric())
+        atoms::numeric()
     }
 }
 
@@ -191,6 +174,19 @@ pub(crate) fn notnull_to_nullable(notnull_flag: i64) -> Result<bool, String> {
 #[inline]
 pub(crate) fn pk_value_to_index(pk_flag: i64) -> Result<u8, String> {
     u8::try_from(pk_flag).map_err(|_| pk_flag.to_string())
+}
+
+/// Converts an integer flag (0/1) to a boolean.
+#[inline]
+fn int_flag_to_bool(val: i64, context: &str, name: &str) -> Result<bool, XqliteError> {
+    match val {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(XqliteError::SchemaParsingError {
+            context: format!("Parsing '{context}' flag for {name}"),
+            error_detail: SchemaErrorDetail::UnexpectedValue(val.to_string()),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -305,37 +301,9 @@ pub(crate) fn list_objects(
                         error_detail: SchemaErrorDetail::UnexpectedValue(unexpected_val),
                     }
                 })?;
-                let is_without_rowid = match temp_info.wr_flag {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        return Err(XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing 'wr' flag for object '{}'.'{}'",
-                                temp_info.schema, temp_info.name
-                            ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                temp_info.wr_flag.to_string(),
-                            ),
-                        });
-                    }
-                };
-
-                let is_strict = match temp_info.strict_flag {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        return Err(XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing 'strict' flag for object '{}'.'{}'",
-                                temp_info.schema, temp_info.name
-                            ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                temp_info.strict_flag.to_string(),
-                            ),
-                        });
-                    }
-                };
+                let obj_desc = format!("object '{}'.'{}'", temp_info.schema, temp_info.name);
+                let is_without_rowid = int_flag_to_bool(temp_info.wr_flag, "wr", &obj_desc)?;
+                let is_strict = int_flag_to_bool(temp_info.strict_flag, "strict", &obj_desc)?;
 
                 final_objects.push(SchemaObjectInfo {
                     schema: temp_info.schema,
@@ -380,18 +348,7 @@ pub(crate) fn columns(
     for temp_result in temp_results {
         match temp_result {
             Ok(temp_data) => {
-                let type_affinity_atom =
-                    type_affinity_to_atom(&temp_data.type_str).map_err(|unexpected_val| {
-                        XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing type affinity for column '{}' in table '{}'",
-                                temp_data.name, table_name
-                            ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                unexpected_val.to_string(),
-                            ),
-                        }
-                    })?;
+                let type_affinity_atom = type_affinity_to_atom(&temp_data.type_str);
 
                 let nullable =
                     notnull_to_nullable(temp_data.notnull_flag).map_err(|unexpected_val| {
@@ -566,36 +523,9 @@ pub(crate) fn indexes(
                         }
                     })?;
 
-                let unique_bool = match temp_data.unique {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        return Err(XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing 'unique' flag for index '{}' on table '{}'",
-                                temp_data.name, table_name
-                            ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                temp_data.unique.to_string(),
-                            ),
-                        });
-                    }
-                };
-                let partial_bool = match temp_data.partial {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        return Err(XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing 'partial' flag for index '{}' on table '{}'",
-                                temp_data.name, table_name
-                            ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                temp_data.partial.to_string(),
-                            ),
-                        });
-                    }
-                };
+                let idx_desc = format!("index '{}' on table '{}'", temp_data.name, table_name);
+                let unique_bool = int_flag_to_bool(temp_data.unique, "unique", &idx_desc)?;
+                let partial_bool = int_flag_to_bool(temp_data.partial, "partial", &idx_desc)?;
 
                 final_indexes.push(IndexInfo {
                     name: temp_data.name,
@@ -649,21 +579,9 @@ pub(crate) fn index_columns(
                         }
                     })?;
 
-                let is_key_bool = match temp_data.key {
-                    0 => false,
-                    1 => true,
-                    _ => {
-                        return Err(XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing 'key' flag for column seq {} in index '{}'",
-                                temp_data.seqno, index_name
-                            ),
-                            error_detail: SchemaErrorDetail::UnexpectedValue(
-                                temp_data.key.to_string(),
-                            ),
-                        });
-                    }
-                };
+                let col_desc =
+                    format!("column seq {} in index '{}'", temp_data.seqno, index_name);
+                let is_key_bool = int_flag_to_bool(temp_data.key, "key", &col_desc)?;
 
                 final_cols.push(IndexColumnInfo {
                     index_column_sequence: temp_data.seqno,

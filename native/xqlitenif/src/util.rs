@@ -291,11 +291,6 @@ pub(crate) fn quote_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-#[inline]
-pub(crate) fn quote_savepoint_name(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
 /// Extracts column values from a stepped statement and encodes them as Rustler Terms.
 ///
 /// # Safety

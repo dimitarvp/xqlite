@@ -462,12 +462,12 @@ impl Encoder for XqliteError {
                     .and_then(|map| map.map_put(atoms::expected(), expected));
                 match map_result {
                     Ok(map) => (atoms::invalid_parameter_count(), map).encode(env),
-                    Err(_) => (
-                        atoms::error(),
-                        atoms::internal_encoding_error(),
-                        "Failed map create for InvalidParameterCount",
-                    )
-                        .encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidParameterCount".to_string(),
+                        };
+                        (atoms::error(), err).encode(env)
+                    }
                 }
             }
             XqliteError::InvalidParameterName(name) => {
@@ -520,12 +520,12 @@ impl Encoder for XqliteError {
                     .and_then(|map| map.map_put(atoms::offset(), offset));
                 match map_result {
                     Ok(map) => (atoms::sql_input_error(), map).encode(env),
-                    Err(_) => (
-                        atoms::error(),
-                        atoms::internal_encoding_error(),
-                        "Failed map create for SqlInputError",
-                    )
-                        .encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for SqlInputError".to_string(),
+                        };
+                        (atoms::error(), err).encode(env)
+                    }
                 }
             }
             XqliteError::ConstraintViolation { kind, message } => {
