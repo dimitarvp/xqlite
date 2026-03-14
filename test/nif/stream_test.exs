@@ -79,8 +79,7 @@ defmodule Xqlite.NIF.StreamTest do
         sql = "SELEKT id FROM stream_items;"
         assert {:error, error_details} = NIF.stream_open(conn, sql, [], [])
 
-        assert match?({:sqlite_failure, _p_code, _e_code, _msg_str}, error_details)
-        {:sqlite_failure, _, _, msg_str} = error_details
+        assert {:sqlite_failure, _, _, msg_str} = error_details
         assert is_binary(msg_str)
         assert String.contains?(msg_str, "syntax error")
         assert String.contains?(msg_str, "SELEKT")
@@ -90,8 +89,7 @@ defmodule Xqlite.NIF.StreamTest do
         sql = "SELECT id FROM non_existent_table_for_stream;"
         assert {:error, error_details} = NIF.stream_open(conn, sql, [], [])
 
-        assert match?({:no_such_table, _msg}, error_details)
-        {:no_such_table, msg_str} = error_details
+        assert {:no_such_table, msg_str} = error_details
         assert is_binary(msg_str)
         assert String.contains?(msg_str, "no such table")
       end

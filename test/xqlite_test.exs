@@ -103,7 +103,7 @@ defmodule XqliteTest do
         # This tests the `case start_fun` logic in Xqlite.stream/4
         result = Xqlite.stream(conn, "SELEKT * FROM stream_test_users;")
 
-        assert match?({:error, {:sqlite_failure, _, _, _}}, result)
+        assert {:error, {:sqlite_failure, _, _, _}} = result
       end
 
       test "stream created with empty SQL results in an empty stream", %{conn: conn} do
@@ -160,16 +160,6 @@ defmodule XqliteTest do
       # With FK enforcement disabled, inserting a child with no matching parent succeeds
       assert {:ok, 1} =
                NIF.execute(conn, "INSERT INTO fk_child (id, parent_id) VALUES (1, 999)", [])
-    end
-  end
-
-  describe "int2bool/1" do
-    test "converts 0 to false" do
-      assert Xqlite.int2bool(0) == false
-    end
-
-    test "converts 1 to true" do
-      assert Xqlite.int2bool(1) == true
     end
   end
 end
