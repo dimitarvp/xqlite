@@ -68,7 +68,6 @@ defmodule Xqlite.TestUtil do
 
   def verify_is_atom(_context, _set_val, fetched_val, _expected_val), do: is_atom(fetched_val)
 
-
   def verify_mmap_size_value(:memory_private, _set_val, actual, _expected_val),
     do: actual == :no_value
 

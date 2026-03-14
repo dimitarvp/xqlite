@@ -6,8 +6,6 @@ defmodule Xqlite.Pragma do
   sqlite compile options, or are intended for testing sqlite.
   """
 
-  import Xqlite, only: [int2bool: 1]
-
   # We need those called in module attribute definitions
   # and that cannot be done with functions in the same module.
   # They have to be in another module.
@@ -575,4 +573,8 @@ defmodule Xqlite.Pragma do
       other -> other
     end)
   end
+
+  @spec int2bool(0 | 1) :: boolean()
+  defp int2bool(0), do: false
+  defp int2bool(1), do: true
 end

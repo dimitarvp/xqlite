@@ -92,11 +92,6 @@ defmodule Xqlite do
 
   @type error :: {:error, error_reason()}
 
-  @doc false
-  @spec int2bool(0 | 1) :: true | false
-  def int2bool(0), do: false
-  def int2bool(1), do: true
-
   @doc """
   Enables strict mode only for the lifetime of the given database connection.
 
