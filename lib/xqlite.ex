@@ -151,6 +151,10 @@ defmodule Xqlite do
 
     * `:batch_size` (integer, default: `500`) - The maximum number of rows
       to fetch from the database in a single batch.
+    * `:type_extensions` (list of modules, default: `[]`) - A list of modules
+      implementing the `Xqlite.TypeExtension` behaviour. Parameters are encoded
+      before binding, and result values are decoded as rows are fetched.
+      Extensions are applied in list order; the first match wins.
 
   ## Examples
 
@@ -171,23 +175,18 @@ defmodule Xqlite do
   @spec stream(conn(), String.t(), list() | keyword(), keyword()) ::
           Enumerable.t() | error()
   def stream(conn, sql, params \\ [], opts \\ []) do
+    type_extensions = Keyword.get(opts, :type_extensions, [])
+    encoded_params = Xqlite.TypeExtension.encode_params(params, type_extensions)
+
     start_fun = &Xqlite.StreamResourceCallbacks.start_fun/1
     next_fun = &Xqlite.StreamResourceCallbacks.next_fun/1
     after_fun = &Xqlite.StreamResourceCallbacks.after_fun/1
 
-    # `Stream.resource/3` expects the start_fun to return {:ok, acc} or {:error, reason}.
-    # If it returns {:error, reason}, Stream.resource will raise an error.
-    # To align with our spec of returning {:error, reason} directly, we must
-    # call start_fun ourselves first.
-
-    case start_fun.({conn, sql, params, opts}) do
+    case start_fun.({conn, sql, encoded_params, opts}) do
       {:ok, acc} ->
-        # If setup is successful, build the stream resource.
-        # The start function for Stream.resource now just returns the successful acc.
         Stream.resource(fn -> acc end, next_fun, after_fun)
 
       {:error, _reason} = error ->
-        # If setup fails, return the error tuple directly.
         error
     end
   end

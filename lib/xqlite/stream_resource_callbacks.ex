@@ -12,6 +12,7 @@ defmodule Xqlite.StreamResourceCallbacks do
           handle: reference(),
           columns: [String.t()],
           batch_size: pos_integer(),
+          type_extensions: [module()],
           original_opts: keyword()
         }
 
@@ -25,11 +26,13 @@ defmodule Xqlite.StreamResourceCallbacks do
           {:ok, columns} ->
             # Both NIF calls succeeded. Build the accumulator.
             batch_size = Keyword.get(opts, :batch_size, 500)
+            type_extensions = Keyword.get(opts, :type_extensions, [])
 
             acc = %{
               handle: handle,
               columns: columns,
               batch_size: batch_size,
+              type_extensions: type_extensions,
               original_opts: opts
             }
 
@@ -52,8 +55,7 @@ defmodule Xqlite.StreamResourceCallbacks do
     # Fetch the next batch of rows from the NIF.
     case NIF.stream_fetch(acc.handle, acc.batch_size) do
       {:ok, %{rows: rows}} ->
-        # Successfully fetched rows. Map them into Elixir maps.
-        mapped_rows = map_rows_to_maps(rows, acc.columns)
+        mapped_rows = map_rows_to_maps(rows, acc.columns, acc.type_extensions)
         {mapped_rows, acc}
 
       :done ->
@@ -85,9 +87,9 @@ defmodule Xqlite.StreamResourceCallbacks do
     end
   end
 
-  defp map_rows_to_maps(rows, columns) do
-    Enum.map(rows, fn row_list ->
-      Map.new(Enum.zip(columns, row_list))
-    end)
+  defp map_rows_to_maps(rows, columns, type_extensions) do
+    rows
+    |> Xqlite.TypeExtension.decode_rows(type_extensions)
+    |> Enum.map(fn row_list -> Map.new(Enum.zip(columns, row_list)) end)
   end
 end
