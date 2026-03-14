@@ -1,6 +1,5 @@
 defmodule Xqlite.NIF.ReadOnlyDbTest do
-  # Read-only tests involve file setup; not safe for async
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias XqliteNIF, as: NIF
 
