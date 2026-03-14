@@ -36,7 +36,8 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 
 ### High-level API
 
-- **`Xqlite.stream/4`** — lazily fetch rows as string-keyed maps via `Stream.resource/3`
+- **`Xqlite.stream/4`** — lazily fetch rows as string-keyed maps via `Stream.resource/3`; supports `:type_extensions` option for automatic encode/decode
+- **`Xqlite.TypeExtension`** — behaviour for bidirectional Elixir↔SQLite type conversion. Built-in extensions: `DateTime`, `NaiveDateTime`, `Date`, `Time` (all ISO 8601)
 - **`Xqlite.Result`** — query result struct implementing `Table.Reader` (works with Explorer, Kino, VegaLite)
 - **`Xqlite.Pragma`** — typed PRAGMA schema with `get/4` and `put/4`, covering 60+ PRAGMAs with validation
 - **Convenience helpers** — `enable_foreign_key_enforcement/1`, `enable_strict_mode/1`, etc.
@@ -53,6 +54,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Row ID:** `last_insert_rowid/1`
 - **Schema:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **Log hook:** `set_log_hook/1`, `remove_log_hook/0` — global SQLite diagnostic log forwarded to a PID as `{:xqlite_log, code, message}`
+- **Update hook:** `set_update_hook/2`, `remove_update_hook/1` — per-connection change notifications as `{:xqlite_update, action, db_name, table, rowid}`
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
 
 Errors are structured tuples: `{:error, {:constraint_violation, :constraint_foreign_key, msg}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
@@ -92,6 +94,24 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 # Receive SQLite diagnostic events (auto-index warnings, schema changes, etc.)
 {:ok, :ok} = XqliteNIF.set_log_hook(self())
 # => receive {:xqlite_log, 284, "automatic index on ..."}
+
+# Receive per-connection change notifications
+:ok = XqliteNIF.set_update_hook(conn, self())
+{:ok, 1} = XqliteNIF.execute(conn, "INSERT INTO users (name) VALUES ('Bob')", [])
+# => receive {:xqlite_update, :insert, "main", "users", 2}
+
+# Type extensions: automatic DateTime/Date/Time encoding and decoding
+alias Xqlite.TypeExtension
+
+extensions = [TypeExtension.DateTime, TypeExtension.Date, TypeExtension.Time]
+params = TypeExtension.encode_params([~U[2024-01-15 10:30:00Z], ~D[2024-06-15]], extensions)
+{:ok, 1} = XqliteNIF.execute(conn, "INSERT INTO events (ts, day) VALUES (?1, ?2)", params)
+
+# Stream with automatic type decoding
+Xqlite.stream(conn, "SELECT ts, day FROM events", [],
+  type_extensions: [TypeExtension.DateTime, TypeExtension.Date])
+|> Enum.to_list()
+# => [%{"ts" => ~U[2024-01-15 10:30:00Z], "day" => ~D[2024-06-15]}]
 ```
 
 ## Known limitations
@@ -105,11 +125,11 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 
 Planned for **xqlite** core (before Ecto adapter work):
 
-1. Change notification hook (`set_update_hook/2`)
-2. Custom type extensions (Elixir↔SQLite type coercion)
-3. Extension loading (`load_extension/2`)
-4. Serialize / deserialize database to binary
-5. Online Backup API
+1. ~~Change notification hook (`set_update_hook/2`)~~ — done
+2. ~~Custom type extensions (Elixir↔SQLite type coercion)~~ — done
+3. Serialize / deserialize database to binary (`sqlite3_serialize` / `sqlite3_deserialize`)
+4. Extension loading (`enable_load_extension/2`, `load_extension/2`)
+5. Manual statement lifecycle (prepare/bind/step/reset/release)
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
