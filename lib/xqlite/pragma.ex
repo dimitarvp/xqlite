@@ -298,7 +298,10 @@ defmodule Xqlite.Pragma do
   # Handler for PRAGMAs that take NO arguments. Dispatches based on return type.
   defp do_get_no_arg(db, key, _opts) when key in @pragmas_with_special_int_mapping do
     with {:ok, value} <- XqliteNIF.get_pragma(db, to_string(key)) do
-      {:ok, map_special_int_to_atom(key, value)}
+      case map_special_int_to_atom(key, value) do
+        {:error, _} = err -> err
+        mapped -> {:ok, mapped}
+      end
     end
   end
 
@@ -411,16 +414,9 @@ defmodule Xqlite.Pragma do
   end
 
   def put(db, key, val) when is_binary(key) do
-    case safe_pragma_atom(key) do
-      {:ok, atom_key} -> do_put(db, atom_key, val)
-      :error -> {:error, {:invalid_pragma_name, key}}
-    end
-  end
-
-  defp safe_pragma_atom(key) do
-    {:ok, String.to_existing_atom(key)}
+    do_put(db, String.to_existing_atom(key), val)
   rescue
-    ArgumentError -> :error
+    ArgumentError -> {:error, {:invalid_pragma_name, key}}
   end
 
   defp do_put(db, key_atom, val) do
