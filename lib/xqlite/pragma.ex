@@ -116,7 +116,6 @@ defmodule Xqlite.Pragma do
     wal_checkpoint: [r: {0, true, :list}, r: {1, true, :text, :list}]
   }
 
-  @i32 0..0xFFFFFFFF
   @signed_i32 -2_147_483_648..0x7FFFFFFF
   @u32 0..0x7FFFFFFF
   @nonzero_u32 1..0x7FFFFFFF
@@ -124,7 +123,7 @@ defmodule Xqlite.Pragma do
 
   @valid_write_arg_values %{
     application_id: @signed_i32,
-    analysis_limit: @i32,
+    analysis_limit: @u32,
     auto_vacuum: 0..2,
     automatic_index: @bool,
     busy_timeout: @u32,
@@ -139,11 +138,11 @@ defmodule Xqlite.Pragma do
     hard_heap_limit: @u32,
     ignore_check_constraints: @bool,
     journal_mode: ~w(DELETE TRUNCATE PERSIST MEMORY WAL OFF),
-    journal_size_limit: @i32,
+    journal_size_limit: @signed_i32,
     legacy_alter_table: @bool,
     locking_mode: ~w(NORMAL EXCLUSIVE),
     max_page_count: @nonzero_u32,
-    mmap_size: @i32,
+    mmap_size: @signed_i32,
     page_size: [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536],
     query_only: @bool,
     read_uncommitted: @bool,
@@ -156,7 +155,7 @@ defmodule Xqlite.Pragma do
     threads: @u32,
     trusted_schema: @bool,
     user_version: @signed_i32,
-    wal_autocheckpoint: @i32
+    wal_autocheckpoint: @signed_i32
   }
 
   @all @schema |> Map.keys() |> Enum.sort()
@@ -328,6 +327,10 @@ defmodule Xqlite.Pragma do
     end
   end
 
+  defp do_get_no_arg(_db, key, _opts) do
+    {:error, {:unknown_pragma, key}}
+  end
+
   # Handler for PRAGMAs that take ONE argument.
   defp do_get_with_arg(db, key, arg, _opts) do
     with {:ok, rows} <- do_query(db, key, arg) do
@@ -440,7 +443,7 @@ defmodule Xqlite.Pragma do
 
       {^spec, v} when is_boolean(v) ->
         # Handle boolean values. SQLite uses 0 for false, 1 for true.
-        # This check is robust for any spec that is a Range (e.g., @bool, @i32).
+        # This check is robust for any spec that is a Range (e.g., @bool, @u32).
         if(v, do: 1, else: 0) in spec
 
       {^spec, v} when is_list(spec) ->

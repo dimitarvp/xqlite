@@ -9,15 +9,15 @@ defmodule XqlitePragmaTest do
 
   @write_test_cases [
     # Simple set/get with representative values
-    {:application_id, [0, 12345, 98765, -1000]},
-    {:analysis_limit, [0, 100, -1]},
-    {:user_version, [0, 5, 10, -100]},
+    {:application_id, [0, 12345, 98765, -1000], nil},
+    {:analysis_limit, [0, 100], nil},
+    {:user_version, [0, 5, 10, -100], nil},
     # Can only be set on a fresh DB
-    {:page_size, [2048, 4096, 8192]},
-    {:busy_timeout, [0, 1000, 5000]},
+    {:page_size, [2048, 4096, 8192], nil},
+    {:busy_timeout, [0, 1000, 5000], nil},
     # -1 means no limit
-    {:journal_size_limit, [0, -1, 102_400]},
-    {:max_page_count, [1, 1_000_000]},
+    {:journal_size_limit, [0, -1, 102_400], nil},
+    {:max_page_count, [1, 1_000_000], nil},
 
     # All boolean PRAGMAs
     {:automatic_index, [true, false]},
@@ -178,6 +178,26 @@ defmodule XqlitePragmaTest do
           end
         end
       end
+    end
+  end
+
+  describe "unknown pragma" do
+    setup do
+      {:ok, db} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(db) end)
+      {:ok, db: db}
+    end
+
+    test "get returns {:error, {:unknown_pragma, name}} for unknown pragma", %{db: db} do
+      assert {:error, {:unknown_pragma, :totally_fake_pragma}} =
+               P.get(db, :totally_fake_pragma)
+    end
+
+    test "put returns {:error, {:invalid_pragma_name, name}} for unknown string pragma", %{
+      db: db
+    } do
+      assert {:error, {:invalid_pragma_name, "never_atomized_pragma_xyz"}} =
+               P.put(db, "never_atomized_pragma_xyz", 1)
     end
   end
 
