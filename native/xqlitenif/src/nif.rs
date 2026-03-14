@@ -244,6 +244,11 @@ fn release_savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String
     singular_ok_or_error_tuple(env, execution_result)
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+fn transaction_status(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+    connection::with_conn(&handle, |conn| Ok(!conn.is_autocommit()))
+}
+
 // ---------------------------------------------------------------------------
 // Schema NIFs
 // ---------------------------------------------------------------------------

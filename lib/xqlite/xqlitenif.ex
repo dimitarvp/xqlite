@@ -467,6 +467,16 @@ defmodule XqliteNIF do
   def release_savepoint(_conn, _name), do: err()
 
   @doc """
+  Returns whether the connection is currently inside a transaction.
+
+  Returns `{:ok, true}` if a transaction is active (i.e., after `begin/2`
+  and before `commit/1` or `rollback/1`).
+  Returns `{:ok, false}` if the connection is in autocommit mode.
+  """
+  @spec transaction_status(conn :: Xqlite.conn()) :: {:ok, boolean()} | Xqlite.error()
+  def transaction_status(_conn), do: err()
+
+  @doc """
   Retrieves information about all attached databases for the connection.
 
   Corresponds to the `PRAGMA database_list;` statement. Each active connection

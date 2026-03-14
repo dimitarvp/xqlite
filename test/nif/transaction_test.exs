@@ -171,6 +171,32 @@ defmodule Xqlite.NIF.TransactionTest do
         assert {:error, :invalid_transaction_mode} = NIF.begin(conn, :bogus)
       end
 
+      # --- Transaction Status Tests ---
+
+      test "transaction_status returns false outside transaction", %{conn: conn} do
+        assert {:ok, false} = NIF.transaction_status(conn)
+      end
+
+      test "transaction_status returns true inside transaction", %{conn: conn} do
+        assert :ok = NIF.begin(conn)
+        assert {:ok, true} = NIF.transaction_status(conn)
+        assert :ok = NIF.rollback(conn)
+      end
+
+      test "transaction_status returns false after commit", %{conn: conn} do
+        assert :ok = NIF.begin(conn)
+        assert {:ok, true} = NIF.transaction_status(conn)
+        assert :ok = NIF.commit(conn)
+        assert {:ok, false} = NIF.transaction_status(conn)
+      end
+
+      test "transaction_status returns false after rollback", %{conn: conn} do
+        assert :ok = NIF.begin(conn)
+        assert {:ok, true} = NIF.transaction_status(conn)
+        assert :ok = NIF.rollback(conn)
+        assert {:ok, false} = NIF.transaction_status(conn)
+      end
+
       # --- Savepoint Tests ---
       # Setup specific table needed for these tests
       setup %{conn: conn} do
