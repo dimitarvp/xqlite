@@ -326,7 +326,11 @@ pub(crate) fn stream_open<'a>(
             let prepare_rc = ffi::sqlite3_prepare_v2(
                 db_handle,
                 c_sql.as_ptr(),
-                c_sql.as_bytes().len() as std::os::raw::c_int,
+                std::os::raw::c_int::try_from(c_sql.as_bytes().len()).map_err(|_| {
+                    XqliteError::CannotExecute(
+                        "SQL string length exceeds c_int range".to_string(),
+                    )
+                })?,
                 &mut raw_stmt_ptr,
                 std::ptr::null_mut(),
             );
