@@ -17,9 +17,8 @@ mix compile --warnings-as-errors
 mix dialyzer          # PLT cached in priv/plts/
 ```
 
-Prefer to cache test results in temporary text files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) and then inspect them, rather than parsing long output inline.
-Run targeted tests first (`mix test test/path/to/file.exs`), then run the full suite (`mix test.seq`) only after those pass.
-`mix test.seq` is for the full suite only — it does not support subsets or individual files. For individual files use `mix test` with one file at a time.
+Always use `mix test.seq` to run tests — no arguments, always the full suite. It runs everything sequentially (one file per OS process) and takes ~25s. Never use `mix test` directly.
+Cache test output in temp files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) to avoid parsing long inline output.
 
 ## Project Structure
 
