@@ -23,9 +23,21 @@ defmodule Xqlite.Pragma do
   @type name :: String.t()
   @type pragma_opts :: keyword()
   @type pragma_key :: String.t() | atom()
-  @type pragma_value :: String.t() | integer()
-  @type pragma_result :: any()
-  @type pragma_get_result :: {:ok, list()} | {:error, String.t()}
+  @type pragma_value :: String.t() | integer() | boolean() | atom()
+
+  @type get_result ::
+          {:ok,
+           integer()
+           | float()
+           | boolean()
+           | atom()
+           | String.t()
+           | list()
+           | nil}
+          | Xqlite.error()
+
+  @type list_result :: {:ok, list()} | Xqlite.error()
+
   @type auto_vacuum_key :: 0 | 1 | 2
   @type auto_vacuum_value :: :none | :full | :incremental
   @type secure_delete_key :: 0 | 1 | 2
@@ -248,8 +260,8 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   A convenience wrapper to extract the `:rows` from a successful `XqliteNIF.query/3` call.
   """
-  @spec query_to_pragma_result({:ok, map()} | {:error, term()}) ::
-          {:ok, list()} | {:error, term()}
+  @spec query_to_pragma_result({:ok, Xqlite.query_result()} | Xqlite.error()) ::
+          list_result()
   def query_to_pragma_result({:ok, %{rows: rows}}), do: {:ok, rows}
   def query_to_pragma_result({:error, _} = err), do: err
 
@@ -264,8 +276,8 @@ defmodule Xqlite.Pragma do
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
   """
-  @spec get(reference(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
-          pragma_get_result()
+  @spec get(Xqlite.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
+          get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
   def get(db, key, arg, opts) when not is_list(arg) do
@@ -384,27 +396,27 @@ defmodule Xqlite.Pragma do
   defp map_special_int_to_atom(:synchronous, value), do: get_synchronous(value)
   defp map_special_int_to_atom(:temp_store, value), do: get_temp_store(value)
 
-  @spec index_list(reference(), name(), pragma_opts()) :: pragma_result()
+  @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_list(db, name, opts \\ []) do
     get(db, :index_list, name, opts)
   end
 
-  @spec index_info(reference(), name(), pragma_opts()) :: pragma_result()
+  @spec index_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_info(db, name, opts \\ []) do
     get(db, :index_info, name, opts)
   end
 
-  @spec index_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
+  @spec index_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_xinfo(db, name, opts \\ []) do
     get(db, :index_xinfo, name, opts)
   end
 
-  @spec table_info(reference(), name(), pragma_opts()) :: pragma_result()
+  @spec table_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_info(db, name, opts \\ []) do
     get(db, :table_info, name, opts)
   end
 
-  @spec table_xinfo(reference(), name(), pragma_opts()) :: pragma_result()
+  @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_xinfo(db, name, opts \\ []) do
     get(db, :table_xinfo, name, opts)
   end
@@ -412,7 +424,7 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Changes a PRAGMA's value.
   """
-  @spec put(reference(), pragma_key(), pragma_value()) :: :ok | {:error, Xqlite.error()}
+  @spec put(Xqlite.conn(), pragma_key(), pragma_value()) :: :ok | Xqlite.error()
   def put(db, key, val) when is_atom(key) do
     do_put(db, key, val)
   end
