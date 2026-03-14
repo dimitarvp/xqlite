@@ -1,20 +1,4 @@
-use crate::{
-    atom, binary, cannot_convert_atom_to_string, cannot_convert_to_sqlite_value,
-    cannot_execute, cannot_execute_pragma, cannot_fetch_row, cannot_open_database,
-    cannot_prepare_statement, constraint_check, constraint_commit_hook, constraint_datatype,
-    constraint_foreign_key, constraint_function, constraint_not_null, constraint_pinned,
-    constraint_primary_key, constraint_rowid, constraint_trigger, constraint_unique,
-    constraint_violation, constraint_vtab, database_busy_or_locked, error,
-    execute_returned_results, expected_keyword_list, expected_keyword_tuple, expected_list,
-    float, from_sql_conversion_failure, function, index_exists, integer,
-    integral_value_out_of_range, internal_encoding_error, invalid_column_index,
-    invalid_column_name, invalid_column_type, invalid_parameter_count, invalid_parameter_name,
-    invalid_pragma_name, invalid_stream_handle, list, lock_error, map, multiple_statements,
-    no_such_index, no_such_table, null_byte_in_string, operation_cancelled, pid, port,
-    read_only_database, reference, schema_changed, schema_parsing_error, sql_input_error,
-    sqlite_failure, table_exists, text, to_sql_conversion_failure, tuple, unexpected_value,
-    unknown, unsupported_atom, unsupported_data_type, utf8_error,
-};
+use crate::atoms;
 use rusqlite::{Error as RusqliteError, ffi};
 use rustler::{
     Atom, Encoder, Env, Term, TermType,
@@ -34,24 +18,26 @@ fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
     const SQLITE_CONSTRAINT_PRIMARY: i32 = ffi::SQLITE_CONSTRAINT;
 
     match extended_code {
-        ffi::SQLITE_CONSTRAINT_CHECK => Some(constraint_check()),
-        ffi::SQLITE_CONSTRAINT_COMMITHOOK => Some(constraint_commit_hook()),
-        ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Some(constraint_foreign_key()),
-        ffi::SQLITE_CONSTRAINT_FUNCTION => Some(constraint_function()),
-        ffi::SQLITE_CONSTRAINT_NOTNULL => Some(constraint_not_null()),
-        ffi::SQLITE_CONSTRAINT_PRIMARYKEY => Some(constraint_primary_key()),
-        ffi::SQLITE_CONSTRAINT_ROWID => Some(constraint_rowid()),
-        ffi::SQLITE_CONSTRAINT_TRIGGER => Some(constraint_trigger()),
-        ffi::SQLITE_CONSTRAINT_UNIQUE => Some(constraint_unique()),
-        ffi::SQLITE_CONSTRAINT_VTAB => Some(constraint_vtab()),
-        ffi::SQLITE_CONSTRAINT_PINNED => Some(constraint_pinned()),
-        ffi::SQLITE_CONSTRAINT_DATATYPE => Some(constraint_datatype()),
+        ffi::SQLITE_CONSTRAINT_CHECK => Some(atoms::constraint_check()),
+        ffi::SQLITE_CONSTRAINT_COMMITHOOK => Some(atoms::constraint_commit_hook()),
+        ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Some(atoms::constraint_foreign_key()),
+        ffi::SQLITE_CONSTRAINT_FUNCTION => Some(atoms::constraint_function()),
+        ffi::SQLITE_CONSTRAINT_NOTNULL => Some(atoms::constraint_not_null()),
+        ffi::SQLITE_CONSTRAINT_PRIMARYKEY => Some(atoms::constraint_primary_key()),
+        ffi::SQLITE_CONSTRAINT_ROWID => Some(atoms::constraint_rowid()),
+        ffi::SQLITE_CONSTRAINT_TRIGGER => Some(atoms::constraint_trigger()),
+        ffi::SQLITE_CONSTRAINT_UNIQUE => Some(atoms::constraint_unique()),
+        ffi::SQLITE_CONSTRAINT_VTAB => Some(atoms::constraint_vtab()),
+        ffi::SQLITE_CONSTRAINT_PINNED => Some(atoms::constraint_pinned()),
+        ffi::SQLITE_CONSTRAINT_DATATYPE => Some(atoms::constraint_datatype()),
 
         // Catch-all: Check if the primary code part matches SQLITE_CONSTRAINT
         // This covers cases where SQLite might return, e.g., just 19 (SQLITE_CONSTRAINT)
         // without a specific extended code like (19 | (5 << 8)) for NOTNULL.
         // It also covers *future* extended constraint codes we don't know about yet.
-        code if (code & 0xff) == SQLITE_CONSTRAINT_PRIMARY => Some(constraint_violation()),
+        code if (code & 0xff) == SQLITE_CONSTRAINT_PRIMARY => {
+            Some(atoms::constraint_violation())
+        }
 
         _ => None,
     }
@@ -76,28 +62,28 @@ fn term_type_to_string(term_type: TermType) -> &'static str {
 
 fn term_type_to_atom(_env: Env, term_type: TermType) -> Atom {
     match term_type {
-        TermType::Atom => atom(),
-        TermType::Binary => binary(),
-        TermType::Float => float(),
-        TermType::Fun => function(),
-        TermType::Integer => integer(),
-        TermType::List => list(),
-        TermType::Map => map(),
-        TermType::Pid => pid(),
-        TermType::Port => port(),
-        TermType::Ref => reference(),
-        TermType::Tuple => tuple(),
-        TermType::Unknown => unknown(),
+        TermType::Atom => atoms::atom(),
+        TermType::Binary => atoms::binary(),
+        TermType::Float => atoms::float(),
+        TermType::Fun => atoms::function(),
+        TermType::Integer => atoms::integer(),
+        TermType::List => atoms::list(),
+        TermType::Map => atoms::map(),
+        TermType::Pid => atoms::pid(),
+        TermType::Port => atoms::port(),
+        TermType::Ref => atoms::reference(),
+        TermType::Tuple => atoms::tuple(),
+        TermType::Unknown => atoms::unknown(),
     }
 }
 
 fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
     match t {
         rusqlite::types::Type::Null => nil(),
-        rusqlite::types::Type::Integer => integer(),
-        rusqlite::types::Type::Real => float(),
-        rusqlite::types::Type::Text => text(),
-        rusqlite::types::Type::Blob => binary(),
+        rusqlite::types::Type::Integer => atoms::integer(),
+        rusqlite::types::Type::Real => atoms::float(),
+        rusqlite::types::Type::Text => atoms::text(),
+        rusqlite::types::Type::Blob => atoms::binary(),
     }
 }
 
@@ -229,6 +215,9 @@ pub(crate) enum XqliteError {
         reason: String,
     },
 
+    // Connection state
+    ConnectionClosed,
+
     // Internal
     InternalEncodingError {
         context: String,
@@ -314,6 +303,9 @@ impl Display for XqliteError {
             }
             XqliteError::InvalidStreamHandle { reason } => {
                 write!(f, "Invalid stream handle: {reason}")
+            }
+            XqliteError::ConnectionClosed => {
+                write!(f, "Connection is closed")
             }
             XqliteError::InternalEncodingError { context } => {
                 write!(f, "Internal error during result encoding: {context}")
@@ -401,98 +393,128 @@ impl Encoder for XqliteError {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
             XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
-                (cannot_convert_to_sqlite_value(), value_str, reason).encode(env)
+                (atoms::cannot_convert_to_sqlite_value(), value_str, reason).encode(env)
             }
             XqliteError::ToSqlConversionFailure { reason } => {
-                (to_sql_conversion_failure(), reason).encode(env)
+                (atoms::to_sql_conversion_failure(), reason).encode(env)
             }
             XqliteError::ExpectedKeywordList { value_str } => {
-                (expected_keyword_list(), value_str).encode(env)
+                (atoms::expected_keyword_list(), value_str).encode(env)
             }
             XqliteError::ExpectedKeywordTuple { value_str } => {
-                (expected_keyword_tuple(), value_str).encode(env)
+                (atoms::expected_keyword_tuple(), value_str).encode(env)
             }
             XqliteError::ExpectedList { value_str } => {
-                (expected_list(), value_str).encode(env)
+                (atoms::expected_list(), value_str).encode(env)
             }
-            XqliteError::UnsupportedAtom { atom_value: _ } => unsupported_atom().encode(env),
-            XqliteError::UnsupportedDataType { term_type } => {
-                (unsupported_data_type(), term_type_to_atom(env, *term_type)).encode(env)
+            XqliteError::UnsupportedAtom { atom_value: _ } => {
+                atoms::unsupported_atom().encode(env)
             }
+            XqliteError::UnsupportedDataType { term_type } => (
+                atoms::unsupported_data_type(),
+                term_type_to_atom(env, *term_type),
+            )
+                .encode(env),
             XqliteError::CannotPrepareStatement(sql, reason) => {
-                (cannot_prepare_statement(), sql, reason).encode(env)
+                (atoms::cannot_prepare_statement(), sql, reason).encode(env)
             }
-            XqliteError::CannotExecute(reason) => (cannot_execute(), reason).encode(env),
+            XqliteError::CannotExecute(reason) => {
+                (atoms::cannot_execute(), reason).encode(env)
+            }
             XqliteError::CannotExecutePragma { pragma, reason } => {
-                (cannot_execute_pragma(), pragma, reason).encode(env)
+                (atoms::cannot_execute_pragma(), pragma, reason).encode(env)
             }
             XqliteError::DatabaseBusyOrLocked { message } => {
-                (database_busy_or_locked(), message).encode(env)
+                (atoms::database_busy_or_locked(), message).encode(env)
             }
-            XqliteError::OperationCancelled => operation_cancelled().encode(env),
-            XqliteError::NoSuchTable { message } => (no_such_table(), message).encode(env),
-            XqliteError::NoSuchIndex { message } => (no_such_index(), message).encode(env),
-            XqliteError::TableExists { message } => (table_exists(), message).encode(env),
-            XqliteError::IndexExists { message } => (index_exists(), message).encode(env),
-            XqliteError::SchemaChanged { message } => (schema_changed(), message).encode(env),
+            XqliteError::OperationCancelled => atoms::operation_cancelled().encode(env),
+            XqliteError::NoSuchTable { message } => {
+                (atoms::no_such_table(), message).encode(env)
+            }
+            XqliteError::NoSuchIndex { message } => {
+                (atoms::no_such_index(), message).encode(env)
+            }
+            XqliteError::TableExists { message } => {
+                (atoms::table_exists(), message).encode(env)
+            }
+            XqliteError::IndexExists { message } => {
+                (atoms::index_exists(), message).encode(env)
+            }
+            XqliteError::SchemaChanged { message } => {
+                (atoms::schema_changed(), message).encode(env)
+            }
             XqliteError::ReadOnlyDatabase { message } => {
-                (read_only_database(), message).encode(env)
+                (atoms::read_only_database(), message).encode(env)
             }
-            XqliteError::CannotFetchRow(reason) => (cannot_fetch_row(), reason).encode(env),
+            XqliteError::CannotFetchRow(reason) => {
+                (atoms::cannot_fetch_row(), reason).encode(env)
+            }
             XqliteError::CannotOpenDatabase {
                 path,
                 code,
                 message,
-            } => (cannot_open_database(), path, code, message).encode(env),
+            } => (atoms::cannot_open_database(), path, code, message).encode(env),
             XqliteError::CannotConvertAtomToString(reason) => {
-                (cannot_convert_atom_to_string(), reason).encode(env)
+                (atoms::cannot_convert_atom_to_string(), reason).encode(env)
             }
-            XqliteError::LockError(reason) => (lock_error(), reason).encode(env),
+            XqliteError::LockError(reason) => (atoms::lock_error(), reason).encode(env),
             XqliteError::InvalidStreamHandle { reason } => {
-                (invalid_stream_handle(), reason).encode(env)
+                (atoms::invalid_stream_handle(), reason).encode(env)
             }
+            XqliteError::ConnectionClosed => atoms::connection_closed().encode(env),
             XqliteError::InternalEncodingError { context } => {
-                (internal_encoding_error(), context).encode(env)
+                (atoms::internal_encoding_error(), context).encode(env)
             }
             XqliteError::InvalidParameterCount { provided, expected } => {
                 let map_result = map_new(env)
-                    // Use crate::* to avoid shadowing
-                    .map_put(crate::provided(), provided)
-                    .and_then(|map| map.map_put(crate::expected(), expected));
+                    .map_put(atoms::provided(), provided)
+                    .and_then(|map| map.map_put(atoms::expected(), expected));
                 match map_result {
-                    Ok(map) => (invalid_parameter_count(), map).encode(env),
+                    Ok(map) => (atoms::invalid_parameter_count(), map).encode(env),
                     Err(_) => (
-                        error(),
-                        internal_encoding_error(),
+                        atoms::error(),
+                        atoms::internal_encoding_error(),
                         "Failed map create for InvalidParameterCount",
                     )
                         .encode(env),
                 }
             }
             XqliteError::InvalidParameterName(name) => {
-                (invalid_parameter_name(), name).encode(env)
+                (atoms::invalid_parameter_name(), name).encode(env)
             }
-            XqliteError::InvalidPragmaName(name) => (invalid_pragma_name(), name).encode(env),
-            XqliteError::NulErrorInString => null_byte_in_string().encode(env),
-            XqliteError::MultipleStatements => multiple_statements().encode(env),
+            XqliteError::InvalidPragmaName(name) => {
+                (atoms::invalid_pragma_name(), name).encode(env)
+            }
+            XqliteError::NulErrorInString => atoms::null_byte_in_string().encode(env),
+            XqliteError::MultipleStatements => atoms::multiple_statements().encode(env),
             XqliteError::InvalidColumnIndex(index) => {
-                (invalid_column_index(), index).encode(env)
+                (atoms::invalid_column_index(), index).encode(env)
             }
-            XqliteError::InvalidColumnName(name) => (invalid_column_name(), name).encode(env),
+            XqliteError::InvalidColumnName(name) => {
+                (atoms::invalid_column_name(), name).encode(env)
+            }
             XqliteError::InvalidColumnType {
                 index,
                 name,
                 sqlite_type,
-            } => (invalid_column_type(), index, name, *sqlite_type).encode(env),
-            XqliteError::ExecuteReturnedResults => execute_returned_results().encode(env),
-            XqliteError::Utf8Error { reason } => (utf8_error(), reason).encode(env),
+            } => (atoms::invalid_column_type(), index, name, *sqlite_type).encode(env),
+            XqliteError::ExecuteReturnedResults => {
+                atoms::execute_returned_results().encode(env)
+            }
+            XqliteError::Utf8Error { reason } => (atoms::utf8_error(), reason).encode(env),
             XqliteError::FromSqlConversionFailure {
                 index,
                 sqlite_type,
                 reason,
-            } => (from_sql_conversion_failure(), index, *sqlite_type, reason).encode(env),
+            } => (
+                atoms::from_sql_conversion_failure(),
+                index,
+                *sqlite_type,
+                reason,
+            )
+                .encode(env),
             XqliteError::IntegralValueOutOfRange { index, value } => {
-                (integral_value_out_of_range(), index, value).encode(env)
+                (atoms::integral_value_out_of_range(), index, value).encode(env)
             }
             XqliteError::SqlInputError {
                 code,
@@ -501,36 +523,36 @@ impl Encoder for XqliteError {
                 offset,
             } => {
                 let map_result = map_new(env)
-                    .map_put(crate::code(), code)
-                    .and_then(|map| map.map_put(crate::message(), message))
-                    .and_then(|map| map.map_put(crate::sql(), sql))
-                    .and_then(|map| map.map_put(crate::offset(), offset));
+                    .map_put(atoms::code(), code)
+                    .and_then(|map| map.map_put(atoms::message(), message))
+                    .and_then(|map| map.map_put(atoms::sql(), sql))
+                    .and_then(|map| map.map_put(atoms::offset(), offset));
                 match map_result {
-                    Ok(map) => (sql_input_error(), map).encode(env),
+                    Ok(map) => (atoms::sql_input_error(), map).encode(env),
                     Err(_) => (
-                        error(),
-                        internal_encoding_error(),
+                        atoms::error(),
+                        atoms::internal_encoding_error(),
                         "Failed map create for SqlInputError",
                     )
                         .encode(env),
                 }
             }
             XqliteError::ConstraintViolation { kind, message } => {
-                (constraint_violation(), *kind, message).encode(env)
+                (atoms::constraint_violation(), *kind, message).encode(env)
             }
             XqliteError::SchemaParsingError {
                 context,
                 error_detail,
             } => {
                 let SchemaErrorDetail::UnexpectedValue(val) = error_detail;
-                let detail_term = (unexpected_value(), val).encode(env);
-                (schema_parsing_error(), context, detail_term).encode(env)
+                let detail_term = (atoms::unexpected_value(), val).encode(env);
+                (atoms::schema_parsing_error(), context, detail_term).encode(env)
             }
             XqliteError::SqliteFailure {
                 code,
                 extended_code,
                 message,
-            } => (sqlite_failure(), code, extended_code, message).encode(env),
+            } => (atoms::sqlite_failure(), code, extended_code, message).encode(env),
         }
     }
 }

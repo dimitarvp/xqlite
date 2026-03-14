@@ -1,9 +1,7 @@
-use crate::{
-    asc, binary, cascade, create_index, desc, float, full, hidden_alias, integer, no_action,
-    none, normal, numeric, partial, primary_key_constraint, restrict, sequence, set_default,
-    set_null, shadow, simple, stored_generated, table, text, unique_constraint, view,
-    r#virtual, virtual_generated,
-};
+use crate::atoms;
+use crate::error::{SchemaErrorDetail, XqliteError};
+use crate::util::quote_identifier;
+use rusqlite::Connection;
 use rustler::{Atom, NifStruct};
 use std::convert::TryFrom;
 
@@ -75,11 +73,11 @@ pub(crate) struct IndexColumnInfo {
 #[inline]
 pub(crate) fn object_type_to_atom(s: &str) -> Result<Atom, &str> {
     match s {
-        "table" => Ok(table()),
-        "view" => Ok(view()),
-        "shadow" => Ok(shadow()),
-        "virtual" => Ok(r#virtual()),
-        "sequence" => Ok(sequence()),
+        "table" => Ok(atoms::table()),
+        "view" => Ok(atoms::view()),
+        "shadow" => Ok(atoms::shadow()),
+        "virtual" => Ok(atoms::r#virtual()),
+        "sequence" => Ok(atoms::sequence()),
         _ => Err(s),
     }
 }
@@ -91,30 +89,30 @@ pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Result<Atom, &st
 
     if upper_declared_type.contains("INT") {
         // Catches INT, INTEGER, BIGINT etc.
-        Ok(integer())
+        Ok(atoms::integer())
     } else if upper_declared_type.contains("CHAR") || // VARCHAR, CHARACTER
                   upper_declared_type.contains("CLOB") || // CLOB
                   upper_declared_type.contains("TEXT")
     // TEXT
     {
-        Ok(text())
+        Ok(atoms::text())
     } else if upper_declared_type.contains("BLOB") ||
                   upper_declared_type.is_empty() || // No type specified means BLOB affinity
                   upper_declared_type == "ANY"
     // ANY type columns also get BLOB affinity if no data type is forced by content
     {
-        Ok(binary()) // For 'ANY' this is a simplification; typeof() would be more accurate for content.
+        Ok(atoms::binary()) // For 'ANY' this is a simplification; typeof() would be more accurate for content.
     // But for PRAGMA table_info, this is a reasonable default mapping.
     } else if upper_declared_type.contains("REAL") || // REAL
                   upper_declared_type.contains("FLOA") || // FLOAT
                   upper_declared_type.contains("DOUB")
     // DOUBLE
     {
-        Ok(float())
+        Ok(atoms::float())
     } else {
         // Default to NUMERIC affinity for anything else.
         // This covers BOOLEAN, DATE, DATETIME etc. which don't have their own affinity.
-        Ok(numeric())
+        Ok(atoms::numeric())
     }
 }
 
@@ -122,10 +120,10 @@ pub(crate) fn type_affinity_to_atom(declared_type_str: &str) -> Result<Atom, &st
 #[inline]
 pub(crate) fn hidden_int_to_atom(hidden_val: i64) -> Result<Atom, String> {
     match hidden_val {
-        0 => Ok(normal()),
-        1 => Ok(hidden_alias()),
-        2 => Ok(virtual_generated()),
-        3 => Ok(stored_generated()),
+        0 => Ok(atoms::normal()),
+        1 => Ok(atoms::hidden_alias()),
+        2 => Ok(atoms::virtual_generated()),
+        3 => Ok(atoms::stored_generated()),
         _ => Err(hidden_val.to_string()),
     }
 }
@@ -134,11 +132,11 @@ pub(crate) fn hidden_int_to_atom(hidden_val: i64) -> Result<Atom, String> {
 #[inline]
 pub(crate) fn fk_action_to_atom(s: &str) -> Result<Atom, &str> {
     match s {
-        "NO ACTION" => Ok(no_action()),
-        "RESTRICT" => Ok(restrict()),
-        "SET NULL" => Ok(set_null()),
-        "SET DEFAULT" => Ok(set_default()),
-        "CASCADE" => Ok(cascade()),
+        "NO ACTION" => Ok(atoms::no_action()),
+        "RESTRICT" => Ok(atoms::restrict()),
+        "SET NULL" => Ok(atoms::set_null()),
+        "SET DEFAULT" => Ok(atoms::set_default()),
+        "CASCADE" => Ok(atoms::cascade()),
         _ => Err(s),
     }
 }
@@ -147,10 +145,10 @@ pub(crate) fn fk_action_to_atom(s: &str) -> Result<Atom, &str> {
 #[inline]
 pub(crate) fn fk_match_to_atom(s: &str) -> Result<Atom, &str> {
     match s {
-        "NONE" => Ok(none()),
-        "SIMPLE" => Ok(simple()),
-        "PARTIAL" => Ok(partial()),
-        "FULL" => Ok(full()),
+        "NONE" => Ok(atoms::none()),
+        "SIMPLE" => Ok(atoms::simple()),
+        "PARTIAL" => Ok(atoms::partial()),
+        "FULL" => Ok(atoms::full()),
         _ => Err(s),
     }
 }
@@ -159,9 +157,9 @@ pub(crate) fn fk_match_to_atom(s: &str) -> Result<Atom, &str> {
 #[inline]
 pub(crate) fn index_origin_to_atom(s: &str) -> Result<Atom, &str> {
     match s {
-        "c" => Ok(create_index()),
-        "u" => Ok(unique_constraint()),
-        "pk" => Ok(primary_key_constraint()),
+        "c" => Ok(atoms::create_index()),
+        "u" => Ok(atoms::unique_constraint()),
+        "pk" => Ok(atoms::primary_key_constraint()),
         _ => Err(s),
     }
 }
@@ -171,8 +169,8 @@ pub(crate) fn index_origin_to_atom(s: &str) -> Result<Atom, &str> {
 #[inline]
 pub(crate) fn sort_order_to_atom(val: i64) -> Result<Atom, String> {
     match val {
-        0 => Ok(asc()),
-        1 => Ok(desc()),
+        0 => Ok(atoms::asc()),
+        1 => Ok(atoms::desc()),
         _ => Err(val.to_string()),
     }
 }

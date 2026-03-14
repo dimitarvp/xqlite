@@ -1,3 +1,4 @@
+use crate::atoms;
 use crate::error::XqliteError;
 use crate::nif::XqliteConn;
 use rusqlite::ffi;
@@ -19,6 +20,7 @@ pub(crate) struct BlobResource(pub(crate) Vec<u8>);
 #[resource_impl]
 impl Resource for BlobResource {}
 
+#[inline]
 pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
     match val {
         Value::Null => nil().encode(env),
@@ -36,30 +38,30 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
 
 pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> Term<'a> {
     match term.get_type() {
-        TermType::Atom => (crate::atom(), term).encode(env), // e.g., {:atom, :foo}
+        TermType::Atom => (atoms::atom(), term).encode(env), // e.g., {:atom, :foo}
         TermType::Binary => {
             match term.decode::<String>() {
                 Ok(_s_val) => {
                     // If it's a valid Elixir string, tag as :string and pass original term
-                    (crate::string(), term).encode(env) // e.g., {:string, "hello"}
+                    (atoms::string(), term).encode(env) // e.g., {:string, "hello"}
                 }
                 _ => {
                     // Otherwise, tag as :binary and pass original term
-                    (crate::binary(), term).encode(env) // e.g., {:binary, <<1,2,3>>}
+                    (atoms::binary(), term).encode(env) // e.g., {:binary, <<1,2,3>>}
                 }
             }
         }
-        TermType::Integer => (crate::integer(), term).encode(env), // e.g., {:integer, 123}
-        TermType::Float => (crate::float(), term).encode(env),     // e.g., {:float, 1.23}
-        TermType::List => (crate::list(), term).encode(env),       // e.g., {:list, [1,2]}
-        TermType::Map => (crate::map(), term).encode(env),         // e.g., {:map, %{a: 1}}
-        TermType::Fun => (crate::function(), term).encode(env), // e.g., {:function, &fun/0} (opaque)
-        TermType::Pid => (crate::pid(), term).encode(env), // e.g., {:pid, #Pid<...>} (opaque)
-        TermType::Port => (crate::port(), term).encode(env), // e.g., {:port, #Port<...>} (opaque)
-        TermType::Ref => (crate::reference(), term).encode(env), // e.g., {:reference, #Reference<...>} (opaque)
-        TermType::Tuple => (crate::tuple(), term).encode(env),   // e.g., {:tuple, {1,2}}
+        TermType::Integer => (atoms::integer(), term).encode(env), // e.g., {:integer, 123}
+        TermType::Float => (atoms::float(), term).encode(env),     // e.g., {:float, 1.23}
+        TermType::List => (atoms::list(), term).encode(env),       // e.g., {:list, [1,2]}
+        TermType::Map => (atoms::map(), term).encode(env),         // e.g., {:map, %{a: 1}}
+        TermType::Fun => (atoms::function(), term).encode(env), // e.g., {:function, &fun/0} (opaque)
+        TermType::Pid => (atoms::pid(), term).encode(env), // e.g., {:pid, #Pid<...>} (opaque)
+        TermType::Port => (atoms::port(), term).encode(env), // e.g., {:port, #Port<...>} (opaque)
+        TermType::Ref => (atoms::reference(), term).encode(env), // e.g., {:reference, #Reference<...>} (opaque)
+        TermType::Tuple => (atoms::tuple(), term).encode(env),   // e.g., {:tuple, {1,2}}
         TermType::Unknown => {
-            (crate::unknown(), format!("Unknown TermType: {term:?}")).encode(env)
+            (atoms::unknown(), format!("Unknown TermType: {term:?}")).encode(env)
         }
     }
 }
@@ -295,15 +297,23 @@ pub(crate) fn quote_savepoint_name(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-// This function is marked unsafe because it dereferences raw pointers (stmt_ptr)
-// and calls FFI functions that are inherently unsafe. The caller (stream_fetch)
-// must ensure stmt_ptr is valid and points to a statement that has been
-// successfully stepped to SQLITE_ROW.
+/// Extracts column values from a stepped statement and encodes them as Rustler Terms.
+///
+/// # Safety
+///
+/// - `stmt_ptr` must be non-null and point to a valid, prepared `sqlite3_stmt`
+///   that has just returned `SQLITE_ROW` from `sqlite3_step`.
+/// - `column_count` must match the statement's actual column count.
+/// - The caller must hold the connection mutex or otherwise guarantee no concurrent
+///   access to the same statement.
+#[inline]
 pub(crate) unsafe fn sqlite_row_to_elixir_terms(
     env: Env<'_>,
     stmt_ptr: *mut ffi::sqlite3_stmt,
     column_count: usize,
 ) -> Result<Vec<Term<'_>>, XqliteError> {
+    // SAFETY: Caller guarantees stmt_ptr is valid and positioned on a row.
+    // All sqlite3_column_* calls are safe given a valid, stepped statement.
     unsafe {
         let mut row_values = Vec::with_capacity(column_count);
         for i in 0..column_count {
