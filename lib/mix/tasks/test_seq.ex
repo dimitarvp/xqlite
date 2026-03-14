@@ -1,5 +1,16 @@
-# lib/mix/tasks/test_seq.ex
 defmodule Mix.Tasks.Test.Seq do
+  @moduledoc """
+  Runs all test files sequentially, each in its own OS process.
+
+  This avoids SQLite's global VFS contention that causes spurious
+  "out of memory" errors when test files run in parallel.
+
+  ## Usage
+
+      mix test.seq
+      mix test.seq --trace
+  """
+
   use Mix.Task
 
   @shortdoc "Run tests sequentially, one file at a time"
@@ -14,7 +25,7 @@ defmodule Mix.Tasks.Test.Seq do
 
     if failed_files != [] do
       IO.puts("\nFailed files: #{Enum.join(failed_files, ", ")}")
-      System.halt(1)
+      Mix.raise("#{length(failed_files)} test file(s) failed")
     else
       IO.puts("\n✓ All tests passed!")
     end
@@ -25,7 +36,6 @@ defmodule Mix.Tasks.Test.Seq do
   defp run_test_files([file | rest], args, failed_files) do
     IO.puts("\n=== Running #{file} ===")
 
-    # Use a different task name to avoid infinite recursion
     case System.cmd("mix", ["test", file] ++ args, into: IO.stream()) do
       {_, 0} ->
         IO.puts("✓ #{file} passed")
