@@ -946,5 +946,45 @@ defmodule XqliteNIF do
         ) :: :ok | Xqlite.error()
   def deserialize(_conn, _schema, _data, _read_only), do: err()
 
+  # ---------------------------------------------------------------------------
+  # Extension Loading
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Enables or disables extension loading for the given connection.
+
+  Extension loading is disabled by default for security. You must call
+  `enable_load_extension(conn, true)` before calling `load_extension/2` or
+  `load_extension/3`. Call `enable_load_extension(conn, false)` when done
+  loading to re-lock the connection.
+  """
+  @spec enable_load_extension(conn :: Xqlite.conn(), enabled :: boolean()) ::
+          :ok | Xqlite.error()
+  def enable_load_extension(_conn, _enabled), do: err()
+
+  @doc """
+  Loads a SQLite extension from the shared library at `path`.
+
+  The entry point is auto-detected by SQLite. Extension loading must be
+  enabled first via `enable_load_extension/2`.
+  """
+  @spec load_extension(conn :: Xqlite.conn(), path :: String.t()) ::
+          :ok | Xqlite.error()
+  def load_extension(conn, path), do: load_extension(conn, path, nil)
+
+  @doc """
+  Loads a SQLite extension from the shared library at `path` with an
+  explicit entry point function name.
+
+  Pass `nil` for `entry_point` to let SQLite auto-detect.
+  Extension loading must be enabled first via `enable_load_extension/2`.
+  """
+  @spec load_extension(
+          conn :: Xqlite.conn(),
+          path :: String.t(),
+          entry_point :: String.t() | nil
+        ) :: :ok | Xqlite.error()
+  def load_extension(_conn, _path, _entry_point), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

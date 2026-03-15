@@ -35,6 +35,7 @@ pub(crate) mod atoms {
         exclusive,
         execute_returned_results,
         expected,
+        extension_loading_disabled,
         expected_keyword_list,
         expected_keyword_tuple,
         expected_list,

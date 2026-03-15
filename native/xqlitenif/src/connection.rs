@@ -3,10 +3,12 @@ use crate::error::XqliteError;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug)]
 pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
+    pub(crate) extensions_enabled: AtomicBool,
 }
 
 #[resource_impl]
@@ -52,6 +54,7 @@ pub(crate) fn handle_open_result(
     match open_result {
         Ok(conn) => Ok(ResourceArc::new(XqliteConn {
             conn: Mutex::new(Some(conn)),
+            extensions_enabled: AtomicBool::new(false),
         })),
         Err(e) => Err(match e {
             RusqliteError::SqliteFailure(ffi_err, msg_opt) => {

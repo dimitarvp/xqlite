@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 rusqlite = { version = "0.39.0", features = [
   "bundled",
   "hooks",
+  "load_extension",
   "modern_sqlite",
   "serialize",
   "trace",

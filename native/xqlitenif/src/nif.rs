@@ -767,3 +767,49 @@ fn deserialize<'a>(
     });
     singular_ok_or_error_tuple(env, result)
 }
+
+// ---------------------------------------------------------------------------
+// Extension Loading NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn enable_load_extension<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    enabled: bool,
+) -> Term<'a> {
+    let result = connection::with_conn(&handle, |conn| {
+        if enabled {
+            // SAFETY: Caller has opted in to loading extensions. The risk of
+            // arbitrary code execution is accepted by the user.
+            unsafe { conn.load_extension_enable()? };
+        } else {
+            conn.load_extension_disable()?;
+        }
+        handle.extensions_enabled.store(enabled, Ordering::Release);
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn load_extension<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    path: String,
+    entry_point: Option<String>,
+) -> Term<'a> {
+    if !handle.extensions_enabled.load(Ordering::Acquire) {
+        return (atoms::error(), atoms::extension_loading_disabled()).encode(env);
+    }
+    let result = connection::with_conn(&handle, |conn| {
+        // SAFETY: Extension loading was explicitly enabled by the caller via
+        // enable_load_extension. The path points to a user-provided shared
+        // library — the user accepts the trust boundary.
+        unsafe {
+            conn.load_extension(path.as_str(), entry_point.as_deref())?;
+        }
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
