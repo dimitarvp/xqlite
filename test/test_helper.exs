@@ -7,7 +7,7 @@ cargo_home = System.get_env("CARGO_HOME") || Path.join(System.user_home!(), ".ca
 
 sqlite_header_dir =
   Path.wildcard(
-    Path.join([cargo_home, "registry", "src", "**", "libsqlite3-sys-*", "sqlite3"])
+    Path.join([cargo_home, "registry", "src", "*", "libsqlite3-sys-*", "sqlite3"])
   )
   |> Enum.sort()
   |> List.last()
