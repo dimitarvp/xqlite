@@ -42,3 +42,6 @@ checksum-*.exs
 /test/support/ext/*.dylib
 /test/support/ext/*.so
 /test/support/ext/*.dll
+/test/support/ext/*.obj
+/test/support/ext/*.lib
+/test/support/ext/*.exp

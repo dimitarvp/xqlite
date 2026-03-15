@@ -19,20 +19,27 @@ sqlite_header_dir =
   |> List.last()
 
 if sqlite_header_dir && File.exists?(test_ext_src) do
-  ext_suffix = if :os.type() == {:unix, :darwin}, do: "dylib", else: "so"
+  {ext_suffix, compiler_args} =
+    case :os.type() do
+      {:unix, :darwin} ->
+        {"dylib",
+         fn src, out, inc -> ["cc", ["-shared", "-fPIC", "-I", inc, "-o", out, src]] end}
+
+      {:unix, _} ->
+        {"so", fn src, out, inc -> ["cc", ["-shared", "-fPIC", "-I", inc, "-o", out, src]] end}
+
+      {:win32, _} ->
+        {"dll",
+         fn src, out, inc ->
+           ["cl", ["/LD", "/I", inc, src, "/Fe:" <> out, "/link", "/DLL"]]
+         end}
+    end
+
   out_file = "#{test_ext_out}.#{ext_suffix}"
 
   unless File.exists?(out_file) && File.stat!(out_file).mtime >= File.stat!(test_ext_src).mtime do
-    {_, 0} =
-      System.cmd("cc", [
-        "-shared",
-        "-fPIC",
-        "-I",
-        sqlite_header_dir,
-        "-o",
-        out_file,
-        test_ext_src
-      ])
+    [cmd | [args]] = compiler_args.(test_ext_src, out_file, sqlite_header_dir)
+    {_, 0} = System.cmd(cmd, args, stderr_to_stdout: true)
   end
 end
 
