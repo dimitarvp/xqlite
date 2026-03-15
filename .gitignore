@@ -37,3 +37,8 @@ checksum-*.exs
 
 # Local direnv config (forces source compilation via XQLITE_BUILD).
 .envrc
+
+# Compiled test extensions (built from C source during test).
+/test/support/ext/*.dylib
+/test/support/ext/*.so
+/test/support/ext/*.dll

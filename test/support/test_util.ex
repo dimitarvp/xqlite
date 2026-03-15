@@ -52,6 +52,14 @@ defmodule Xqlite.TestUtil do
     Map.fetch!(@tag_to_mfa_map, found_tag)
   end
 
+  @doc """
+  Returns the absolute path to the compiled test SQLite extension (without file suffix).
+  SQLite's load_extension strips/adds the platform suffix automatically.
+  """
+  def test_extension_path do
+    Path.join([__DIR__, "ext", "xqlite_test_ext"])
+  end
+
   def normalize_test_values(values) do
     Enum.map(values, fn
       {set, expected} -> {set, expected}
