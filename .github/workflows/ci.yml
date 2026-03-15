@@ -40,7 +40,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Restore dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
@@ -88,7 +88,7 @@ jobs:
           otp-version: ${{ env.DEFAULT_OTP }}
 
       - name: Restore dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
@@ -99,7 +99,7 @@ jobs:
             v0-elixir-dialyzer-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
 
       - name: Restore PLT cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             priv/plts
@@ -155,7 +155,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Restore Elixir dependencies cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             deps
