@@ -55,6 +55,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Schema:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **Log hook:** `set_log_hook/1`, `remove_log_hook/0` — global SQLite diagnostic log forwarded to a PID as `{:xqlite_log, code, message}`
 - **Update hook:** `set_update_hook/2`, `remove_update_hook/1` — per-connection change notifications as `{:xqlite_update, action, db_name, table, rowid}`
+- **Serialize:** `serialize/1`, `serialize/2`, `deserialize/2`, `deserialize/4` — atomic database snapshots to/from contiguous binary
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
 
 Errors are structured tuples: `{:error, {:constraint_violation, :constraint_foreign_key, msg}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
@@ -112,6 +113,16 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
   type_extensions: [TypeExtension.DateTime, TypeExtension.Date])
 |> Enum.to_list()
 # => [%{"ts" => ~U[2024-01-15 10:30:00Z], "day" => ~D[2024-06-15]}]
+
+# Serialize an in-memory database to a binary snapshot
+{:ok, binary} = XqliteNIF.serialize(conn)
+
+# Restore from a snapshot (e.g., transfer between connections, backups)
+{:ok, conn2} = XqliteNIF.open_in_memory()
+:ok = XqliteNIF.deserialize(conn2, binary)
+
+# Read-only deserialization (writes will fail)
+:ok = XqliteNIF.deserialize(conn2, "main", binary, true)
 ```
 
 ## Known limitations
@@ -125,11 +136,13 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 
 Planned for **xqlite** core (before Ecto adapter work):
 
-1. ~~Change notification hook (`set_update_hook/2`)~~ — done
-2. ~~Custom type extensions (Elixir↔SQLite type coercion)~~ — done
-3. Serialize / deserialize database to binary (`sqlite3_serialize` / `sqlite3_deserialize`)
-4. Extension loading (`enable_load_extension/2`, `load_extension/2`)
-5. Manual statement lifecycle (prepare/bind/step/reset/release)
+1. Extension loading (`enable_load_extension/2`, `load_extension/2`)
+2. Manual statement lifecycle (prepare/bind/step/reset/release)
+3. Online Backup API
+4. Session Extension
+5. Incremental Blob I/O
+6. SQLCipher support (optional)
+7. User-Defined Functions (lowest priority — extremely fiddly across NIF boundaries)
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
