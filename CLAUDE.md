@@ -83,6 +83,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 
 ## Rust Code Style
 
+- **All `#[rustler::nif]` functions live in `nif.rs`.** Resource structs, helpers, and module-specific logic go in their own modules (e.g., `session.rs`, `stream.rs`, `connection.rs`). Never put NIF functions outside `nif.rs`.
 - All Rustler atoms must be referenced via the `atoms::` module prefix (e.g., `atoms::columns()`, `atoms::error()`). Never import atoms into local scope with bare `use crate::{columns, ...}`.
 - Every `unsafe` block must have a `// SAFETY:` comment explaining the invariant that makes it safe.
 - Use `#[inline]` on hot-path helpers called per-row or per-NIF-invocation.
