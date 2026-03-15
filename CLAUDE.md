@@ -60,7 +60,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 7. **Triple version bump.** Version must be updated in `mix.exs` (project version), `native/xqlitenif/Cargo.toml`, and `mix.exs` (`source_ref` in `docs/0`) simultaneously. Always commit them together.
 8. **No paid GHA runners.** OSS project — never use `-large`, `-xlarge`, or any paid runner labels. Use free-tier runners and cross-compile where needed (e.g., `x86_64-apple-darwin` from ARM64 `macos-15`).
 9. **Checksum generation requires `--no-config`.** `mix rustler_precompiled.download XqliteNIF --all --print --no-config` — without `--no-config`, compilation triggers the `use RustlerPrecompiled` macro which fails if the checksum file doesn't exist yet.
-10. **`-dev` suffix auto-enables `force_build`.** During development keep version as `X.Y.Z-dev` — `rustler_precompiled` detects it and compiles from Rust source. No env var or checksum file needed locally. **NEVER commit `-dev` versions.** The `-dev` suffix in `mix.exs` and `Cargo.toml` must stay local-only, never staged or committed. Always check `git diff --cached mix.exs native/xqlitenif/Cargo.toml` before committing to ensure no version changes leak in.
+10. **Local source builds via `.envrc`.** `.envrc` sets `XQLITE_BUILD=true` so `rustler_precompiled` always compiles from Rust source locally. The `.envrc` is gitignored. Version strings in `mix.exs` and `Cargo.toml` stay at the released version — only bump them on release day (see Release Checklist).
 11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
 12. **NIF version features in `Cargo.toml`.** Rustler 0.37 requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
 13. **Delete old checksum file before regenerating.** `mix rustler_precompiled.download --all` won't overwrite stale entries from a prior version. Always `rm -f checksum-Elixir.XqliteNIF.exs` first. If `mix hex.publish` still fails with a checksum mismatch, `--only-local` can add just the local platform's entry.
@@ -115,7 +115,7 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 4. `rm -f checksum-Elixir.XqliteNIF.exs` — stale entries from prior versions won't be overwritten.
 5. `mix rustler_precompiled.download XqliteNIF --all --print --no-config`
 6. `mix hex.publish`
-7. Locally bump to `X.Y+1.0-dev` in `mix.exs` and `Cargo.toml` (do NOT commit — local-only so `-dev` suffix triggers source builds).
+7. No post-release local version bump needed — `.envrc` handles source builds via `XQLITE_BUILD=true`.
 
 ## Design Tradeoffs
 

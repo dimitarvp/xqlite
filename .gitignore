@@ -34,3 +34,6 @@ xqlite-*.tar
 
 # Precompiled NIF checksums (generated per release, included in hex package).
 checksum-*.exs
+
+# Local direnv config (forces source compilation via XQLITE_BUILD).
+.envrc
