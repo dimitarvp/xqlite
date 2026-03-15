@@ -145,9 +145,9 @@ Planned for **xqlite** core (before Ecto adapter work):
 1. Online Backup API
 2. Session Extension
 3. Incremental Blob I/O
-4. Manual statement lifecycle (prepare/bind/step/reset/release)
-5. SQLCipher support (optional)
-6. User-Defined Functions (lowest priority — extremely fiddly across NIF boundaries)
+4. SQLCipher support (optional)
+5. User-Defined Functions (extremely fiddly across NIF boundaries)
+6. Manual statement lifecycle (prepare/bind/step/reset/release)
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
