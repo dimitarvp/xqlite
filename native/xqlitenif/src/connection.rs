@@ -98,3 +98,21 @@ where
         None => Err(XqliteError::ConnectionClosed),
     }
 }
+
+#[inline]
+pub(crate) fn with_conn_mut<F, R>(
+    handle: &ResourceArc<XqliteConn>,
+    func: F,
+) -> Result<R, XqliteError>
+where
+    F: FnOnce(&mut Connection) -> Result<R, XqliteError>,
+{
+    let mut conn_guard = handle
+        .conn
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    match conn_guard.as_mut() {
+        Some(conn) => func(conn),
+        None => Err(XqliteError::ConnectionClosed),
+    }
+}

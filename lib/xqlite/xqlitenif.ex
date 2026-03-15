@@ -900,5 +900,51 @@ defmodule XqliteNIF do
   @spec remove_update_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def remove_update_hook(_conn), do: err()
 
+  @doc """
+  Serializes a database to a contiguous binary.
+
+  Returns a binary snapshot of the entire database. This is an atomic,
+  point-in-time copy — no pages are locked during serialization.
+
+  `schema` identifies which attached database to serialize. Use `"main"`
+  for the primary database (default), `"temp"` for the temp database,
+  or the name of an attached database.
+
+  Returns `{:ok, binary}` on success or `{:error, reason}` on failure.
+  """
+  @spec serialize(conn :: Xqlite.conn()) :: {:ok, binary()} | Xqlite.error()
+  def serialize(conn), do: serialize(conn, "main")
+
+  @spec serialize(conn :: Xqlite.conn(), schema :: String.t()) ::
+          {:ok, binary()} | Xqlite.error()
+  def serialize(_conn, _schema), do: err()
+
+  @doc """
+  Deserializes a binary into a database, replacing its current contents.
+
+  The binary must be a valid SQLite database image (as produced by
+  `serialize/2`). After deserialization the connection operates on the
+  new database entirely in memory.
+
+  `schema` identifies which attached database to replace. Use `"main"`
+  for the primary database (default).
+
+  When `read_only` is `true`, the deserialized database cannot be
+  modified — write operations will fail with `{:error, {:read_only_database, _}}`.
+  When `false` (default), the database is writable and may grow as needed.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec deserialize(conn :: Xqlite.conn(), data :: binary()) :: :ok | Xqlite.error()
+  def deserialize(conn, data), do: deserialize(conn, "main", data, false)
+
+  @spec deserialize(
+          conn :: Xqlite.conn(),
+          schema :: String.t(),
+          data :: binary(),
+          read_only :: boolean()
+        ) :: :ok | Xqlite.error()
+  def deserialize(_conn, _schema, _data, _read_only), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

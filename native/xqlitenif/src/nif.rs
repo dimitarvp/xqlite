@@ -727,3 +727,43 @@ fn remove_update_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_>
     let result = connection::with_conn(&handle, crate::update_hook::remove);
     singular_ok_or_error_tuple(env, result)
 }
+
+// ---------------------------------------------------------------------------
+// Serialize / Deserialize NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn serialize<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    schema: String,
+) -> Result<rustler::Binary<'a>, XqliteError> {
+    connection::with_conn(&handle, |conn| {
+        let data = conn.serialize(schema.as_str())?;
+        let bytes: &[u8] = &data;
+        let mut binary = rustler::OwnedBinary::new(bytes.len()).ok_or_else(|| {
+            XqliteError::InternalEncodingError {
+                context: "failed to allocate binary for serialized database".to_string(),
+            }
+        })?;
+        binary.as_mut_slice().copy_from_slice(bytes);
+        Ok(binary.release(env))
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn deserialize<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    schema: String,
+    data: rustler::Binary<'a>,
+    read_only: bool,
+) -> Term<'a> {
+    let result = connection::with_conn_mut(&handle, |conn| {
+        let bytes = data.as_slice();
+        let cursor = std::io::Cursor::new(bytes);
+        conn.deserialize_read_exact(schema.as_str(), cursor, bytes.len(), read_only)?;
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
