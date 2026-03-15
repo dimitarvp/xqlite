@@ -56,6 +56,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Log hook:** `set_log_hook/1`, `remove_log_hook/0` — global SQLite diagnostic log forwarded to a PID as `{:xqlite_log, code, message}`
 - **Update hook:** `set_update_hook/2`, `remove_update_hook/1` — per-connection change notifications as `{:xqlite_update, action, db_name, table, rowid}`
 - **Serialize:** `serialize/1`, `serialize/2`, `deserialize/2`, `deserialize/4` — atomic database snapshots to/from contiguous binary
+- **Extensions:** `enable_load_extension/2`, `load_extension/2`, `load_extension/3` — opt-in loading of SQLite extensions from shared libraries
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
 
 Errors are structured tuples: `{:error, {:constraint_violation, :constraint_foreign_key, msg}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
@@ -123,6 +124,11 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 
 # Read-only deserialization (writes will fail)
 :ok = XqliteNIF.deserialize(conn2, "main", binary, true)
+
+# Load a SQLite extension (e.g., spatialite, sqlean modules)
+:ok = XqliteNIF.enable_load_extension(conn, true)
+:ok = XqliteNIF.load_extension(conn, "/path/to/extension")
+:ok = XqliteNIF.enable_load_extension(conn, false)
 ```
 
 ## Known limitations
@@ -136,13 +142,12 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 
 Planned for **xqlite** core (before Ecto adapter work):
 
-1. Extension loading (`enable_load_extension/2`, `load_extension/2`)
-2. Manual statement lifecycle (prepare/bind/step/reset/release)
-3. Online Backup API
-4. Session Extension
-5. Incremental Blob I/O
-6. SQLCipher support (optional)
-7. User-Defined Functions (lowest priority — extremely fiddly across NIF boundaries)
+1. Online Backup API
+2. Session Extension
+3. Incremental Blob I/O
+4. Manual statement lifecycle (prepare/bind/step/reset/release)
+5. SQLCipher support (optional)
+6. User-Defined Functions (lowest priority — extremely fiddly across NIF boundaries)
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
