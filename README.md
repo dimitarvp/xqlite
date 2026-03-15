@@ -57,7 +57,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Update hook:** `set_update_hook/2`, `remove_update_hook/1` — per-connection change notifications as `{:xqlite_update, action, db_name, table, rowid}`
 - **Serialize:** `serialize/1`, `serialize/2`, `deserialize/2`, `deserialize/4` — atomic database snapshots to/from contiguous binary
 - **Extensions:** `enable_load_extension/2`, `load_extension/2`, `load_extension/3` — opt-in loading of SQLite extensions from shared libraries
-- **Backup:** `backup/2`, `backup/3`, `restore/2`, `restore/3` — one-shot online backup/restore to/from file (incremental backup with progress reporting is planned)
+- **Backup:** `backup/2`, `backup/3`, `restore/2`, `restore/3` — one-shot online backup/restore to/from file; `backup_with_progress/6` — incremental backup with progress messages and cancellation
 - **Session:** `session_new/1`, `session_attach/2`, `session_changeset/1`, `session_patchset/1`, `session_is_empty/1`, `session_delete/1`, `changeset_apply/3`, `changeset_invert/1`, `changeset_concat/2` — change tracking, changeset capture/apply/invert/concat with conflict strategies
 - **Blob I/O:** `blob_open/6`, `blob_read/3`, `blob_write/3`, `blob_size/1`, `blob_reopen/2`, `blob_close/1` — incremental read/write of large BLOBs without loading into memory
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
@@ -138,6 +138,12 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 {:ok, conn3} = XqliteNIF.open_in_memory()
 :ok = XqliteNIF.restore(conn3, "/path/to/backup.db")
 
+# Backup with progress reporting and cancellation
+{:ok, token} = XqliteNIF.create_cancel_token()
+:ok = XqliteNIF.backup_with_progress(conn, "main", "/path/to/backup.db", self(), 10, token)
+# Receive {:xqlite_backup_progress, remaining, pagecount} messages
+# Cancel from another process: XqliteNIF.cancel_operation(token)
+
 # Track changes with sessions, then replicate to another database
 {:ok, session} = XqliteNIF.session_new(conn)
 :ok = XqliteNIF.session_attach(session, nil)
@@ -164,14 +170,29 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 - **Invalid UTF-8 in TEXT columns** — applying SQL text functions (`UPPER()`, `LOWER()`) to non-UTF-8 data may crash the SQLite C library.
 - **User-Defined Functions** — not planned due to implementation complexity across NIF boundaries.
 
+## Design notes
+
+### Backup API
+
+xqlite provides two backup interfaces: one-shot (`backup/2`, `restore/2`) and incremental with progress (`backup_with_progress/6`).
+
+The incremental variant runs the entire backup inside a single NIF call on a dirty I/O scheduler, sending `{:xqlite_backup_progress, remaining, pagecount}` messages to a PID after each step. A cancel token (the same one used for `query_cancellable/4`) allows another process to abort the backup at any time.
+
+We chose this single-call design over exposing a step-by-step `Backup` resource handle because:
+
+- **No double-connection risk.** SQLite's incremental backup API requires holding two connections simultaneously (source + destination). In Ecto/DBConnection pools, checking out two connections at once is a classic deadlock risk. Our API takes a file path as the destination, avoiding this entirely.
+- **No manual lifecycle management.** A step-by-step API would require callers to explicitly close/finish the backup handle. Forgotten handles leak resources. Our approach creates, runs, and cleans up the backup in one call.
+- **Cancellation and progress are already covered.** The cancel token + progress messages give callers everything they need for UI feedback and timeout enforcement without exposing low-level step control.
+
+For use cases that genuinely require step-level control from Elixir (e.g., custom retry logic between steps), `serialize/1` and `deserialize/2` provide atomic database snapshots as binaries that can be chunked and managed in pure Elixir. If demand for a step-by-step backup resource materializes, it can be added in a future release.
+
 ## Roadmap
 
 Planned for **xqlite** core (before Ecto adapter work):
 
-1. Incremental backup with progress reporting
-2. SQLCipher support (optional)
-3. User-Defined Functions (extremely fiddly across NIF boundaries)
-4. Manual statement lifecycle (prepare/bind/step/reset/release)
+1. SQLCipher support (optional)
+2. User-Defined Functions (extremely fiddly across NIF boundaries)
+3. Manual statement lifecycle (prepare/bind/step/reset/release)
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
