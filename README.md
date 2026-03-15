@@ -59,6 +59,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Extensions:** `enable_load_extension/2`, `load_extension/2`, `load_extension/3` — opt-in loading of SQLite extensions from shared libraries
 - **Backup:** `backup/2`, `backup/3`, `restore/2`, `restore/3` — one-shot online backup/restore to/from file (incremental backup with progress reporting is planned)
 - **Session:** `session_new/1`, `session_attach/2`, `session_changeset/1`, `session_patchset/1`, `session_is_empty/1`, `session_delete/1`, `changeset_apply/3`, `changeset_invert/1`, `changeset_concat/2` — change tracking, changeset capture/apply/invert/concat with conflict strategies
+- **Blob I/O:** `blob_open/6`, `blob_read/3`, `blob_write/3`, `blob_size/1`, `blob_reopen/2`, `blob_close/1` — incremental read/write of large BLOBs without loading into memory
 - **Diagnostics:** `compile_options/1`, `sqlite_version/0`
 
 Errors are structured tuples: `{:error, {:constraint_violation, :constraint_foreign_key, msg}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
@@ -146,6 +147,14 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 
 # Apply changeset to replica (conflict strategies: :omit, :replace, :abort)
 :ok = XqliteNIF.changeset_apply(replica_conn, changeset, :replace)
+
+# Incremental blob I/O — read/write large BLOBs in chunks
+{:ok, 1} = XqliteNIF.execute(conn, "INSERT INTO files VALUES (1, zeroblob(1048576))", [])
+{:ok, blob} = XqliteNIF.blob_open(conn, "main", "files", "data", 1, false)
+:ok = XqliteNIF.blob_write(blob, 0, chunk1)
+:ok = XqliteNIF.blob_write(blob, byte_size(chunk1), chunk2)
+{:ok, header} = XqliteNIF.blob_read(blob, 0, 64)
+:ok = XqliteNIF.blob_close(blob)
 ```
 
 ## Known limitations
@@ -159,11 +168,10 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 
 Planned for **xqlite** core (before Ecto adapter work):
 
-1. Incremental Blob I/O
-2. Incremental backup with progress reporting
-3. SQLCipher support (optional)
-4. User-Defined Functions (extremely fiddly across NIF boundaries)
-5. Manual statement lifecycle (prepare/bind/step/reset/release)
+1. Incremental backup with progress reporting
+2. SQLCipher support (optional)
+3. User-Defined Functions (extremely fiddly across NIF boundaries)
+4. Manual statement lifecycle (prepare/bind/step/reset/release)
 
 **Then:** [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, type handling.
 
