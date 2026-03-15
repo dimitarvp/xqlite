@@ -26,7 +26,7 @@ end
     {:win32, _} ->
       {"dll",
        fn src, out, inc ->
-         ["cl", ["/LD", "/I", inc, src, "/Fe:" <> out, "/link", "/DLL"]]
+         ["gcc", ["-shared", "-I", inc, "-o", out, src]]
        end}
   end
 
