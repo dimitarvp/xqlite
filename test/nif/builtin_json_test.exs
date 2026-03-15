@@ -237,7 +237,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
         assert {:ok, %{rows: [[result]]}} =
                  NIF.query(conn, "SELECT json_group_array(val) FROM jga", [])
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert Enum.sort(decoded) == ["alpha", "beta", "gamma"]
       end
 
@@ -249,7 +249,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
         assert {:ok, %{rows: [[result]]}} =
                  NIF.query(conn, "SELECT json_group_object(k, v) FROM jgo", [])
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded == %{"x" => 1, "y" => 2}
       end
 
@@ -265,7 +265,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded["a"] == 1
         assert decoded["b"] == 2
       end
@@ -278,7 +278,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded["a"] == 99
         refute Map.has_key?(decoded, "b")
       end
@@ -291,7 +291,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded == %{"a" => 99, "b" => 2}
       end
 
@@ -303,7 +303,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded == %{"a" => 1, "c" => 3}
       end
 
@@ -344,7 +344,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
         assert {:ok, %{rows: [[1, json_out]]}} =
                  NIF.query(conn, "SELECT * FROM jrt WHERE id = 1", [])
 
-        assert :json.decode(json_out) == :json.decode(json_in)
+        assert Jason.decode!(json_out) == Jason.decode!(json_in)
       end
 
       test "json_extract() works on stored column data", %{conn: conn} do
@@ -380,7 +380,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
         assert {:ok, %{rows: [[json_out]]}} =
                  NIF.query(conn, "SELECT data FROM juni", [])
 
-        assert :json.decode(json_out) == :json.decode(json_in)
+        assert Jason.decode!(json_out) == Jason.decode!(json_in)
       end
 
       test "JSON with escaped characters", %{conn: conn} do
@@ -413,11 +413,11 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert length(decoded) == 6
         assert Enum.at(decoded, 0) == 1
         assert Enum.at(decoded, 1) == "two"
-        assert Enum.at(decoded, 3) == :null
+        assert Enum.at(decoded, 3) == nil
         assert Enum.at(decoded, 4) == true
         assert Enum.at(decoded, 5) == [4, 5]
       end
@@ -445,7 +445,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded == %{"a" => 1, "b" => 99, "c" => 3}
       end
 
@@ -457,7 +457,7 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
                    []
                  )
 
-        decoded = :json.decode(result)
+        decoded = Jason.decode!(result)
         assert decoded == %{"a" => 1}
       end
     end
