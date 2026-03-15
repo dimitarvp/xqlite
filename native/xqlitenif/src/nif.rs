@@ -7,11 +7,13 @@ use crate::query;
 use crate::schema::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, SchemaObjectInfo,
 };
+use crate::session::{self, XqliteSession};
 use crate::stream::XqliteStream;
 use crate::transaction;
 use crate::util::singular_ok_or_error_tuple;
 use rusqlite::Connection;
 use rusqlite::ffi;
+use rusqlite::session::ConflictAction;
 use rustler::{
     Encoder, Env, ResourceArc, Term, TermType,
     types::{
@@ -19,6 +21,7 @@ use rustler::{
         map::map_new,
     },
 };
+use std::io::Cursor;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -761,7 +764,7 @@ fn deserialize<'a>(
 ) -> Term<'a> {
     let result = connection::with_conn_mut(&handle, |conn| {
         let bytes = data.as_slice();
-        let cursor = std::io::Cursor::new(bytes);
+        let cursor = Cursor::new(bytes);
         conn.deserialize_read_exact(schema.as_str(), cursor, bytes.len(), read_only)?;
         Ok(())
     });
@@ -812,4 +815,200 @@ fn load_extension<'a>(
         Ok(())
     });
     singular_ok_or_error_tuple(env, result)
+}
+
+// ---------------------------------------------------------------------------
+// Online Backup NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn backup<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    schema: String,
+    dest_path: String,
+) -> Term<'a> {
+    let result = connection::with_conn(&handle, |conn| {
+        conn.backup(schema.as_str(), dest_path.as_str(), None)?;
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn restore<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    schema: String,
+    src_path: String,
+) -> Term<'a> {
+    let result = connection::with_conn_mut(&handle, |conn| {
+        conn.restore(
+            schema.as_str(),
+            src_path.as_str(),
+            None::<fn(rusqlite::backup::Progress)>,
+        )?;
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+// ---------------------------------------------------------------------------
+// Session Extension NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn session_new<'a>(env: Env<'a>, handle: ResourceArc<XqliteConn>) -> Term<'a> {
+    let result = connection::with_conn(&handle, |conn| {
+        let s = rusqlite::session::Session::new(conn)?;
+        // SAFETY: We erase the connection lifetime. This is safe because
+        // conn_resource_arc (stored in XqliteSession) prevents the connection
+        // from being dropped while the session exists.
+        let static_session: rusqlite::session::Session<'static> =
+            unsafe { std::mem::transmute(s) };
+        Ok(ResourceArc::new(XqliteSession {
+            session: std::sync::Mutex::new(Some(static_session)),
+            conn_resource_arc: handle.clone(),
+        }))
+    });
+    match result {
+        Ok(resource) => (ok(), resource).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn session_attach<'a>(
+    env: Env<'a>,
+    session_handle: ResourceArc<XqliteSession>,
+    table: Option<String>,
+) -> Term<'a> {
+    let result = session::with_session_mut(&session_handle, |s| {
+        match &table {
+            Some(name) => s.attach(Some(name.as_str()))?,
+            None => s.attach(None::<&str>)?,
+        }
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn session_changeset<'a>(
+    env: Env<'a>,
+    session_handle: ResourceArc<XqliteSession>,
+) -> Term<'a> {
+    let result = session::with_session_mut(&session_handle, |s| {
+        let mut output = Vec::new();
+        s.changeset_strm(&mut output)?;
+        session::to_owned_binary(&output, "changeset")
+    });
+    match result {
+        Ok(binary) => (ok(), binary.release(env)).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn session_patchset<'a>(env: Env<'a>, session_handle: ResourceArc<XqliteSession>) -> Term<'a> {
+    let result = session::with_session_mut(&session_handle, |s| {
+        let mut output = Vec::new();
+        s.patchset_strm(&mut output)?;
+        session::to_owned_binary(&output, "patchset")
+    });
+    match result {
+        Ok(binary) => (ok(), binary.release(env)).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn session_is_empty(session_handle: ResourceArc<XqliteSession>) -> Result<bool, XqliteError> {
+    session::with_session(&session_handle, |s| Ok(s.is_empty()))
+}
+
+#[rustler::nif]
+fn session_delete<'a>(env: Env<'a>, session_handle: ResourceArc<XqliteSession>) -> Term<'a> {
+    let result = (|| -> Result<(), XqliteError> {
+        let mut guard = session_handle
+            .session
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        guard.take();
+        Ok(())
+    })();
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn changeset_apply<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    changeset_binary: rustler::Binary<'a>,
+    conflict_strategy: rustler::Atom,
+) -> Term<'a> {
+    let strategy = if conflict_strategy == atoms::omit() {
+        ConflictAction::SQLITE_CHANGESET_OMIT
+    } else if conflict_strategy == atoms::replace() {
+        ConflictAction::SQLITE_CHANGESET_REPLACE
+    } else if conflict_strategy == atoms::abort() {
+        ConflictAction::SQLITE_CHANGESET_ABORT
+    } else {
+        return (atoms::error(), atoms::invalid_conflict_strategy()).encode(env);
+    };
+
+    let result = connection::with_conn(&handle, |conn| {
+        let bytes = changeset_binary.as_slice();
+        let mut cursor = Cursor::new(bytes);
+        let strategy_code = strategy as i32;
+        conn.apply_strm(
+            &mut cursor,
+            None::<fn(&str) -> bool>,
+            move |_conflict_type, _item| match strategy_code {
+                x if x == ConflictAction::SQLITE_CHANGESET_REPLACE as i32 => {
+                    ConflictAction::SQLITE_CHANGESET_REPLACE
+                }
+                x if x == ConflictAction::SQLITE_CHANGESET_ABORT as i32 => {
+                    ConflictAction::SQLITE_CHANGESET_ABORT
+                }
+                _ => ConflictAction::SQLITE_CHANGESET_OMIT,
+            },
+        )?;
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn changeset_invert<'a>(env: Env<'a>, changeset_binary: rustler::Binary<'a>) -> Term<'a> {
+    let result = (|| -> Result<rustler::OwnedBinary, XqliteError> {
+        let bytes = changeset_binary.as_slice();
+        let mut input = Cursor::new(bytes);
+        let mut output = Vec::new();
+        rusqlite::session::invert_strm(&mut input, &mut output)?;
+        session::to_owned_binary(&output, "inverted changeset")
+    })();
+    match result {
+        Ok(binary) => (ok(), binary.release(env)).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn changeset_concat<'a>(
+    env: Env<'a>,
+    a_binary: rustler::Binary<'a>,
+    b_binary: rustler::Binary<'a>,
+) -> Term<'a> {
+    let result = (|| -> Result<rustler::OwnedBinary, XqliteError> {
+        let mut input_a = Cursor::new(a_binary.as_slice());
+        let mut input_b = Cursor::new(b_binary.as_slice());
+        let mut output = Vec::new();
+        rusqlite::session::concat_strm(&mut input_a, &mut input_b, &mut output)?;
+        session::to_owned_binary(&output, "concatenated changeset")
+    })();
+    match result {
+        Ok(binary) => (ok(), binary.release(env)).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
 }

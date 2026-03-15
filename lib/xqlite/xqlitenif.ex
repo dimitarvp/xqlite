@@ -986,5 +986,128 @@ defmodule XqliteNIF do
         ) :: :ok | Xqlite.error()
   def load_extension(_conn, _path, _entry_point), do: err()
 
+  # ---------------------------------------------------------------------------
+  # Online Backup
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Backs up the database to a file.
+
+  Copies the named schema (default `"main"`) to the file at `dest_path`.
+  The destination file is created or overwritten. The source database
+  remains readable during the backup.
+  """
+  @spec backup(conn :: Xqlite.conn(), dest_path :: String.t()) ::
+          :ok | Xqlite.error()
+  def backup(conn, dest_path), do: backup(conn, "main", dest_path)
+
+  @spec backup(
+          conn :: Xqlite.conn(),
+          schema :: String.t(),
+          dest_path :: String.t()
+        ) :: :ok | Xqlite.error()
+  def backup(_conn, _schema, _dest_path), do: err()
+
+  @doc """
+  Restores a database from a file.
+
+  Replaces the named schema (default `"main"`) with the contents of the
+  file at `src_path`. The connection's existing data in that schema is
+  overwritten.
+  """
+  @spec restore(conn :: Xqlite.conn(), src_path :: String.t()) ::
+          :ok | Xqlite.error()
+  def restore(conn, src_path), do: restore(conn, "main", src_path)
+
+  @spec restore(
+          conn :: Xqlite.conn(),
+          schema :: String.t(),
+          src_path :: String.t()
+        ) :: :ok | Xqlite.error()
+  def restore(_conn, _schema, _src_path), do: err()
+
+  # ---------------------------------------------------------------------------
+  # Session Extension
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Creates a new change-tracking session on the connection.
+
+  Returns an opaque session handle. Attach tables to track with
+  `session_attach/2` before making changes.
+  """
+  @spec session_new(conn :: Xqlite.conn()) :: {:ok, reference()} | Xqlite.error()
+  def session_new(_conn), do: err()
+
+  @doc """
+  Attaches a table to be tracked by the session.
+
+  Pass a table name to track that table, or `nil` to track all tables.
+  """
+  @spec session_attach(session :: reference(), table :: String.t() | nil) ::
+          :ok | Xqlite.error()
+  def session_attach(_session, _table), do: err()
+
+  @doc """
+  Captures a changeset from the session.
+
+  Returns a binary containing all INSERT/UPDATE/DELETE operations
+  recorded since the session was created or the last changeset capture.
+  """
+  @spec session_changeset(session :: reference()) :: {:ok, binary()} | Xqlite.error()
+  def session_changeset(_session), do: err()
+
+  @doc """
+  Captures a patchset from the session.
+
+  Like `session_changeset/1` but the patchset format is more compact —
+  it omits original primary key values for UPDATE operations.
+  """
+  @spec session_patchset(session :: reference()) :: {:ok, binary()} | Xqlite.error()
+  def session_patchset(_session), do: err()
+
+  @doc """
+  Returns true if the session has recorded no changes.
+  """
+  @spec session_is_empty(session :: reference()) :: boolean()
+  def session_is_empty(_session), do: err()
+
+  @doc """
+  Deletes the session, releasing its resources.
+
+  The session handle must not be used after this call.
+  """
+  @spec session_delete(session :: reference()) :: :ok | Xqlite.error()
+  def session_delete(_session), do: err()
+
+  @doc """
+  Applies a changeset binary to a connection.
+
+  `conflict_strategy` determines behavior on conflicts:
+  - `:omit` — skip conflicting changes
+  - `:replace` — overwrite with the changeset's values
+  - `:abort` — abort the entire apply operation
+  """
+  @spec changeset_apply(
+          conn :: Xqlite.conn(),
+          changeset :: binary(),
+          conflict_strategy :: :omit | :replace | :abort
+        ) :: :ok | Xqlite.error()
+  def changeset_apply(_conn, _changeset, _conflict_strategy), do: err()
+
+  @doc """
+  Inverts a changeset binary.
+
+  INSERT becomes DELETE, DELETE becomes INSERT, UPDATE values are swapped.
+  """
+  @spec changeset_invert(changeset :: binary()) :: {:ok, binary()} | Xqlite.error()
+  def changeset_invert(_changeset), do: err()
+
+  @doc """
+  Concatenates two changeset binaries into one.
+  """
+  @spec changeset_concat(a :: binary(), b :: binary()) :: {:ok, binary()} | Xqlite.error()
+  def changeset_concat(_a, _b), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end
