@@ -854,6 +854,88 @@ fn restore<'a>(
     singular_ok_or_error_tuple(env, result)
 }
 
+#[rustler::nif(schedule = "DirtyIo")]
+fn backup_with_progress<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    schema: String,
+    dest_path: String,
+    pid: rustler::types::LocalPid,
+    pages_per_step: i32,
+    cancel_token: ResourceArc<XqliteCancelToken>,
+) -> Term<'a> {
+    let result = connection::with_conn(&handle, |conn| {
+        let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
+        let backup =
+            rusqlite::backup::Backup::new_with_names(conn, schema.as_str(), &mut dst, "main")?;
+
+        loop {
+            if cancel_token.0.load(Ordering::Acquire) {
+                return Err(XqliteError::OperationCancelled);
+            }
+
+            let step_result = backup.step(pages_per_step)?;
+            let progress = backup.progress();
+
+            // SAFETY: enif_send with NULL caller_env is valid from dirty
+            // scheduler threads (OTP 26.1+). All data is copied into msg_env.
+            unsafe {
+                send_backup_progress(&pid, progress.remaining, progress.pagecount);
+            }
+
+            match step_result {
+                rusqlite::backup::StepResult::Done => return Ok(()),
+                rusqlite::backup::StepResult::More => continue,
+                rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                _ => continue,
+            }
+        }
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+/// Send `{:xqlite_backup_progress, remaining, pagecount}` to `pid`.
+///
+/// # Safety
+///
+/// Must be called from a dirty scheduler thread. Uses `enif_send` with
+/// NULL caller_env, valid since OTP 26.1.
+unsafe fn send_backup_progress(
+    pid: &rustler::types::LocalPid,
+    remaining: std::ffi::c_int,
+    pagecount: std::ffi::c_int,
+) {
+    use rustler::sys::{
+        enif_alloc_env, enif_free_env, enif_make_atom_len, enif_make_int64,
+        enif_make_tuple_from_array, enif_send,
+    };
+
+    // SAFETY: All enif_* calls operate on a freshly allocated msg_env.
+    unsafe {
+        let msg_env = enif_alloc_env();
+
+        let tag = enif_make_atom_len(
+            msg_env,
+            b"xqlite_backup_progress".as_ptr().cast(),
+            b"xqlite_backup_progress".len(),
+        );
+        let remaining_term = enif_make_int64(msg_env, remaining as i64);
+        let pagecount_term = enif_make_int64(msg_env, pagecount as i64);
+
+        let elements = [tag, remaining_term, pagecount_term];
+        let tuple = enif_make_tuple_from_array(msg_env, elements.as_ptr(), 3);
+
+        let sent = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, tuple);
+
+        if sent == 0 {
+            enif_free_env(msg_env);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session Extension NIFs
 // ---------------------------------------------------------------------------

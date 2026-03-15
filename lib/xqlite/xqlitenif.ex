@@ -1026,6 +1026,28 @@ defmodule XqliteNIF do
         ) :: :ok | Xqlite.error()
   def restore(_conn, _schema, _src_path), do: err()
 
+  @doc """
+  Backs up a database to a file with progress reporting and cancellation.
+
+  Copies `pages_per_step` pages at a time, sending
+  `{:xqlite_backup_progress, remaining, pagecount}` messages to `pid`
+  after each step. Check the `cancel_token` between steps — if cancelled,
+  returns `{:error, :operation_cancelled}`.
+
+  Use `create_cancel_token/0` to create the token, and `cancel_operation/1`
+  from another process to cancel.
+  """
+  @spec backup_with_progress(
+          conn :: Xqlite.conn(),
+          schema :: String.t(),
+          dest_path :: String.t(),
+          pid :: pid(),
+          pages_per_step :: pos_integer(),
+          cancel_token :: reference()
+        ) :: :ok | Xqlite.error()
+  def backup_with_progress(_conn, _schema, _dest_path, _pid, _pages_per_step, _cancel_token),
+    do: err()
+
   # ---------------------------------------------------------------------------
   # Session Extension
   # ---------------------------------------------------------------------------
