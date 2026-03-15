@@ -48,6 +48,7 @@ pub(crate) mod atoms {
         index_exists,
         integer,
         integral_value_out_of_range,
+        invalid_conflict_strategy,
         internal_encoding_error,
         invalid_batch_size,
         invalid_column_index,
@@ -70,10 +71,12 @@ pub(crate) mod atoms {
         no_value,
         none,
         normal,
+        abort,
         null_byte_in_string,
         num_rows,
         numeric,
         offset,
+        omit,
         operation_cancelled,
         partial,
         pid,
@@ -82,6 +85,7 @@ pub(crate) mod atoms {
         provided,
         read_only_database,
         reference,
+        replace,
         restrict,
         rows,
         schema_changed,
@@ -126,6 +130,7 @@ mod nif;
 mod pragma;
 mod query;
 mod schema;
+mod session;
 mod stream;
 mod transaction;
 mod update_hook;
