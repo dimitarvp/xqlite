@@ -3,7 +3,9 @@ test_ext_dir = Path.join([__DIR__, "support", "ext"])
 test_ext_src = Path.join(test_ext_dir, "xqlite_test_ext.c")
 test_ext_out = Path.join(test_ext_dir, "xqlite_test_ext")
 
-cargo_home = System.get_env("CARGO_HOME") || Path.join(System.user_home!(), ".cargo")
+cargo_home =
+  (System.get_env("CARGO_HOME") || Path.join(System.user_home!(), ".cargo"))
+  |> String.replace("\\", "/")
 
 sqlite_header_dir =
   Path.wildcard(Path.join([cargo_home, "registry", "src", "*", "libsqlite3-sys-*", "sqlite3"]))
