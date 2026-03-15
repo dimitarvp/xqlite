@@ -6,9 +6,7 @@ test_ext_out = Path.join(test_ext_dir, "xqlite_test_ext")
 cargo_home = System.get_env("CARGO_HOME") || Path.join(System.user_home!(), ".cargo")
 
 sqlite_header_dir =
-  Path.wildcard(
-    Path.join([cargo_home, "registry", "src", "*", "libsqlite3-sys-*", "sqlite3"])
-  )
+  Path.wildcard(Path.join([cargo_home, "registry", "src", "*", "libsqlite3-sys-*", "sqlite3"]))
   |> Enum.sort()
   |> List.last()
 
