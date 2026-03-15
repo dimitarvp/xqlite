@@ -122,6 +122,7 @@ pub(crate) mod atoms {
     }
 }
 
+mod blob;
 mod cancel;
 mod connection;
 mod error;

@@ -1109,5 +1109,68 @@ defmodule XqliteNIF do
   @spec changeset_concat(a :: binary(), b :: binary()) :: {:ok, binary()} | Xqlite.error()
   def changeset_concat(_a, _b), do: err()
 
+  # ---------------------------------------------------------------------------
+  # Incremental Blob I/O
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Opens a BLOB for incremental I/O.
+
+  Returns an opaque blob handle for reading/writing chunks of a BLOB
+  value without loading the entire thing into memory.
+
+  - `db` — database name (typically `"main"`)
+  - `table` — table name
+  - `column` — column name containing the BLOB
+  - `row_id` — rowid of the row
+  - `read_only` — `true` for read-only access, `false` for read-write
+  """
+  @spec blob_open(
+          conn :: Xqlite.conn(),
+          db :: String.t(),
+          table :: String.t(),
+          column :: String.t(),
+          row_id :: integer(),
+          read_only :: boolean()
+        ) :: {:ok, reference()} | Xqlite.error()
+  def blob_open(_conn, _db, _table, _column, _row_id, _read_only), do: err()
+
+  @doc """
+  Reads `length` bytes from the blob starting at `offset`.
+  """
+  @spec blob_read(blob :: reference(), offset :: non_neg_integer(), length :: pos_integer()) ::
+          {:ok, binary()} | Xqlite.error()
+  def blob_read(_blob, _offset, _length), do: err()
+
+  @doc """
+  Writes `data` to the blob starting at `offset`.
+
+  Cannot change the blob size — the data must fit within the existing
+  blob. Use `zeroblob()` in SQL to pre-allocate the desired size.
+  """
+  @spec blob_write(blob :: reference(), offset :: non_neg_integer(), data :: binary()) ::
+          :ok | Xqlite.error()
+  def blob_write(_blob, _offset, _data), do: err()
+
+  @doc """
+  Returns the size of the blob in bytes.
+  """
+  @spec blob_size(blob :: reference()) :: {:ok, non_neg_integer()} | Xqlite.error()
+  def blob_size(_blob), do: err()
+
+  @doc """
+  Moves the blob handle to a different row in the same table/column.
+
+  More efficient than closing and re-opening for sequential row access.
+  """
+  @spec blob_reopen(blob :: reference(), row_id :: integer()) :: :ok | Xqlite.error()
+  def blob_reopen(_blob, _row_id), do: err()
+
+  @doc """
+  Closes the blob handle, releasing its resources.
+  """
+  @spec blob_close(blob :: reference()) :: :ok | Xqlite.error()
+  def blob_close(_blob), do: err()
+
   defp err, do: :erlang.nif_error(:nif_not_loaded)
 end

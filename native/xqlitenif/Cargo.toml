@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 rusqlite = { version = "0.39.0", features = [
   "backup",
+  "blob",
   "bundled",
   "hooks",
   "load_extension",

@@ -1,4 +1,5 @@
 use crate::atoms;
+use crate::blob::{self, XqliteBlob};
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{self, XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
@@ -1011,4 +1012,110 @@ fn changeset_concat<'a>(
         Ok(binary) => (ok(), binary.release(env)).encode(env),
         Err(err) => (error(), err).encode(env),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental Blob I/O NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn blob_open<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    db: String,
+    table: String,
+    column: String,
+    row_id: i64,
+    read_only: bool,
+) -> Term<'a> {
+    let result = connection::with_conn(&handle, |conn| {
+        let b = conn.blob_open(
+            db.as_str(),
+            table.as_str(),
+            column.as_str(),
+            row_id,
+            read_only,
+        )?;
+        // SAFETY: We erase the connection lifetime. This is safe because
+        // conn_resource_arc (stored in XqliteBlob) prevents the connection
+        // from being dropped while the blob handle exists.
+        let static_blob: rusqlite::blob::Blob<'static> = unsafe { std::mem::transmute(b) };
+        Ok(ResourceArc::new(XqliteBlob {
+            blob: std::sync::Mutex::new(Some(static_blob)),
+            conn_resource_arc: handle.clone(),
+        }))
+    });
+    match result {
+        Ok(resource) => (ok(), resource).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn blob_read<'a>(
+    env: Env<'a>,
+    blob_handle: ResourceArc<XqliteBlob>,
+    offset: usize,
+    length: usize,
+) -> Term<'a> {
+    let result = blob::with_blob(&blob_handle, |b| {
+        let blob_size = b.len();
+        if offset >= blob_size {
+            return Ok(rustler::OwnedBinary::new(0).unwrap());
+        }
+        let actual_len = std::cmp::min(length, blob_size - offset);
+        let mut buf = vec![0u8; actual_len];
+        b.read_at_exact(&mut buf, offset)?;
+        session::to_owned_binary(&buf, "blob read")
+    });
+    match result {
+        Ok(binary) => (ok(), binary.release(env)).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn blob_write<'a>(
+    env: Env<'a>,
+    blob_handle: ResourceArc<XqliteBlob>,
+    offset: usize,
+    data: rustler::Binary<'a>,
+) -> Term<'a> {
+    let result = blob::with_blob_mut(&blob_handle, |b| {
+        b.write_all_at(data.as_slice(), offset)?;
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn blob_size(blob_handle: ResourceArc<XqliteBlob>) -> Result<usize, XqliteError> {
+    blob::with_blob(&blob_handle, |b| Ok(b.len()))
+}
+
+#[rustler::nif]
+fn blob_reopen<'a>(
+    env: Env<'a>,
+    blob_handle: ResourceArc<XqliteBlob>,
+    row_id: i64,
+) -> Term<'a> {
+    let result = blob::with_blob_mut(&blob_handle, |b| {
+        b.reopen(row_id)?;
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn blob_close<'a>(env: Env<'a>, blob_handle: ResourceArc<XqliteBlob>) -> Term<'a> {
+    let result = (|| -> Result<(), XqliteError> {
+        let mut guard = blob_handle
+            .blob
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        // Drop the blob (its Drop impl calls sqlite3_blob_close)
+        guard.take();
+        Ok(())
+    })();
+    singular_ok_or_error_tuple(env, result)
 }
