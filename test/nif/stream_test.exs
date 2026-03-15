@@ -380,9 +380,10 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 1} = NIF.execute(conn, "INSERT INTO utf8_t VALUES (CAST(X'FFFE8041' AS TEXT))", [])
 
     {:ok, stream} = NIF.stream_open(conn, "SELECT val FROM utf8_t", [], [])
-    assert {:error, {:utf8_error, reason}} = NIF.stream_fetch(stream, 10)
+    assert {:error, {:utf8_error, column, reason}} = NIF.stream_fetch(stream, 10)
+    assert column == 0
     assert is_binary(reason)
-    assert String.contains?(reason, "UTF-8")
+    assert String.contains?(reason, "utf-8")
     NIF.stream_close(stream)
     NIF.close(conn)
   end

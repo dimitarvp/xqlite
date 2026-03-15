@@ -165,6 +165,7 @@ pub(crate) enum XqliteError {
         value: i64,
     },
     Utf8Error {
+        column: usize,
         reason: String,
     },
 
@@ -335,7 +336,9 @@ impl Display for XqliteError {
             XqliteError::ExecuteReturnedResults => {
                 write!(f, "Execute returned results, expected no rows")
             }
-            XqliteError::Utf8Error { reason } => write!(f, "UTF-8 decoding error: {reason}"),
+            XqliteError::Utf8Error { column, reason } => {
+                write!(f, "UTF-8 decoding error at column {column}: {reason}")
+            }
             XqliteError::FromSqlConversionFailure {
                 index,
                 sqlite_type,
@@ -494,7 +497,9 @@ impl Encoder for XqliteError {
             XqliteError::ExecuteReturnedResults => {
                 atoms::execute_returned_results().encode(env)
             }
-            XqliteError::Utf8Error { reason } => (atoms::utf8_error(), reason).encode(env),
+            XqliteError::Utf8Error { column, reason } => {
+                (atoms::utf8_error(), column, reason).encode(env)
+            }
             XqliteError::FromSqlConversionFailure {
                 index,
                 sqlite_type,
@@ -643,7 +648,8 @@ impl From<RusqliteError> for XqliteError {
                 XqliteError::InvalidParameterName(name)
             }
             RusqliteError::NulError(_) => XqliteError::NulErrorInString,
-            RusqliteError::Utf8Error(e) => XqliteError::Utf8Error {
+            RusqliteError::Utf8Error(col, e) => XqliteError::Utf8Error {
+                column: col,
                 reason: e.to_string(),
             },
             RusqliteError::FromSqlConversionFailure(idx, sql_type, source_err) => {

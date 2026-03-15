@@ -113,8 +113,9 @@ pub(crate) fn process_rows<'a, 'rows>(
                             ) {
                                 return Err(XqliteError::OperationCancelled);
                             }
-                            if let rusqlite::Error::Utf8Error(utf8_err) = e {
+                            if let rusqlite::Error::Utf8Error(col, utf8_err) = e {
                                 return Err(XqliteError::Utf8Error {
+                                    column: col,
                                     reason: utf8_err.to_string(),
                                 });
                             }
@@ -137,8 +138,9 @@ pub(crate) fn process_rows<'a, 'rows>(
                 ) {
                     return Err(XqliteError::OperationCancelled);
                 }
-                if let rusqlite::Error::Utf8Error(utf8_err) = e {
+                if let rusqlite::Error::Utf8Error(col, utf8_err) = e {
                     return Err(XqliteError::Utf8Error {
+                        column: col,
                         reason: utf8_err.to_string(),
                     });
                 }
@@ -346,9 +348,8 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                         Ok(s) => s.encode(env),
                         Err(utf8_err) => {
                             return Err(XqliteError::Utf8Error {
-                                reason: format!(
-                                    "Invalid UTF-8 sequence in TEXT column index {i}: {utf8_err}"
-                                ),
+                                column: i,
+                                reason: utf8_err.to_string(),
                             });
                         }
                     }
