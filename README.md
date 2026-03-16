@@ -45,7 +45,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 ### Low-level NIF API (`XqliteNIF`)
 
 - **Connection:** `open/1`, `open_in_memory/0`, `open_readonly/1`, `open_in_memory_readonly/0`, `open_temporary/0`, `close/1`
-- **Queries:** `query/3`, `query_cancellable/4` — returns `%{columns, rows, num_rows}`
+- **Queries:** `query/3`, `query_cancellable/4` — returns `%{columns, rows, num_rows}`; `query_with_changes/3`, `query_with_changes_cancellable/4` — same plus atomic `changes` count
 - **Execution:** `execute/3`, `execute_cancellable/4` — returns `{:ok, affected_rows}`; `execute_batch/2`, `execute_batch_cancellable/3`
 - **Streaming:** `stream_open/4`, `stream_get_columns/1`, `stream_fetch/2`, `stream_close/1`
 - **Cancellation:** `create_cancel_token/0`, `cancel_operation/1` — per-operation, progress-handler-based, fine-grained

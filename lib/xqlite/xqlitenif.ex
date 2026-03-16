@@ -188,6 +188,36 @@ defmodule XqliteNIF do
   def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
 
   @doc """
+  Executes a SQL query and returns results with the affected row count.
+
+  Returns `{:ok, %{columns, rows, num_rows, changes}}` where `changes` is
+  `sqlite3_changes()` captured atomically inside the connection lock. For
+  SELECT statements (non-empty columns), `changes` is 0. For DML, it's the
+  actual affected row count.
+
+  This is the recommended function when you need reliable affected row counts.
+  Unlike calling `query/3` then `changes/1` separately, the count is captured
+  before the lock is released, so it cannot be stale.
+  """
+  @spec query_with_changes(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword()
+        ) :: {:ok, map()} | Xqlite.error()
+  def query_with_changes(_conn, _sql, _params), do: err()
+
+  @doc """
+  Cancellable version of `query_with_changes/3`.
+  """
+  @spec query_with_changes_cancellable(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword(),
+          cancel_token :: reference()
+        ) :: {:ok, map()} | Xqlite.error()
+  def query_with_changes_cancellable(_conn, _sql, _params, _cancel_token), do: err()
+
+  @doc """
   Executes a SQL statement that does not return rows (e.g., `INSERT`, `UPDATE`, `DELETE`, DDL).
 
   `conn` is the database connection resource.

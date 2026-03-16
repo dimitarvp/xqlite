@@ -4,6 +4,7 @@ pub(crate) mod atoms {
         atom,
         binary,
         cannot_convert_atom_to_string,
+        changes,
         cannot_convert_to_sqlite_value,
         cannot_execute,
         cannot_execute_pragma,

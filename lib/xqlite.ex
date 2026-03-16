@@ -147,21 +147,15 @@ defmodule Xqlite do
   is 0. For DML (INSERT/UPDATE/DELETE), `num_rows` is 0 (no result rows)
   and `changes` is the number of affected rows.
 
-  This is the high-level wrapper around `XqliteNIF.query/3` +
-  `XqliteNIF.changes/1`. For zero-overhead access, use `XqliteNIF` directly.
+  Uses `XqliteNIF.query_with_changes/3` which captures the affected row count
+  atomically inside the connection lock. For zero-overhead access without the
+  changes field, use `XqliteNIF.query/3` directly.
   """
   @spec query(conn(), String.t(), list() | keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def query(conn, sql, params \\ []) do
-    with {:ok, map} <- XqliteNIF.query(conn, sql, params),
-         {:ok, affected} <- XqliteNIF.changes(conn) do
-      {:ok,
-       %Xqlite.Result{
-         columns: map.columns,
-         rows: map.rows,
-         num_rows: map.num_rows,
-         changes: affected
-       }}
+    with {:ok, map} <- XqliteNIF.query_with_changes(conn, sql, params) do
+      {:ok, Xqlite.Result.from_map(map)}
     end
   end
 

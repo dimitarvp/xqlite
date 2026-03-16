@@ -114,6 +114,54 @@ fn execute_batch(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn query_with_changes<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+) -> Term<'a> {
+    let result = connection::with_conn(&handle, |conn| {
+        let qr = query::core_query(env, conn, &sql, params_term, None)?;
+        let changes = if qr.columns.is_empty() {
+            conn.changes()
+        } else {
+            0
+        };
+        Ok((qr, changes))
+    });
+
+    match result {
+        Ok((qr, changes)) => encode_query_result_with_changes(env, &qr, changes),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn query_with_changes_cancellable<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+    token: ResourceArc<XqliteCancelToken>,
+) -> Term<'a> {
+    let token_bool = token.0.clone();
+    let result = connection::with_conn(&handle, |conn| {
+        let qr = query::core_query(env, conn, &sql, params_term, Some(token_bool))?;
+        let changes = if qr.columns.is_empty() {
+            conn.changes()
+        } else {
+            0
+        };
+        Ok((qr, changes))
+    });
+
+    match result {
+        Ok((qr, changes)) => encode_query_result_with_changes(env, &qr, changes),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn query_cancellable<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -942,6 +990,40 @@ unsafe fn send_backup_progress(
 
         if sent == 0 {
             enif_free_env(msg_env);
+        }
+    }
+}
+
+/// Encodes a query result with an additional `changes` key.
+#[inline]
+fn encode_query_result_with_changes<'a>(
+    env: Env<'a>,
+    qr: &XqliteQueryResult<'a>,
+    changes: u64,
+) -> Term<'a> {
+    let result: Result<Term, String> = Ok(map_new(env))
+        .and_then(|map| {
+            map.map_put(atoms::columns(), &qr.columns)
+                .map_err(|_| "Failed to insert :columns key".to_string())
+        })
+        .and_then(|map| {
+            map.map_put(atoms::rows(), &qr.rows)
+                .map_err(|_| "Failed to insert :rows key".to_string())
+        })
+        .and_then(|map| {
+            map.map_put(atoms::num_rows(), qr.num_rows)
+                .map_err(|_| "Failed to insert :num_rows key".to_string())
+        })
+        .and_then(|map| {
+            map.map_put(atoms::changes(), changes)
+                .map_err(|_| "Failed to insert :changes key".to_string())
+        });
+
+    match result {
+        Ok(map) => (ok(), map).encode(env),
+        Err(context) => {
+            let err = XqliteError::InternalEncodingError { context };
+            (error(), err).encode(env)
         }
     }
 }
