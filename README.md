@@ -13,7 +13,7 @@ For Ecto 3.x integration see the planned [xqlite_ecto3](https://github.com/dimit
 ```elixir
 def deps do
   [
-    {:xqlite, "~> 0.5.0"}
+    {:xqlite, "~> 0.5.1"}
   ]
 end
 ```

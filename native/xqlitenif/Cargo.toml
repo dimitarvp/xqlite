@@ -1,6 +1,6 @@
 [package]
 name = "xqlitenif"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Dimitar Panayotov <mitko.p@gmail.com>"]
 edition = "2024"
 
