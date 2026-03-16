@@ -248,45 +248,6 @@ defmodule Xqlite.NIF.StreamTest do
         assert :done == NIF.stream_fetch(stream_handle, 1)
         assert :ok == NIF.stream_close(stream_handle)
       end
-
-      # --- stream_close/1 Tests ---
-      test "stream_close/1 successfully closes an open stream (re-verify)", %{conn: conn} do
-        sql = "SELECT id FROM stream_items;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
-        assert :ok == NIF.stream_close(stream_handle)
-      end
-
-      test "stream_close/1 is idempotent (re-verify)", %{conn: conn} do
-        sql = "SELECT id FROM stream_items;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
-        :ok = NIF.stream_close(stream_handle)
-        assert :ok == NIF.stream_close(stream_handle)
-      end
-
-      test "stream_get_columns/1 still returns columns after stream_close/1 (re-verify)", %{
-        conn: conn
-      } do
-        sql = "SELECT name FROM stream_items;"
-        expected_columns = ["name"]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
-        # Pin here is fine if expected_columns is defined once
-        assert {:ok, expected_columns} == NIF.stream_get_columns(stream_handle)
-
-        assert :ok == NIF.stream_close(stream_handle)
-        # Pin here is fine
-        assert {:ok, expected_columns} == NIF.stream_get_columns(stream_handle)
-      end
-
-      test "stream_close/1 on an invalid handle type returns an error (re-verify)", %{
-        conn: conn
-      } do
-        assert {:error, {:invalid_stream_handle, _reason}} = NIF.stream_close(conn)
-      end
-
-      test "stream_close/1 on a dummy reference returns an error (re-verify)", %{conn: _conn} do
-        dummy_ref = make_ref()
-        assert {:error, {:invalid_stream_handle, _reason}} = NIF.stream_close(dummy_ref)
-      end
     end
   end
 
