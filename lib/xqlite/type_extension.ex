@@ -75,14 +75,15 @@ defmodule Xqlite.TypeExtension do
           list() | keyword()
   def encode_params(params, []), do: params
 
-  def encode_params(params, extensions) when is_list(params) do
-    case Keyword.keyword?(params) do
-      true ->
-        Enum.map(params, fn {key, value} -> {key, encode_value(value, extensions)} end)
+  def encode_params([{key, _} | _] = params, extensions) when is_atom(key) do
+    Enum.map(params, fn
+      {k, value} when is_atom(k) -> {k, encode_value(value, extensions)}
+      other -> other
+    end)
+  end
 
-      false ->
-        Enum.map(params, fn value -> encode_value(value, extensions) end)
-    end
+  def encode_params(params, extensions) when is_list(params) do
+    Enum.map(params, fn value -> encode_value(value, extensions) end)
   end
 
   @doc """
