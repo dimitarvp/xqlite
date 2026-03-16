@@ -134,11 +134,9 @@ defmodule Xqlite.NIF.BuiltinWindowTest do
                    []
                  )
 
-        [first | _] = rows
-        assert Enum.at(first, 2) == nil
-
-        second = Enum.at(rows, 1)
-        assert Enum.at(second, 2) == Enum.at(first, 1)
+        [[_, first_salary, nil] | [[_, second_salary, first_salary] | _]] = rows
+        assert is_integer(first_salary)
+        assert is_integer(second_salary)
       end
 
       test "lag() with offset and default", %{conn: conn} do
@@ -161,12 +159,9 @@ defmodule Xqlite.NIF.BuiltinWindowTest do
                    []
                  )
 
-        last = List.last(rows)
-        assert Enum.at(last, 2) == nil
-
-        first = hd(rows)
-        second = Enum.at(rows, 1)
-        assert Enum.at(first, 2) == Enum.at(second, 1)
+        [_, _, nil] = List.last(rows)
+        [[_, _, lead_val] | [[_, second_salary, _] | _]] = rows
+        assert lead_val == second_salary
       end
 
       # -------------------------------------------------------------------
@@ -222,9 +217,8 @@ defmodule Xqlite.NIF.BuiltinWindowTest do
                  )
 
         # First row has no 2nd value yet
-        assert Enum.at(hd(rows), 1) == nil
-        # Second row onwards should have the 2nd value
-        second_vals = rows |> Enum.drop(1) |> Enum.map(fn [_, v] -> v end) |> Enum.uniq()
+        [[_, nil] | rest] = rows
+        second_vals = rest |> Enum.map(fn [_, v] -> v end) |> Enum.uniq()
         assert length(second_vals) == 1
       end
 
@@ -278,7 +272,7 @@ defmodule Xqlite.NIF.BuiltinWindowTest do
 
         counts = Enum.map(rows, fn [_, c] -> c end)
         assert hd(counts) == 2
-        assert Enum.at(counts, 1) == 3
+        [2, 3 | _] = counts
         assert List.last(counts) == 2
       end
 
@@ -302,8 +296,7 @@ defmodule Xqlite.NIF.BuiltinWindowTest do
                  )
 
         assert length(rows) == 6
-        first_rn = Enum.at(hd(rows), 1)
-        assert first_rn == 1
+        [[_, 1, _] | _] = rows
       end
 
       # -------------------------------------------------------------------
