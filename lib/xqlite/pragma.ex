@@ -369,44 +369,46 @@ defmodule Xqlite.Pragma do
 
   @all @schema |> Map.keys() |> Enum.sort()
 
+  @string_to_atom_map Map.new(@all, fn key -> {Atom.to_string(key), key} end)
+
   @readable_with_zero_args @schema
                            |> Enum.filter(fn {_, s} -> 0 in s.read_arities end)
-                           |> Enum.map(&elem(&1, 0))
+                           |> Enum.map(fn {name, _} -> name end)
                            |> Enum.sort()
 
   @readable_with_one_arg @schema
                          |> Enum.filter(fn {_, s} -> 1 in s.read_arities end)
-                         |> Enum.map(&elem(&1, 0))
+                         |> Enum.map(fn {name, _} -> name end)
                          |> Enum.sort()
 
   @writable @schema
             |> Enum.filter(fn {_, s} -> s.writable end)
-            |> Enum.map(&elem(&1, 0))
+            |> Enum.map(fn {name, _} -> name end)
             |> Enum.sort()
 
   @returning_boolean @schema
                      |> Enum.filter(fn {_, s} -> s.return_type == :bool end)
-                     |> Enum.map(&elem(&1, 0))
+                     |> Enum.map(fn {name, _} -> name end)
                      |> Enum.sort()
 
   @returning_int @schema
                  |> Enum.filter(fn {_, s} -> s.return_type == :int end)
-                 |> Enum.map(&elem(&1, 0))
+                 |> Enum.map(fn {name, _} -> name end)
                  |> Enum.sort()
 
   @returning_text @schema
                   |> Enum.filter(fn {_, s} -> s.return_type == :text end)
-                  |> Enum.map(&elem(&1, 0))
+                  |> Enum.map(fn {name, _} -> name end)
                   |> Enum.sort()
 
   @returning_list @schema
                   |> Enum.filter(fn {_, s} -> s.return_type == :list end)
-                  |> Enum.map(&elem(&1, 0))
+                  |> Enum.map(fn {name, _} -> name end)
                   |> Enum.sort()
 
   @returning_nothing @schema
                      |> Enum.filter(fn {_, s} -> s.return_type == :nothing end)
-                     |> Enum.map(&elem(&1, 0))
+                     |> Enum.map(fn {name, _} -> name end)
                      |> Enum.sort()
 
   @valid_write_arg_values @schema
@@ -596,9 +598,10 @@ defmodule Xqlite.Pragma do
   end
 
   def put(db, key, val, opts) when is_binary(key) do
-    do_put(db, String.to_existing_atom(key), val, opts)
-  rescue
-    ArgumentError -> {:error, {:invalid_pragma_name, key}}
+    case Map.fetch(@string_to_atom_map, key) do
+      {:ok, key_atom} -> do_put(db, key_atom, val, opts)
+      :error -> {:error, {:invalid_pragma_name, key}}
+    end
   end
 
   defp do_put(db, key_atom, val, opts) do
