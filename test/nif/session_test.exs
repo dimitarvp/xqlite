@@ -428,6 +428,32 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.close(conn2)
       end
 
+      test "conflict :abort returns error on conflict", %{conn: conn} do
+        :ok =
+          NIF.execute_batch(conn, "CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);")
+
+        {:ok, session} = NIF.session_new(conn)
+        :ok = NIF.session_attach(session, nil)
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_abrt VALUES (1, 'from_source')", [])
+        {:ok, changeset} = NIF.session_changeset(session)
+        NIF.session_delete(session)
+
+        {:ok, conn2} = NIF.open_in_memory()
+
+        :ok =
+          NIF.execute_batch(conn2, """
+          CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);
+          INSERT INTO sess_abrt VALUES (1, 'existing');
+          """)
+
+        assert {:error, _} = NIF.changeset_apply(conn2, changeset, :abort)
+
+        assert {:ok, %{rows: [[1, "existing"]]}} =
+                 NIF.query(conn2, "SELECT * FROM sess_abrt", [])
+
+        NIF.close(conn2)
+      end
+
       test "invalid conflict strategy returns error", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE sess_bad (id INTEGER PRIMARY KEY);")
 

@@ -197,6 +197,30 @@ defmodule Xqlite.NIF.BlobTest do
         NIF.blob_close(blob)
       end
 
+      test "write exceeding blob size returns error", %{conn: conn} do
+        :ok =
+          NIF.execute_batch(conn, """
+          CREATE TABLE bl_overflow (id INTEGER PRIMARY KEY, data BLOB);
+          INSERT INTO bl_overflow VALUES (1, zeroblob(5));
+          """)
+
+        {:ok, blob} = NIF.blob_open(conn, "main", "bl_overflow", "data", 1, false)
+        assert {:error, _} = NIF.blob_write(blob, 0, <<1, 2, 3, 4, 5, 6, 7, 8>>)
+        NIF.blob_close(blob)
+      end
+
+      test "write at offset that would exceed blob size returns error", %{conn: conn} do
+        :ok =
+          NIF.execute_batch(conn, """
+          CREATE TABLE bl_off_overflow (id INTEGER PRIMARY KEY, data BLOB);
+          INSERT INTO bl_off_overflow VALUES (1, zeroblob(10));
+          """)
+
+        {:ok, blob} = NIF.blob_open(conn, "main", "bl_off_overflow", "data", 1, false)
+        assert {:error, _} = NIF.blob_write(blob, 8, <<1, 2, 3, 4, 5>>)
+        NIF.blob_close(blob)
+      end
+
       # -------------------------------------------------------------------
       # Reopen — switch to different row
       # -------------------------------------------------------------------

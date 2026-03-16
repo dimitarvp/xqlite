@@ -162,4 +162,101 @@ defmodule XqliteTest do
                NIF.execute(conn, "INSERT INTO fk_child (id, parent_id) VALUES (1, 999)", [])
     end
   end
+
+  describe "enable_foreign_key_enforcement/1" do
+    setup do
+      {:ok, conn} = NIF.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "blocks FK violations when enabled", %{conn: conn} do
+      assert {:ok, _} = Xqlite.enable_foreign_key_enforcement(conn)
+
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE fk_parent (id INTEGER PRIMARY KEY);
+        CREATE TABLE fk_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES fk_parent(id));
+        """)
+
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+               NIF.execute(conn, "INSERT INTO fk_child (id, parent_id) VALUES (1, 999)", [])
+    end
+  end
+
+  describe "SQLite loose type coercion (non-strict mode)" do
+    setup do
+      {:ok, conn} = NIF.open_in_memory()
+
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE coerce (
+          i INTEGER,
+          r REAL,
+          t TEXT,
+          b BLOB,
+          n NUMERIC
+        );
+        """)
+
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "string '42' stored in INTEGER column is coerced to integer 42", %{conn: conn} do
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO coerce (i) VALUES (?1)", ["42"])
+
+      assert {:ok, %{rows: [[42]]}} =
+               NIF.query(conn, "SELECT i FROM coerce", [])
+    end
+
+    test "integer stored in TEXT column stays as integer (no coercion)", %{conn: conn} do
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO coerce (t) VALUES (?1)", [42])
+
+      assert {:ok, %{rows: [["42"]]}} =
+               NIF.query(conn, "SELECT t FROM coerce", [])
+    end
+
+    test "float stored in INTEGER column retains REAL type", %{conn: conn} do
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO coerce (i) VALUES (?1)", [3.14])
+
+      assert {:ok, %{rows: [[3.14]]}} =
+               NIF.query(conn, "SELECT i FROM coerce", [])
+    end
+
+    test "integer 42 stored in REAL column is coerced to 42.0", %{conn: conn} do
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO coerce (r) VALUES (?1)", [42])
+
+      assert {:ok, %{rows: [[42.0]]}} =
+               NIF.query(conn, "SELECT r FROM coerce", [])
+    end
+
+    test "string stored in BLOB column retains TEXT type", %{conn: conn} do
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO coerce (b) VALUES (?1)", ["hello"])
+
+      assert {:ok, %{rows: [["hello"]]}} =
+               NIF.query(conn, "SELECT b FROM coerce", [])
+    end
+
+    test "NUMERIC affinity coerces string '123' to integer 123", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "INSERT INTO coerce (n) VALUES ('123');")
+
+      assert {:ok, %{rows: [[123]]}} =
+               NIF.query(conn, "SELECT n FROM coerce", [])
+    end
+
+    test "NUMERIC affinity coerces string '3.14' to real 3.14", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "INSERT INTO coerce (n) VALUES ('3.14');")
+
+      assert {:ok, %{rows: [[3.14]]}} =
+               NIF.query(conn, "SELECT n FROM coerce", [])
+    end
+
+    test "NUMERIC affinity keeps non-numeric string as TEXT", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "INSERT INTO coerce (n) VALUES ('hello');")
+
+      assert {:ok, %{rows: [["hello"]]}} =
+               NIF.query(conn, "SELECT n FROM coerce", [])
+    end
+  end
 end
