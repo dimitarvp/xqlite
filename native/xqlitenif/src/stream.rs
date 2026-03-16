@@ -37,51 +37,41 @@ impl XqliteStream {
             .swap(std::ptr::null_mut(), Ordering::AcqRel);
 
         if !old_ptr.is_null() {
-            // SAFETY: old_ptr was obtained via atomic swap from a pointer that was
-            // either set by sqlite3_prepare_v2 (valid) or already null (filtered above).
-            // The swap guarantees exclusive ownership — no other thread can finalize it.
+            // Acquire the connection lock before finalizing. This ensures no other
+            // thread is currently inside sqlite3_step on this connection. Without
+            // this lock, a concurrent stream_fetch could be mid-step when we finalize
+            // the statement out from under it.
+            let conn_guard = self
+                .conn_resource_arc
+                .conn
+                .lock()
+                .map_err(|e| XqliteError::LockError(e.to_string()))?;
+
+            // SAFETY: old_ptr was obtained via atomic swap, guaranteeing exclusive
+            // ownership. The connection lock is held, ensuring no concurrent sqlite3_step.
             let result_code = unsafe { ffi::sqlite3_finalize(old_ptr) };
             if result_code != ffi::SQLITE_OK {
-                // Attempt to get a more detailed error message from the connection.
                 let ffi_err = ffi::Error::new(result_code);
                 let mut message =
                     format!("Failed to finalize SQLite statement (code: {result_code})");
 
-                // Try to lock the connection to get a specific SQLite error message.
-                // This lock is on a different Mutex (the one inside XqliteConn).
-                match self.conn_resource_arc.conn.lock() {
-                    Ok(conn_guard) if conn_guard.is_some() => {
-                        // SAFETY: conn_guard holds the mutex and contains Some(conn),
-                        // so the connection handle is valid. sqlite3_errmsg returns a
-                        // pointer to SQLite's internal error buffer, valid until the
-                        // next SQLite API call on this connection. We copy immediately.
-                        let specific_sqlite_msg = unsafe {
-                            let err_msg_ptr =
-                                ffi::sqlite3_errmsg(conn_guard.as_ref().unwrap().handle());
-                            if !err_msg_ptr.is_null() {
-                                std::ffi::CStr::from_ptr(err_msg_ptr)
-                                    .to_string_lossy()
-                                    .into_owned()
-                            } else {
-                                // No specific message from SQLite, keep our formatted one.
-                                String::new()
-                            }
-                        };
-                        if !specific_sqlite_msg.is_empty()
-                            && specific_sqlite_msg.to_lowercase() != "not an error"
-                        {
-                            message = specific_sqlite_msg;
+                if let Some(conn) = conn_guard.as_ref() {
+                    // SAFETY: conn_guard holds the mutex. sqlite3_errmsg returns a
+                    // pointer valid until the next API call; we copy immediately.
+                    let specific_sqlite_msg = unsafe {
+                        let err_msg_ptr = ffi::sqlite3_errmsg(conn.handle());
+                        if !err_msg_ptr.is_null() {
+                            std::ffi::CStr::from_ptr(err_msg_ptr)
+                                .to_string_lossy()
+                                .into_owned()
+                        } else {
+                            String::new()
                         }
-                    }
-                    Ok(_) => {
-                        // Connection was closed (None) — can't get specific error message.
-                        message.push_str(" (connection was closed before finalization)");
-                    }
-                    Err(_) => {
-                        // Failed to lock the connection mutex (poisoned).
-                        message.push_str(
-                            " (failed to lock connection for specific error message)",
-                        );
+                    };
+                    if !specific_sqlite_msg.is_empty()
+                        && specific_sqlite_msg.to_lowercase() != "not an error"
+                    {
+                        message = specific_sqlite_msg;
                     }
                 }
 
