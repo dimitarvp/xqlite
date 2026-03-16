@@ -45,6 +45,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 ## Architecture
 
 - Thread safety: `Mutex<Connection>` per connection handle (inside `ResourceArc`, which provides `Arc` semantics). Serialized access is intentional — read concurrency belongs in the Ecto adapter layer (pool of independent handles).
+- **CRITICAL — raw handle locking rule:** Every call to a `sqlite3_*` C function — `sqlite3_step`, `sqlite3_finalize`, `sqlite3_column_*`, `sqlite3_bind_*`, `sqlite3_errmsg`, ALL of them — MUST hold the connection `Mutex` for its entire duration. `AtomicPtr` swap gives exclusive *pointer ownership* but NOT exclusive *connection access*. These are two different things. A thread can own a pointer via atomic swap while another thread is mid-`sqlite3_step` on the same connection — that's a data race and a BEAM segfault. We shipped this bug once in `take_and_finalize_atomic_stmt` (called `sqlite3_finalize` without the lock). Never again.
 - Streams: `ResourceArc` wraps struct, `AtomicPtr` manages raw `sqlite3_stmt` for lock-free batch iteration. Deliberate unsafe FFI — requires safety audits.
 - Cancellation: SQLite progress handler, checked every 8 VM steps (hardcoded, un-tuned). Token is `Arc<AtomicBool>`.
 - Error handling: comprehensive Rust→Elixir mapping. Constraint violations get specific atoms. Fallback: `{:sqlite_failure, code, extended_code, message}`.
@@ -71,9 +72,9 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 ## Elixir Code Style
 
 - No early returns. Flow control via `case`, `with`, pattern matching.
-- `:ok`/`:error` tuples only. No raise/throw.
+- `:ok`/`:error` tuples only. No raise/throw. No `rescue`. No implicit crashes either — anonymous function clause patterns (`fn {k, v} -> ...`) MUST have a fallthrough clause or the caller must guarantee the shape. A `MatchError` from a destructuring `fn` is an implicit raise.
 - `with <- ` right-hand side: no complex expressions. Extract to private functions.
-- Never `elem/1` — always pattern-match.
+- Never `elem/1` — always pattern-match. Never `String.to_existing_atom` + `rescue` — use compile-time maps instead.
 - Never `func1(func2(a), b)` — use pipes. Minimum 2 pipes (never single `a |> f(b)`, write `f(a, b)` instead).
 - Long pipe chains are idiomatic — never shorten them.
 - Short functions, low cyclomatic complexity. Split aggressively.
@@ -87,6 +88,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 - All Rustler atoms must be referenced via the `atoms::` module prefix (e.g., `atoms::columns()`, `atoms::error()`). Never import atoms into local scope with bare `use crate::{columns, ...}`.
 - Every `unsafe` block must have a `// SAFETY:` comment explaining the invariant that makes it safe.
 - Use `#[inline]` on hot-path helpers called per-row or per-NIF-invocation.
+- Elixir-side parameter dispatch (keyword vs positional) must mirror the Rust NIF's head-check routing in `util.rs`. Do not add redundant O(N) validation in Elixir when Rust already validates structure at the NIF boundary.
 
 ## Commit Style
 
