@@ -52,6 +52,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **PRAGMAs:** `get_pragma/2`, `set_pragma/3`
 - **Transactions:** `begin/2` (`:deferred` / `:immediate` / `:exclusive`), `commit/1`, `rollback/1`, `transaction_status/1`, `savepoint/2`, `release_savepoint/2`, `rollback_to_savepoint/2`
 - **Row ID:** `last_insert_rowid/1`
+- **Changes:** `changes/1` — rows affected by last DML; `total_changes/1` — cumulative since connection opened
 - **Schema:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **Log hook:** `set_log_hook/1`, `remove_log_hook/0` — global SQLite diagnostic log forwarded to a PID as `{:xqlite_log, code, message}`
 - **Update hook:** `set_update_hook/2`, `remove_update_hook/1` — per-connection change notifications as `{:xqlite_update, action, db_name, table, rowid}`

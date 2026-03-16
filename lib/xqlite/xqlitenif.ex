@@ -694,6 +694,22 @@ defmodule XqliteNIF do
   def last_insert_rowid(_conn), do: err()
 
   @doc """
+  Returns the number of rows modified, inserted, or deleted by the most
+  recently completed `INSERT`, `UPDATE`, or `DELETE` statement on this
+  connection. Does not count changes from triggers or foreign key actions.
+  """
+  @spec changes(conn :: Xqlite.conn()) :: {:ok, non_neg_integer()} | Xqlite.error()
+  def changes(_conn), do: err()
+
+  @doc """
+  Returns the total number of rows modified, inserted, or deleted by all
+  `INSERT`, `UPDATE`, or `DELETE` statements since the connection was
+  opened, including changes from triggers.
+  """
+  @spec total_changes(conn :: Xqlite.conn()) :: {:ok, non_neg_integer()} | Xqlite.error()
+  def total_changes(_conn), do: err()
+
+  @doc """
   Creates a new cancellation token resource.
 
   This token can be passed to cancellable NIF operations (e.g.,

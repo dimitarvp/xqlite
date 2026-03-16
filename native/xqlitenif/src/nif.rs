@@ -325,6 +325,16 @@ fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError
     connection::with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
 }
 
+#[rustler::nif]
+fn changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
+    connection::with_conn(&handle, |conn| Ok(conn.changes()))
+}
+
+#[rustler::nif]
+fn total_changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
+    connection::with_conn(&handle, |conn| Ok(conn.total_changes()))
+}
+
 // ---------------------------------------------------------------------------
 // Stream NIFs
 // ---------------------------------------------------------------------------
