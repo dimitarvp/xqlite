@@ -9,21 +9,19 @@ defmodule Xqlite.Result do
 
     * `:columns` — list of column name strings
     * `:rows` — list of rows, each row being a list of values
-    * `:num_rows` — number of rows returned
-
-  ## Creating from NIF results
-
-      {:ok, map} = XqliteNIF.query(conn, "SELECT id, name FROM users", [])
-      result = Xqlite.Result.from_map(map)
+    * `:num_rows` — number of result rows returned
+    * `:changes` — number of rows modified by the last DML statement
+      (INSERT/UPDATE/DELETE). For SELECT queries this is 0.
   """
 
   @enforce_keys [:columns, :rows, :num_rows]
-  defstruct [:columns, :rows, :num_rows]
+  defstruct [:columns, :rows, :num_rows, changes: 0]
 
   @type t :: %__MODULE__{
           columns: [String.t()],
           rows: [[term()]],
-          num_rows: non_neg_integer()
+          num_rows: non_neg_integer(),
+          changes: non_neg_integer()
         }
 
   @doc """
@@ -31,8 +29,13 @@ defmodule Xqlite.Result do
   """
   @spec from_map(%{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}) ::
           t()
-  def from_map(%{columns: columns, rows: rows, num_rows: num_rows}) do
-    %__MODULE__{columns: columns, rows: rows, num_rows: num_rows}
+  def from_map(%{columns: columns, rows: rows, num_rows: num_rows} = map) do
+    %__MODULE__{
+      columns: columns,
+      rows: rows,
+      num_rows: num_rows,
+      changes: Map.get(map, :changes, 0)
+    }
   end
 end
 

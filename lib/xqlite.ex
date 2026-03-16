@@ -141,6 +141,50 @@ defmodule Xqlite do
   end
 
   @doc """
+  Executes a SQL query and returns a `%Xqlite.Result{}` struct.
+
+  For SELECT queries, `num_rows` is the count of returned rows and `changes`
+  is 0. For DML (INSERT/UPDATE/DELETE), `num_rows` is 0 (no result rows)
+  and `changes` is the number of affected rows.
+
+  This is the high-level wrapper around `XqliteNIF.query/3` +
+  `XqliteNIF.changes/1`. For zero-overhead access, use `XqliteNIF` directly.
+  """
+  @spec query(conn(), String.t(), list() | keyword()) ::
+          {:ok, Xqlite.Result.t()} | error()
+  def query(conn, sql, params \\ []) do
+    with {:ok, map} <- XqliteNIF.query(conn, sql, params),
+         {:ok, affected} <- XqliteNIF.changes(conn) do
+      {:ok,
+       %Xqlite.Result{
+         columns: map.columns,
+         rows: map.rows,
+         num_rows: map.num_rows,
+         changes: affected
+       }}
+    end
+  end
+
+  @doc """
+  Executes a non-returning SQL statement and returns a `%Xqlite.Result{}`.
+
+  For DML statements, `changes` contains the number of affected rows.
+  """
+  @spec execute(conn(), String.t(), list() | keyword()) ::
+          {:ok, Xqlite.Result.t()} | error()
+  def execute(conn, sql, params \\ []) do
+    with {:ok, affected} <- XqliteNIF.execute(conn, sql, params) do
+      {:ok,
+       %Xqlite.Result{
+         columns: [],
+         rows: [],
+         num_rows: 0,
+         changes: affected
+       }}
+    end
+  end
+
+  @doc """
   Creates a stream that executes a query and emits rows as string-keyed maps.
 
   This provides a high-level, idiomatic Elixir `Stream` for processing large
