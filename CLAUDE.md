@@ -49,7 +49,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 - Streams: `ResourceArc` wraps struct, `AtomicPtr` manages raw `sqlite3_stmt` for lock-free batch iteration. Deliberate unsafe FFI — requires safety audits.
 - Cancellation: SQLite progress handler, checked every 8 VM steps (hardcoded, un-tuned). Token is `Arc<AtomicBool>`.
 - Error handling: comprehensive Rust→Elixir mapping. Constraint violations get specific atoms. Fallback: `{:sqlite_failure, code, extended_code, message}`.
-- **`changes/1` is separate from `query/3` by design.** `query/3` returns result row count (`num_rows`), not `sqlite3_changes()`. For DML without RETURNING, `num_rows` is 0. Callers needing affected row counts (e.g., the Ecto adapter) must call `changes/1` after DML. This is intentional — `sqlite3_changes()` is connection-level state, not per-statement. Folding it into `query/3` would report stale counts if triggers or concurrent operations modified state between statement completion and the changes read.
+- **`sqlite3_changes()` is sticky.** Per SQLite docs: "Executing any other type of SQL statement does not modify the value returned by these functions." This means `changes/1` returns the last DML's count even after SELECT, DDL, or PRAGMA — it never resets to 0 on its own. The two-call pattern (`query` then `changes`) is therefore unreliable after non-DML statements. `query_with_changes/3` solves this by capturing `sqlite3_changes()` inside the Mutex hold and zeroing it for non-DML results (detected by empty columns).
 
 ## Gotchas (hard-won lessons)
 

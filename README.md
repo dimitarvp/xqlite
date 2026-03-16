@@ -191,9 +191,11 @@ For use cases that genuinely require step-level control from Elixir (e.g., custo
 
 `query/3` returns `%{columns, rows, num_rows}` where `num_rows` is the count of *result rows* — not SQLite's `sqlite3_changes()`. For SELECT statements these are the same thing. For DML (INSERT/UPDATE/DELETE without RETURNING), `query/3` returns `num_rows: 0` because there are no result rows, even though rows were affected.
 
-To get the actual affected row count after DML, call `changes/1` immediately after the statement. This is a separate NIF call, not folded into `query/3`, because `sqlite3_changes()` is a connection-level function — it reflects the *last* completed statement, not a specific query handle. Folding it into `query/3` would report stale counts if a trigger or concurrent operation modified the connection state between the statement's completion and the changes read.
+To get the actual affected row count after DML, call `changes/1` immediately after the statement — or use `query_with_changes/3` which captures the count atomically.
 
-This matches how exqlite handles it (`Sqlite3.changes/1` after `step`), and how the `xqlite_ecto3` adapter wires it: DML → `query_cancellable` → `changes/1` → populate `num_rows`.
+**Important SQLite behavior:** `sqlite3_changes()` is sticky — per [the official docs](https://www.sqlite.org/c3ref/changes.html), "executing any other type of SQL statement does not modify the value returned by these functions." This means `changes/1` after a SELECT returns the *previous* DML's count, not 0. It never resets on its own.
+
+`query_with_changes/3` solves this by reading `sqlite3_changes()` inside the same Mutex hold as the query execution and returning 0 for non-DML statements (detected by empty result columns). This is the recommended function for callers who need reliable affected row counts — including the `xqlite_ecto3` adapter.
 
 ## Roadmap
 
