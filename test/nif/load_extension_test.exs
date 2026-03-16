@@ -110,8 +110,9 @@ defmodule Xqlite.NIF.LoadExtensionTest do
       # load_extension — error cases
       # -------------------------------------------------------------------
 
-      test "load without enabling returns error", %{conn: conn} do
-        assert {:error, _} = NIF.load_extension(conn, test_extension_path())
+      test "load without enabling returns :extension_loading_disabled", %{conn: conn} do
+        assert {:error, :extension_loading_disabled} =
+                 NIF.load_extension(conn, test_extension_path())
       end
 
       test "load nonexistent path returns error", %{conn: conn} do

@@ -25,99 +25,74 @@ defmodule Xqlite.NIF.BuiltinDbstatTest do
         {:ok, conn: conn}
       end
 
-      test "dbstat virtual table is queryable", %{conn: conn} do
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(
-                   conn,
-                   "SELECT name, path, pageno, pagetype, ncell, payload, unused, mx_payload FROM dbstat",
-                   []
-                 )
-
-        assert length(rows) > 0
-      end
-
-      test "dbstat reports pages for table and index", %{conn: conn} do
+      test "dbstat reports correct distinct object names", %{conn: conn} do
         assert {:ok, %{rows: rows}} =
                  NIF.query(conn, "SELECT DISTINCT name FROM dbstat ORDER BY name", [])
 
         names = Enum.map(rows, &hd/1)
         assert "dbst_data" in names
         assert "dbst_idx" in names
+        assert "sqlite_schema" in names
       end
 
-      test "dbstat pageno is positive integer", %{conn: conn} do
+      test "all pages are leaf type for small dataset", %{conn: conn} do
+        assert {:ok, %{rows: [["leaf"]]}} =
+                 NIF.query(conn, "SELECT DISTINCT pagetype FROM dbstat", [])
+      end
+
+      test "dbst_data has exactly 2 cells with known payload", %{conn: conn} do
+        assert {:ok, %{rows: [["dbst_data", 2, payload, _unused]], num_rows: 1}} =
+                 NIF.query(
+                   conn,
+                   "SELECT name, ncell, payload, unused FROM dbstat WHERE name = 'dbst_data'",
+                   []
+                 )
+
+        assert payload > 0
+      end
+
+      test "dbst_idx has exactly 2 cells", %{conn: conn} do
+        assert {:ok, %{rows: [["dbst_idx", 2, _, _]], num_rows: 1}} =
+                 NIF.query(
+                   conn,
+                   "SELECT name, ncell, payload, unused FROM dbstat WHERE name = 'dbst_idx'",
+                   []
+                 )
+      end
+
+      test "pageno values are positive integers", %{conn: conn} do
         assert {:ok, %{rows: rows}} =
                  NIF.query(conn, "SELECT pageno FROM dbstat", [])
 
-        assert Enum.all?(rows, fn [pageno] -> is_integer(pageno) and pageno > 0 end)
-      end
-
-      test "dbstat pagetype is a known type", %{conn: conn} do
-        known_types = ["internal", "leaf", "overflow"]
-
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(conn, "SELECT DISTINCT pagetype FROM dbstat", [])
-
-        types = Enum.map(rows, &hd/1)
-        assert Enum.all?(types, fn t -> t in known_types end)
-      end
-
-      test "dbstat ncell is non-negative", %{conn: conn} do
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(conn, "SELECT ncell FROM dbstat", [])
-
-        assert Enum.all?(rows, fn [ncell] -> is_integer(ncell) and ncell >= 0 end)
-      end
-
-      test "dbstat payload and unused are non-negative", %{conn: conn} do
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(conn, "SELECT payload, unused FROM dbstat", [])
-
-        assert Enum.all?(rows, fn [payload, unused] ->
-                 is_integer(payload) and payload >= 0 and
-                   is_integer(unused) and unused >= 0
-               end)
-      end
-
-      test "dbstat with schema filter", %{conn: conn} do
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(
-                   conn,
-                   "SELECT name FROM dbstat WHERE name = 'dbst_data'",
-                   []
-                 )
-
-        assert length(rows) > 0
-        assert Enum.all?(rows, fn [name] -> name == "dbst_data" end)
-      end
-
-      test "dbstat aggregate: total pages per object", %{conn: conn} do
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(
-                   conn,
-                   "SELECT name, COUNT(*) AS pages, SUM(payload) AS total_payload FROM dbstat GROUP BY name ORDER BY name",
-                   []
-                 )
-
-        assert length(rows) >= 2
-
-        Enum.each(rows, fn [_name, pages, payload] ->
-          assert is_integer(pages) and pages > 0
-          assert is_integer(payload) and payload >= 0
+        Enum.each(rows, fn [pageno] ->
+          assert is_integer(pageno)
+          assert pageno > 0
         end)
       end
 
-      test "dbstat on empty table", %{conn: conn} do
-        :ok = NIF.execute_batch(conn, "CREATE TABLE dbst_empty (id INTEGER PRIMARY KEY);")
-
+      test "aggregate pages per object", %{conn: conn} do
         assert {:ok, %{rows: rows}} =
                  NIF.query(
                    conn,
-                   "SELECT name, ncell FROM dbstat WHERE name = 'dbst_empty'",
+                   "SELECT name, COUNT(*) AS pages FROM dbstat GROUP BY name ORDER BY name",
                    []
                  )
 
-        assert length(rows) >= 1
+        page_map = Map.new(rows, fn [name, count] -> {name, count} end)
+        assert page_map["dbst_data"] == 1
+        assert page_map["dbst_idx"] == 1
+        assert page_map["sqlite_schema"] == 1
+      end
+
+      test "empty table has one page with zero cells", %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE dbst_empty (id INTEGER PRIMARY KEY);")
+
+        assert {:ok, %{rows: [["dbst_empty", 0, 0, _]], num_rows: 1}} =
+                 NIF.query(
+                   conn,
+                   "SELECT name, ncell, payload, unused FROM dbstat WHERE name = 'dbst_empty'",
+                   []
+                 )
       end
     end
   end

@@ -214,14 +214,14 @@ defmodule Xqlite.NIF.BuiltinJsonTest do
       # -------------------------------------------------------------------
 
       test "json_tree() traverses nested structure", %{conn: conn} do
-        assert {:ok, %{rows: rows}} =
+        assert {:ok, %{rows: rows, num_rows: 3}} =
                  NIF.query(
                    conn,
                    ~s|SELECT key, type FROM json_tree('{"a":{"b":1}}') ORDER BY id|,
                    []
                  )
 
-        assert length(rows) >= 3
+        assert rows == [[nil, "object"], ["a", "object"], ["b", "integer"]]
       end
 
       # -------------------------------------------------------------------

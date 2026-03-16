@@ -442,7 +442,7 @@ defmodule Xqlite.NIF.BuiltinFts5Test do
         :ok = NIF.execute_batch(conn, "CREATE VIRTUAL TABLE fts_ic USING fts5(content);")
         {:ok, 1} = NIF.execute(conn, "INSERT INTO fts_ic VALUES (?1)", ["test data"])
 
-        assert {:ok, _} =
+        assert {:ok, %{columns: [], rows: [], num_rows: 0}} =
                  NIF.query(
                    conn,
                    "INSERT INTO fts_ic(fts_ic, rank) VALUES('integrity-check', 1)",

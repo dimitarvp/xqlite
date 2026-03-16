@@ -252,8 +252,8 @@ defmodule Xqlite.NIF.BackupProgressTest do
         {:ok, token} = NIF.create_cancel_token()
         :ok = NIF.backup_with_progress(conn, "main", path, self(), 1, token)
 
-        messages = drain_progress_messages()
-        assert length(messages) >= 3
+        message_count = length(drain_progress_messages())
+        assert message_count >= 3 and message_count <= 20
       end
 
       test "large pages_per_step completes in fewer messages", %{conn: conn, backup_path: path} do
@@ -315,8 +315,8 @@ defmodule Xqlite.NIF.BackupProgressTest do
         assert File.exists?(path)
         assert File.stat!(path).size > 0
 
-        messages = drain_progress_messages()
-        assert length(messages) >= 1
+        message_count = length(drain_progress_messages())
+        assert message_count >= 1 and message_count <= 3
       end
     end
   end
