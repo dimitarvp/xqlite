@@ -13,7 +13,7 @@ For Ecto 3.x integration see the planned [xqlite_ecto3](https://github.com/dimit
 ```elixir
 def deps do
   [
-    {:xqlite, "~> 0.4.1"}
+    {:xqlite, "~> 0.5.0"}
   ]
 end
 ```
@@ -39,7 +39,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **`Xqlite.stream/4`** — lazily fetch rows as string-keyed maps via `Stream.resource/3`; supports `:type_extensions` option for automatic encode/decode
 - **`Xqlite.TypeExtension`** — behaviour for bidirectional Elixir↔SQLite type conversion. Built-in extensions: `DateTime`, `NaiveDateTime`, `Date`, `Time` (all ISO 8601)
 - **`Xqlite.Result`** — query result struct implementing `Table.Reader` (works with Explorer, Kino, VegaLite)
-- **`Xqlite.Pragma`** — typed PRAGMA schema with `get/4` and `put/4`, covering 60+ PRAGMAs with validation
+- **`Xqlite.Pragma`** — typed PRAGMA schema with `get/4` and `put/4`, covering 68 PRAGMAs with validation
 - **Convenience helpers** — `enable_foreign_key_enforcement/1`, `enable_strict_mode/1`, etc.
 
 ### Low-level NIF API (`XqliteNIF`)
