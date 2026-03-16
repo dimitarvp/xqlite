@@ -68,6 +68,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 14. **rusqlite upgrade (post-0.38.0).** PR #1819 (fixes our #1817) changes `Error::Utf8Error(err)` → `Error::Utf8Error(col, err)` and replaces `From<ValueRef> for Value` with `TryFrom`. Update the pattern match in `error.rs`; our `row.get::<_, Value>()?` calls need no changes.
 15. **Windows paths in Elixir.** `CARGO_HOME` and other env vars on Windows use backslashes. `Path.join` appends with forward slashes, producing mixed-separator paths that `Path.wildcard` cannot match. Always normalize with `String.replace("\\", "/")` before globbing. This bit us in `test_helper.exs`.
 16. **C compiler on Windows GHA runners.** `cl.exe` (MSVC) is NOT on PATH — it needs `ilammy/msvc-dev-cmd@v1` or manual `vcvarsall.bat` setup. MinGW `gcc` IS on PATH (gcc 14.2.0 at `C:\mingw64\bin`). Use `gcc -shared` for compiling SQLite extensions on Windows — proven by sqlean project. SQLite extensions use a function-pointer ABI so MinGW vs MSVC is irrelevant.
+17. **`mix clean` before checksum download after version bump.** After bumping the version in `mix.exs` and `Cargo.toml`, stale build artifacts retain the old version. `mix rustler_precompiled.download --no-config` reads the version from the compiled beam, not the source. Always run `mix clean && mix compile` before `mix rustler_precompiled.download` on release day.
 
 ## Elixir Code Style
 
