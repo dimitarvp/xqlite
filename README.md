@@ -187,6 +187,14 @@ We chose this single-call design over exposing a step-by-step `Backup` resource 
 
 For use cases that genuinely require step-level control from Elixir (e.g., custom retry logic between steps), `serialize/1` and `deserialize/2` provide atomic database snapshots as binaries that can be chunked and managed in pure Elixir. If demand for a step-by-step backup resource materializes, it can be added in a future release.
 
+### Affected row counts (`changes/1`)
+
+`query/3` returns `%{columns, rows, num_rows}` where `num_rows` is the count of *result rows* — not SQLite's `sqlite3_changes()`. For SELECT statements these are the same thing. For DML (INSERT/UPDATE/DELETE without RETURNING), `query/3` returns `num_rows: 0` because there are no result rows, even though rows were affected.
+
+To get the actual affected row count after DML, call `changes/1` immediately after the statement. This is a separate NIF call, not folded into `query/3`, because `sqlite3_changes()` is a connection-level function — it reflects the *last* completed statement, not a specific query handle. Folding it into `query/3` would report stale counts if a trigger or concurrent operation modified the connection state between the statement's completion and the changes read.
+
+This matches how exqlite handles it (`Sqlite3.changes/1` after `step`), and how the `xqlite_ecto3` adapter wires it: DML → `query_cancellable` → `changes/1` → populate `num_rows`.
+
 ## Roadmap
 
 Planned for **xqlite** core (before Ecto adapter work):
