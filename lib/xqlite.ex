@@ -7,6 +7,64 @@ defmodule Xqlite do
   @type conn :: reference()
 
   # ---------------------------------------------------------------------------
+  # Connection options (validated via NimbleOptions)
+  # ---------------------------------------------------------------------------
+
+  @open_opts_schema NimbleOptions.new!(
+                      journal_mode: [
+                        type: {:in, [:wal, :delete, :truncate, :memory, :off]},
+                        default: :wal,
+                        doc:
+                          "SQLite journal mode. `:wal` enables concurrent readers with a single writer."
+                      ],
+                      busy_timeout: [
+                        type: :timeout,
+                        default: 5_000,
+                        doc:
+                          "Milliseconds to wait when the database is locked. `:infinity` waits forever."
+                      ],
+                      foreign_keys: [
+                        type: :boolean,
+                        default: true,
+                        doc:
+                          "Enable foreign key constraint enforcement. SQLite defaults to OFF."
+                      ],
+                      synchronous: [
+                        type: {:in, [:off, :normal, :full, :extra]},
+                        default: :normal,
+                        doc:
+                          "Synchronous mode. `:normal` is safe with WAL and significantly faster than `:full`."
+                      ],
+                      cache_size: [
+                        type: :integer,
+                        default: -64_000,
+                        doc:
+                          "Page cache size. Negative values mean KB (e.g., `-64000` = 64MB). SQLite default is 2MB."
+                      ],
+                      temp_store: [
+                        type: {:in, [:default, :file, :memory]},
+                        default: :memory,
+                        doc: "Where to store temporary tables and indices."
+                      ],
+                      wal_autocheckpoint: [
+                        type: :non_neg_integer,
+                        default: 1000,
+                        doc:
+                          "WAL auto-checkpoint threshold in pages. 0 disables auto-checkpoint."
+                      ],
+                      mmap_size: [
+                        type: :non_neg_integer,
+                        default: 0,
+                        doc: "Memory-mapped I/O size in bytes. 0 disables mmap."
+                      ],
+                      auto_vacuum: [
+                        type: {:in, [:none, :full, :incremental]},
+                        default: :none,
+                        doc: "Auto-vacuum mode. Must be set before creating any tables."
+                      ]
+                    )
+
+  # ---------------------------------------------------------------------------
   # SQLite value types
   # ---------------------------------------------------------------------------
 
@@ -91,6 +149,299 @@ defmodule Xqlite do
           | {:utf8_error, String.t()}
 
   @type error :: {:error, error_reason()}
+
+  # ---------------------------------------------------------------------------
+  # Connection opening with validated options
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Opens a database connection with opinionated defaults and validated options.
+
+  All PRAGMAs are applied on the same connection immediately after opening,
+  with no window for another process to observe an unconfigured state.
+
+  ## Options
+
+  #{NimbleOptions.docs(@open_opts_schema)}
+
+  ## Examples
+
+      {:ok, conn} = Xqlite.open("my.db")
+      {:ok, conn} = Xqlite.open("my.db", journal_mode: :delete, busy_timeout: 10_000)
+
+  """
+  @spec open(String.t(), keyword()) :: {:ok, conn()} | error()
+  def open(path, opts \\ []) do
+    with {:ok, validated} <- validate_open_opts(opts),
+         {:ok, conn} <- XqliteNIF.open(path),
+         :ok <- apply_pragmas(conn, validated) do
+      {:ok, conn}
+    end
+  end
+
+  @doc """
+  Opens an in-memory database with opinionated defaults and validated options.
+
+  Accepts the same options as `open/2`.
+  """
+  @spec open_in_memory(keyword()) :: {:ok, conn()} | error()
+  def open_in_memory(opts \\ []) do
+    with {:ok, validated} <- validate_open_opts(opts),
+         {:ok, conn} <- XqliteNIF.open_in_memory(),
+         :ok <- apply_pragmas(conn, validated) do
+      {:ok, conn}
+    end
+  end
+
+  defp validate_open_opts(opts) do
+    case NimbleOptions.validate(opts, @open_opts_schema) do
+      {:ok, _validated} = ok ->
+        ok
+
+      {:error, %NimbleOptions.ValidationError{} = err} ->
+        {:error, {:invalid_open_option, Exception.message(err)}}
+    end
+  end
+
+  @pragma_order [
+    :busy_timeout,
+    :journal_mode,
+    :auto_vacuum,
+    :foreign_keys,
+    :synchronous,
+    :cache_size,
+    :temp_store,
+    :wal_autocheckpoint,
+    :mmap_size
+  ]
+
+  defp apply_pragmas(conn, validated) do
+    Enum.reduce_while(@pragma_order, :ok, fn key, :ok ->
+      value = Keyword.fetch!(validated, key)
+
+      case set_pragma_value(conn, key, value) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp set_pragma_value(conn, :busy_timeout, :infinity),
+    do: XqliteNIF.set_pragma(conn, "busy_timeout", 2_147_483_647)
+
+  defp set_pragma_value(conn, :busy_timeout, ms),
+    do: XqliteNIF.set_pragma(conn, "busy_timeout", ms)
+
+  defp set_pragma_value(conn, :foreign_keys, true),
+    do: XqliteNIF.set_pragma(conn, "foreign_keys", :on)
+
+  defp set_pragma_value(conn, :foreign_keys, false),
+    do: XqliteNIF.set_pragma(conn, "foreign_keys", :off)
+
+  defp set_pragma_value(conn, :auto_vacuum, :none),
+    do: XqliteNIF.set_pragma(conn, "auto_vacuum", 0)
+
+  defp set_pragma_value(conn, :auto_vacuum, :full),
+    do: XqliteNIF.set_pragma(conn, "auto_vacuum", 1)
+
+  defp set_pragma_value(conn, :auto_vacuum, :incremental),
+    do: XqliteNIF.set_pragma(conn, "auto_vacuum", 2)
+
+  defp set_pragma_value(conn, :temp_store, :default),
+    do: XqliteNIF.set_pragma(conn, "temp_store", 0)
+
+  defp set_pragma_value(conn, :temp_store, :file),
+    do: XqliteNIF.set_pragma(conn, "temp_store", 1)
+
+  defp set_pragma_value(conn, :temp_store, :memory),
+    do: XqliteNIF.set_pragma(conn, "temp_store", 2)
+
+  defp set_pragma_value(conn, key, value),
+    do: XqliteNIF.set_pragma(conn, Atom.to_string(key), value)
+
+  # ---------------------------------------------------------------------------
+  # STRICT table operations
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Checks an existing table for values that would violate STRICT typing rules.
+
+  Returns `{:ok, []}` if the table is clean, or `{:ok, violations}` where each
+  violation is a map with `:rowid`, `:column`, `:actual_type`, and `:expected_type`.
+
+  This is a read-only check — it does not modify the table.
+  """
+  @spec check_strict_violations(conn(), String.t()) ::
+          {:ok, [map()]} | error()
+  def check_strict_violations(conn, table) when is_binary(table) do
+    with {:ok, columns} <- get_typed_columns(conn, table) do
+      violation_queries =
+        columns
+        |> Enum.map(fn {col_name, col_type} ->
+          allowed = strict_allowed_types(col_type)
+          type_list = Enum.map_join(allowed, ", ", &"'#{&1}'")
+
+          "SELECT rowid, '#{col_name}' AS col, typeof(\"#{col_name}\") AS actual_type, " <>
+            "'#{String.upcase(Atom.to_string(col_type))}' AS expected_type " <>
+            "FROM \"#{table}\" WHERE typeof(\"#{col_name}\") NOT IN (#{type_list})"
+        end)
+
+      case violation_queries do
+        [] ->
+          {:ok, []}
+
+        queries ->
+          union_sql = Enum.join(queries, " UNION ALL ")
+
+          with {:ok, result} <- XqliteNIF.query(conn, union_sql, []) do
+            violations =
+              Enum.map(result.rows, fn [rowid, col, actual, expected] ->
+                %{rowid: rowid, column: col, actual_type: actual, expected_type: expected}
+              end)
+
+            {:ok, violations}
+          end
+      end
+    end
+  end
+
+  @doc """
+  Converts an existing table to STRICT mode via table rebuild.
+
+  This creates a new STRICT table, copies all data, drops the original, and
+  renames the new table — all inside a transaction.
+
+  If existing data violates STRICT typing rules, the operation fails with
+  `{:error, {:strict_violations, violations}}` where `violations` is a list
+  of maps from `check_strict_violations/2`. The original table is left untouched.
+
+  ## Options
+
+  None currently.
+
+  ## Examples
+
+      :ok = Xqlite.enable_strict_table(conn, "users")
+
+  """
+  @spec enable_strict_table(conn(), String.t()) :: :ok | {:error, term()}
+  def enable_strict_table(conn, table) when is_binary(table) do
+    with {:ok, violations} <- check_strict_violations(conn, table),
+         :ok <- reject_violations(violations),
+         {:ok, create_sql} <- get_create_sql(conn, table) do
+      rebuild_as_strict(conn, table, create_sql)
+    end
+  end
+
+  defp reject_violations([]), do: :ok
+
+  defp reject_violations(violations),
+    do: {:error, {:strict_violations, violations}}
+
+  defp get_create_sql(conn, table) do
+    sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+
+    case XqliteNIF.query(conn, sql, [table]) do
+      {:ok, %{rows: [[create_sql]]}} -> {:ok, create_sql}
+      {:ok, %{rows: []}} -> {:error, {:no_such_table, table}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp get_typed_columns(conn, table) do
+    case XqliteNIF.query(conn, "PRAGMA table_info(\"#{table}\")", []) do
+      {:ok, %{rows: []}} ->
+        {:error, {:no_such_table, table}}
+
+      {:ok, %{rows: rows}} ->
+        columns =
+          rows
+          |> Enum.map(fn [_cid, name, type | _rest] ->
+            parsed_type = parse_column_type(type)
+            {name, parsed_type}
+          end)
+          |> Enum.reject(fn {_name, type} -> type == :any end)
+
+        {:ok, columns}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp parse_column_type(type) when is_binary(type) do
+    case String.downcase(type) do
+      "integer" -> :integer
+      "int" -> :integer
+      "real" -> :real
+      "text" -> :text
+      "blob" -> :blob
+      _ -> :any
+    end
+  end
+
+  defp parse_column_type(_), do: :any
+
+  defp strict_allowed_types(:integer), do: ["integer", "null"]
+  defp strict_allowed_types(:real), do: ["real", "integer", "null"]
+  defp strict_allowed_types(:text), do: ["text", "integer", "real", "null"]
+  defp strict_allowed_types(:blob), do: ["blob", "null"]
+  defp strict_allowed_types(:any), do: ["integer", "real", "text", "blob", "null"]
+
+  defp rebuild_as_strict(conn, table, original_create_sql) do
+    tmp_table = "#{table}_xqlite_strict_rebuild"
+
+    # The CREATE SQL from sqlite_master uses the original table name
+    # (quoted or unquoted). Replace all forms: bare, double-quoted, backtick-quoted.
+    strict_sql =
+      original_create_sql
+      |> String.replace(~r/\)\s*(STRICT)?\s*$/, ") STRICT")
+      |> String.replace(
+        ~r/\bCREATE TABLE\s+(?:"#{table}"|`#{table}`|#{table})\b/,
+        "CREATE TABLE \"#{tmp_table}\""
+      )
+
+    with {:ok, index_sqls} <- get_index_sqls(conn, table),
+         :ok <- exec(conn, "BEGIN IMMEDIATE"),
+         :ok <- exec(conn, strict_sql),
+         :ok <- exec(conn, "INSERT INTO \"#{tmp_table}\" SELECT * FROM \"#{table}\""),
+         :ok <- exec(conn, "DROP TABLE \"#{table}\""),
+         :ok <- exec(conn, "ALTER TABLE \"#{tmp_table}\" RENAME TO \"#{table}\""),
+         :ok <- recreate_indexes(conn, index_sqls),
+         :ok <- exec(conn, "COMMIT") do
+      :ok
+    else
+      {:error, _} = err ->
+        exec(conn, "ROLLBACK")
+        err
+    end
+  end
+
+  defp get_index_sqls(conn, table) do
+    sql = "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL"
+
+    case XqliteNIF.query(conn, sql, [table]) do
+      {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, fn [s] -> s end)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp recreate_indexes(_conn, []), do: :ok
+
+  defp recreate_indexes(conn, [sql | rest]) do
+    case exec(conn, sql) do
+      :ok -> recreate_indexes(conn, rest)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp exec(conn, sql) do
+    case XqliteNIF.execute(conn, sql) do
+      {:ok, _} -> :ok
+      :ok -> :ok
+      {:error, _} = err -> err
+    end
+  end
 
   @doc """
   Enables strict mode only for the lifetime of the given database connection.
