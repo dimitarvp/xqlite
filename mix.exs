@@ -53,6 +53,7 @@ defmodule Xqlite.MixProject do
     [
       {:rustler, "~> 0.37.1", optional: true},
       {:rustler_precompiled, "~> 0.8"},
+      {:nimble_options, "~> 1.1"},
       {:table, "~> 0.1.0"},
 
       # dev / test.
