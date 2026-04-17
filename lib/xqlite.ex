@@ -438,7 +438,6 @@ defmodule Xqlite do
   defp exec(conn, sql) do
     case XqliteNIF.execute(conn, sql) do
       {:ok, _} -> :ok
-      :ok -> :ok
       {:error, _} = err -> err
     end
   end
