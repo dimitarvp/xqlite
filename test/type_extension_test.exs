@@ -5,6 +5,13 @@ defmodule Xqlite.TypeExtensionTest do
   alias Xqlite.TypeExtension
   alias XqliteNIF, as: NIF
 
+  @all_extensions [
+    Xqlite.TypeExtension.DateTime,
+    Xqlite.TypeExtension.NaiveDateTime,
+    Xqlite.TypeExtension.Date,
+    Xqlite.TypeExtension.Time
+  ]
+
   # ---------------------------------------------------------------------------
   # Test helpers: custom extensions for testing chain behaviour
   # ---------------------------------------------------------------------------
@@ -421,13 +428,6 @@ defmodule Xqlite.TypeExtensionTest do
   # ---------------------------------------------------------------------------
 
   describe "all built-in extensions" do
-    @all_extensions [
-      Xqlite.TypeExtension.DateTime,
-      Xqlite.TypeExtension.NaiveDateTime,
-      Xqlite.TypeExtension.Date,
-      Xqlite.TypeExtension.Time
-    ]
-
     test "encode each built-in type" do
       params = [
         ~U[2024-01-15 10:30:00Z],

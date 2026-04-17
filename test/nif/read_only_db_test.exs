@@ -7,6 +7,11 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   @create_table_sql "CREATE TABLE #{@test_table_name} (id INTEGER PRIMARY KEY, data TEXT);"
   @insert_sql "INSERT INTO #{@test_table_name} (id, data) VALUES (1, 'sample data');"
 
+  @readonly_openers [
+    {:uri_mode_ro, "URI mode=ro", :open_readonly_via_uri},
+    {:open_readonly_nif, "open_readonly/1 NIF", :open_readonly_via_nif}
+  ]
+
   defp create_temp_db_file() do
     temp_db_path =
       Path.join(
@@ -30,11 +35,6 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   defp open_readonly_via_nif(db_path) do
     NIF.open_readonly(db_path)
   end
-
-  @readonly_openers [
-    {:uri_mode_ro, "URI mode=ro", :open_readonly_via_uri},
-    {:open_readonly_nif, "open_readonly/1 NIF", :open_readonly_via_nif}
-  ]
 
   for {tag, description, opener_fun} <- @readonly_openers do
     describe "#{description}" do

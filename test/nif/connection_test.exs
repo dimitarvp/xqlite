@@ -6,6 +6,9 @@ defmodule Xqlite.NIF.ConnectionTest do
   alias XqliteNIF, as: NIF
   alias Xqlite.Schema
 
+  @shared_mem_db_uri "file:shared_mem_conn_test_specific?mode=memory&cache=shared"
+  @invalid_db_path "file:./non_existent_dir_for_sure/read_only_db?mode=ro"
+
   for {type_tag, prefix, _opener_mfa} <- connection_openers() do
     describe "using #{prefix}" do
       @describetag type_tag
@@ -139,8 +142,6 @@ defmodule Xqlite.NIF.ConnectionTest do
   end
 
   describe "shared memory DB" do
-    @shared_mem_db_uri "file:shared_mem_conn_test_specific?mode=memory&cache=shared"
-
     setup do
       assert {:ok, conn1} = NIF.open(@shared_mem_db_uri)
       assert {:ok, conn2} = NIF.open(@shared_mem_db_uri)
@@ -161,8 +162,6 @@ defmodule Xqlite.NIF.ConnectionTest do
   end
 
   describe "open failure" do
-    @invalid_db_path "file:./non_existent_dir_for_sure/read_only_db?mode=ro"
-
     test "open/1 fails for an invalid path" do
       assert {:error, {:cannot_open_database, @invalid_db_path, _code, _reason}} =
                NIF.open(@invalid_db_path)

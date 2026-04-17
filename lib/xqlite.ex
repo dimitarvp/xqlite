@@ -64,6 +64,18 @@ defmodule Xqlite do
                       ]
                     )
 
+  @pragma_order [
+    :busy_timeout,
+    :journal_mode,
+    :auto_vacuum,
+    :foreign_keys,
+    :synchronous,
+    :cache_size,
+    :temp_store,
+    :wal_autocheckpoint,
+    :mmap_size
+  ]
+
   # ---------------------------------------------------------------------------
   # SQLite value types
   # ---------------------------------------------------------------------------
@@ -202,18 +214,6 @@ defmodule Xqlite do
         {:error, {:invalid_open_option, Exception.message(err)}}
     end
   end
-
-  @pragma_order [
-    :busy_timeout,
-    :journal_mode,
-    :auto_vacuum,
-    :foreign_keys,
-    :synchronous,
-    :cache_size,
-    :temp_store,
-    :wal_autocheckpoint,
-    :mmap_size
-  ]
 
   defp apply_pragmas(conn, validated) do
     Enum.reduce_while(@pragma_order, :ok, fn key, :ok ->
