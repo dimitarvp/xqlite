@@ -63,16 +63,19 @@ jobs:
         run: mix format --check-formatted
 
       - name: Rust formatting
-        run: cargo fmt --manifest-path native/xqlitenif/Cargo.toml -- --check
+        working-directory: native/xqlitenif
+        run: cargo fmt -- --check
 
       - name: Elixir compilation (warnings as errors)
         run: mix compile --warnings-as-errors
 
       - name: Rust clippy
-        run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
+        working-directory: native/xqlitenif
+        run: cargo clippy -- -D warnings
 
       - name: Rust tests
-        run: cargo test --manifest-path native/xqlitenif/Cargo.toml
+        working-directory: native/xqlitenif
+        run: cargo test
 
   dialyzer:
     name: Type checks

@@ -1,3 +1,10 @@
+[env]
+# `sqlite3_stmt_scanstatus*` is gated on this compile-time flag — without it
+# the API returns SQLITE_MISUSE. Paid cost: a few counters tracked per
+# prepared statement. Benefit: per-scan row counts, loop counts, and
+# estimated rows, which drive `Xqlite.explain_analyze/3`.
+LIBSQLITE3_FLAGS = { value = "-DSQLITE_ENABLE_STMT_SCANSTATUS=1", force = true }
+
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 

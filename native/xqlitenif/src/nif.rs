@@ -3,6 +3,7 @@ use crate::blob::{self, XqliteBlob};
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{self, XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
+use crate::explain_analyze::{self, ExplainAnalyze};
 use crate::pragma;
 use crate::query;
 use crate::schema::{
@@ -201,6 +202,22 @@ fn execute_batch_cancellable(
         query::core_execute_batch(conn, &sql_batch, Some(token_bool))
     });
     singular_ok_or_error_tuple(env, execution_result)
+}
+
+// ---------------------------------------------------------------------------
+// EXPLAIN ANALYZE NIF
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn explain_analyze<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    sql: String,
+    params_term: Term<'a>,
+) -> Result<ExplainAnalyze, XqliteError> {
+    connection::with_conn(&handle, |conn| {
+        explain_analyze::core_explain_analyze(env, conn, &sql, params_term)
+    })
 }
 
 // ---------------------------------------------------------------------------

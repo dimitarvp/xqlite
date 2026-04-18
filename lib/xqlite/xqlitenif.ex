@@ -218,6 +218,61 @@ defmodule XqliteNIF do
   def query_with_changes_cancellable(_conn, _sql, _params, _cancel_token), do: err()
 
   @doc """
+  Runs a SQL statement and returns a structured report of how SQLite executed it.
+
+  Combines three sources:
+    * `EXPLAIN QUERY PLAN <sql>` — SQLite's static query plan tree (under
+      `:query_plan`).
+    * `sqlite3_stmt_scanstatus_v2` — per-scan runtime stats (under `:scans`),
+      one entry per loop in the executed plan.
+    * `sqlite3_stmt_status` — statement-level counters (under `:stmt_counters`).
+
+  Also reports wall-clock execution time and the number of rows produced. Rows
+  themselves are discarded — use `query/3` if you need them.
+
+  The feature requires SQLite to be built with `SQLITE_ENABLE_STMT_SCANSTATUS`,
+  which `xqlite` enables in its bundled build.
+
+  Returns `{:ok, report}` where `report` is a map with the shape:
+
+      %{
+        wall_time_ns: non_neg_integer(),
+        rows_produced: non_neg_integer(),
+        stmt_counters: %{
+          fullscan_step: integer(),
+          sort: integer(),
+          autoindex: integer(),
+          vm_step: integer(),
+          reprepare: integer(),
+          run: integer(),
+          filter_miss: integer(),
+          filter_hit: integer(),
+          memused_bytes: integer()
+        },
+        scans: [%{
+          loops: integer(),
+          rows_visited: integer(),
+          estimated_rows: float(),
+          name: String.t(),
+          explain: String.t(),
+          selectid: integer(),
+          parentid: integer()
+        }],
+        query_plan: [%{
+          id: integer(),
+          parent: integer(),
+          detail: String.t()
+        }]
+      }
+  """
+  @spec explain_analyze(
+          conn :: Xqlite.conn(),
+          sql :: String.t(),
+          params :: list() | keyword()
+        ) :: {:ok, map()} | Xqlite.error()
+  def explain_analyze(_conn, _sql, _params \\ []), do: err()
+
+  @doc """
   Executes a SQL statement that does not return rows (e.g., `INSERT`, `UPDATE`, `DELETE`, DDL).
 
   `conn` is the database connection resource.

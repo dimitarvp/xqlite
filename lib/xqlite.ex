@@ -562,6 +562,32 @@ defmodule Xqlite do
   end
 
   @doc """
+  Runs a SQL statement and returns an `%Xqlite.ExplainAnalyze{}` report.
+
+  The statement is executed in full (rows are fetched and discarded). The
+  returned struct combines the static `EXPLAIN QUERY PLAN` tree with
+  runtime counters from `sqlite3_stmt_scanstatus_v2` / `sqlite3_stmt_status`
+  and a wall-clock measurement around the execution. See
+  `Xqlite.ExplainAnalyze` for the field layout and how to interpret it.
+
+  ## Examples
+
+      iex> {:ok, conn} = XqliteNIF.open_in_memory()
+      iex> XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO t(name) VALUES ('a'), ('b');")
+      :ok
+      iex> {:ok, report} = Xqlite.explain_analyze(conn, "SELECT name FROM t WHERE name = ?", ["b"])
+      iex> match?(%Xqlite.ExplainAnalyze{}, report)
+      true
+  """
+  @spec explain_analyze(conn(), String.t(), list() | keyword()) ::
+          {:ok, Xqlite.ExplainAnalyze.t()} | error()
+  def explain_analyze(conn, sql, params \\ []) do
+    with {:ok, map} <- XqliteNIF.explain_analyze(conn, sql, params) do
+      {:ok, Xqlite.ExplainAnalyze.from_map(map)}
+    end
+  end
+
+  @doc """
   Creates a stream that executes a query and emits rows as string-keyed maps.
 
   This provides a high-level, idiomatic Elixir `Stream` for processing large

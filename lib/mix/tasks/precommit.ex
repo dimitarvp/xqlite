@@ -24,7 +24,7 @@ defmodule Mix.Tasks.Precommit do
 
   @shortdoc "Run all CI checks locally before committing"
 
-  @cargo_manifest "native/xqlitenif/Cargo.toml"
+  @cargo_dir "native/xqlitenif"
 
   @steps [
     {"Elixir formatting", &__MODULE__.check_elixir_format/0},
@@ -70,7 +70,7 @@ defmodule Mix.Tasks.Precommit do
   end
 
   def check_rust_format do
-    run_cmd("cargo", ["fmt", "--manifest-path", @cargo_manifest, "--", "--check"])
+    run_cargo(["fmt", "--", "--check"])
   end
 
   def check_elixir_compile do
@@ -78,11 +78,11 @@ defmodule Mix.Tasks.Precommit do
   end
 
   def check_rust_clippy do
-    run_cmd("cargo", ["clippy", "--manifest-path", @cargo_manifest, "--", "-D", "warnings"])
+    run_cargo(["clippy", "--", "-D", "warnings"])
   end
 
   def check_rust_tests do
-    run_cmd("cargo", ["test", "--manifest-path", @cargo_manifest])
+    run_cargo(["test"])
   end
 
   def check_dialyzer do
@@ -95,6 +95,17 @@ defmodule Mix.Tasks.Precommit do
 
   defp run_cmd(cmd, args) do
     case System.cmd(cmd, args, into: IO.stream(), stderr_to_stdout: true) do
+      {_, 0} -> :ok
+      {_, exit_code} -> {:error, exit_code}
+    end
+  end
+
+  # All cargo commands run with cwd set to the crate directory so that the
+  # crate's `.cargo/config.toml` is picked up (e.g., `LIBSQLITE3_FLAGS` for
+  # `SQLITE_ENABLE_STMT_SCANSTATUS`). Cargo walks up from cwd to find the
+  # config; invoking via `--manifest-path` from the repo root does not.
+  defp run_cargo(args) do
+    case System.cmd("cargo", args, cd: @cargo_dir, into: IO.stream(), stderr_to_stdout: true) do
       {_, 0} -> :ok
       {_, exit_code} -> {:error, exit_code}
     end
