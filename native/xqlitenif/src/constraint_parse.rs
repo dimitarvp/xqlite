@@ -7,6 +7,24 @@
 //! never need to touch the raw message string for classification.
 
 use rusqlite::ffi;
+use rusqlite::types::Type;
+
+/// Parses a SQLite storage-class token as it appears in DATATYPE error messages.
+///
+/// SQLite emits the short form ("INT") for a value's storage class and the
+/// declared form ("INTEGER") for a column's type. STRICT `ANY` columns never
+/// produce SQLITE_CONSTRAINT_DATATYPE (see stricttables.html), so no `Any`
+/// variant is needed.
+fn parse_storage_class(s: &str) -> Option<Type> {
+    match s {
+        "INT" | "INTEGER" => Some(Type::Integer),
+        "REAL" => Some(Type::Real),
+        "TEXT" => Some(Type::Text),
+        "BLOB" => Some(Type::Blob),
+        "NULL" => Some(Type::Null),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ConstraintDetails {
@@ -14,6 +32,8 @@ pub(crate) struct ConstraintDetails {
     pub columns: Vec<String>,
     pub index_name: Option<String>,
     pub constraint_name: Option<String>,
+    pub source_type: Option<Type>,
+    pub target_type: Option<Type>,
 }
 
 pub(crate) fn parse_details(extended_code: i32, message: &str) -> ConstraintDetails {
@@ -32,6 +52,7 @@ pub(crate) fn parse_details(extended_code: i32, message: &str) -> ConstraintDeta
         }
         ffi::SQLITE_CONSTRAINT_NOTNULL => parse_not_null(message),
         ffi::SQLITE_CONSTRAINT_CHECK => parse_check(message),
+        ffi::SQLITE_CONSTRAINT_DATATYPE => parse_datatype(message),
         _ => ConstraintDetails::default(),
     }
 }
@@ -72,6 +93,34 @@ fn parse_check(message: &str) -> ConstraintDetails {
     };
     ConstraintDetails {
         constraint_name: Some(rest.to_string()),
+        ..Default::default()
+    }
+}
+
+fn parse_datatype(message: &str) -> ConstraintDetails {
+    // Empirically verified STRICT-table format:
+    //   "cannot store SRC value in TGT column TABLE.COLUMN"
+    //
+    // SRC uses SQLite's short storage-class name (INT, REAL, TEXT, BLOB, NULL)
+    // while TGT uses the column's declared type (INTEGER, REAL, TEXT, BLOB, ANY).
+    let Some(rest) = message.strip_prefix("cannot store ") else {
+        return ConstraintDetails::default();
+    };
+    let Some((src, rest)) = rest.split_once(" value in ") else {
+        return ConstraintDetails::default();
+    };
+    let Some((tgt, rest)) = rest.split_once(" column ") else {
+        return ConstraintDetails::default();
+    };
+    let (table, columns) = match rest.split_once('.') {
+        Some((t, c)) => (Some(t.to_string()), vec![c.to_string()]),
+        None => (None, vec![rest.to_string()]),
+    };
+    ConstraintDetails {
+        table,
+        columns,
+        source_type: parse_storage_class(src),
+        target_type: parse_storage_class(tgt),
         ..Default::default()
     }
 }
@@ -175,5 +224,64 @@ mod tests {
             "FOREIGN KEY constraint failed",
         );
         assert_eq!(d, ConstraintDetails::default());
+    }
+
+    #[test]
+    fn datatype_text_into_integer_column() {
+        let d = parse_datatype("cannot store TEXT value in INTEGER column t1.v");
+        assert_eq!(d.table.as_deref(), Some("t1"));
+        assert_eq!(d.columns, vec!["v".to_string()]);
+        assert_eq!(d.source_type, Some(Type::Text));
+        assert_eq!(d.target_type, Some(Type::Integer));
+    }
+
+    #[test]
+    fn datatype_int_source_normalises_to_integer() {
+        let d = parse_datatype("cannot store INT value in BLOB column t8.v");
+        assert_eq!(d.source_type, Some(Type::Integer));
+        assert_eq!(d.target_type, Some(Type::Blob));
+    }
+
+    #[test]
+    fn datatype_real_source() {
+        let d = parse_datatype("cannot store REAL value in BLOB column t9.v");
+        assert_eq!(d.source_type, Some(Type::Real));
+        assert_eq!(d.target_type, Some(Type::Blob));
+    }
+
+    #[test]
+    fn datatype_any_target_is_unreachable_but_returns_nil_types() {
+        // STRICT ANY columns never produce SQLITE_CONSTRAINT_DATATYPE, so this
+        // string isn't seen in practice. We still document the behaviour:
+        // unknown tokens fall through to None rather than matching ANY.
+        let d = parse_datatype("cannot store BLOB value in ANY column t.v");
+        assert_eq!(d.source_type, Some(Type::Blob));
+        assert_eq!(d.target_type, None);
+    }
+
+    #[test]
+    fn datatype_column_without_qualifier_leaves_table_nil() {
+        let d = parse_datatype("cannot store TEXT value in INTEGER column v");
+        assert!(d.table.is_none());
+        assert_eq!(d.columns, vec!["v".to_string()]);
+    }
+
+    #[test]
+    fn datatype_unknown_prefix_returns_empty() {
+        assert_eq!(
+            parse_datatype("something unexpected"),
+            ConstraintDetails::default()
+        );
+    }
+
+    #[test]
+    fn parse_details_datatype_routes_through_parser() {
+        let d = parse_details(
+            ffi::SQLITE_CONSTRAINT_DATATYPE,
+            "cannot store TEXT value in INTEGER column mc.a",
+        );
+        assert_eq!(d.table.as_deref(), Some("mc"));
+        assert_eq!(d.source_type, Some(Type::Text));
+        assert_eq!(d.target_type, Some(Type::Integer));
     }
 }

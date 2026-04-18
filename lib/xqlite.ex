@@ -118,12 +118,16 @@ defmodule Xqlite do
           offset: integer()
         }
 
+  @type storage_class :: :integer | :real | :text | :blob | nil
+
   @type constraint_details :: %{
           message: String.t(),
           table: String.t() | nil,
           columns: [String.t()],
           index_name: String.t() | nil,
-          constraint_name: String.t() | nil
+          constraint_name: String.t() | nil,
+          source_type: storage_class(),
+          target_type: storage_class()
         }
 
   @type error_reason ::

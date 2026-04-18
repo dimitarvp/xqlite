@@ -243,36 +243,36 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_blob_col_test2 (val BLOB) STRICT;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
+        assert {:error,
+                {:constraint_violation, :constraint_datatype,
+                 %{source_type: :text, target_type: :blob, columns: ["val"]}}} =
                  NIF.execute(conn, "INSERT INTO strict_blob_col_test2 (val) VALUES (?1);", [
                    "abc"
                  ])
-
-        assert String.contains?(msg, "cannot store TEXT value in BLOB column")
       end
 
       test "BLOB column: rejects INTEGER insert", %{conn: conn} do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_blob_col_test3 (val BLOB) STRICT;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
+        assert {:error,
+                {:constraint_violation, :constraint_datatype,
+                 %{source_type: :integer, target_type: :blob, columns: ["val"]}}} =
                  NIF.execute(conn, "INSERT INTO strict_blob_col_test3 (val) VALUES (?1);", [
                    123
                  ])
-
-        assert String.contains?(msg, "cannot store INT value in BLOB column")
       end
 
       test "BLOB column: rejects REAL insert", %{conn: conn} do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_blob_col_test4 (val BLOB) STRICT;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
+        assert {:error,
+                {:constraint_violation, :constraint_datatype,
+                 %{source_type: :real, target_type: :blob, columns: ["val"]}}} =
                  NIF.execute(conn, "INSERT INTO strict_blob_col_test4 (val) VALUES (?1);", [
                    123.45
                  ])
-
-        assert String.contains?(msg, "cannot store REAL value in BLOB column")
       end
 
       # Test for STRICT table definition rules
@@ -547,13 +547,15 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, %{rows: [[5, 10]]}} =
                  NIF.query(conn, "SELECT a, b FROM gc_strict_int WHERE a = 5;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
+        assert {:error,
+                {:constraint_violation, :constraint_datatype,
+                 %{
+                   source_type: :text,
+                   target_type: :integer,
+                   table: "gc_strict_int",
+                   columns: ["a"]
+                 }}} =
                  NIF.execute(conn, "INSERT INTO gc_strict_int (a) VALUES (?1);", ["text_val"])
-
-        assert String.contains?(
-                 msg,
-                 "cannot store TEXT value in INTEGER column gc_strict_int.a"
-               )
       end
 
       test "STORED generated column with TEXT type: computes correctly", %{conn: conn} do

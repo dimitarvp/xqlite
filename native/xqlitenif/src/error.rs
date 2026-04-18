@@ -44,6 +44,21 @@ fn option_to_term<'a>(env: Env<'a>, value: &Option<String>) -> Term<'a> {
     }
 }
 
+// Emits SQLite-vocabulary atoms (:integer, :real, :text, :blob) for constraint
+// DATATYPE errors. Kept separate from `sqlite_type_to_atom` — that one is
+// BEAM-flavored (:float, :binary) for column-type reporting — so that intent
+// at each call site stays obvious.
+fn storage_class_to_term<'a>(env: Env<'a>, t: &Option<rusqlite::types::Type>) -> Term<'a> {
+    use rusqlite::types::Type;
+    match t {
+        Some(Type::Integer) => atoms::integer().encode(env),
+        Some(Type::Real) => atoms::real().encode(env),
+        Some(Type::Text) => atoms::text().encode(env),
+        Some(Type::Blob) => atoms::blob().encode(env),
+        Some(Type::Null) | None => nil().encode(env),
+    }
+}
+
 fn term_type_to_atom(term_type: TermType) -> Atom {
     match term_type {
         TermType::Atom => atoms::atom(),
@@ -564,6 +579,18 @@ impl Encoder for XqliteError {
                         m.map_put(
                             atoms::constraint_name(),
                             option_to_term(env, &details.constraint_name),
+                        )
+                    })
+                    .and_then(|m| {
+                        m.map_put(
+                            atoms::source_type(),
+                            storage_class_to_term(env, &details.source_type),
+                        )
+                    })
+                    .and_then(|m| {
+                        m.map_put(
+                            atoms::target_type(),
+                            storage_class_to_term(env, &details.target_type),
                         )
                     });
                 match map_result {

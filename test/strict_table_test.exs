@@ -141,10 +141,10 @@ defmodule Xqlite.StrictTableTest do
       assert result.rows == [[1, "alice", 30], [2, "bob", 25]]
 
       # Verify STRICT is enforced — TEXT into INTEGER should fail
-      assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
+      assert {:error,
+              {:constraint_violation, :constraint_datatype,
+               %{source_type: :text, target_type: :integer, table: "users", columns: ["age"]}}} =
                NIF.execute(conn, "INSERT INTO users VALUES (3, 'carol', 'not a number')")
-
-      assert msg =~ "cannot store TEXT value in INTEGER column"
     end
 
     test "rejects table with type violations", %{conn: conn} do
