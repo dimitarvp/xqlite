@@ -71,6 +71,9 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
 
+      - name: Rust tests
+        run: cargo test --manifest-path native/xqlitenif/Cargo.toml
+
   dialyzer:
     name: Type checks
     runs-on: ubuntu-latest

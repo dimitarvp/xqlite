@@ -11,8 +11,9 @@ defmodule Mix.Tasks.Precommit do
   2. Rust formatting (`cargo fmt --check`)
   3. Elixir compilation with warnings as errors
   4. Rust clippy with denied warnings
-  5. Dialyzer type checks
-  6. Full test suite (`mix test.seq`)
+  5. Rust unit tests (`cargo test`)
+  6. Dialyzer type checks
+  7. Full Elixir test suite (`mix test.seq`)
 
   ## Usage
 
@@ -30,8 +31,9 @@ defmodule Mix.Tasks.Precommit do
     {"Rust formatting", &__MODULE__.check_rust_format/0},
     {"Elixir compilation (warnings as errors)", &__MODULE__.check_elixir_compile/0},
     {"Rust clippy", &__MODULE__.check_rust_clippy/0},
+    {"Rust tests", &__MODULE__.check_rust_tests/0},
     {"Dialyzer", &__MODULE__.check_dialyzer/0},
-    {"Tests", &__MODULE__.check_tests/0}
+    {"Elixir tests", &__MODULE__.check_tests/0}
   ]
 
   def run(_args) do
@@ -77,6 +79,10 @@ defmodule Mix.Tasks.Precommit do
 
   def check_rust_clippy do
     run_cmd("cargo", ["clippy", "--manifest-path", @cargo_manifest, "--", "-D", "warnings"])
+  end
+
+  def check_rust_tests do
+    run_cmd("cargo", ["test", "--manifest-path", @cargo_manifest])
   end
 
   def check_dialyzer do
