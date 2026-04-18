@@ -1,4 +1,5 @@
 use crate::atoms;
+use crate::constraint_parse::{self, ConstraintDetails};
 use rusqlite::{Error as RusqliteError, ffi};
 use rustler::{
     Atom, Encoder, Env, Term, TermType,
@@ -33,6 +34,13 @@ fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
         code if (code & 0xff) == SQLITE_CONSTRAINT_BASE => Some(atoms::constraint_violation()),
 
         _ => None,
+    }
+}
+
+fn option_to_term<'a>(env: Env<'a>, value: &Option<String>) -> Term<'a> {
+    match value {
+        Some(s) => s.as_str().encode(env),
+        None => nil().encode(env),
     }
 }
 
@@ -147,7 +155,6 @@ pub(crate) enum XqliteError {
     },
 
     // Row / Column Errors
-    CannotFetchRow(String),
     InvalidColumnIndex(usize),
     InvalidColumnName(String),
     InvalidColumnType {
@@ -173,6 +180,7 @@ pub(crate) enum XqliteError {
     ConstraintViolation {
         kind: Option<Atom>,
         message: String,
+        details: Box<ConstraintDetails>,
     },
 
     // Generic Fallback
@@ -276,7 +284,6 @@ impl Display for XqliteError {
             XqliteError::ReadOnlyDatabase { message } => {
                 write!(f, "Database is read-only: {message}") // SQLITE_READONLY
             }
-            XqliteError::CannotFetchRow(reason) => write!(f, "Cannot fetch row: {reason}"),
             XqliteError::CannotOpenDatabase {
                 path,
                 code,
@@ -360,9 +367,11 @@ impl Display for XqliteError {
                 f,
                 "SQL input error (Code {code}): '{message}' near offset {offset}"
             ),
-            XqliteError::ConstraintViolation { kind: _, message } => {
-                write!(f, "Constraint violation: {message}")
-            }
+            XqliteError::ConstraintViolation {
+                kind: _,
+                message,
+                details: _,
+            } => write!(f, "Constraint violation: {message}"),
             XqliteError::SchemaParsingError {
                 context,
                 unexpected_value,
@@ -438,9 +447,6 @@ impl Encoder for XqliteError {
             }
             XqliteError::ReadOnlyDatabase { message } => {
                 (atoms::read_only_database(), message).encode(env)
-            }
-            XqliteError::CannotFetchRow(reason) => {
-                (atoms::cannot_fetch_row(), reason).encode(env)
             }
             XqliteError::CannotOpenDatabase {
                 path,
@@ -535,8 +541,40 @@ impl Encoder for XqliteError {
                     }
                 }
             }
-            XqliteError::ConstraintViolation { kind, message } => {
-                (atoms::constraint_violation(), *kind, message).encode(env)
+            XqliteError::ConstraintViolation {
+                kind,
+                message,
+                details,
+            } => {
+                let columns_list: Vec<&str> =
+                    details.columns.iter().map(String::as_str).collect();
+                let map_result = map_new(env)
+                    .map_put(atoms::message(), message.as_str())
+                    .and_then(|m| {
+                        m.map_put(atoms::table(), option_to_term(env, &details.table))
+                    })
+                    .and_then(|m| m.map_put(atoms::columns(), columns_list))
+                    .and_then(|m| {
+                        m.map_put(
+                            atoms::index_name(),
+                            option_to_term(env, &details.index_name),
+                        )
+                    })
+                    .and_then(|m| {
+                        m.map_put(
+                            atoms::constraint_name(),
+                            option_to_term(env, &details.constraint_name),
+                        )
+                    });
+                match map_result {
+                    Ok(map) => (atoms::constraint_violation(), *kind, map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for ConstraintViolation".to_string(),
+                        };
+                        (atoms::error(), err).encode(env)
+                    }
+                }
             }
             XqliteError::SchemaParsingError {
                 context,
@@ -572,16 +610,13 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
             message: message_string,
         },
         ffi::SQLITE_CONSTRAINT => {
-            if let Some(kind) = constraint_kind_to_atom_extended(ffi_err.extended_code) {
-                XqliteError::ConstraintViolation {
-                    kind: Some(kind),
-                    message: message_string,
-                }
-            } else {
-                XqliteError::ConstraintViolation {
-                    kind: None,
-                    message: message_string,
-                }
+            let kind = constraint_kind_to_atom_extended(ffi_err.extended_code);
+            let details =
+                constraint_parse::parse_details(ffi_err.extended_code, &message_string);
+            XqliteError::ConstraintViolation {
+                kind,
+                message: message_string,
+                details: Box::new(details),
             }
         }
         // Handle common errors by inspecting the message text.

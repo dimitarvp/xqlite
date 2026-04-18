@@ -105,24 +105,7 @@ pub(crate) fn process_rows<'a, 'rows>(
                             let term = encode_val(env, val);
                             row_values.push(term);
                         }
-                        Err(e) => {
-                            if matches!(
-                                &e,
-                                rusqlite::Error::SqliteFailure(ffi_err, _)
-                                    if ffi_err.extended_code == ffi::SQLITE_INTERRUPT
-                            ) {
-                                return Err(XqliteError::OperationCancelled);
-                            }
-                            if let rusqlite::Error::Utf8Error(col, utf8_err) = e {
-                                return Err(XqliteError::Utf8Error {
-                                    column: col,
-                                    reason: utf8_err.to_string(),
-                                });
-                            }
-                            return Err(XqliteError::CannotFetchRow(format!(
-                                "Error getting value for column {i}: {e}"
-                            )));
-                        }
+                        Err(e) => return Err(e.into()),
                     };
                 }
                 results.push(row_values);
@@ -130,24 +113,7 @@ pub(crate) fn process_rows<'a, 'rows>(
             Ok(None) => {
                 break; // End of rows
             }
-            Err(e) => {
-                if matches!(
-                    &e,
-                    rusqlite::Error::SqliteFailure(ffi_err, _)
-                        if ffi_err.extended_code == ffi::SQLITE_INTERRUPT
-                ) {
-                    return Err(XqliteError::OperationCancelled);
-                }
-                if let rusqlite::Error::Utf8Error(col, utf8_err) = e {
-                    return Err(XqliteError::Utf8Error {
-                        column: col,
-                        reason: utf8_err.to_string(),
-                    });
-                }
-                return Err(XqliteError::CannotFetchRow(format!(
-                    "Error advancing row iterator: {e}"
-                )));
-            }
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(results)

@@ -118,6 +118,14 @@ defmodule Xqlite do
           offset: integer()
         }
 
+  @type constraint_details :: %{
+          message: String.t(),
+          table: String.t() | nil,
+          columns: [String.t()],
+          index_name: String.t() | nil,
+          constraint_name: String.t() | nil
+        }
+
   @type error_reason ::
           :connection_closed
           | :execute_returned_results
@@ -128,9 +136,8 @@ defmodule Xqlite do
           | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
-          | {:cannot_fetch_row, String.t()}
           | {:cannot_open_database, String.t(), integer(), String.t()}
-          | {:constraint_violation, constraint_kind(), String.t()}
+          | {:constraint_violation, constraint_kind(), constraint_details()}
           | {:database_busy_or_locked, String.t()}
           | {:expected_keyword_list, String.t()}
           | {:expected_keyword_tuple, String.t()}

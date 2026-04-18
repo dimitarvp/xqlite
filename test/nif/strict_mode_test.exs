@@ -243,7 +243,7 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_blob_col_test2 (val BLOB) STRICT;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, msg}} =
+        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
                  NIF.execute(conn, "INSERT INTO strict_blob_col_test2 (val) VALUES (?1);", [
                    "abc"
                  ])
@@ -255,7 +255,7 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_blob_col_test3 (val BLOB) STRICT;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, msg}} =
+        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
                  NIF.execute(conn, "INSERT INTO strict_blob_col_test3 (val) VALUES (?1);", [
                    123
                  ])
@@ -267,7 +267,7 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, 0} =
                  NIF.execute(conn, "CREATE TABLE strict_blob_col_test4 (val BLOB) STRICT;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, msg}} =
+        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
                  NIF.execute(conn, "INSERT INTO strict_blob_col_test4 (val) VALUES (?1);", [
                    123.45
                  ])
@@ -547,7 +547,7 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert {:ok, %{rows: [[5, 10]]}} =
                  NIF.query(conn, "SELECT a, b FROM gc_strict_int WHERE a = 5;", [])
 
-        assert {:error, {:constraint_violation, :constraint_datatype, msg}} =
+        assert {:error, {:constraint_violation, :constraint_datatype, %{message: msg}}} =
                  NIF.execute(conn, "INSERT INTO gc_strict_int (a) VALUES (?1);", ["text_val"])
 
         assert String.contains?(

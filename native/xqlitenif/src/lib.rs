@@ -8,7 +8,6 @@ pub(crate) mod atoms {
         cannot_convert_to_sqlite_value,
         cannot_execute,
         cannot_execute_pragma,
-        cannot_fetch_row,
         cannot_open_database,
         cascade,
         code,
@@ -19,6 +18,7 @@ pub(crate) mod atoms {
         constraint_datatype,
         constraint_foreign_key,
         constraint_function,
+        constraint_name,
         constraint_not_null,
         constraint_pinned,
         constraint_primary_key,
@@ -47,6 +47,7 @@ pub(crate) mod atoms {
         hidden_alias,
         immediate,
         index_exists,
+        index_name,
         integer,
         integral_value_out_of_range,
         invalid_conflict_strategy,
@@ -126,6 +127,7 @@ pub(crate) mod atoms {
 mod blob;
 mod cancel;
 mod connection;
+mod constraint_parse;
 mod error;
 mod log_hook;
 mod nif;
