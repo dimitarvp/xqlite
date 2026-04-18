@@ -58,10 +58,14 @@ defmodule Xqlite.NIF.ConnectionTest do
   end
 
   describe "sqlite_version/0" do
-    test "returns a string matching semver-ish format" do
+    test "returns three dot-separated integer components starting at major 3" do
       assert {:ok, version} = NIF.sqlite_version()
       assert is_binary(version)
-      assert Regex.match?(~r/^3\.\d+\.\d+/, version)
+
+      parsed = version |> String.split(".") |> Enum.map(&Integer.parse/1)
+      assert [{3, ""}, {minor, ""}, {patch, ""} | _] = parsed
+      assert is_integer(minor) and minor >= 0
+      assert is_integer(patch) and patch >= 0
     end
   end
 

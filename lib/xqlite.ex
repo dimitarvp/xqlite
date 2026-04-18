@@ -217,13 +217,35 @@ defmodule Xqlite do
   end
 
   defp validate_open_opts(opts) do
-    case NimbleOptions.validate(opts, @open_opts_schema) do
-      {:ok, _validated} = ok ->
-        ok
+    allowed = allowed_open_opt_keys()
 
-      {:error, %NimbleOptions.ValidationError{} = err} ->
-        {:error, {:invalid_open_option, Exception.message(err)}}
+    case Enum.find(opts, fn {k, _v} -> k not in allowed end) do
+      {unknown_key, _v} ->
+        {:error,
+         {:invalid_open_option,
+          %{key: unknown_key, reason: :unknown_key, allowed: allowed, value: nil}}}
+
+      nil ->
+        case NimbleOptions.validate(opts, @open_opts_schema) do
+          {:ok, _validated} = ok ->
+            ok
+
+          {:error, %NimbleOptions.ValidationError{} = err} ->
+            {:error,
+             {:invalid_open_option,
+              %{
+                key: err.key,
+                reason: :invalid_value,
+                value: err.value,
+                message: Exception.message(err)
+              }}}
+        end
     end
+  end
+
+  @spec allowed_open_opt_keys() :: [atom()]
+  defp allowed_open_opt_keys do
+    Keyword.keys(@open_opts_schema.schema)
   end
 
   defp apply_pragmas(conn, validated) do
