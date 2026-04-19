@@ -20,8 +20,9 @@ Xqlite is inspired by [exqlite](https://github.com/elixir-sqlite/exqlite), which
 - **Bundled SQLite.** No need to have SQLite already installed on your machine. No version differences between dev, CI, and production. The precompiled NIFs cover macOS, Linux, Windows, including ARM and RISC-V.
 - **Per-operation cancellation.** Any process can abort an in-progress query by sending `cancel_operation/1` to a cancel token (that you create yourself beforehand) -- no need to hold the connection handle. Progress-handler-based, fine-grained, and mostly deterministic (fine-tuning it is really difficult and it's an ongoing work in finding the ideal tradeoff between raw speed and ability to cancel early).
 - **Structured errors with parsed details.** Constraint violation error values contain the table, columns, index name, and constraint name as structured fields -- I tried very hard to avoid parsing textual errors with regexes and mostly succeeded.
-- **Bidirectional type extensions.** Elixir<->SQLite type conversion: `DateTime`, `Date`, `Time`, `NaiveDateTime` included; other custom types are also considered and will be added as the project evolves. `Duration` is coming.
+- **Bidirectional type extensions.** Elixir<->SQLite type conversion: `DateTime`, `Date`, `Time`, `NaiveDateTime` included; other custom types (duration / interval, array, UUID, timezone-aware datetime) are available today at the Ecto layer via [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3). They may be mirrored at the raw xqlite layer if demand materializes.
 - **Streaming.** `Stream.resource/3`-based row iterator with optional type-extension decoding per-row.
+- **EXPLAIN ANALYZE with per-scan stats.** `Xqlite.explain_analyze/3` returns a structured report combining `EXPLAIN QUERY PLAN`, per-scan runtime counters from `sqlite3_stmt_scanstatus_v2` (loops, rows visited, estimated rows, name, parent), statement-level counters from `sqlite3_stmt_status`, and wall-clock execution time.
 - **Sessions & changesets.** Exposes SQLite's built-in session extension: capture changes to a set of tables, invert/concat changesets, apply to a replica with conflict strategies.
 - **Incremental blob I/O.** Read and write multi-GB column values without loading them into memory.
 - **Online backup with progress and cancellation.** Single-call backup API to a file path, progress messages to a PID, canceling respected even mid-backup.
@@ -175,8 +176,8 @@ I run it in my own projects (currently not as much as I'd like to). The test cov
 **What's the concurrency / parallelization story?**
 SQLite permits a single writer at a time per database file. I use the WAL mode by default to make sure readers remain fully parallel and writers are limited to one at a time, but that can only take you so far. Xqlite serializes access to each connection via a Rust `Mutex`; concurrent writers across _different_ connections to the same file fall back on SQLite's own WAL mode and busy-timeout logic. For a connection pool with parallel readers plus a serialised writer, use `xqlite_ecto3` (or DBConnection directly, or your own pooling solution). For anything requiring true multi-master replication, tools like [Litestream](https://litestream.io) and [LiteFS](https://fly.io/docs/litefs/) live outside of SQLite itself.
 
-**Does Xqlite support OpenTelemetry?**
-Not yet. Full OpenTelemetry support is on the roadmap as a first-class feature. It will be added and it will be thorough.
+**Does Xqlite support telemetry / OpenTelemetry?**
+Not yet. The plan is to emit structured `[:xqlite, ...]` events via the standard `:telemetry` Erlang package — no direct OpenTelemetry dependency. Users who want OTel spans wire the `opentelemetry_telemetry` bridge in their own application; users who only want Prometheus metrics via `:telemetry_metrics` do that; users who want nothing pay nothing. It will be added and it will be thorough.
 
 ## Thread safety
 
@@ -239,22 +240,20 @@ To get the actual affected row count after DML, call `changes/1` immediately aft
 
 ## Roadmap
 
-Planned for Xqlite core:
+Planned for Xqlite core, in priority order:
 
-1. **Full OpenTelemetry support** -- I'll cover absolutely everything that SQLite gives us hooks for (where it makes sense)
-2. **Multi-writer concurrency observability** -- expose SQLite's lock state, WAL checkpoint progress, and busy-retry statistics as structured data so callers can build their own concurrency strategies. I'll expose every single thing I can find; to me being able to keep a finger on the pulse of your storage engine and be able to intervene at almost any moment is paramount. I hate black boxes with a passion -- one of the main goals of this library is to allow us to poke into the guts of our SQLite databases without introducing quantum uncertainty or cryptic crashes.
-3. **Duration / interval type** -- will be stored as int64 nanoseconds from the Unix epoch (NUMERIC) and not as a custom BLOB
-4. **Array type** -- via JSON-TEXT + CHECK constraint + Ecto.Type, bringing JSON arrays into the structured API. This one might be a touch too opinionated, but as it will be strictly opt-in, I believe it's going to be worth adding regardless
-5. **`EXPLAIN ANALYZE` with per-operator timings** -- `EXPLAIN QUERY PLAN` shows the shape of a plan but not how long each step actually took. This will add the missing step-level timings, so you can see _which_ part of a slow query is slow instead of just "well, this plan looks reasonable to me".
-6. **Manual statement lifecycle** -- optional prepare/bind/step/reset/release for patterns not covered by the existing helpers. Still not 100% certain about this one but I've heard it enough times from people that I'm considering adding it proactively (before being asked to). Feedback on whether this would have a direct value for you is very welcome.
-7. **SQLCipher support (optional)** -- for encrypted-at-rest use cases
+1. **Multi-writer concurrency observability.** Expose SQLite's transaction-state, WAL checkpoint progress, busy-retry events, and per-connection counters as structured data so callers can build their own concurrency strategies. Concretely: `sqlite3_busy_handler` forwarded to a PID, `sqlite3_wal_hook` forwarded to a PID, `sqlite3_commit_hook` + `sqlite3_rollback_hook`, `sqlite3_txn_state`, `sqlite3_db_status` counters, a structured wrapper around `sqlite3_wal_checkpoint_v2`. I hate black boxes with a passion — one of the main goals of this library is to let you poke into the guts of your SQLite databases without introducing quantum uncertainty or cryptic crashes.
+2. **`:telemetry` integration.** Every significant operation (query, execute, stream, transaction, savepoint, backup, cancellation, extension load, session capture, serialize/deserialize, each of the observability hooks above) emits structured `[:xqlite, ...]` events via the standard `:telemetry` package. OpenTelemetry integration is a downstream bridge via `opentelemetry_telemetry` — no adapter-side OTel dependency.
+3. **Manual statement lifecycle** — optional prepare/bind/step/reset/release for patterns not covered by the existing helpers. Still not 100% certain about this one but I've heard it enough times from people that I'm considering adding it proactively (before being asked to). Feedback on whether this would have a direct value for you is very welcome.
+4. **SQLCipher support (optional)** — for encrypted-at-rest use cases.
 
 Lower priority (though UDFs remain the lowest priority for now):
 
 - Geometry / Geography support (via SpatiaLite)
 - GIN / GiST / SP-GiST-style index equivalents
+- Mirroring the Ecto-layer custom types (duration, array, UUID, timezone-aware datetime) at the raw xqlite layer — today they live in [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) as `Ecto.Type` modules and won't move unless raw-xqlite users ask
 
-Then: [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) -- full Ecto 3.x adapter with `DBConnection`, migrations, associations, streaming, and the same structured-error surface.
+Then: [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, associations, streaming, and the same structured-error surface.
 
 ## Contributing
 
