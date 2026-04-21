@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+
+- **`XqliteNIF` is now the raw NIF boundary only.** Every function in
+  `XqliteNIF` is a bare NIF stub; all ergonomic wrappers moved to the
+  user-facing `Xqlite` module. Migrations:
+  - `XqliteNIF.open_in_memory/0` → `Xqlite.open_in_memory/0`
+    (or `XqliteNIF.open_in_memory(":memory:")` to stay at the NIF layer)
+  - `XqliteNIF.open_in_memory_readonly/0` → `Xqlite.open_in_memory_readonly/0`
+  - `XqliteNIF.serialize/1` → `Xqlite.serialize/1`
+  - `XqliteNIF.deserialize/2` → `Xqlite.deserialize/2`
+  - `XqliteNIF.load_extension/2` → `Xqlite.load_extension/2`
+  - `XqliteNIF.backup/2` → `Xqlite.backup/2`
+  - `XqliteNIF.restore/2` → `Xqlite.restore/2`
+  - `XqliteNIF.set_busy_handler/3` (keyword-opts form) →
+    `Xqlite.set_busy_handler/3`; the raw NIF stays as
+    `XqliteNIF.set_busy_handler/5`
+
+### Added
+
+- **`Xqlite.busy_timeout/2`** — sets a plain `sqlite3_busy_timeout` while
+  cleanly reclaiming any xqlite-installed busy handler first. Prefer this
+  over `PRAGMA busy_timeout`, which silently replaces the busy handler at
+  the SQLite C level and stops `{:xqlite_busy, …}` delivery without
+  removing our internal slot.
+- Busy-handler PRAGMA-replacement warning front-and-center in the module
+  docs and README.
+
 ## [0.6.0] - 2026-04-19
 
 ### Breaking

@@ -22,7 +22,7 @@ defmodule Xqlite.NIF.SerializeTest do
       # -------------------------------------------------------------------
 
       test "serialize empty database returns valid binary", %{conn: conn} do
-        assert {:ok, binary} = NIF.serialize(conn)
+        assert {:ok, binary} = NIF.serialize(conn, "main")
         assert is_binary(binary)
         assert byte_size(binary) > 0
         assert binary_part(binary, 0, 16) == "SQLite format 3\0"
@@ -44,12 +44,12 @@ defmodule Xqlite.NIF.SerializeTest do
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO s_test (id, val) VALUES (?1, ?2)", [2, "world"])
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
         assert byte_size(binary) > 0
 
         # Deserialize into a fresh connection and verify data survived
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         assert {:ok, %{rows: [[1, "hello"], [2, "world"]], num_rows: 2}} =
                  NIF.query(conn2, "SELECT id, val FROM s_test ORDER BY id", [])
@@ -64,10 +64,10 @@ defmodule Xqlite.NIF.SerializeTest do
           CREATE INDEX idx_s_schema_name ON s_schema(name);
           """)
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         {:ok, objects} = NIF.schema_list_objects(conn2, "main")
         table_names = Enum.map(objects, & &1.name)
@@ -84,15 +84,15 @@ defmodule Xqlite.NIF.SerializeTest do
         :ok = NIF.execute_batch(conn, "CREATE TABLE s_snap (id INTEGER PRIMARY KEY);")
         {:ok, 1} = NIF.execute(conn, "INSERT INTO s_snap (id) VALUES (?1)", [1])
 
-        {:ok, snapshot} = NIF.serialize(conn)
+        {:ok, snapshot} = NIF.serialize(conn, "main")
 
         # Insert more rows after snapshot
         {:ok, 1} = NIF.execute(conn, "INSERT INTO s_snap (id) VALUES (?1)", [2])
         {:ok, 1} = NIF.execute(conn, "INSERT INTO s_snap (id) VALUES (?1)", [3])
 
         # Snapshot should only have the first row
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, snapshot)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", snapshot, false)
 
         assert {:ok, %{rows: [[1]], num_rows: 1}} =
                  NIF.query(conn2, "SELECT id FROM s_snap", [])
@@ -109,14 +109,14 @@ defmodule Xqlite.NIF.SerializeTest do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO old_t (x) VALUES (?1)", [999])
 
         # Create a different database in a second connection
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
         :ok = NIF.execute_batch(conn2, "CREATE TABLE new_t (y TEXT);")
         {:ok, 1} = NIF.execute(conn2, "INSERT INTO new_t (y) VALUES (?1)", ["fresh"])
-        {:ok, binary} = NIF.serialize(conn2)
+        {:ok, binary} = NIF.serialize(conn2, "main")
         NIF.close(conn2)
 
         # Deserialize into the original connection
-        :ok = NIF.deserialize(conn, binary)
+        :ok = NIF.deserialize(conn, "main", binary, false)
 
         # Old table should be gone
         assert {:error, {:no_such_table, _}} =
@@ -128,10 +128,10 @@ defmodule Xqlite.NIF.SerializeTest do
       end
 
       test "deserialize read-only mode blocks writes", %{conn: conn} do
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
         :ok = NIF.execute_batch(conn2, "CREATE TABLE ro_t (id INTEGER PRIMARY KEY);")
         {:ok, 1} = NIF.execute(conn2, "INSERT INTO ro_t (id) VALUES (?1)", [1])
-        {:ok, binary} = NIF.serialize(conn2)
+        {:ok, binary} = NIF.serialize(conn2, "main")
         NIF.close(conn2)
 
         :ok = NIF.deserialize(conn, "main", binary, true)
@@ -146,9 +146,9 @@ defmodule Xqlite.NIF.SerializeTest do
       end
 
       test "deserialize writable mode allows writes", %{conn: conn} do
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
         :ok = NIF.execute_batch(conn2, "CREATE TABLE rw_t (id INTEGER PRIMARY KEY);")
-        {:ok, binary} = NIF.serialize(conn2)
+        {:ok, binary} = NIF.serialize(conn2, "main")
         NIF.close(conn2)
 
         :ok = NIF.deserialize(conn, "main", binary, false)
@@ -180,10 +180,10 @@ defmodule Xqlite.NIF.SerializeTest do
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO rt_blobs (id, val) VALUES (1, ?1)", [<<0, 1, 2>>])
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         assert {:ok, %{rows: [[1, 42]]}} = NIF.query(conn2, "SELECT * FROM rt_ints", [])
         assert {:ok, %{rows: [[1, "hi"]]}} = NIF.query(conn2, "SELECT * FROM rt_texts", [])
@@ -202,10 +202,10 @@ defmodule Xqlite.NIF.SerializeTest do
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO rt_null (id, val) VALUES (1, ?1)", [nil])
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         assert {:ok, %{rows: [[1, nil]]}} = NIF.query(conn2, "SELECT * FROM rt_null", [])
         NIF.close(conn2)
@@ -218,10 +218,10 @@ defmodule Xqlite.NIF.SerializeTest do
           CREATE TABLE rt_child (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES rt_parent(id));
           """)
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         {:ok, fks} = NIF.schema_foreign_keys(conn2, "rt_child")
         assert length(fks) == 1
@@ -231,10 +231,10 @@ defmodule Xqlite.NIF.SerializeTest do
 
       test "round-trip preserves pragmas set before serialize", %{conn: conn} do
         {:ok, _} = NIF.set_pragma(conn, "user_version", 42)
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         assert {:ok, 42} = NIF.get_pragma(conn2, "user_version")
         NIF.close(conn2)
@@ -250,10 +250,10 @@ defmodule Xqlite.NIF.SerializeTest do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO s_tx (id) VALUES (?1)", [1])
         :ok = NIF.commit(conn)
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
         assert {:ok, %{rows: [[1]]}} = NIF.query(conn2, "SELECT id FROM s_tx", [])
         NIF.close(conn2)
       end
@@ -266,10 +266,10 @@ defmodule Xqlite.NIF.SerializeTest do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO s_rb (id) VALUES (?1)", [2])
         :ok = NIF.rollback(conn)
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
         assert {:ok, %{rows: [[1]], num_rows: 1}} = NIF.query(conn2, "SELECT id FROM s_rb", [])
         NIF.close(conn2)
       end
@@ -279,12 +279,12 @@ defmodule Xqlite.NIF.SerializeTest do
       # -------------------------------------------------------------------
 
       test "writable deserialized database supports transactions", %{conn: conn} do
-        {:ok, conn_src} = NIF.open_in_memory()
+        {:ok, conn_src} = NIF.open_in_memory(":memory:")
         :ok = NIF.execute_batch(conn_src, "CREATE TABLE d_tx (id INTEGER PRIMARY KEY);")
-        {:ok, binary} = NIF.serialize(conn_src)
+        {:ok, binary} = NIF.serialize(conn_src, "main")
         NIF.close(conn_src)
 
-        :ok = NIF.deserialize(conn, binary)
+        :ok = NIF.deserialize(conn, "main", binary, false)
         :ok = NIF.begin(conn, :immediate)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO d_tx (id) VALUES (?1)", [1])
         :ok = NIF.commit(conn)
@@ -293,19 +293,19 @@ defmodule Xqlite.NIF.SerializeTest do
       end
 
       test "writable deserialized database can be re-serialized", %{conn: conn} do
-        {:ok, conn_src} = NIF.open_in_memory()
+        {:ok, conn_src} = NIF.open_in_memory(":memory:")
         :ok = NIF.execute_batch(conn_src, "CREATE TABLE d_rs (id INTEGER PRIMARY KEY);")
         {:ok, 1} = NIF.execute(conn_src, "INSERT INTO d_rs (id) VALUES (?1)", [1])
-        {:ok, binary1} = NIF.serialize(conn_src)
+        {:ok, binary1} = NIF.serialize(conn_src, "main")
         NIF.close(conn_src)
 
-        :ok = NIF.deserialize(conn, binary1)
+        :ok = NIF.deserialize(conn, "main", binary1, false)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO d_rs (id) VALUES (?1)", [2])
 
-        {:ok, binary2} = NIF.serialize(conn)
+        {:ok, binary2} = NIF.serialize(conn, "main")
 
-        {:ok, conn3} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn3, binary2)
+        {:ok, conn3} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn3, "main", binary2, false)
 
         assert {:ok, %{rows: [[1], [2]], num_rows: 2}} =
                  NIF.query(conn3, "SELECT id FROM d_rs ORDER BY id", [])
@@ -329,10 +329,10 @@ defmodule Xqlite.NIF.SerializeTest do
             ])
         end
 
-        {:ok, binary} = NIF.serialize(conn)
+        {:ok, binary} = NIF.serialize(conn, "main")
 
-        {:ok, conn2} = NIF.open_in_memory()
-        :ok = NIF.deserialize(conn2, binary)
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
+        :ok = NIF.deserialize(conn2, "main", binary, false)
 
         assert {:ok, %{num_rows: 500}} = NIF.query(conn2, "SELECT id FROM s_large", [])
 
@@ -347,7 +347,7 @@ defmodule Xqlite.NIF.SerializeTest do
       # -------------------------------------------------------------------
 
       test "stream works on deserialized database", %{conn: conn} do
-        {:ok, conn_src} = NIF.open_in_memory()
+        {:ok, conn_src} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(
@@ -357,10 +357,10 @@ defmodule Xqlite.NIF.SerializeTest do
 
         {:ok, 1} = NIF.execute(conn_src, "INSERT INTO d_stream VALUES (1, 'a')", [])
         {:ok, 1} = NIF.execute(conn_src, "INSERT INTO d_stream VALUES (2, 'b')", [])
-        {:ok, binary} = NIF.serialize(conn_src)
+        {:ok, binary} = NIF.serialize(conn_src, "main")
         NIF.close(conn_src)
 
-        :ok = NIF.deserialize(conn, binary)
+        :ok = NIF.deserialize(conn, "main", binary, false)
 
         results =
           Xqlite.stream(conn, "SELECT id, val FROM d_stream ORDER BY id")
@@ -380,72 +380,72 @@ defmodule Xqlite.NIF.SerializeTest do
   # -------------------------------------------------------------------
 
   test "serialize on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
-    assert {:error, :connection_closed} = NIF.serialize(conn)
+    assert {:error, :connection_closed} = NIF.serialize(conn, "main")
   end
 
   test "deserialize on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
-    assert {:error, :connection_closed} = NIF.deserialize(conn, <<>>)
+    assert {:error, :connection_closed} = NIF.deserialize(conn, "main", <<>>, false)
   end
 
   test "deserialize with empty binary returns error" do
-    {:ok, conn} = NIF.open_in_memory()
-    result = NIF.deserialize(conn, <<>>)
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+    result = NIF.deserialize(conn, "main", <<>>, false)
     NIF.close(conn)
     assert {:error, _} = result
   end
 
   test "deserialize with garbage binary accepts but querying fails" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     # SQLite accepts garbage at deserialize time — validation is lazy
-    :ok = NIF.deserialize(conn, "not a valid sqlite database at all")
+    :ok = NIF.deserialize(conn, "main", "not a valid sqlite database at all", false)
     assert {:error, _} = NIF.query(conn, "SELECT 1", [])
     NIF.close(conn)
   end
 
   test "transfer database between two independent connections" do
-    {:ok, conn1} = NIF.open_in_memory()
+    {:ok, conn1} = NIF.open_in_memory(":memory:")
     :ok = NIF.execute_batch(conn1, "CREATE TABLE xfer (id INTEGER PRIMARY KEY, msg TEXT);")
     {:ok, 1} = NIF.execute(conn1, "INSERT INTO xfer VALUES (1, 'transferred')", [])
-    {:ok, binary} = NIF.serialize(conn1)
+    {:ok, binary} = NIF.serialize(conn1, "main")
     NIF.close(conn1)
 
-    {:ok, conn2} = NIF.open_in_memory()
-    :ok = NIF.deserialize(conn2, binary)
+    {:ok, conn2} = NIF.open_in_memory(":memory:")
+    :ok = NIF.deserialize(conn2, "main", binary, false)
     assert {:ok, %{rows: [[1, "transferred"]]}} = NIF.query(conn2, "SELECT * FROM xfer", [])
     NIF.close(conn2)
   end
 
   test "multiple sequential serializations produce independent snapshots" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.execute_batch(conn, "CREATE TABLE seq_s (id INTEGER PRIMARY KEY);")
 
     {:ok, 1} = NIF.execute(conn, "INSERT INTO seq_s (id) VALUES (?1)", [1])
-    {:ok, snap1} = NIF.serialize(conn)
+    {:ok, snap1} = NIF.serialize(conn, "main")
 
     {:ok, 1} = NIF.execute(conn, "INSERT INTO seq_s (id) VALUES (?1)", [2])
-    {:ok, snap2} = NIF.serialize(conn)
+    {:ok, snap2} = NIF.serialize(conn, "main")
 
     {:ok, 1} = NIF.execute(conn, "INSERT INTO seq_s (id) VALUES (?1)", [3])
-    {:ok, snap3} = NIF.serialize(conn)
+    {:ok, snap3} = NIF.serialize(conn, "main")
     NIF.close(conn)
 
     # Each snapshot has a different number of rows
-    {:ok, c1} = NIF.open_in_memory()
-    :ok = NIF.deserialize(c1, snap1)
+    {:ok, c1} = NIF.open_in_memory(":memory:")
+    :ok = NIF.deserialize(c1, "main", snap1, false)
     assert {:ok, %{num_rows: 1}} = NIF.query(c1, "SELECT id FROM seq_s", [])
     NIF.close(c1)
 
-    {:ok, c2} = NIF.open_in_memory()
-    :ok = NIF.deserialize(c2, snap2)
+    {:ok, c2} = NIF.open_in_memory(":memory:")
+    :ok = NIF.deserialize(c2, "main", snap2, false)
     assert {:ok, %{num_rows: 2}} = NIF.query(c2, "SELECT id FROM seq_s", [])
     NIF.close(c2)
 
-    {:ok, c3} = NIF.open_in_memory()
-    :ok = NIF.deserialize(c3, snap3)
+    {:ok, c3} = NIF.open_in_memory(":memory:")
+    :ok = NIF.deserialize(c3, "main", snap3, false)
     assert {:ok, %{num_rows: 3}} = NIF.query(c3, "SELECT id FROM seq_s", [])
     NIF.close(c3)
   end

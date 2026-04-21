@@ -180,7 +180,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
   # -------------------------------------------------------------------
 
   test "query_with_changes_cancellable returns same shape" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.execute_batch(conn, "CREATE TABLE qwcc (id INTEGER PRIMARY KEY, val TEXT);")
     {:ok, 1} = NIF.execute(conn, "INSERT INTO qwcc VALUES (1, 'a')", [])
     {:ok, token} = NIF.create_cancel_token()
@@ -192,7 +192,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
   end
 
   test "query_with_changes_cancellable can be cancelled" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, token} = NIF.create_cancel_token()
     :ok = NIF.cancel_operation(token)
 
@@ -208,7 +208,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
   end
 
   test "closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
     assert {:error, :connection_closed} = NIF.query_with_changes(conn, "SELECT 1", [])
   end

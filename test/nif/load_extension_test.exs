@@ -43,7 +43,7 @@ defmodule Xqlite.NIF.LoadExtensionTest do
 
       test "load test extension and call its function", %{conn: conn} do
         :ok = NIF.enable_load_extension(conn, true)
-        assert :ok = NIF.load_extension(conn, test_extension_path())
+        assert :ok = NIF.load_extension(conn, test_extension_path(), nil)
         :ok = NIF.enable_load_extension(conn, false)
 
         assert {:ok, %{rows: [["xqlite_ext_ok"]]}} =
@@ -77,7 +77,7 @@ defmodule Xqlite.NIF.LoadExtensionTest do
 
       test "extension function persists across queries", %{conn: conn} do
         :ok = NIF.enable_load_extension(conn, true)
-        :ok = NIF.load_extension(conn, test_extension_path())
+        :ok = NIF.load_extension(conn, test_extension_path(), nil)
         :ok = NIF.enable_load_extension(conn, false)
 
         assert {:ok, %{rows: [["xqlite_ext_ok"]]}} =
@@ -89,7 +89,7 @@ defmodule Xqlite.NIF.LoadExtensionTest do
 
       test "disable after load does not unload the extension", %{conn: conn} do
         :ok = NIF.enable_load_extension(conn, true)
-        :ok = NIF.load_extension(conn, test_extension_path())
+        :ok = NIF.load_extension(conn, test_extension_path(), nil)
         :ok = NIF.enable_load_extension(conn, false)
 
         # Extension function should still work after disabling load permission
@@ -99,7 +99,7 @@ defmodule Xqlite.NIF.LoadExtensionTest do
 
       test "extension function works in expressions", %{conn: conn} do
         :ok = NIF.enable_load_extension(conn, true)
-        :ok = NIF.load_extension(conn, test_extension_path())
+        :ok = NIF.load_extension(conn, test_extension_path(), nil)
         :ok = NIF.enable_load_extension(conn, false)
 
         assert {:ok, %{rows: [[13]]}} =
@@ -112,12 +112,12 @@ defmodule Xqlite.NIF.LoadExtensionTest do
 
       test "load without enabling returns :extension_loading_disabled", %{conn: conn} do
         assert {:error, :extension_loading_disabled} =
-                 NIF.load_extension(conn, test_extension_path())
+                 NIF.load_extension(conn, test_extension_path(), nil)
       end
 
       test "load nonexistent path returns error", %{conn: conn} do
         :ok = NIF.enable_load_extension(conn, true)
-        assert {:error, _} = NIF.load_extension(conn, "/no/such/extension")
+        assert {:error, _} = NIF.load_extension(conn, "/no/such/extension", nil)
         :ok = NIF.enable_load_extension(conn, false)
       end
 
@@ -146,23 +146,23 @@ defmodule Xqlite.NIF.LoadExtensionTest do
   # -------------------------------------------------------------------
 
   test "enable_load_extension on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
     assert {:error, _} = NIF.enable_load_extension(conn, true)
   end
 
   test "load_extension on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
-    assert {:error, _} = NIF.load_extension(conn, test_extension_path())
+    assert {:error, _} = NIF.load_extension(conn, test_extension_path(), nil)
   end
 
   test "extension loaded on one connection is not visible on another" do
-    {:ok, conn1} = NIF.open_in_memory()
-    {:ok, conn2} = NIF.open_in_memory()
+    {:ok, conn1} = NIF.open_in_memory(":memory:")
+    {:ok, conn2} = NIF.open_in_memory(":memory:")
 
     :ok = NIF.enable_load_extension(conn1, true)
-    :ok = NIF.load_extension(conn1, test_extension_path())
+    :ok = NIF.load_extension(conn1, test_extension_path(), nil)
     :ok = NIF.enable_load_extension(conn1, false)
 
     # conn1 has the extension
@@ -177,10 +177,10 @@ defmodule Xqlite.NIF.LoadExtensionTest do
   end
 
   test "loading same extension twice is idempotent" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.enable_load_extension(conn, true)
-    :ok = NIF.load_extension(conn, test_extension_path())
-    :ok = NIF.load_extension(conn, test_extension_path())
+    :ok = NIF.load_extension(conn, test_extension_path(), nil)
+    :ok = NIF.load_extension(conn, test_extension_path(), nil)
     :ok = NIF.enable_load_extension(conn, false)
 
     assert {:ok, %{rows: [["xqlite_ext_ok"]]}} =

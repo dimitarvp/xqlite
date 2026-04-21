@@ -202,7 +202,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, "CREATE TABLE sess_ap (id INTEGER PRIMARY KEY, val TEXT);")
@@ -230,7 +230,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, """
@@ -261,7 +261,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, """
@@ -320,7 +320,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, inv2} = NIF.changeset_invert(inv1)
 
         # Double-inverted should be equivalent to original — apply to fresh DB
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(
@@ -359,7 +359,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, combined} = NIF.changeset_concat(cs1, cs2)
         assert byte_size(combined) > 0
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, "CREATE TABLE sess_cat (id INTEGER PRIMARY KEY, val TEXT);")
@@ -386,7 +386,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, """
@@ -412,7 +412,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, """
@@ -438,7 +438,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, """
@@ -489,7 +489,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(conn2, """
@@ -524,7 +524,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(
@@ -560,7 +560,7 @@ defmodule Xqlite.NIF.SessionTest do
         {:ok, changeset} = NIF.session_changeset(session)
         NIF.session_delete(session)
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(
@@ -595,7 +595,7 @@ defmodule Xqlite.NIF.SessionTest do
 
         assert byte_size(changeset) > 0
 
-        {:ok, conn2} = NIF.open_in_memory()
+        {:ok, conn2} = NIF.open_in_memory(":memory:")
 
         :ok =
           NIF.execute_batch(
@@ -624,14 +624,14 @@ defmodule Xqlite.NIF.SessionTest do
   # -------------------------------------------------------------------
 
   test "session_new on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
 
     assert {:error, _} = NIF.session_new(conn)
   end
 
   test "changeset_apply on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
 
     assert {:error, _} = NIF.changeset_apply(conn, <<>>, :omit)

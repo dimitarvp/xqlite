@@ -48,7 +48,7 @@ XQLITE_BUILD=true mix deps.compile xqlite
 ## Quickstart
 
 ```elixir
-{:ok, conn} = XqliteNIF.open_in_memory()
+{:ok, conn} = Xqlite.open_in_memory()
 {:ok, _} = XqliteNIF.execute(conn, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", [])
 {:ok, 1} = XqliteNIF.execute(conn, "INSERT INTO users (name) VALUES (?1)", ["Alice"])
 {:ok, result} = XqliteNIF.query(conn, "SELECT id, name FROM users", [])
@@ -112,6 +112,27 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 # => receive {:xqlite_update, :insert, "main", "users", 2}
 ```
 
+### Busy handler -- observe contention, retry, give up on a budget
+
+```elixir
+:ok = Xqlite.set_busy_handler(conn, self(), max_retries: 50, max_elapsed_ms: 5_000, sleep_ms: 10)
+# every SQLITE_BUSY retry delivers: {:xqlite_busy, retries_so_far, elapsed_ms}
+# surfaces SQLITE_BUSY to the caller once either ceiling is hit
+
+:ok = Xqlite.remove_busy_handler(conn)                     # back to "fail fast" behavior
+:ok = Xqlite.busy_timeout(conn, 1_000)                     # plain timeout, no handler
+```
+
+> **Warning.** `PRAGMA busy_timeout` / `sqlite3_busy_timeout` silently
+> replaces any installed busy handler at the SQLite C level. If you
+> install an xqlite handler and then run `PRAGMA busy_timeout`, SQLite
+> replaces our callback with its built-in sleep-and-retry one and
+> `{:xqlite_busy, …}` messages stop. No memory is leaked (our internal
+> state is reclaimed on the next `set_busy_handler`, `remove_busy_handler`,
+> or connection close), but the message stream goes quiet. Use
+> `Xqlite.busy_timeout/2` — it removes our handler cleanly first, then
+> installs the plain timeout.
+
 ### Online backup with progress and cancellation
 
 ```elixir
@@ -152,9 +173,9 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 Different from `backup_with_progress/6`, which streams page by page while the source is live, and from sessions, which capture _changes_ since a point in time. Serialize is a one-shot atomic snapshot of the _whole_ database into a BEAM binary, useful for shipping DB state between nodes/processes, cloning a DB without disk I/O, or handing off to a Task without worrying about file locks.
 
 ```elixir
-{:ok, binary} = XqliteNIF.serialize(conn)
-{:ok, conn2} = XqliteNIF.open_in_memory()
-:ok = XqliteNIF.deserialize(conn2, binary)
+{:ok, binary} = Xqlite.serialize(conn)
+{:ok, conn2} = Xqlite.open_in_memory()
+:ok = Xqlite.deserialize(conn2, binary)
 ```
 
 ## FAQ

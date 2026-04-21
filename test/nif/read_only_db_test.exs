@@ -147,7 +147,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   end
 
   test "open_in_memory_readonly returns a working read-only connection" do
-    {:ok, ro_conn} = NIF.open_in_memory_readonly()
+    {:ok, ro_conn} = NIF.open_in_memory_readonly(":memory:")
     # Can read pragmas
     assert {:ok, _} = NIF.get_pragma(ro_conn, "encoding")
     # Cannot create tables

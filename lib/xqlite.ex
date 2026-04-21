@@ -210,10 +210,24 @@ defmodule Xqlite do
   @spec open_in_memory(keyword()) :: {:ok, conn()} | error()
   def open_in_memory(opts \\ []) do
     with {:ok, validated} <- validate_open_opts(opts),
-         {:ok, conn} <- XqliteNIF.open_in_memory(),
+         {:ok, conn} <- XqliteNIF.open_in_memory(":memory:"),
          :ok <- apply_pragmas(conn, validated) do
       {:ok, conn}
     end
+  end
+
+  @doc """
+  Opens a read-only connection to an in-memory SQLite database.
+
+  Useful for connecting to a named shared-cache in-memory database opened
+  read-write by another connection — pass its URI as `uri`, or omit it to
+  open a private (empty) read-only `:memory:` database.
+
+  No PRAGMAs are applied; read-only databases can't persist most settings.
+  """
+  @spec open_in_memory_readonly(String.t()) :: {:ok, conn()} | error()
+  def open_in_memory_readonly(uri \\ ":memory:") when is_binary(uri) do
+    XqliteNIF.open_in_memory_readonly(uri)
   end
 
   defp validate_open_opts(opts) do
@@ -572,7 +586,7 @@ defmodule Xqlite do
 
   ## Examples
 
-      iex> {:ok, conn} = XqliteNIF.open_in_memory()
+      iex> {:ok, conn} = Xqlite.open_in_memory()
       iex> XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO t(name) VALUES ('a'), ('b');")
       :ok
       iex> {:ok, report} = Xqlite.explain_analyze(conn, "SELECT name FROM t WHERE name = ?", ["b"])
@@ -605,7 +619,7 @@ defmodule Xqlite do
 
   ## Examples
 
-      iex> {:ok, conn} = XqliteNIF.open_in_memory()
+      iex> {:ok, conn} = Xqlite.open_in_memory()
       iex> XqliteNIF.execute_batch(conn, "CREATE TABLE users(id, name); INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');")
       :ok
       iex> Xqlite.stream(conn, "SELECT id, name FROM users;") |> Enum.to_list()
@@ -635,6 +649,171 @@ defmodule Xqlite do
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Backup / serialize / deserialize
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Serializes a database to a contiguous binary.
+
+  Returns a binary snapshot of the entire database — an atomic, point-in-time
+  copy. No pages are locked during serialization.
+
+  `schema` identifies which attached database to serialize. Defaults to
+  `"main"`. Use `"temp"` for the temp database or the name of an attached
+  database.
+  """
+  @spec serialize(conn(), String.t()) :: {:ok, binary()} | error()
+  def serialize(conn, schema \\ "main") when is_binary(schema) do
+    XqliteNIF.serialize(conn, schema)
+  end
+
+  @doc """
+  Deserializes a binary into a database, replacing its current contents.
+
+  The binary must be a valid SQLite database image (as produced by
+  `serialize/2`). After deserialization the connection operates on the new
+  database entirely in memory.
+
+  `schema` identifies which attached database to replace (default `"main"`).
+  `read_only` marks the deserialized image as read-only (default `false`).
+  """
+  @spec deserialize(conn(), binary(), String.t(), boolean()) :: :ok | error()
+  def deserialize(conn, data, schema \\ "main", read_only \\ false)
+      when is_binary(data) and is_binary(schema) and is_boolean(read_only) do
+    XqliteNIF.deserialize(conn, schema, data, read_only)
+  end
+
+  @doc """
+  Backs up a schema to a file.
+
+  Copies the named schema (default `"main"`) to the file at `dest_path`. The
+  destination is created or overwritten. The source remains readable during
+  the backup.
+  """
+  @spec backup(conn(), String.t(), String.t()) :: :ok | error()
+  def backup(conn, dest_path, schema \\ "main")
+      when is_binary(dest_path) and is_binary(schema) do
+    XqliteNIF.backup(conn, schema, dest_path)
+  end
+
+  @doc """
+  Restores a schema from a file.
+
+  Replaces the named schema (default `"main"`) with the contents of the file
+  at `src_path`. Existing data in that schema is overwritten.
+  """
+  @spec restore(conn(), String.t(), String.t()) :: :ok | error()
+  def restore(conn, src_path, schema \\ "main")
+      when is_binary(src_path) and is_binary(schema) do
+    XqliteNIF.restore(conn, schema, src_path)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Extension loading
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Loads a SQLite extension from the shared library at `path`.
+
+  `entry_point` is the extension's init function name; pass `nil` (default)
+  to let SQLite auto-detect. Extension loading must be enabled first via
+  `XqliteNIF.enable_load_extension/2`.
+  """
+  @spec load_extension(conn(), String.t(), String.t() | nil) :: :ok | error()
+  def load_extension(conn, path, entry_point \\ nil)
+      when is_binary(path) and (is_binary(entry_point) or is_nil(entry_point)) do
+    XqliteNIF.load_extension(conn, path, entry_point)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Busy handler / busy timeout
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Installs a busy handler on the connection.
+
+  When SQLite encounters a locked database (another writer holds
+  `RESERVED+`) the handler decides whether to retry or surface
+  `SQLITE_BUSY` to the caller. Each invocation is also forwarded to `pid` as
+
+      {:xqlite_busy, retries_so_far, elapsed_ms}
+
+  so callers can observe contention (telemetry, structured logging,
+  adaptive backoff).
+
+  ## Options
+
+    * `:max_retries` (non-negative integer, default `50`) — stop after this
+      many retries and let the caller see `SQLITE_BUSY`.
+    * `:max_elapsed_ms` (non-negative integer, default `5_000`) — absolute
+      time ceiling in milliseconds from the first busy event in the window.
+    * `:sleep_ms` (non-negative integer, default `10`) — milliseconds to
+      sleep between retries. Zero disables the pause (tight spin; rarely
+      what you want).
+
+  Replacing an existing handler is atomic: the previous handler's state is
+  reclaimed before the new one takes effect.
+
+  > #### Warning — PRAGMA busy_timeout silently replaces your handler {: .warning}
+  >
+  > SQLite allows the busy handler to be silently replaced by
+  > `sqlite3_busy_timeout`, `PRAGMA busy_timeout`, or another
+  > `sqlite3_busy_handler` call. If you install an xqlite handler and then
+  > run `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
+  > "busy_timeout", ms)`), SQLite replaces our callback with its built-in
+  > sleep-and-retry one and you stop receiving `{:xqlite_busy, …}`
+  > messages. No memory is leaked — our internal state is reclaimed on the
+  > next `set_busy_handler/3`, `remove_busy_handler/1`, or connection
+  > close — but the messages will have silently stopped.
+  >
+  > To switch to plain-timeout semantics without surprises, use
+  > `busy_timeout/2`.
+  """
+  @spec set_busy_handler(conn(), pid(), keyword()) :: :ok | error()
+  def set_busy_handler(conn, pid, opts \\ [])
+      when is_pid(pid) and is_list(opts) do
+    max_retries = Keyword.get(opts, :max_retries, 50)
+    max_elapsed_ms = Keyword.get(opts, :max_elapsed_ms, 5_000)
+    sleep_ms = Keyword.get(opts, :sleep_ms, 10)
+    XqliteNIF.set_busy_handler(conn, pid, max_retries, max_elapsed_ms, sleep_ms)
+  end
+
+  @doc """
+  Removes any busy handler installed on the connection.
+
+  Safe to call when no handler is installed (no-op on both the SQLite and
+  xqlite sides). After removal, SQLite returns `SQLITE_BUSY` immediately on
+  contention unless a `busy_timeout` is subsequently set (see
+  `busy_timeout/2`).
+  """
+  @spec remove_busy_handler(conn()) :: :ok | error()
+  def remove_busy_handler(conn), do: XqliteNIF.remove_busy_handler(conn)
+
+  @doc """
+  Sets a plain `sqlite3_busy_timeout` on the connection, replacing any
+  xqlite-installed busy handler cleanly.
+
+  Calls `remove_busy_handler/1` first (so our internal state is reclaimed
+  and `{:xqlite_busy, …}` messages stop for an understood reason), then
+  sets `PRAGMA busy_timeout = ms`.
+
+  Prefer this helper over reaching for `PRAGMA busy_timeout` directly: the
+  raw PRAGMA silently replaces any installed xqlite handler at the SQLite
+  level, stopping `{:xqlite_busy, …}` deliveries without clearing our
+  internal slot. This function keeps both sides consistent.
+
+  `ms` is the timeout in milliseconds. `0` disables the timeout entirely
+  (SQLite returns `SQLITE_BUSY` immediately on contention).
+  """
+  @spec busy_timeout(conn(), non_neg_integer()) :: :ok | error()
+  def busy_timeout(conn, ms) when is_integer(ms) and ms >= 0 do
+    with :ok <- XqliteNIF.remove_busy_handler(conn),
+         {:ok, _} <- XqliteNIF.set_pragma(conn, "busy_timeout", ms) do
+      :ok
     end
   end
 end

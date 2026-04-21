@@ -265,7 +265,7 @@ defmodule Xqlite.NIF.TransactionTest do
 
   # --- Edge case: savepoint without active transaction ---
   test "isolated: savepoint without active transaction succeeds (implicitly starts one)" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE sp_no_tx (id INTEGER)", [])
 
     assert :ok = NIF.savepoint(conn, "sp_implicit")
@@ -280,7 +280,7 @@ defmodule Xqlite.NIF.TransactionTest do
 
   # --- Edge case: special characters in savepoint names ---
   test "isolated: savepoint with apostrophe in name" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.begin(conn)
     assert :ok = NIF.savepoint(conn, "it's a savepoint")
     assert :ok = NIF.release_savepoint(conn, "it's a savepoint")
@@ -289,7 +289,7 @@ defmodule Xqlite.NIF.TransactionTest do
   end
 
   test "isolated: savepoint with spaces in name" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.begin(conn)
     assert :ok = NIF.savepoint(conn, "my save point")
     assert :ok = NIF.release_savepoint(conn, "my save point")
@@ -298,7 +298,7 @@ defmodule Xqlite.NIF.TransactionTest do
   end
 
   test "isolated: savepoint with unicode in name" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.begin(conn)
     assert :ok = NIF.savepoint(conn, "savepoint_éàü")
     assert :ok = NIF.release_savepoint(conn, "savepoint_éàü")
@@ -307,7 +307,7 @@ defmodule Xqlite.NIF.TransactionTest do
   end
 
   test "isolated: savepoint with double quotes in name" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.begin(conn)
     assert :ok = NIF.savepoint(conn, "sp with \"quotes\"")
     assert :ok = NIF.release_savepoint(conn, "sp with \"quotes\"")

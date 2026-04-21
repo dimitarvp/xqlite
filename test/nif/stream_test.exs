@@ -253,7 +253,7 @@ defmodule Xqlite.NIF.StreamTest do
 
   # --- Edge case: concurrent stream + query on same connection ---
   test "isolated: query completes while stream is open, then stream continues" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE cs_t (id INTEGER, val TEXT)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (1, 'a')", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (2, 'b')", [])
@@ -275,7 +275,7 @@ defmodule Xqlite.NIF.StreamTest do
 
   # --- Isolated Test Case (Updated for new batch_size contract) ---
   test "isolated: stream_fetch behavior with exhaustion and invalid batch_size" do
-    assert {:ok, conn} = NIF.open_in_memory()
+    assert {:ok, conn} = NIF.open_in_memory(":memory:")
     assert {:ok, 0} = NIF.execute(conn, "CREATE TABLE iso_items (id INTEGER PRIMARY KEY);", [])
     assert {:ok, 1} = NIF.execute(conn, "INSERT INTO iso_items (id) VALUES (1);", [])
     assert {:ok, 1} = NIF.execute(conn, "INSERT INTO iso_items (id) VALUES (2);", [])
@@ -302,7 +302,7 @@ defmodule Xqlite.NIF.StreamTest do
 
   # --- Edge case: stream after connection close ---
   test "isolated: stream still works after connection close (AtomicPtr holds stmt)" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE sc_t (id INTEGER)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO sc_t VALUES (1)", [])
 
@@ -315,7 +315,7 @@ defmodule Xqlite.NIF.StreamTest do
 
   # --- Edge case: multiple streams from same connection ---
   test "isolated: multiple streams from the same connection both work" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE ms_t (id INTEGER, val TEXT)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO ms_t VALUES (1, 'a')", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO ms_t VALUES (2, 'b')", [])
@@ -336,7 +336,7 @@ defmodule Xqlite.NIF.StreamTest do
 
   # --- Edge case: non-UTF-8 text via streaming ---
   test "isolated: returns utf8_error for invalid UTF-8 in TEXT column via stream" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE utf8_t (val TEXT)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO utf8_t VALUES (CAST(X'FFFE8041' AS TEXT))", [])
 
@@ -351,7 +351,7 @@ defmodule Xqlite.NIF.StreamTest do
 
   # --- Edge case: empty blob via stream ---
   test "isolated: zero-length blob returns empty binary via stream" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE blob_s (data BLOB)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO blob_s VALUES (x'')", [])
 

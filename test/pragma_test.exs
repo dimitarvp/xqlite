@@ -183,7 +183,7 @@ defmodule XqlitePragmaTest do
 
   describe "schema-prefixed pragmas via :db_name option" do
     setup do
-      {:ok, db} = NIF.open_in_memory()
+      {:ok, db} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(db) end)
       {:ok, db: db}
     end
@@ -223,7 +223,7 @@ defmodule XqlitePragmaTest do
 
   describe "unknown pragma" do
     setup do
-      {:ok, db} = NIF.open_in_memory()
+      {:ok, db} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(db) end)
       {:ok, db: db}
     end
@@ -251,7 +251,7 @@ defmodule XqlitePragmaTest do
   end
 
   defp clean_db() do
-    {:ok, db} = NIF.open_in_memory()
+    {:ok, db} = NIF.open_in_memory(":memory:")
     ExUnit.Callbacks.on_exit(fn -> NIF.close(db) end)
     db
   end

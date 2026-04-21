@@ -359,13 +359,13 @@ defmodule Xqlite.NIF.LogHookTest do
     test "opening a new connection after close still delivers events" do
       {:ok, :ok} = NIF.set_log_hook(self())
 
-      {:ok, conn1} = NIF.open_in_memory()
+      {:ok, conn1} = NIF.open_in_memory(":memory:")
       trigger_autoindex_warning(conn1)
       assert_receive {:xqlite_log, _, _}, 2_000
 
       NIF.close(conn1)
 
-      {:ok, conn2} = NIF.open_in_memory()
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn2) end)
 
       trigger_autoindex_warning(conn2)
@@ -379,7 +379,7 @@ defmodule Xqlite.NIF.LogHookTest do
 
       conns =
         for _ <- 1..3 do
-          {:ok, conn} = NIF.open_in_memory()
+          {:ok, conn} = NIF.open_in_memory(":memory:")
           conn
         end
 
@@ -399,7 +399,7 @@ defmodule Xqlite.NIF.LogHookTest do
     test "3 sequential listeners each receive events from their own database" do
       conns =
         for _ <- 1..3 do
-          {:ok, conn} = NIF.open_in_memory()
+          {:ok, conn} = NIF.open_in_memory(":memory:")
           conn
         end
 
@@ -427,7 +427,7 @@ defmodule Xqlite.NIF.LogHookTest do
 
       conns =
         for _ <- 1..3 do
-          {:ok, conn} = NIF.open_in_memory()
+          {:ok, conn} = NIF.open_in_memory(":memory:")
           conn
         end
 

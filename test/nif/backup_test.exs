@@ -32,7 +32,7 @@ defmodule Xqlite.NIF.BackupTest do
       # -------------------------------------------------------------------
 
       test "backup empty database to file", %{conn: conn, backup_path: path} do
-        assert :ok = NIF.backup(conn, path)
+        assert :ok = NIF.backup(conn, "main", path)
         assert File.exists?(path)
         assert File.stat!(path).size > 0
       end
@@ -44,7 +44,7 @@ defmodule Xqlite.NIF.BackupTest do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO bk_data VALUES (1, 'hello')", [])
         {:ok, 1} = NIF.execute(conn, "INSERT INTO bk_data VALUES (2, 'world')", [])
 
-        assert :ok = NIF.backup(conn, path)
+        assert :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -77,7 +77,7 @@ defmodule Xqlite.NIF.BackupTest do
           INSERT INTO bk_t2 VALUES (1, 42);
           """)
 
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -98,7 +98,7 @@ defmodule Xqlite.NIF.BackupTest do
           INSERT INTO bk_idx VALUES (1, 'test');
           """)
 
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -122,7 +122,7 @@ defmodule Xqlite.NIF.BackupTest do
           INSERT INTO bk_child VALUES (1, 1);
           """)
 
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -153,7 +153,7 @@ defmodule Xqlite.NIF.BackupTest do
             [42, 3.14, "hello", <<0xDE, 0xAD>>, nil]
           )
 
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -168,11 +168,11 @@ defmodule Xqlite.NIF.BackupTest do
       test "backup overwrites existing destination file", %{conn: conn, backup_path: path} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE bk_over1 (id INTEGER);")
         {:ok, 1} = NIF.execute(conn, "INSERT INTO bk_over1 VALUES (1)", [])
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         :ok = NIF.execute_batch(conn, "CREATE TABLE bk_over2 (id INTEGER);")
         {:ok, 1} = NIF.execute(conn, "INSERT INTO bk_over2 VALUES (2)", [])
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -194,7 +194,7 @@ defmodule Xqlite.NIF.BackupTest do
             ])
         end
 
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -209,7 +209,7 @@ defmodule Xqlite.NIF.BackupTest do
       # -------------------------------------------------------------------
 
       test "backup to invalid path returns error", %{conn: conn} do
-        assert {:error, _} = NIF.backup(conn, "/no/such/directory/backup.db")
+        assert {:error, _} = NIF.backup(conn, "main", "/no/such/directory/backup.db")
       end
 
       test "backup with invalid schema returns error", %{conn: conn, backup_path: path} do
@@ -225,10 +225,10 @@ defmodule Xqlite.NIF.BackupTest do
           NIF.execute_batch(conn, "CREATE TABLE rs_src (id INTEGER PRIMARY KEY, val TEXT);")
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO rs_src VALUES (1, 'original')", [])
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
-        {:ok, dest_conn} = NIF.open_in_memory()
-        :ok = NIF.restore(dest_conn, path)
+        {:ok, dest_conn} = NIF.open_in_memory(":memory:")
+        :ok = NIF.restore(dest_conn, "main", path)
 
         assert {:ok, %{rows: [[1, "original"]], num_rows: 1}} =
                  NIF.query(dest_conn, "SELECT * FROM rs_src", [])
@@ -241,13 +241,13 @@ defmodule Xqlite.NIF.BackupTest do
           NIF.execute_batch(conn, "CREATE TABLE rs_rep (id INTEGER PRIMARY KEY, val TEXT);")
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO rs_rep VALUES (1, 'backup')", [])
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
-        {:ok, dest_conn} = NIF.open_in_memory()
+        {:ok, dest_conn} = NIF.open_in_memory(":memory:")
         :ok = NIF.execute_batch(dest_conn, "CREATE TABLE rs_old (x INTEGER);")
         {:ok, 1} = NIF.execute(dest_conn, "INSERT INTO rs_old VALUES (99)", [])
 
-        :ok = NIF.restore(dest_conn, path)
+        :ok = NIF.restore(dest_conn, "main", path)
 
         assert {:ok, %{rows: [[1, "backup"]]}} =
                  NIF.query(dest_conn, "SELECT * FROM rs_rep", [])
@@ -260,9 +260,9 @@ defmodule Xqlite.NIF.BackupTest do
       test "restore with explicit main schema", %{conn: conn, backup_path: path} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE rs_sch (val TEXT);")
         {:ok, 1} = NIF.execute(conn, "INSERT INTO rs_sch VALUES ('schema_test')", [])
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
-        {:ok, dest_conn} = NIF.open_in_memory()
+        {:ok, dest_conn} = NIF.open_in_memory(":memory:")
         :ok = NIF.restore(dest_conn, "main", path)
 
         assert {:ok, %{rows: [["schema_test"]]}} =
@@ -277,7 +277,7 @@ defmodule Xqlite.NIF.BackupTest do
 
       test "restore from nonexistent file returns error", %{conn: conn} do
         assert {:error, _} =
-                 NIF.restore(conn, "/no/such/file/backup.db")
+                 NIF.restore(conn, "main", "/no/such/file/backup.db")
       end
 
       test "restore from corrupt file returns error", %{conn: conn} do
@@ -289,7 +289,7 @@ defmodule Xqlite.NIF.BackupTest do
 
         File.write!(corrupt_path, "this is not a sqlite database")
 
-        result = NIF.restore(conn, corrupt_path)
+        result = NIF.restore(conn, "main", corrupt_path)
         File.rm(corrupt_path)
 
         assert {:error, _} = result
@@ -312,10 +312,10 @@ defmodule Xqlite.NIF.BackupTest do
           INSERT INTO rt_orders VALUES (3, 2, 150.00);
           """)
 
-        :ok = NIF.backup(conn, path)
+        :ok = NIF.backup(conn, "main", path)
 
-        {:ok, restored} = NIF.open_in_memory()
-        :ok = NIF.restore(restored, path)
+        {:ok, restored} = NIF.open_in_memory(":memory:")
+        :ok = NIF.restore(restored, "main", path)
 
         assert {:ok, %{rows: users}} =
                  NIF.query(restored, "SELECT * FROM rt_users ORDER BY id", [])
@@ -349,21 +349,21 @@ defmodule Xqlite.NIF.BackupTest do
   # -------------------------------------------------------------------
 
   test "backup on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
 
-    assert {:error, _} = NIF.backup(conn, "/tmp/xqlite_closed_backup.db")
+    assert {:error, _} = NIF.backup(conn, "main", "/tmp/xqlite_closed_backup.db")
   end
 
   test "restore on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
 
-    assert {:error, _} = NIF.restore(conn, "/tmp/xqlite_nonexistent.db")
+    assert {:error, _} = NIF.restore(conn, "main", "/tmp/xqlite_nonexistent.db")
   end
 
   test "backup then restore between two independent connections" do
-    {:ok, src} = NIF.open_in_memory()
+    {:ok, src} = NIF.open_in_memory(":memory:")
     :ok = NIF.execute_batch(src, "CREATE TABLE xfer (id INTEGER PRIMARY KEY, msg TEXT);")
     {:ok, 1} = NIF.execute(src, "INSERT INTO xfer VALUES (1, 'transferred')", [])
 
@@ -373,11 +373,11 @@ defmodule Xqlite.NIF.BackupTest do
         "xqlite_xfer_#{:erlang.unique_integer([:positive])}.db"
       )
 
-    :ok = NIF.backup(src, path)
+    :ok = NIF.backup(src, "main", path)
     NIF.close(src)
 
-    {:ok, dst} = NIF.open_in_memory()
-    :ok = NIF.restore(dst, path)
+    {:ok, dst} = NIF.open_in_memory(":memory:")
+    :ok = NIF.restore(dst, "main", path)
 
     assert {:ok, %{rows: [[1, "transferred"]], num_rows: 1}} =
              NIF.query(dst, "SELECT * FROM xfer", [])

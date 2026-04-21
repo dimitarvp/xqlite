@@ -20,7 +20,7 @@ defmodule Xqlite.TestUtil do
     end
   end
 
-  def open_in_memory(), do: open_and_configure({NIF, :open_in_memory, []})
+  def open_in_memory(), do: open_and_configure({NIF, :open_in_memory, [":memory:"]})
   def open_temporary(), do: open_and_configure({NIF, :open_temporary, []})
 
   @doc """

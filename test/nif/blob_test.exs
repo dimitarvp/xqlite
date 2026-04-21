@@ -421,7 +421,7 @@ defmodule Xqlite.NIF.BlobTest do
   # -------------------------------------------------------------------
 
   test "blob_open on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
 
     assert {:error, _} = NIF.blob_open(conn, "main", "t", "c", 1, true)

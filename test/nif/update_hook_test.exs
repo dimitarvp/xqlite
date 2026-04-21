@@ -1099,8 +1099,8 @@ defmodule Xqlite.NIF.UpdateHookTest do
 
   describe "per-connection isolation" do
     test "hook on conn1 does not fire for conn2 changes" do
-      {:ok, conn1} = NIF.open_in_memory()
-      {:ok, conn2} = NIF.open_in_memory()
+      {:ok, conn1} = NIF.open_in_memory(":memory:")
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
       on_exit(fn ->
         NIF.close(conn1)
@@ -1123,8 +1123,8 @@ defmodule Xqlite.NIF.UpdateHookTest do
     end
 
     test "each connection has its own independent hook" do
-      {:ok, conn1} = NIF.open_in_memory()
-      {:ok, conn2} = NIF.open_in_memory()
+      {:ok, conn1} = NIF.open_in_memory(":memory:")
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
       on_exit(fn ->
         NIF.close(conn1)
@@ -1156,8 +1156,8 @@ defmodule Xqlite.NIF.UpdateHookTest do
     end
 
     test "removing hook from conn1 does not affect conn2" do
-      {:ok, conn1} = NIF.open_in_memory()
-      {:ok, conn2} = NIF.open_in_memory()
+      {:ok, conn1} = NIF.open_in_memory(":memory:")
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
       on_exit(fn ->
         NIF.close(conn1)

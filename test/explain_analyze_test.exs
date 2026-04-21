@@ -3,7 +3,7 @@ defmodule Xqlite.ExplainAnalyzeTest do
 
   describe "Xqlite.explain_analyze/3" do
     test "returns an %Xqlite.ExplainAnalyze{} struct" do
-      {:ok, conn} = XqliteNIF.open_in_memory()
+      {:ok, conn} = Xqlite.open_in_memory()
 
       :ok =
         XqliteNIF.execute_batch(conn, """
@@ -24,7 +24,7 @@ defmodule Xqlite.ExplainAnalyzeTest do
     end
 
     test "plumbs errors through" do
-      {:ok, conn} = XqliteNIF.open_in_memory()
+      {:ok, conn} = Xqlite.open_in_memory()
 
       assert {:error, _} = Xqlite.explain_analyze(conn, "SELECT * FROM bogus", [])
 

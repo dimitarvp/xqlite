@@ -6,7 +6,7 @@ defmodule Xqlite.NIF.BuiltinApiArmorTest do
   alias XqliteNIF, as: NIF
 
   test "ENABLE_API_ARMOR is present in compile options" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
 
     assert {:ok, options} = NIF.compile_options(conn)
     assert "ENABLE_API_ARMOR" in options

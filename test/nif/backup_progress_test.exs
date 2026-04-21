@@ -326,7 +326,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
   # -------------------------------------------------------------------
 
   test "backup_with_progress on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
     {:ok, token} = NIF.create_cancel_token()
 

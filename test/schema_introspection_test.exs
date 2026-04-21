@@ -467,7 +467,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
 
   describe "get_create_sql/2 isolated" do
     setup do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
 
       :ok =
         NIF.execute_batch(conn, "CREATE TABLE gcs_test (id INTEGER PRIMARY KEY, name TEXT);")

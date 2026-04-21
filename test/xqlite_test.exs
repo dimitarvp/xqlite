@@ -115,7 +115,7 @@ defmodule XqliteTest do
 
   describe "disable_strict_mode/1" do
     setup do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
@@ -139,7 +139,7 @@ defmodule XqliteTest do
 
   describe "disable_foreign_key_enforcement/1" do
     setup do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
@@ -165,7 +165,7 @@ defmodule XqliteTest do
 
   describe "enable_foreign_key_enforcement/1" do
     setup do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
@@ -186,7 +186,7 @@ defmodule XqliteTest do
 
   describe "SQLite loose type coercion (non-strict mode)" do
     setup do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
 
       :ok =
         NIF.execute_batch(conn, """

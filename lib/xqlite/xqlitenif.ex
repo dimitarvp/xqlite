@@ -53,8 +53,6 @@ defmodule XqliteNIF do
 
   @type stream_fetch_ok_result :: %{rows: [list(term())]}
 
-  @default_memory_database ":memory:"
-
   @doc """
   Opens a connection to an SQLite database file.
 
@@ -70,18 +68,15 @@ defmodule XqliteNIF do
   def open(_path), do: err()
 
   @doc """
-  Opens a connection to an in-memory SQLite database.
+  Opens a connection to an in-memory SQLite database identified by `uri`.
 
-  Can be called with no arguments to open a private, temporary in-memory
-  database (`":memory:"`). It can also be called with a URI filename like
-  `"file:memdb1?mode=memory&cache=shared"` to create a named in-memory
-  database that can be shared across connections in the same process.
+  Pass `":memory:"` for a private, temporary in-memory database, or a URI
+  filename like `"file:memdb1?mode=memory&cache=shared"` to create a
+  shared-cache in-memory database reachable from other connections in the
+  same process.
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
-  @spec open_in_memory() :: {:ok, Xqlite.conn()} | Xqlite.error()
-  def open_in_memory(), do: open_in_memory(@default_memory_database)
-
   @spec open_in_memory(uri :: String.t()) :: {:ok, Xqlite.conn()} | Xqlite.error()
   def open_in_memory(_uri), do: err()
 
@@ -100,19 +95,18 @@ defmodule XqliteNIF do
   def open_readonly(_path), do: err()
 
   @doc """
-  Opens a read-only connection to an in-memory SQLite database.
+  Opens a read-only connection to an in-memory SQLite database identified
+  by `uri`.
 
-  Useful for connecting to a named shared-cache in-memory database that was
-  opened read-write by another connection (e.g., via
-  `"file:memdb1?mode=memory&cache=shared"`).
+  Typical use is connecting to a named shared-cache in-memory database
+  opened read-write by another connection, e.g.
+  `"file:memdb1?mode=memory&cache=shared"`. Pass `":memory:"` for a
+  private, empty read-only database.
 
   Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_MEMORY | SQLITE_OPEN_URI` flags.
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
-  @spec open_in_memory_readonly() :: {:ok, Xqlite.conn()} | Xqlite.error()
-  def open_in_memory_readonly(), do: open_in_memory_readonly(@default_memory_database)
-
   @spec open_in_memory_readonly(uri :: String.t()) :: {:ok, Xqlite.conn()} | Xqlite.error()
   def open_in_memory_readonly(_uri), do: err()
 
@@ -461,8 +455,7 @@ defmodule XqliteNIF do
   Returns `{:error, :invalid_transaction_mode}` for unrecognized mode atoms.
   """
   @spec begin(conn :: Xqlite.conn(), mode :: transaction_mode()) :: :ok | Xqlite.error()
-  def begin(conn, mode \\ :deferred)
-  def begin(_conn, _mode), do: err()
+  def begin(_conn, _mode \\ :deferred), do: err()
 
   @doc """
   Commits the current database transaction.
@@ -844,8 +837,7 @@ defmodule XqliteNIF do
   """
   @spec txn_state(Xqlite.conn(), String.t() | nil) ::
           {:ok, :none | :read | :write | :unknown} | Xqlite.error()
-  def txn_state(conn, schema \\ nil)
-  def txn_state(_conn, _schema), do: err()
+  def txn_state(_conn, _schema \\ nil), do: err()
 
   @doc """
   Forces a WAL checkpoint. Equivalent to `sqlite3_wal_checkpoint_v2`.
@@ -879,8 +871,7 @@ defmodule XqliteNIF do
           :passive | :full | :restart | :truncate,
           String.t() | nil
         ) :: {:ok, map()} | Xqlite.error()
-  def wal_checkpoint(conn, mode \\ :passive, schema \\ nil)
-  def wal_checkpoint(_conn, _mode, _schema), do: err()
+  def wal_checkpoint(_conn, _mode \\ :passive, _schema \\ nil), do: err()
 
   @doc """
   Returns a structured snapshot of `sqlite3_db_status` counters for the
@@ -915,53 +906,58 @@ defmodule XqliteNIF do
   def connection_stats(_conn), do: err()
 
   @doc """
-  Installs a busy handler on the connection.
+  Installs a busy handler on the connection (raw NIF).
+
+  Most users want `Xqlite.set_busy_handler/3`, which accepts keyword
+  options with sane defaults.
 
   When SQLite encounters a locked database (another writer holds
-  RESERVED+) the handler decides whether to retry or surface
+  `RESERVED+`) the handler decides whether to retry or surface
   `SQLITE_BUSY` to the caller. Each invocation is also forwarded to
   `pid` as
 
       {:xqlite_busy, retries_so_far, elapsed_ms}
 
   so callers can observe contention (telemetry, structured logging,
-  custom backoff feedback).
+  adaptive backoff).
 
-  ## Options
+    * `max_retries` — stop after this many retries and let the caller
+      see `SQLITE_BUSY`.
+    * `max_elapsed_ms` — absolute time ceiling in milliseconds from the
+      first busy event in the window.
+    * `sleep_ms` — milliseconds to sleep between retries. Zero disables
+      the pause.
 
-    * `:max_retries` (non-negative integer, default `50`) — stop after
-      this many retries and let the caller see `SQLITE_BUSY`.
-    * `:max_elapsed_ms` (non-negative integer, default `5_000`) —
-      absolute time ceiling in milliseconds from the first busy event
-      in the window.
-    * `:sleep_ms` (non-negative integer, default `10`) — milliseconds
-      to sleep between retries. Zero disables the pause (tight spin;
-      rarely what you want).
+  Replacing an existing handler is atomic: the previous handler's state
+  is reclaimed before the new one takes effect.
 
-  Replacing an existing handler — including the implicit one installed
-  by `PRAGMA busy_timeout` / `sqlite3_busy_timeout` — is safe and
-  atomic. Only one busy handler exists per connection.
+  > #### Warning — PRAGMA busy_timeout silently replaces this handler {: .warning}
+  >
+  > `PRAGMA busy_timeout` / `sqlite3_busy_timeout` replaces the installed
+  > handler at the SQLite C level without going through our atomic slot.
+  > Messages stop flowing; no memory is leaked (the internal state is
+  > reclaimed on the next `set_busy_handler/5` / `remove_busy_handler/1`
+  > / connection close). Prefer `Xqlite.busy_timeout/2` to switch to
+  > plain-timeout semantics.
 
   Returns `:ok`.
   """
-  @spec set_busy_handler(Xqlite.conn(), pid(), keyword()) :: :ok | Xqlite.error()
-  def set_busy_handler(conn, pid, opts \\ []) when is_list(opts) do
-    max_retries = Keyword.get(opts, :max_retries, 50)
-    max_elapsed_ms = Keyword.get(opts, :max_elapsed_ms, 5_000)
-    sleep_ms = Keyword.get(opts, :sleep_ms, 10)
-    set_busy_handler(conn, pid, max_retries, max_elapsed_ms, sleep_ms)
-  end
-
-  @doc false
+  @spec set_busy_handler(
+          conn :: Xqlite.conn(),
+          pid :: pid(),
+          max_retries :: non_neg_integer(),
+          max_elapsed_ms :: non_neg_integer(),
+          sleep_ms :: non_neg_integer()
+        ) :: :ok | Xqlite.error()
   def set_busy_handler(_conn, _pid, _max_retries, _max_elapsed_ms, _sleep_ms),
     do: err()
 
   @doc """
   Removes any busy handler from the connection.
 
-  Safe to call when no handler is installed (becomes a no-op). After
-  removal, SQLite defaults to returning `SQLITE_BUSY` immediately on
-  contention — unless a `busy_timeout` PRAGMA is subsequently set.
+  Safe to call when no handler is installed (no-op on both sides). After
+  removal, SQLite returns `SQLITE_BUSY` immediately on contention unless
+  a `busy_timeout` is subsequently set.
 
   Returns `:ok`.
   """
@@ -1157,43 +1153,32 @@ defmodule XqliteNIF do
   def remove_update_hook(_conn), do: err()
 
   @doc """
-  Serializes a database to a contiguous binary.
+  Serializes an attached database to a contiguous binary.
 
-  Returns a binary snapshot of the entire database. This is an atomic,
-  point-in-time copy — no pages are locked during serialization.
-
-  `schema` identifies which attached database to serialize. Use `"main"`
-  for the primary database (default), `"temp"` for the temp database,
-  or the name of an attached database.
+  Atomic, point-in-time snapshot. Use `Xqlite.serialize/1` for a default
+  `"main"` schema.
 
   Returns `{:ok, binary}` on success or `{:error, reason}` on failure.
   """
-  @spec serialize(conn :: Xqlite.conn()) :: {:ok, binary()} | Xqlite.error()
-  def serialize(conn), do: serialize(conn, "main")
-
   @spec serialize(conn :: Xqlite.conn(), schema :: String.t()) ::
           {:ok, binary()} | Xqlite.error()
   def serialize(_conn, _schema), do: err()
 
   @doc """
-  Deserializes a binary into a database, replacing its current contents.
+  Deserializes a binary into the named schema, replacing its contents.
 
   The binary must be a valid SQLite database image (as produced by
   `serialize/2`). After deserialization the connection operates on the
   new database entirely in memory.
 
-  `schema` identifies which attached database to replace. Use `"main"`
-  for the primary database (default).
+  When `read_only` is `true`, write operations on the schema fail with
+  `{:error, {:read_only_database, _}}`. When `false` it is writable and
+  may grow as needed.
 
-  When `read_only` is `true`, the deserialized database cannot be
-  modified — write operations will fail with `{:error, {:read_only_database, _}}`.
-  When `false` (default), the database is writable and may grow as needed.
+  Use `Xqlite.deserialize/4` for defaulted `schema`/`read_only`.
 
   Returns `:ok` on success or `{:error, reason}` on failure.
   """
-  @spec deserialize(conn :: Xqlite.conn(), data :: binary()) :: :ok | Xqlite.error()
-  def deserialize(conn, data), do: deserialize(conn, "main", data, false)
-
   @spec deserialize(
           conn :: Xqlite.conn(),
           schema :: String.t(),
@@ -1221,19 +1206,10 @@ defmodule XqliteNIF do
   @doc """
   Loads a SQLite extension from the shared library at `path`.
 
-  The entry point is auto-detected by SQLite. Extension loading must be
-  enabled first via `enable_load_extension/2`.
-  """
-  @spec load_extension(conn :: Xqlite.conn(), path :: String.t()) ::
-          :ok | Xqlite.error()
-  def load_extension(conn, path), do: load_extension(conn, path, nil)
+  Pass `nil` for `entry_point` to let SQLite auto-detect. Extension
+  loading must be enabled first via `enable_load_extension/2`.
 
-  @doc """
-  Loads a SQLite extension from the shared library at `path` with an
-  explicit entry point function name.
-
-  Pass `nil` for `entry_point` to let SQLite auto-detect.
-  Extension loading must be enabled first via `enable_load_extension/2`.
+  Use `Xqlite.load_extension/2` for a defaulted `entry_point` of `nil`.
   """
   @spec load_extension(
           conn :: Xqlite.conn(),
@@ -1247,16 +1223,13 @@ defmodule XqliteNIF do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Backs up the database to a file.
+  Backs up the named schema to a file at `dest_path`.
 
-  Copies the named schema (default `"main"`) to the file at `dest_path`.
   The destination file is created or overwritten. The source database
   remains readable during the backup.
-  """
-  @spec backup(conn :: Xqlite.conn(), dest_path :: String.t()) ::
-          :ok | Xqlite.error()
-  def backup(conn, dest_path), do: backup(conn, "main", dest_path)
 
+  Use `Xqlite.backup/2` for a defaulted `"main"` schema.
+  """
   @spec backup(
           conn :: Xqlite.conn(),
           schema :: String.t(),
@@ -1265,16 +1238,12 @@ defmodule XqliteNIF do
   def backup(_conn, _schema, _dest_path), do: err()
 
   @doc """
-  Restores a database from a file.
+  Restores the named schema from a file at `src_path`.
 
-  Replaces the named schema (default `"main"`) with the contents of the
-  file at `src_path`. The connection's existing data in that schema is
-  overwritten.
+  The connection's existing data in that schema is overwritten.
+
+  Use `Xqlite.restore/2` for a defaulted `"main"` schema.
   """
-  @spec restore(conn :: Xqlite.conn(), src_path :: String.t()) ::
-          :ok | Xqlite.error()
-  def restore(conn, src_path), do: restore(conn, "main", src_path)
-
   @spec restore(
           conn :: Xqlite.conn(),
           schema :: String.t(),

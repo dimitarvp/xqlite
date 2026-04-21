@@ -71,19 +71,19 @@ defmodule Xqlite.NIF.ConnectionTest do
 
   describe "using a closed connection" do
     test "query returns connection_closed", %{} do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       :ok = NIF.close(conn)
       assert {:error, :connection_closed} = NIF.query(conn, "SELECT 1;", [])
     end
 
     test "execute returns connection_closed", %{} do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       :ok = NIF.close(conn)
       assert {:error, :connection_closed} = NIF.execute(conn, "SELECT 1;", [])
     end
 
     test "get_pragma returns connection_closed", %{} do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       :ok = NIF.close(conn)
       assert {:error, :connection_closed} = NIF.get_pragma(conn, "cache_size")
     end
@@ -91,7 +91,7 @@ defmodule Xqlite.NIF.ConnectionTest do
 
   describe "concurrent access" do
     test "multiple tasks inserting through the same connection handle" do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
 
       {:ok, 0} =
@@ -113,7 +113,7 @@ defmodule Xqlite.NIF.ConnectionTest do
     end
 
     test "concurrent operations during close get success or connection_closed" do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
 
       tasks =

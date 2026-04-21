@@ -64,8 +64,8 @@ defmodule Xqlite.NIF.LastInsertRowidTest do
 
   describe "using separate connections" do
     setup do
-      assert {:ok, conn1} = NIF.open_in_memory()
-      assert {:ok, conn2} = NIF.open_in_memory()
+      assert {:ok, conn1} = NIF.open_in_memory(":memory:")
+      assert {:ok, conn2} = NIF.open_in_memory(":memory:")
       assert {:ok, 0} = NIF.execute(conn1, @table_sql, [])
       assert {:ok, 0} = NIF.execute(conn2, @table_sql, [])
 

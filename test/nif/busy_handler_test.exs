@@ -28,7 +28,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
-    :ok = NIF.set_busy_handler(probe, test_pid, handler_opts)
+    :ok = Xqlite.set_busy_handler(probe, test_pid, handler_opts)
 
     {holder, probe}
   end
@@ -100,7 +100,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {holder, probe} =
       prime_contention(path, max_retries: 1_000, max_elapsed_ms: 10_000, sleep_ms: 10)
 
-    :ok = NIF.remove_busy_handler(probe)
+    :ok = Xqlite.remove_busy_handler(probe)
 
     before_ms = System.monotonic_time(:millisecond)
     result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
@@ -128,10 +128,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
     # Install, then replace with a narrower one.
-    :ok = NIF.set_busy_handler(probe, test_pid, max_retries: 100, sleep_ms: 20)
+    :ok = Xqlite.set_busy_handler(probe, test_pid, max_retries: 100, sleep_ms: 20)
 
     :ok =
-      NIF.set_busy_handler(probe, test_pid,
+      Xqlite.set_busy_handler(probe, test_pid,
         max_retries: 1,
         max_elapsed_ms: 500,
         sleep_ms: 5
@@ -145,7 +145,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert match?({:error, _}, result)
     assert elapsed < 100
 
-    :ok = NIF.remove_busy_handler(probe)
+    :ok = Xqlite.remove_busy_handler(probe)
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)

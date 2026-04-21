@@ -199,20 +199,20 @@ defmodule Xqlite.NIF.ChangesTest do
   # -------------------------------------------------------------------
 
   test "changes on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
     assert {:error, :connection_closed} = NIF.changes(conn)
   end
 
   test "total_changes on closed connection returns error" do
-    {:ok, conn} = NIF.open_in_memory()
+    {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
     assert {:error, :connection_closed} = NIF.total_changes(conn)
   end
 
   test "changes is connection-specific" do
-    {:ok, conn1} = NIF.open_in_memory()
-    {:ok, conn2} = NIF.open_in_memory()
+    {:ok, conn1} = NIF.open_in_memory(":memory:")
+    {:ok, conn2} = NIF.open_in_memory(":memory:")
 
     :ok = NIF.execute_batch(conn1, "CREATE TABLE ch1 (id INTEGER PRIMARY KEY);")
     :ok = NIF.execute_batch(conn2, "CREATE TABLE ch2 (id INTEGER PRIMARY KEY);")

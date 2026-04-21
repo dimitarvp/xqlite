@@ -96,7 +96,7 @@ defmodule Xqlite.NIF.PragmaTest do
     # Tag specific block
     @tag :memory_private
     setup do
-      assert {:ok, conn} = NIF.open_in_memory()
+      assert {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
@@ -115,7 +115,7 @@ defmodule Xqlite.NIF.PragmaTest do
   # --- Edge case: pragma name injection ---
   describe "pragma name validation" do
     setup do
-      {:ok, conn} = NIF.open_in_memory()
+      {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
