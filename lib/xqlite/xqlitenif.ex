@@ -848,6 +848,73 @@ defmodule XqliteNIF do
   def txn_state(_conn, _schema), do: err()
 
   @doc """
+  Forces a WAL checkpoint. Equivalent to `sqlite3_wal_checkpoint_v2`.
+
+  `mode` picks the checkpoint strategy:
+
+    * `:passive` (default) — checkpoints as many pages as possible
+      without blocking readers or writers. Never returns `busy: true`.
+    * `:full` — waits for any concurrent writers to finish, then
+      checkpoints all pages. Will set `busy: true` if readers prevent
+      completion.
+    * `:restart` — as `:full`, plus waits for existing readers to
+      drain so the next writer can restart the WAL from the beginning.
+    * `:truncate` — as `:restart`, plus truncates the WAL file on disk.
+
+  `schema` is the attached-database name (defaults to `nil`, meaning the
+  main database).
+
+  Returns `{:ok, %{log_pages: n, checkpointed_pages: n, busy: bool}}`:
+
+    * `log_pages` — size of the WAL log in pages after the checkpoint,
+      or `-1` if WAL mode is not active.
+    * `checkpointed_pages` — number of pages the checkpoint actually
+      moved from the WAL into the main database, or `-1` if inactive.
+    * `busy` — `true` if the checkpoint did not complete all of its work
+      because other connections held back progress. `log_pages` /
+      `checkpointed_pages` are still populated with partial data.
+  """
+  @spec wal_checkpoint(
+          Xqlite.conn(),
+          :passive | :full | :restart | :truncate,
+          String.t() | nil
+        ) :: {:ok, map()} | Xqlite.error()
+  def wal_checkpoint(conn, mode \\ :passive, schema \\ nil)
+  def wal_checkpoint(_conn, _mode, _schema), do: err()
+
+  @doc """
+  Returns a structured snapshot of `sqlite3_db_status` counters for the
+  connection.
+
+  Returns `{:ok, %{…}}` with the following keys (all non-negative integers):
+
+    * `:lookaside_used` — lookaside slots in use.
+    * `:cache_used` — heap bytes in the pager cache.
+    * `:schema_used` — heap bytes in the schema cache.
+    * `:stmt_used` — heap bytes across prepared statements.
+    * `:lookaside_hit` — count of lookaside allocations satisfied from
+      the pool.
+    * `:lookaside_miss_size` — count of allocations that bypassed
+      lookaside because they were too big.
+    * `:lookaside_miss_full` — count of allocations that bypassed
+      lookaside because it was full.
+    * `:cache_hit` — pager cache hit count.
+    * `:cache_miss` — pager cache miss count.
+    * `:cache_write` — count of dirty pages written.
+    * `:deferred_fks` — pending deferred FK violations (only relevant
+      under `PRAGMA defer_foreign_keys = ON`).
+    * `:cache_used_shared` — heap bytes in the shared pager cache
+      attributable to this connection.
+    * `:cache_spill` — count of dirty-cache spills to disk.
+    * `:tempbuf_spill` — count of `tempdb` spill events.
+
+  All counters are "current" values; high-water marks are not exposed
+  yet. Call repeatedly for time-series monitoring.
+  """
+  @spec connection_stats(Xqlite.conn()) :: {:ok, map()} | Xqlite.error()
+  def connection_stats(_conn), do: err()
+
+  @doc """
   Signals an intent to cancel operations associated with a given cancellation token.
 
   When this function is called, any active SQLite operations (executed via

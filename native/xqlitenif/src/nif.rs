@@ -253,6 +253,166 @@ fn txn_state<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// WAL checkpoint + DB status (observability)
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn wal_checkpoint<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    mode: rustler::Atom,
+    schema: Option<String>,
+) -> Result<Term<'a>, XqliteError> {
+    let mode_int = match () {
+        _ if mode == atoms::passive() => ffi::SQLITE_CHECKPOINT_PASSIVE,
+        _ if mode == atoms::full() => ffi::SQLITE_CHECKPOINT_FULL,
+        _ if mode == atoms::restart() => ffi::SQLITE_CHECKPOINT_RESTART,
+        _ if mode == atoms::truncate() => ffi::SQLITE_CHECKPOINT_TRUNCATE,
+        _ => {
+            return Err(XqliteError::CannotExecute(format!(
+                "invalid wal_checkpoint mode {mode:?}; expected :passive, :full, :restart, or :truncate"
+            )));
+        }
+    };
+
+    connection::with_conn(&handle, |conn| {
+        // SAFETY: with_conn holds the connection Mutex. db handle is
+        // valid for the duration of the closure. zDb is either null
+        // (main schema) or a valid NUL-terminated string whose lifetime
+        // spans the FFI call.
+        unsafe {
+            let db = conn.handle();
+            let c_schema = match schema.as_deref() {
+                None => None,
+                Some(s) => Some(
+                    std::ffi::CString::new(s).map_err(|_| XqliteError::NulErrorInString)?,
+                ),
+            };
+            let schema_ptr = c_schema
+                .as_ref()
+                .map(|c| c.as_ptr())
+                .unwrap_or(std::ptr::null());
+
+            let mut log_pages: std::os::raw::c_int = 0;
+            let mut ckpt_pages: std::os::raw::c_int = 0;
+            let rc = ffi::sqlite3_wal_checkpoint_v2(
+                db,
+                schema_ptr,
+                mode_int,
+                &mut log_pages,
+                &mut ckpt_pages,
+            );
+
+            match rc {
+                ffi::SQLITE_OK | ffi::SQLITE_BUSY => {
+                    let busy = rc == ffi::SQLITE_BUSY;
+                    let map = map_new(env);
+                    let map = map
+                        .map_put(atoms::log_pages().encode(env), (log_pages as i64).encode(env))
+                        .map_err(|_| {
+                            XqliteError::CannotExecute("wal_checkpoint map_put log_pages failed".into())
+                        })?;
+                    let map = map
+                        .map_put(
+                            atoms::checkpointed_pages().encode(env),
+                            (ckpt_pages as i64).encode(env),
+                        )
+                        .map_err(|_| {
+                            XqliteError::CannotExecute(
+                                "wal_checkpoint map_put checkpointed_pages failed".into(),
+                            )
+                        })?;
+                    let map = map.map_put(atoms::busy().encode(env), busy.encode(env)).map_err(
+                        |_| XqliteError::CannotExecute("wal_checkpoint map_put busy failed".into()),
+                    )?;
+                    Ok(map)
+                }
+                _ => {
+                    let ffi_err = ffi::Error::new(rc);
+                    let err_msg_ptr = ffi::sqlite3_errmsg(db);
+                    let message = if err_msg_ptr.is_null() {
+                        format!("sqlite3_wal_checkpoint_v2 failed (code {rc})")
+                    } else {
+                        std::ffi::CStr::from_ptr(err_msg_ptr)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    Err(XqliteError::from(rusqlite::Error::SqliteFailure(
+                        ffi_err,
+                        Some(message),
+                    )))
+                }
+            }
+        }
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn connection_stats<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+) -> Result<Term<'a>, XqliteError> {
+    connection::with_conn(&handle, |conn| {
+        // SAFETY: with_conn holds the connection Mutex; db handle valid
+        // for the closure. Each `sqlite3_db_status` call writes into
+        // stack-local ints we own.
+        unsafe {
+            let db = conn.handle();
+
+            let ops: &[(rustler::Atom, i32)] = &[
+                (atoms::lookaside_used(), ffi::SQLITE_DBSTATUS_LOOKASIDE_USED),
+                (atoms::cache_used(), ffi::SQLITE_DBSTATUS_CACHE_USED),
+                (atoms::schema_used(), ffi::SQLITE_DBSTATUS_SCHEMA_USED),
+                (atoms::stmt_used(), ffi::SQLITE_DBSTATUS_STMT_USED),
+                (atoms::lookaside_hit(), ffi::SQLITE_DBSTATUS_LOOKASIDE_HIT),
+                (
+                    atoms::lookaside_miss_size(),
+                    ffi::SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE,
+                ),
+                (
+                    atoms::lookaside_miss_full(),
+                    ffi::SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL,
+                ),
+                (atoms::cache_hit(), ffi::SQLITE_DBSTATUS_CACHE_HIT),
+                (atoms::cache_miss(), ffi::SQLITE_DBSTATUS_CACHE_MISS),
+                (atoms::cache_write(), ffi::SQLITE_DBSTATUS_CACHE_WRITE),
+                (atoms::deferred_fks(), ffi::SQLITE_DBSTATUS_DEFERRED_FKS),
+                (
+                    atoms::cache_used_shared(),
+                    ffi::SQLITE_DBSTATUS_CACHE_USED_SHARED,
+                ),
+                (atoms::cache_spill(), ffi::SQLITE_DBSTATUS_CACHE_SPILL),
+                (atoms::tempbuf_spill(), ffi::SQLITE_DBSTATUS_TEMPBUF_SPILL),
+            ];
+
+            let mut map = map_new(env);
+            for (atom, op) in ops {
+                let mut current: std::os::raw::c_int = 0;
+                let mut highwater: std::os::raw::c_int = 0;
+                let rc =
+                    ffi::sqlite3_db_status(db, *op, &mut current, &mut highwater, 0);
+
+                if rc != ffi::SQLITE_OK {
+                    return Err(XqliteError::CannotExecute(format!(
+                        "sqlite3_db_status(op={op}) returned {rc}"
+                    )));
+                }
+
+                map = map
+                    .map_put(atom.encode(env), (current as i64).encode(env))
+                    .map_err(|_| {
+                        XqliteError::CannotExecute(format!(
+                            "connection_stats map_put for op {op} failed"
+                        ))
+                    })?;
+            }
+
+            Ok(map)
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Cancel NIFs
 // ---------------------------------------------------------------------------
 
