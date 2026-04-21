@@ -1,12 +1,12 @@
 use crate::error::XqliteError;
+use crate::hook_util;
 use rusqlite::{Connection, ffi};
 use rustler::sys::{
-    ERL_NIF_TERM, ErlNifEnv, enif_alloc_env, enif_free_env, enif_make_atom_len,
-    enif_make_int64, enif_make_tuple_from_array, enif_send,
+    enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::AtomicPtr;
 use std::time::Instant;
 
 /// State kept alive while a busy handler is installed on a connection.
@@ -79,7 +79,7 @@ unsafe fn send_busy_to_pid(pid: &LocalPid, retries: u32, elapsed_ms: u64) {
     unsafe {
         let msg_env = enif_alloc_env();
 
-        let tag = make_atom(msg_env, b"xqlite_busy");
+        let tag = hook_util::make_atom(msg_env, b"xqlite_busy");
         let retries_term = enif_make_int64(msg_env, retries as i64);
         let elapsed_term = enif_make_int64(msg_env, elapsed_ms as i64);
 
@@ -90,12 +90,6 @@ unsafe fn send_busy_to_pid(pid: &LocalPid, retries: u32, elapsed_ms: u64) {
 
         enif_free_env(msg_env);
     }
-}
-
-#[inline]
-unsafe fn make_atom(env: *mut ErlNifEnv, name: &[u8]) -> ERL_NIF_TERM {
-    // SAFETY: `env` is a valid msg_env; `name` is a valid UTF-8 slice.
-    unsafe { enif_make_atom_len(env, name.as_ptr().cast(), name.len()) }
 }
 
 /// Install a busy handler on the given connection.
@@ -111,39 +105,21 @@ pub(crate) fn install(
     slot: &AtomicPtr<BusyHandlerState>,
     state: BusyHandlerState,
 ) -> Result<(), XqliteError> {
-    let new_ptr = Box::into_raw(Box::new(state));
-
-    // SAFETY: caller holds the connection Mutex; `conn.handle()` yields
-    // the raw db pointer for that locked connection. `new_ptr` is kept
-    // alive via the atomic slot; freed below if SQLite rejects.
-    let rc = unsafe {
-        ffi::sqlite3_busy_handler(
-            conn.handle(),
-            Some(busy_handler_callback),
-            new_ptr as *mut c_void,
-        )
-    };
-
-    if rc != ffi::SQLITE_OK {
-        // SAFETY: SQLite rejected the handler; it won't fire. Reclaim
-        // our leak before surfacing the error.
-        unsafe {
-            drop(Box::from_raw(new_ptr));
+    hook_util::install_hook(slot, state, |new_ptr| {
+        // SAFETY: caller holds the connection Mutex; `conn.handle()`
+        // yields the raw db pointer for that locked connection.
+        let rc = unsafe {
+            ffi::sqlite3_busy_handler(
+                conn.handle(),
+                Some(busy_handler_callback),
+                new_ptr as *mut c_void,
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(ffi_rc_to_error(conn, rc));
         }
-        return Err(ffi_rc_to_error(conn, rc));
-    }
-
-    // Swap in the new pointer; reclaim any predecessor.
-    let old_ptr = slot.swap(new_ptr, Ordering::AcqRel);
-    if !old_ptr.is_null() {
-        // SAFETY: we just replaced the handler at the SQLite C level
-        // above; the old pointer can no longer be accessed by a callback.
-        unsafe {
-            drop(Box::from_raw(old_ptr));
-        }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Remove the busy handler from the given connection.
@@ -156,24 +132,17 @@ pub(crate) fn uninstall(
     conn: &Connection,
     slot: &AtomicPtr<BusyHandlerState>,
 ) -> Result<(), XqliteError> {
-    // SAFETY: caller holds the connection Mutex. Passing None+null clears
-    // any registered handler; calling with no handler installed is valid.
-    let rc = unsafe { ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut()) };
-
-    if rc != ffi::SQLITE_OK {
-        return Err(ffi_rc_to_error(conn, rc));
-    }
-
-    let old_ptr = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
-    if !old_ptr.is_null() {
-        // SAFETY: SQLite-side handler is cleared; no callback will read
-        // the old state. Reclaim the box.
-        unsafe {
-            drop(Box::from_raw(old_ptr));
+    hook_util::uninstall_hook(slot, || {
+        // SAFETY: caller holds the connection Mutex. Passing None+null
+        // clears any registered handler; calling with no handler
+        // installed is valid.
+        let rc =
+            unsafe { ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut()) };
+        if rc != ffi::SQLITE_OK {
+            return Err(ffi_rc_to_error(conn, rc));
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 // --- NIF-facing constructor -------------------------------------------------

@@ -112,6 +112,16 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 # => receive {:xqlite_update, :insert, "main", "users", 2}
 ```
 
+### Transaction lifecycle hooks
+
+```elixir
+:ok = XqliteNIF.set_commit_hook(conn, self())     # {:xqlite_commit} before each commit
+:ok = XqliteNIF.set_rollback_hook(conn, self())   # {:xqlite_rollback} after each rollback
+:ok = XqliteNIF.set_wal_hook(conn, self())        # {:xqlite_wal, db_name, pages} after WAL commits
+```
+
+The commit hook is observation-only and never vetoes the commit. Combined with `set_update_hook/2` and `set_busy_handler/5`, the connection exposes every SQLite-visible lifecycle event for telemetry without touching the SQL stream.
+
 ### Busy handler -- observe contention, retry, give up on a budget
 
 ```elixir

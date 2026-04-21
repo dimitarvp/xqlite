@@ -1,8 +1,8 @@
 use crate::error::XqliteError;
+use crate::hook_util;
 use rusqlite::hooks::Action;
 use rustler::sys::{
-    ERL_NIF_TERM, ErlNifEnv, enif_alloc_env, enif_free_env, enif_make_atom_len,
-    enif_make_int64, enif_make_new_binary, enif_make_tuple_from_array, enif_send,
+    enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
 
@@ -27,10 +27,10 @@ unsafe fn send_update_to_pid(
     unsafe {
         let msg_env = enif_alloc_env();
 
-        let tag = make_atom(msg_env, b"xqlite_update");
-        let action = make_atom(msg_env, action_name);
-        let db = make_binary(msg_env, db_name.as_bytes());
-        let table = make_binary(msg_env, table_name.as_bytes());
+        let tag = hook_util::make_atom(msg_env, b"xqlite_update");
+        let action = hook_util::make_atom(msg_env, action_name);
+        let db = hook_util::make_binary(msg_env, db_name.as_bytes());
+        let table = hook_util::make_binary(msg_env, table_name.as_bytes());
         let rid = enif_make_int64(msg_env, rowid);
 
         let elements = [tag, action, db, table, rid];
@@ -39,23 +39,6 @@ unsafe fn send_update_to_pid(
         let _res = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, msg);
 
         enif_free_env(msg_env);
-    }
-}
-
-#[inline]
-unsafe fn make_atom(env: *mut ErlNifEnv, name: &[u8]) -> ERL_NIF_TERM {
-    // SAFETY: env is a valid NIF environment, name is a valid UTF-8 slice.
-    unsafe { enif_make_atom_len(env, name.as_ptr().cast(), name.len()) }
-}
-
-#[inline]
-unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TERM {
-    // SAFETY: env is valid, enif_make_new_binary returns a buffer of exactly data.len() bytes.
-    unsafe {
-        let mut term: ERL_NIF_TERM = 0;
-        let buf = enif_make_new_binary(env, data.len(), &mut term);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-        term
     }
 }
 

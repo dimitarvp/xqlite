@@ -1,20 +1,26 @@
 use crate::atoms;
 use crate::busy_handler::BusyHandlerState;
 use crate::error::XqliteError;
+use crate::hook_util;
+use crate::wal_hook::WalHookState;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicPtr;
 
 #[derive(Debug)]
 pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
     pub(crate) extensions_enabled: AtomicBool,
-    // Leaked `Box<BusyHandlerState>` pointer when a busy handler is
-    // installed; null otherwise. `install` / `uninstall` in
-    // `busy_handler.rs` manage the lifecycle; `Drop` reclaims
-    // stragglers when the connection resource is GC'd.
+    // Leaked `Box<*HookState>` pointers for the hooks that need FFI
+    // state management (the rusqlite-closure-accepting hooks —
+    // commit/rollback/update — do their own internal box management
+    // and don't live here). `install` / `uninstall` in each module
+    // manage the lifecycle; the `Drop` impl below reclaims stragglers
+    // when the connection resource is GC'd.
     pub(crate) busy_handler: AtomicPtr<BusyHandlerState>,
+    pub(crate) wal_hook: AtomicPtr<WalHookState>,
 }
 
 #[resource_impl]
@@ -22,17 +28,8 @@ impl Resource for XqliteConn {}
 
 impl Drop for XqliteConn {
     fn drop(&mut self) {
-        let ptr = self
-            .busy_handler
-            .swap(std::ptr::null_mut(), Ordering::AcqRel);
-        if !ptr.is_null() {
-            // SAFETY: we own the allocation (set via Box::into_raw in
-            // busy_handler::install) and no SQLite callback can fire
-            // after the Connection is dropped.
-            unsafe {
-                drop(Box::from_raw(ptr));
-            }
-        }
+        hook_util::drop_hook(&self.busy_handler);
+        hook_util::drop_hook(&self.wal_hook);
     }
 }
 
@@ -78,6 +75,7 @@ pub(crate) fn handle_open_result(
             conn: Mutex::new(Some(conn)),
             extensions_enabled: AtomicBool::new(false),
             busy_handler: AtomicPtr::new(std::ptr::null_mut()),
+            wal_hook: AtomicPtr::new(std::ptr::null_mut()),
         })),
         Err(e) => Err(match e {
             RusqliteError::SqliteFailure(ffi_err, msg_opt) => {

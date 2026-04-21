@@ -170,28 +170,35 @@ pub(crate) mod atoms {
         insert,
         update,
         xqlite_busy,
+        xqlite_commit,
         xqlite_log,
-        xqlite_update
+        xqlite_rollback,
+        xqlite_update,
+        xqlite_wal
     }
 }
 
 mod blob;
 mod busy_handler;
 mod cancel;
+mod commit_hook;
 mod connection;
 mod constraint_parse;
 mod error;
 mod explain_analyze;
+mod hook_util;
 mod log_hook;
 mod nif;
 mod pragma;
 mod query;
+mod rollback_hook;
 mod schema;
 mod session;
 mod stream;
 mod transaction;
 mod update_hook;
 mod util;
+mod wal_hook;
 
 use rustler::{Env, Term};
 

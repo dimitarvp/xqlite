@@ -1037,6 +1037,63 @@ fn remove_update_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_>
 }
 
 // ---------------------------------------------------------------------------
+// WAL / Commit / Rollback Hook NIFs
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn set_wal_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+) -> Term<'_> {
+    let state = crate::wal_hook::WalHookState::new(pid);
+    let result = connection::with_conn(&handle, |conn| {
+        crate::wal_hook::install(conn, &handle.wal_hook, state)
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn remove_wal_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| {
+        crate::wal_hook::uninstall(conn, &handle.wal_hook)
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn set_commit_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| crate::commit_hook::set(conn, pid));
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn remove_commit_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, crate::commit_hook::remove);
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn set_rollback_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| crate::rollback_hook::set(conn, pid));
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn remove_rollback_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, crate::rollback_hook::remove);
+    singular_ok_or_error_tuple(env, result)
+}
+
+// ---------------------------------------------------------------------------
 // Serialize / Deserialize NIFs
 // ---------------------------------------------------------------------------
 

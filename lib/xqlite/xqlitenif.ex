@@ -1153,6 +1153,96 @@ defmodule XqliteNIF do
   def remove_update_hook(_conn), do: err()
 
   @doc """
+  Installs a WAL hook on the connection.
+
+  After each commit in WAL mode, SQLite invokes the hook with the
+  attached database name and the number of frames in the WAL log. We
+  forward
+
+      {:xqlite_wal, db_name, pages}
+
+  to `pid` — `db_name` is a binary (`"main"`, `"temp"`, or an attached
+  database name), `pages` is a non-negative integer.
+
+  Useful for WAL-size monitoring and triggering manual checkpoints when
+  the log grows past a threshold.
+
+  Only one WAL hook per connection. Replacing it atomically reclaims the
+  previous state.
+
+  > #### Warning — PRAGMA wal_autocheckpoint replaces this hook {: .warning}
+  >
+  > SQLite's `wal_autocheckpoint` PRAGMA and the
+  > `sqlite3_wal_autocheckpoint` C function both register their own
+  > internal WAL hook, silently replacing any previously installed one.
+  > Same memory-safety guarantees as `set_busy_handler/5`: no leak,
+  > messages just stop. Install this hook *after* any
+  > `wal_autocheckpoint` configuration, or switch to
+  > `wal_checkpoint/3` for explicit checkpointing.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec set_wal_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
+  def set_wal_hook(_conn, _pid), do: err()
+
+  @doc """
+  Removes the WAL hook from this connection.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec remove_wal_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
+  def remove_wal_hook(_conn), do: err()
+
+  @doc """
+  Installs a commit hook on the connection.
+
+  Immediately before each commit (regardless of journal mode), forwards
+
+      {:xqlite_commit}
+
+  to `pid`. The hook is observation-only — it never vetoes the commit.
+
+  Only one commit hook per connection. Replacing it is atomic.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec set_commit_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
+  def set_commit_hook(_conn, _pid), do: err()
+
+  @doc """
+  Removes the commit hook from this connection.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec remove_commit_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
+  def remove_commit_hook(_conn), do: err()
+
+  @doc """
+  Installs a rollback hook on the connection.
+
+  After each rollback (whether user-initiated or forced by a
+  constraint / deferred-FK failure at commit), forwards
+
+      {:xqlite_rollback}
+
+  to `pid`.
+
+  Only one rollback hook per connection. Replacing it is atomic.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec set_rollback_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
+  def set_rollback_hook(_conn, _pid), do: err()
+
+  @doc """
+  Removes the rollback hook from this connection.
+
+  Returns `:ok` on success or `{:error, reason}` on failure.
+  """
+  @spec remove_rollback_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
+  def remove_rollback_hook(_conn), do: err()
+
+  @doc """
   Serializes an attached database to a contiguous binary.
 
   Atomic, point-in-time snapshot. Use `Xqlite.serialize/1` for a default

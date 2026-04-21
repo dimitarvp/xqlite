@@ -33,6 +33,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removing our internal slot.
 - Busy-handler PRAGMA-replacement warning front-and-center in the module
   docs and README.
+- **WAL hook**: `XqliteNIF.set_wal_hook/2` + `remove_wal_hook/1`. Sends
+  `{:xqlite_wal, db_name, pages}` to a pid after each commit in WAL mode.
+  Front-and-center warning about `PRAGMA wal_autocheckpoint` silently
+  replacing the hook (same semantics as busy_handler).
+- **Commit hook**: `XqliteNIF.set_commit_hook/2` + `remove_commit_hook/1`.
+  Sends `{:xqlite_commit}` to a pid immediately before each commit.
+  Observation-only — never vetoes the commit.
+- **Rollback hook**: `XqliteNIF.set_rollback_hook/2` +
+  `remove_rollback_hook/1`. Sends `{:xqlite_rollback}` to a pid after
+  each rollback.
+
+### Internal
+
+- Shared `hook_util` Rust module deduplicates term-construction
+  (`make_atom` / `make_binary`) and atomic-slot lifecycle
+  (`install_hook` / `uninstall_hook` / `drop_hook`) across the FFI-based
+  hooks (busy_handler, wal_hook) and the rusqlite-closure hooks
+  (update_hook, commit_hook, rollback_hook).
 
 ## [0.6.0] - 2026-04-19
 
