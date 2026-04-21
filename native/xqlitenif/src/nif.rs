@@ -221,6 +221,38 @@ fn explain_analyze<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// Transaction / autocommit introspection
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn autocommit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
+    connection::with_conn(&handle, |conn| Ok(conn.is_autocommit()))
+}
+
+#[rustler::nif]
+fn txn_state<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    schema: Option<String>,
+) -> Result<Term<'a>, XqliteError> {
+    use rusqlite::TransactionState as TS;
+
+    let state = connection::with_conn(&handle, |conn| {
+        conn.transaction_state(schema.as_deref())
+            .map_err(XqliteError::from)
+    })?;
+
+    let atom = match state {
+        TS::None => atoms::none(),
+        TS::Read => atoms::read(),
+        TS::Write => atoms::write(),
+        _ => atoms::unknown(),
+    };
+
+    Ok(atom.encode(env))
+}
+
+// ---------------------------------------------------------------------------
 // Cancel NIFs
 // ---------------------------------------------------------------------------
 

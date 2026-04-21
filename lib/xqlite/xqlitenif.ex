@@ -814,6 +814,40 @@ defmodule XqliteNIF do
   def create_cancel_token(), do: err()
 
   @doc """
+  Returns `true` when `conn` is in auto-commit mode (no active transaction),
+  `false` otherwise.
+
+  Equivalent to `sqlite3_get_autocommit`. Zero-cost; always available.
+  """
+  @spec autocommit(Xqlite.conn()) :: {:ok, boolean()} | Xqlite.error()
+  def autocommit(_conn), do: err()
+
+  @doc """
+  Returns the transaction state for the given schema (defaults to `"main"`).
+
+  Equivalent to `sqlite3_txn_state`. Zero-cost; always available.
+
+  Possible values:
+
+    * `:none` — no transaction active on this schema.
+    * `:read` — a read transaction is active (SHARED lock).
+    * `:write` — a write transaction is active (RESERVED+ lock).
+    * `:unknown` — future variants (SQLite added a state we don't map yet).
+
+  ## Why not a full 5-state lock ladder?
+
+  `sqlite3_file_control(SQLITE_FCNTL_LOCKSTATE)` would give the full
+  NONE / SHARED / RESERVED / PENDING / EXCLUSIVE picture, but it requires
+  SQLite compiled with `SQLITE_DEBUG` — a build flag that enables every
+  `assert()` inside SQLite with a real performance cost. We do not compile
+  with it. `txn_state` is the honest production-safe substitute.
+  """
+  @spec txn_state(Xqlite.conn(), String.t() | nil) ::
+          {:ok, :none | :read | :write | :unknown} | Xqlite.error()
+  def txn_state(conn, schema \\ nil)
+  def txn_state(_conn, _schema), do: err()
+
+  @doc """
   Signals an intent to cancel operations associated with a given cancellation token.
 
   When this function is called, any active SQLite operations (executed via
