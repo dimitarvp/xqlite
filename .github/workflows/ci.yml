@@ -122,62 +122,76 @@ jobs:
       - name: Run Dialyzer
         run: mix dialyzer --format short
 
-  test:
-    name: Tests
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    needs: format_and_lint
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-2022]
-        elixir: ["1.17", "1.18", "1.19"]
-        otp: ["26", "27", "28"]
-        rust: ["stable"]
-        exclude:
-          - otp: "28"
-            elixir: "1.18"
-          - otp: "28"
-            elixir: "1.17"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Elixir
-        id: beam
-        uses: erlef/setup-beam@v1
-        with:
-          elixir-version: ${{ matrix.elixir }}
-          otp-version: ${{ matrix.otp }}
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
-          components: rustfmt, clippy
-
-      - name: Restore Elixir dependencies cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            deps
-            _build
-            priv/native
-          key: v0-elixir-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: |
-            v0-elixir-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
-
-      - name: Restore Rust (Cargo) cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: native/xqlitenif
-          prefix-key: "v0-rust-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
-
-      - name: Install Elixir dependencies
-        run: mix deps.get
-
-      - name: Compile project (includes NIF)
-        run: mix compile
-
-      - name: Run tests
-        run: mix test.seq
+# ============================================================================
+#  !!!  TEMPORARY: test matrix disabled 2026-04-19 → 2026-05-01  !!!
+#  GitHub Actions quota warning at 90% on 2026-04-19 triggered this cut.
+#  `format_and_lint` and `dialyzer` above still run on every push (Linux,
+#  cheap). The full cross-OS + multi-Elixir/OTP matrix is PAUSED until
+#  the May quota window opens.
+#
+#  RE-ENABLE BY: uncommenting the entire `test:` block below on or after
+#  2026-05-01. Also delete this banner.
+#
+#  Until then, `mix precommit` locally is the last line of defense. Every
+#  commit must pass it before pushing.
+# ============================================================================
+#
+#  test:
+#    name: Tests
+#    runs-on: ${{ matrix.os }}
+#    timeout-minutes: 15
+#    needs: format_and_lint
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        os: [ubuntu-latest, macos-latest, windows-2022]
+#        elixir: ["1.17", "1.18", "1.19"]
+#        otp: ["26", "27", "28"]
+#        rust: ["stable"]
+#        exclude:
+#          - otp: "28"
+#            elixir: "1.18"
+#          - otp: "28"
+#            elixir: "1.17"
+#    steps:
+#      - name: Checkout code
+#        uses: actions/checkout@v6
+#
+#      - name: Set up Elixir
+#        id: beam
+#        uses: erlef/setup-beam@v1
+#        with:
+#          elixir-version: ${{ matrix.elixir }}
+#          otp-version: ${{ matrix.otp }}
+#
+#      - name: Set up Rust toolchain
+#        uses: dtolnay/rust-toolchain@master
+#        with:
+#          toolchain: ${{ matrix.rust }}
+#          components: rustfmt, clippy
+#
+#      - name: Restore Elixir dependencies cache
+#        uses: actions/cache@v5
+#        with:
+#          path: |
+#            deps
+#            _build
+#            priv/native
+#          key: v0-elixir-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
+#          restore-keys: |
+#            v0-elixir-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
+#
+#      - name: Restore Rust (Cargo) cache
+#        uses: Swatinem/rust-cache@v2
+#        with:
+#          workspaces: native/xqlitenif
+#          prefix-key: "v0-rust-test-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
+#
+#      - name: Install Elixir dependencies
+#        run: mix deps.get
+#
+#      - name: Compile project (includes NIF)
+#        run: mix compile
+#
+#      - name: Run tests
+#        run: mix test.seq
