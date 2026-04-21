@@ -915,6 +915,60 @@ defmodule XqliteNIF do
   def connection_stats(_conn), do: err()
 
   @doc """
+  Installs a busy handler on the connection.
+
+  When SQLite encounters a locked database (another writer holds
+  RESERVED+) the handler decides whether to retry or surface
+  `SQLITE_BUSY` to the caller. Each invocation is also forwarded to
+  `pid` as
+
+      {:xqlite_busy, retries_so_far, elapsed_ms}
+
+  so callers can observe contention (telemetry, structured logging,
+  custom backoff feedback).
+
+  ## Options
+
+    * `:max_retries` (non-negative integer, default `50`) — stop after
+      this many retries and let the caller see `SQLITE_BUSY`.
+    * `:max_elapsed_ms` (non-negative integer, default `5_000`) —
+      absolute time ceiling in milliseconds from the first busy event
+      in the window.
+    * `:sleep_ms` (non-negative integer, default `10`) — milliseconds
+      to sleep between retries. Zero disables the pause (tight spin;
+      rarely what you want).
+
+  Replacing an existing handler — including the implicit one installed
+  by `PRAGMA busy_timeout` / `sqlite3_busy_timeout` — is safe and
+  atomic. Only one busy handler exists per connection.
+
+  Returns `:ok`.
+  """
+  @spec set_busy_handler(Xqlite.conn(), pid(), keyword()) :: :ok | Xqlite.error()
+  def set_busy_handler(conn, pid, opts \\ []) when is_list(opts) do
+    max_retries = Keyword.get(opts, :max_retries, 50)
+    max_elapsed_ms = Keyword.get(opts, :max_elapsed_ms, 5_000)
+    sleep_ms = Keyword.get(opts, :sleep_ms, 10)
+    set_busy_handler(conn, pid, max_retries, max_elapsed_ms, sleep_ms)
+  end
+
+  @doc false
+  def set_busy_handler(_conn, _pid, _max_retries, _max_elapsed_ms, _sleep_ms),
+    do: err()
+
+  @doc """
+  Removes any busy handler from the connection.
+
+  Safe to call when no handler is installed (becomes a no-op). After
+  removal, SQLite defaults to returning `SQLITE_BUSY` immediately on
+  contention — unless a `busy_timeout` PRAGMA is subsequently set.
+
+  Returns `:ok`.
+  """
+  @spec remove_busy_handler(Xqlite.conn()) :: :ok | Xqlite.error()
+  def remove_busy_handler(_conn), do: err()
+
+  @doc """
   Signals an intent to cancel operations associated with a given cancellation token.
 
   When this function is called, any active SQLite operations (executed via

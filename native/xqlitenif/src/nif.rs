@@ -1,5 +1,6 @@
 use crate::atoms;
 use crate::blob::{self, XqliteBlob};
+use crate::busy_handler::{self, BusyHandlerState};
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{self, XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
@@ -250,6 +251,34 @@ fn txn_state<'a>(
     };
 
     Ok(atom.encode(env))
+}
+
+// ---------------------------------------------------------------------------
+// Busy handler
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn set_busy_handler(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+    max_retries: u32,
+    max_elapsed_ms: u64,
+    sleep_ms: u64,
+) -> Term<'_> {
+    let state = BusyHandlerState::new(pid, max_retries, max_elapsed_ms, sleep_ms);
+    let result = connection::with_conn(&handle, |conn| {
+        busy_handler::install(conn, &handle.busy_handler, state)
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn remove_busy_handler(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| {
+        busy_handler::uninstall(conn, &handle.busy_handler)
+    });
+    singular_ok_or_error_tuple(env, result)
 }
 
 // ---------------------------------------------------------------------------

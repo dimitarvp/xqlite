@@ -1,18 +1,40 @@
 use crate::atoms;
+use crate::busy_handler::BusyHandlerState;
 use crate::error::XqliteError;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 #[derive(Debug)]
 pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
     pub(crate) extensions_enabled: AtomicBool,
+    // Leaked `Box<BusyHandlerState>` pointer when a busy handler is
+    // installed; null otherwise. `install` / `uninstall` in
+    // `busy_handler.rs` manage the lifecycle; `Drop` reclaims
+    // stragglers when the connection resource is GC'd.
+    pub(crate) busy_handler: AtomicPtr<BusyHandlerState>,
 }
 
 #[resource_impl]
 impl Resource for XqliteConn {}
+
+impl Drop for XqliteConn {
+    fn drop(&mut self) {
+        let ptr = self
+            .busy_handler
+            .swap(std::ptr::null_mut(), Ordering::AcqRel);
+        if !ptr.is_null() {
+            // SAFETY: we own the allocation (set via Box::into_raw in
+            // busy_handler::install) and no SQLite callback can fire
+            // after the Connection is dropped.
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct XqliteQueryResult<'a> {
@@ -55,6 +77,7 @@ pub(crate) fn handle_open_result(
         Ok(conn) => Ok(ResourceArc::new(XqliteConn {
             conn: Mutex::new(Some(conn)),
             extensions_enabled: AtomicBool::new(false),
+            busy_handler: AtomicPtr::new(std::ptr::null_mut()),
         })),
         Err(e) => Err(match e {
             RusqliteError::SqliteFailure(ffi_err, msg_opt) => {

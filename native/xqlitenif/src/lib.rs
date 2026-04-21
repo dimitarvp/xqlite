@@ -169,12 +169,14 @@ pub(crate) mod atoms {
         delete,
         insert,
         update,
+        xqlite_busy,
         xqlite_log,
         xqlite_update
     }
 }
 
 mod blob;
+mod busy_handler;
 mod cancel;
 mod connection;
 mod constraint_parse;
