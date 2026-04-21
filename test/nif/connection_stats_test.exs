@@ -51,7 +51,8 @@ defmodule Xqlite.NIF.ConnectionStatsTest do
       end
 
       test "cache_hit increases after repeated SELECTs", %{conn: conn} do
-        :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1), (2)")
+        :ok =
+          NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1), (2)")
 
         # Prime the cache.
         {:ok, _} = NIF.query(conn, "SELECT * FROM t", [])

@@ -308,9 +308,14 @@ fn wal_checkpoint<'a>(
                     let busy = rc == ffi::SQLITE_BUSY;
                     let map = map_new(env);
                     let map = map
-                        .map_put(atoms::log_pages().encode(env), (log_pages as i64).encode(env))
+                        .map_put(
+                            atoms::log_pages().encode(env),
+                            (log_pages as i64).encode(env),
+                        )
                         .map_err(|_| {
-                            XqliteError::CannotExecute("wal_checkpoint map_put log_pages failed".into())
+                            XqliteError::CannotExecute(
+                                "wal_checkpoint map_put log_pages failed".into(),
+                            )
                         })?;
                     let map = map
                         .map_put(
@@ -322,9 +327,13 @@ fn wal_checkpoint<'a>(
                                 "wal_checkpoint map_put checkpointed_pages failed".into(),
                             )
                         })?;
-                    let map = map.map_put(atoms::busy().encode(env), busy.encode(env)).map_err(
-                        |_| XqliteError::CannotExecute("wal_checkpoint map_put busy failed".into()),
-                    )?;
+                    let map = map
+                        .map_put(atoms::busy().encode(env), busy.encode(env))
+                        .map_err(|_| {
+                            XqliteError::CannotExecute(
+                                "wal_checkpoint map_put busy failed".into(),
+                            )
+                        })?;
                     Ok(map)
                 }
                 _ => {
@@ -389,8 +398,7 @@ fn connection_stats<'a>(
             for (atom, op) in ops {
                 let mut current: std::os::raw::c_int = 0;
                 let mut highwater: std::os::raw::c_int = 0;
-                let rc =
-                    ffi::sqlite3_db_status(db, *op, &mut current, &mut highwater, 0);
+                let rc = ffi::sqlite3_db_status(db, *op, &mut current, &mut highwater, 0);
 
                 if rc != ffi::SQLITE_OK {
                     return Err(XqliteError::CannotExecute(format!(
