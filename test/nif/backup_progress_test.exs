@@ -341,6 +341,102 @@ defmodule Xqlite.NIF.BackupProgressTest do
              )
   end
 
+  test "dead subscriber pid does not crash the NIF mid-backup" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+
+    on_exit(fn ->
+      NIF.close(conn)
+    end)
+
+    :ok =
+      NIF.execute_batch(
+        conn,
+        "CREATE TABLE bkp_dead (id INTEGER PRIMARY KEY, data TEXT);"
+      )
+
+    for i <- 1..200 do
+      {:ok, 1} =
+        NIF.execute(conn, "INSERT INTO bkp_dead VALUES (?1, ?2)", [
+          i,
+          String.duplicate("z", 400)
+        ])
+    end
+
+    dest =
+      Path.join(
+        System.tmp_dir!(),
+        "xqlite_bkp_dead_#{:erlang.unique_integer([:positive])}.db"
+      )
+
+    on_exit(fn -> File.rm(dest) end)
+
+    dead = spawn(fn -> :ok end)
+    ref = Process.monitor(dead)
+    receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
+
+    {:ok, token} = NIF.create_cancel_token()
+
+    # Tiny pages_per_step so we fire the send repeatedly against a dead pid.
+    # Every send must be a no-op; the backup must complete.
+    assert :ok = NIF.backup_with_progress(conn, "main", dest, dead, 1, token)
+
+    assert File.exists?(dest)
+    assert File.stat!(dest).size > 0
+  end
+
+  test "GenServer-like process forwards backup_progress events" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+
+    on_exit(fn ->
+      NIF.close(conn)
+    end)
+
+    :ok =
+      NIF.execute_batch(
+        conn,
+        "CREATE TABLE bkp_fwd (id INTEGER PRIMARY KEY, data TEXT);"
+      )
+
+    for i <- 1..50 do
+      {:ok, 1} =
+        NIF.execute(conn, "INSERT INTO bkp_fwd VALUES (?1, ?2)", [i, "row_#{i}"])
+    end
+
+    dest =
+      Path.join(
+        System.tmp_dir!(),
+        "xqlite_bkp_fwd_#{:erlang.unique_integer([:positive])}.db"
+      )
+
+    on_exit(fn -> File.rm(dest) end)
+
+    test_pid = self()
+
+    forwarder =
+      spawn(fn ->
+        forwarder_loop(test_pid)
+      end)
+
+    {:ok, token} = NIF.create_cancel_token()
+    :ok = NIF.backup_with_progress(conn, "main", dest, forwarder, 5, token)
+
+    # At least one forwarded event must arrive with the right shape.
+    assert_receive {:forwarded_backup_progress,
+                    {:xqlite_backup_progress, remaining, pagecount}},
+                   2_000
+
+    assert is_integer(remaining) and remaining >= 0
+    assert is_integer(pagecount) and pagecount > 0
+  end
+
+  defp forwarder_loop(target) do
+    receive do
+      {:xqlite_backup_progress, _, _} = event ->
+        send(target, {:forwarded_backup_progress, event})
+        forwarder_loop(target)
+    end
+  end
+
   # -------------------------------------------------------------------
   # Helper
   # -------------------------------------------------------------------
