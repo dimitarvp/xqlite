@@ -150,4 +150,117 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
+
+  test "replacing the subscriber pid stops delivery to the old pid", %{path: path} do
+    old_listener = spawn_collector()
+    new_listener = spawn_collector()
+
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.set_busy_handler(probe, old_listener, max_retries: 3, sleep_ms: 10)
+    :ok = Xqlite.set_busy_handler(probe, new_listener, max_retries: 3, sleep_ms: 10)
+
+    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+
+    assert length(get_collected(new_listener)) > 0
+    assert get_collected(old_listener) == []
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "dead subscriber pid does not crash the NIF", %{path: path} do
+    dead = spawn(fn -> :ok end)
+    ref = Process.monitor(dead)
+    receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
+
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.set_busy_handler(probe, dead, max_retries: 3, sleep_ms: 10)
+
+    # Should not blow up — enif_send to a dead pid is a no-op.
+    assert match?({:error, _}, NIF.execute(probe, "INSERT INTO t VALUES (1)", []))
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "set / remove on a closed connection returns structured error", %{path: path} do
+    {:ok, conn} = NIF.open(path)
+    :ok = NIF.close(conn)
+
+    assert {:error, :connection_closed} =
+             Xqlite.set_busy_handler(conn, self(), max_retries: 1)
+
+    assert {:error, :connection_closed} = Xqlite.remove_busy_handler(conn)
+  end
+
+  test "elapsed_ms is monotonically non-decreasing across retries", %{path: path} do
+    collector = spawn_collector()
+
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.set_busy_handler(probe, collector, max_retries: 10, sleep_ms: 5)
+
+    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+
+    events = get_collected(collector)
+    assert length(events) > 1, "need multiple retries to test monotonicity"
+
+    elapsed_sequence = Enum.map(events, fn {:xqlite_busy, _retries, elapsed} -> elapsed end)
+
+    Enum.zip(elapsed_sequence, Enum.drop(elapsed_sequence, 1))
+    |> Enum.each(fn {earlier, later} ->
+      assert later >= earlier,
+             "elapsed_ms went backwards: #{earlier} -> #{later}"
+    end)
+
+    retries_sequence = Enum.map(events, fn {:xqlite_busy, r, _} -> r end)
+    # retries is the SQLite count param; it starts at 0 and monotonically grows.
+    assert retries_sequence == Enum.sort(retries_sequence)
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers
+  # ---------------------------------------------------------------------------
+
+  defp spawn_collector do
+    spawn(fn -> collector_loop([]) end)
+  end
+
+  defp collector_loop(acc) do
+    receive do
+      {:get, from} ->
+        send(from, {:collected, Enum.reverse(acc)})
+        collector_loop(acc)
+
+      {:xqlite_busy, _, _} = event ->
+        collector_loop([event | acc])
+    end
+  end
+
+  defp get_collected(pid) do
+    send(pid, {:get, self()})
+
+    receive do
+      {:collected, msgs} -> msgs
+    after
+      1_000 -> []
+    end
+  end
 end

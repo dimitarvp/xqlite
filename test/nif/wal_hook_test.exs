@@ -61,27 +61,139 @@ defmodule Xqlite.NIF.WalHookTest do
   end
 
   test "replacing hook atomically — previous pid stops receiving", %{conn: conn} do
-    pid = self()
+    old_listener = spawn_collector()
+    new_listener = spawn_collector()
 
-    sink_pid =
-      spawn(fn ->
-        receive do
-          _ -> :ok
-        end
-      end)
+    :ok = NIF.set_wal_hook(conn, old_listener)
+    :ok = NIF.set_wal_hook(conn, new_listener)
 
-    # Install with self() first.
-    :ok = NIF.set_wal_hook(conn, pid)
     :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-    assert_receive {:xqlite_wal, _, _}, 500
-
-    # Replace with a different pid.
-    :ok = NIF.set_wal_hook(conn, sink_pid)
     {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
 
-    # Original pid (self) should receive nothing new.
-    refute_receive {:xqlite_wal, _, _}, 100
+    assert length(get_collected(new_listener)) > 0
+    assert get_collected(old_listener) == []
 
     :ok = NIF.remove_wal_hook(conn)
+  end
+
+  test "re-register after remove works", %{conn: conn} do
+    :ok = NIF.set_wal_hook(conn, self())
+    :ok = NIF.remove_wal_hook(conn)
+    :ok = NIF.set_wal_hook(conn, self())
+
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    :ok = NIF.remove_wal_hook(conn)
+  end
+
+  test "dead subscriber pid does not crash the NIF", %{conn: conn} do
+    dead = spawn(fn -> :ok end)
+    ref = Process.monitor(dead)
+    receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
+
+    :ok = NIF.set_wal_hook(conn, dead)
+
+    # DDL + DML must both succeed with a dead subscriber.
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
+
+    :ok = NIF.remove_wal_hook(conn)
+  end
+
+  test "set / remove on a closed connection returns structured error", %{path: path} do
+    {:ok, conn} = NIF.open(path)
+    :ok = NIF.close(conn)
+
+    assert {:error, :connection_closed} = NIF.set_wal_hook(conn, self())
+    assert {:error, :connection_closed} = NIF.remove_wal_hook(conn)
+  end
+
+  test "per-connection isolation: hook on conn A is not invoked by conn B commits", %{
+    path: path
+  } do
+    {:ok, conn_b} = NIF.open(path)
+    {:ok, _} = NIF.set_pragma(conn_b, "journal_mode", "WAL")
+    on_exit(fn -> NIF.close(conn_b) end)
+
+    # Give conn A (from setup) a hook pointed at a collector; conn B gets none.
+    collector_a = spawn_collector()
+    :ok = NIF.set_wal_hook(conn_b, self())
+
+    # Use conn_b for a commit; its hook (self) should receive the message.
+    :ok = NIF.execute_batch(conn_b, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    # conn_a's listener (collector) should remain empty.
+    assert get_collected(collector_a) == []
+
+    :ok = NIF.remove_wal_hook(conn_b)
+  end
+
+  test "GenServer-like process forwards wal events", %{conn: conn} do
+    test_pid = self()
+
+    forwarder =
+      spawn(fn ->
+        forwarder_loop(test_pid)
+      end)
+
+    :ok = NIF.set_wal_hook(conn, forwarder)
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+
+    assert_receive {:forwarded_wal, {:xqlite_wal, "main", _}}, 500
+
+    :ok = NIF.remove_wal_hook(conn)
+  end
+
+  test "survives 50 rapid set/remove cycles without dropping messages", %{conn: conn} do
+    for _ <- 1..50 do
+      :ok = NIF.set_wal_hook(conn, self())
+      :ok = NIF.remove_wal_hook(conn)
+    end
+
+    :ok = NIF.set_wal_hook(conn, self())
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    :ok = NIF.remove_wal_hook(conn)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers
+  # ---------------------------------------------------------------------------
+
+  defp spawn_collector do
+    spawn(fn -> collector_loop([]) end)
+  end
+
+  defp collector_loop(acc) do
+    receive do
+      {:get, from} ->
+        send(from, {:collected, Enum.reverse(acc)})
+        collector_loop(acc)
+
+      {:xqlite_wal, _, _} = event ->
+        collector_loop([event | acc])
+    end
+  end
+
+  defp get_collected(pid) do
+    send(pid, {:get, self()})
+
+    receive do
+      {:collected, msgs} -> msgs
+    after
+      500 -> []
+    end
+  end
+
+  defp forwarder_loop(target) do
+    receive do
+      {:xqlite_wal, _, _} = event ->
+        send(target, {:forwarded_wal, event})
+        forwarder_loop(target)
+    end
   end
 end
