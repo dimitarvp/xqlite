@@ -346,23 +346,42 @@ defmodule Xqlite.Telemetry do
       end
     end
   else
+    # Disabled-mode macros: still evaluate the AST arguments so that
+    # variables referenced in the call site stay "used" from the
+    # compiler's perspective (no unused-variable warnings on bindings
+    # that exist only to feed measurements / metadata maps). The
+    # evaluated values are immediately discarded — no `:telemetry`
+    # call ever happens. Cost: constructing the measurement / metadata
+    # maps anyway. Typical maps are small; the cost is sub-microsecond.
+    # If a future use case demands zero-cost-even-on-arg-eval, we can
+    # switch to a per-callsite `if Xqlite.Telemetry.enabled?() do`
+    # pattern. For now, this keeps call sites clean and reads nicely.
+
     @doc false
-    defmacro emit(_event_name, _measurements, _metadata) do
+    defmacro emit(event_name, measurements, metadata) do
       quote do
+        _ = unquote(event_name)
+        _ = unquote(measurements)
+        _ = unquote(metadata)
         :ok
       end
     end
 
     @doc false
-    defmacro span(_event_name, _metadata, do: block) do
+    defmacro span(event_name, metadata, do: block) do
       quote do
+        _ = unquote(event_name)
+        _ = unquote(metadata)
         unquote(block)
       end
     end
 
     @doc false
-    defmacro span_with_stop_metadata(_event_name, _start_metadata, do: block) do
+    defmacro span_with_stop_metadata(event_name, start_metadata, do: block) do
       quote do
+        _ = unquote(event_name)
+        _ = unquote(start_metadata)
+
         case unquote(block) do
           {value, _stop_metadata} -> value
         end

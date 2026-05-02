@@ -5,6 +5,7 @@ defmodule Xqlite.StreamResourceCallbacks do
   # This module is not intended for direct use.
 
   alias XqliteNIF, as: NIF
+  import Xqlite.Telemetry, only: [emit: 3]
 
   require Logger
 
@@ -13,7 +14,9 @@ defmodule Xqlite.StreamResourceCallbacks do
           columns: [String.t()],
           batch_size: pos_integer(),
           type_extensions: [module()],
-          original_opts: keyword()
+          original_opts: keyword(),
+          rows_total: non_neg_integer(),
+          opened_at: integer()
         }
 
   @spec start_fun({Xqlite.conn(), String.t(), list() | keyword(), keyword()}) ::
@@ -33,7 +36,9 @@ defmodule Xqlite.StreamResourceCallbacks do
               columns: columns,
               batch_size: batch_size,
               type_extensions: type_extensions,
-              original_opts: opts
+              original_opts: opts,
+              rows_total: 0,
+              opened_at: Xqlite.Telemetry.monotonic_time()
             }
 
             {:ok, acc}
@@ -52,14 +57,32 @@ defmodule Xqlite.StreamResourceCallbacks do
 
   @spec next_fun(acc()) :: {[map()], acc()} | {:halt, acc()}
   def next_fun(acc) do
-    # Fetch the next batch of rows from the NIF.
+    fetch_started_at = Xqlite.Telemetry.monotonic_time()
+
     case NIF.stream_fetch(acc.handle, acc.batch_size) do
       {:ok, %{rows: rows}} ->
         mapped_rows = map_rows_to_maps(rows, acc.columns, acc.type_extensions)
-        {mapped_rows, acc}
+        rows_count = length(mapped_rows)
+        new_acc = %{acc | rows_total: acc.rows_total + rows_count}
+        now = Xqlite.Telemetry.monotonic_time()
+
+        emit(
+          [:xqlite, :stream, :fetch],
+          %{monotonic_time: now, duration: now - fetch_started_at, rows_returned: rows_count},
+          %{stream_handle: acc.handle, done?: false}
+        )
+
+        {mapped_rows, new_acc}
 
       :done ->
-        # The stream is exhausted. Halt the stream.
+        now = Xqlite.Telemetry.monotonic_time()
+
+        emit(
+          [:xqlite, :stream, :fetch],
+          %{monotonic_time: now, duration: now - fetch_started_at, rows_returned: 0},
+          %{stream_handle: acc.handle, done?: true}
+        )
+
         {:halt, acc}
 
       {:error, reason} ->
@@ -67,24 +90,45 @@ defmodule Xqlite.StreamResourceCallbacks do
         # Note: Stream.resource/3 does not propagate this error to the consumer.
         # Raising an exception is an alternative, but logging is safer for now.
         Logger.error("Error fetching from Xqlite stream: #{inspect(reason)}")
+        now = Xqlite.Telemetry.monotonic_time()
+
+        emit(
+          [:xqlite, :stream, :fetch],
+          %{monotonic_time: now, duration: now - fetch_started_at, rows_returned: 0},
+          %{stream_handle: acc.handle, done?: true}
+        )
+
         {:halt, acc}
     end
   end
 
   @spec after_fun(acc()) :: :ok
   def after_fun(acc) do
-    # Ensure the underlying NIF stream resource is closed.
-    # The return value of this function is ignored by Stream.resource/3,
-    # but we can still handle a potential error case by logging it.
-    case NIF.stream_close(acc.handle) do
-      :ok ->
-        :ok
+    close_result = NIF.stream_close(acc.handle)
 
-      {:error, reason} ->
-        Logger.error("Error closing Xqlite stream handle: #{inspect(reason)}")
-        # Still return :ok, as the stream is finished regardless
-        :ok
-    end
+    reason =
+      case close_result do
+        :ok ->
+          :drained
+
+        {:error, close_err} ->
+          Logger.error("Error closing Xqlite stream handle: #{inspect(close_err)}")
+          :errored
+      end
+
+    now = Xqlite.Telemetry.monotonic_time()
+
+    emit(
+      [:xqlite, :stream, :close],
+      %{
+        monotonic_time: now,
+        total_duration: now - acc.opened_at,
+        total_rows: acc.rows_total
+      },
+      %{stream_handle: acc.handle, reason: reason}
+    )
+
+    :ok
   end
 
   defp map_rows_to_maps(rows, columns, type_extensions) do

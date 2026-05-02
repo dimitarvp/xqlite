@@ -730,17 +730,28 @@ defmodule Xqlite do
   def stream(conn, sql, params \\ [], opts \\ []) do
     type_extensions = Keyword.get(opts, :type_extensions, [])
     encoded_params = Xqlite.TypeExtension.encode_params(params, type_extensions)
+    batch_size = Keyword.get(opts, :batch_size, 500)
+
+    start_md = %{
+      conn: conn,
+      sql: sql,
+      batch_size: batch_size,
+      type_extensions_count: length(type_extensions)
+    }
 
     start_fun = &Xqlite.StreamResourceCallbacks.start_fun/1
     next_fun = &Xqlite.StreamResourceCallbacks.next_fun/1
     after_fun = &Xqlite.StreamResourceCallbacks.after_fun/1
 
-    case start_fun.({conn, sql, encoded_params, opts}) do
-      {:ok, acc} ->
-        Stream.resource(fn -> acc end, next_fun, after_fun)
+    span_with_stop_metadata [:xqlite, :stream, :open], start_md do
+      case start_fun.({conn, sql, encoded_params, opts}) do
+        {:ok, acc} ->
+          {Stream.resource(fn -> acc end, next_fun, after_fun),
+           Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
-      {:error, _reason} = error ->
-        error
+        {:error, reason} = error ->
+          {error, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
     end
   end
 
@@ -760,7 +771,27 @@ defmodule Xqlite do
   """
   @spec serialize(conn(), String.t()) :: {:ok, binary()} | error()
   def serialize(conn, schema \\ "main") when is_binary(schema) do
-    XqliteNIF.serialize(conn, schema)
+    start_md = %{conn: conn, schema: schema}
+
+    span_with_stop_metadata [:xqlite, :serialize], start_md do
+      case XqliteNIF.serialize(conn, schema) do
+        {:ok, bin} = ok ->
+          {ok,
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             byte_size: byte_size(bin)
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             byte_size: nil
+           })}
+      end
+    end
   end
 
   @doc """
@@ -776,7 +807,22 @@ defmodule Xqlite do
   @spec deserialize(conn(), binary(), String.t(), boolean()) :: :ok | error()
   def deserialize(conn, data, schema \\ "main", read_only \\ false)
       when is_binary(data) and is_binary(schema) and is_boolean(read_only) do
-    XqliteNIF.deserialize(conn, schema, data, read_only)
+    start_md = %{
+      conn: conn,
+      schema: schema,
+      read_only?: read_only,
+      byte_size: byte_size(data)
+    }
+
+    span_with_stop_metadata [:xqlite, :deserialize], start_md do
+      case XqliteNIF.deserialize(conn, schema, data, read_only) do
+        :ok = ok ->
+          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+
+        {:error, reason} = err ->
+          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
+    end
   end
 
   @doc """
@@ -789,7 +835,33 @@ defmodule Xqlite do
   @spec backup(conn(), String.t(), String.t()) :: :ok | error()
   def backup(conn, dest_path, schema \\ "main")
       when is_binary(dest_path) and is_binary(schema) do
-    XqliteNIF.backup(conn, schema, dest_path)
+    start_md = %{conn: conn, schema: schema, dest_path: dest_path}
+
+    span_with_stop_metadata [:xqlite, :backup], start_md do
+      case XqliteNIF.backup(conn, schema, dest_path) do
+        :ok = ok ->
+          byte_size_after =
+            case File.stat(dest_path) do
+              {:ok, %File.Stat{size: s}} -> s
+              _ -> nil
+            end
+
+          {ok,
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             byte_size: byte_size_after
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             byte_size: nil
+           })}
+      end
+    end
   end
 
   @doc """
@@ -801,7 +873,17 @@ defmodule Xqlite do
   @spec restore(conn(), String.t(), String.t()) :: :ok | error()
   def restore(conn, src_path, schema \\ "main")
       when is_binary(src_path) and is_binary(schema) do
-    XqliteNIF.restore(conn, schema, src_path)
+    start_md = %{conn: conn, schema: schema, src_path: src_path}
+
+    span_with_stop_metadata [:xqlite, :restore], start_md do
+      case XqliteNIF.restore(conn, schema, src_path) do
+        :ok = ok ->
+          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+
+        {:error, reason} = err ->
+          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -813,12 +895,132 @@ defmodule Xqlite do
 
   `entry_point` is the extension's init function name; pass `nil` (default)
   to let SQLite auto-detect. Extension loading must be enabled first via
-  `XqliteNIF.enable_load_extension/2`.
+  `enable_load_extension/2`.
   """
   @spec load_extension(conn(), String.t(), String.t() | nil) :: :ok | error()
   def load_extension(conn, path, entry_point \\ nil)
       when is_binary(path) and (is_binary(entry_point) or is_nil(entry_point)) do
-    XqliteNIF.load_extension(conn, path, entry_point)
+    start_md = %{conn: conn, path: path, entry_point: entry_point}
+
+    span_with_stop_metadata [:xqlite, :extension, :load], start_md do
+      case XqliteNIF.load_extension(conn, path, entry_point) do
+        :ok = ok ->
+          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+
+        {:error, reason} = err ->
+          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
+    end
+  end
+
+  @doc """
+  Enables or disables extension loading on the connection.
+
+  Defaults to `true`. Wraps `XqliteNIF.enable_load_extension/2` and emits
+  `[:xqlite, :extension, :enable]` telemetry.
+  """
+  @spec enable_load_extension(conn(), boolean()) :: :ok | error()
+  def enable_load_extension(conn, enabled \\ true) when is_boolean(enabled) do
+    case XqliteNIF.enable_load_extension(conn, enabled) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :extension, :enable],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{conn: conn, enabled: enabled}
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # WAL checkpoint
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Performs a WAL checkpoint on the connection.
+
+  `mode` is one of `:passive` (default), `:full`, `:restart`, or `:truncate`.
+  `schema` is the attached-database name (default `"main"`).
+
+  Returns `{:ok, %{log_pages, checkpointed_pages, busy?}}` on success.
+  """
+  @spec wal_checkpoint(conn(), atom(), String.t()) :: {:ok, map()} | error()
+  def wal_checkpoint(conn, mode \\ :passive, schema \\ "main")
+      when mode in [:passive, :full, :restart, :truncate] and is_binary(schema) do
+    start_md = %{conn: conn, mode: mode, schema: schema}
+
+    span_with_stop_metadata [:xqlite, :wal_checkpoint], start_md do
+      case XqliteNIF.wal_checkpoint(conn, mode, schema) do
+        {:ok, result} = ok ->
+          {ok,
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             log_pages: result.log_pages,
+             checkpointed_pages: result.checkpointed_pages,
+             busy?: result.busy
+           })}
+
+        {:error, reason} = err ->
+          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Pragma get / set
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Reads a PRAGMA value from the connection.
+
+  Wraps `XqliteNIF.get_pragma/2` and emits `[:xqlite, :pragma, :get]`.
+  """
+  @spec get_pragma(conn(), String.t() | atom()) :: {:ok, term()} | error()
+  def get_pragma(conn, name) do
+    name_str = to_string(name)
+
+    case XqliteNIF.get_pragma(conn, name_str) do
+      {:ok, _value} = ok ->
+        emit(
+          [:xqlite, :pragma, :get],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{conn: conn, name: name_str}
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Sets a PRAGMA value on the connection.
+
+  Wraps `XqliteNIF.set_pragma/3` and emits `[:xqlite, :pragma, :set]`.
+  """
+  @spec set_pragma(conn(), String.t() | atom(), term()) :: {:ok, term()} | error()
+  def set_pragma(conn, name, value) do
+    name_str = to_string(name)
+
+    case XqliteNIF.set_pragma(conn, name_str, value) do
+      {:ok, _new_value} = ok ->
+        emit(
+          [:xqlite, :pragma, :set],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{conn: conn, name: name_str, value: value}
+        )
+
+        ok
+
+      err ->
+        err
+    end
   end
 
   # ---------------------------------------------------------------------------
