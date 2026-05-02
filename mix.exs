@@ -72,7 +72,12 @@ defmodule Xqlite.MixProject do
       name: "Xqlite",
       source_url: "https://github.com/dimitarvp/xqlite",
       source_ref: "v0.6.0",
-      extras: ["README.md", "CHANGELOG.md", "LICENSE.md"],
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE.md",
+        "guides/wiring_telemetry.md"
+      ],
       groups_for_modules: [
         "High-Level API": [
           Xqlite,
