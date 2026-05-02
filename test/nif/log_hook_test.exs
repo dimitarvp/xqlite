@@ -207,6 +207,28 @@ defmodule Xqlite.NIF.LogHookTest do
           h
         end)
       end
+
+      test "concurrent register/unregister from multiple tasks does not crash",
+           %{conn: conn} do
+        tasks =
+          Enum.map(1..10, fn _ ->
+            Task.async(fn ->
+              for _ <- 1..20 do
+                {:ok, h} = NIF.register_log_hook(self())
+                NIF.unregister_log_hook(h)
+              end
+            end)
+          end)
+
+        Task.await_many(tasks, 10_000)
+
+        with_log_handle(fn ->
+          {:ok, h} = NIF.register_log_hook(self())
+          trigger_autoindex_warning(conn)
+          assert_receive {:xqlite_log, 284, _}, 2_000
+          h
+        end)
+      end
     end
   end
 

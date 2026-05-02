@@ -203,6 +203,49 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert {:error, :connection_closed} = Xqlite.remove_busy_handler(conn)
   end
 
+  test "GenServer-like process forwards busy events", %{path: path} do
+    test_pid = self()
+
+    forwarder =
+      spawn(fn ->
+        receive do
+          {:xqlite_busy, _, _} = event ->
+            send(test_pid, {:forwarded_busy, event})
+        end
+      end)
+
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.set_busy_handler(probe, forwarder, max_retries: 3, sleep_ms: 5)
+
+    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+
+    assert_receive {:forwarded_busy, {:xqlite_busy, _, _}}, 500
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "survives 50 rapid set/remove cycles on the same probe connection",
+       %{path: path} do
+    {:ok, probe} = NIF.open(path)
+
+    for _ <- 1..50 do
+      :ok = Xqlite.set_busy_handler(probe, self(), max_retries: 1, sleep_ms: 1)
+      :ok = Xqlite.remove_busy_handler(probe)
+    end
+
+    # Sanity: the connection is still usable after the churn.
+    assert :ok = Xqlite.set_busy_handler(probe, self(), max_retries: 1, sleep_ms: 1)
+    assert :ok = Xqlite.remove_busy_handler(probe)
+
+    :ok = NIF.close(probe)
+  end
+
   test "elapsed_ms is monotonically non-decreasing across retries", %{path: path} do
     collector = spawn_collector()
 

@@ -249,14 +249,25 @@ defmodule Xqlite.NIF.UpdateHookTest do
         assert_receive {:xqlite_update, :insert, "main", "hook_test", 1}, 2_000
       end
 
-      test "dead listener pid does not crash", %{conn: conn} do
+      test "dead listener pid does not crash or block siblings", %{conn: conn} do
         dead = spawn(fn -> :ok end)
         ref = Process.monitor(dead)
         receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
 
-        {:ok, h} = NIF.register_update_hook(conn, dead)
+        live = spawn_collector()
+
+        {:ok, h_dead} = NIF.register_update_hook(conn, dead)
+        {:ok, h_live} = NIF.register_update_hook(conn, live)
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO hook_test VALUES (1, 'ghost')", [])
+        Process.sleep(20)
+
+        # Live sibling must still receive its message regardless of
+        # the dead pid in the same fan-out list.
+        assert length(get_collected(live)) == 1
+
+        :ok = NIF.unregister_update_hook(conn, h_dead)
+        :ok = NIF.unregister_update_hook(conn, h_live)
       end
     end
 

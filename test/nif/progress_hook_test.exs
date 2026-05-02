@@ -207,16 +207,26 @@ defmodule Xqlite.NIF.ProgressHookTest do
         {:ok, conn: conn}
       end
 
-      test "dead subscriber pid does not crash the NIF", %{conn: conn} do
+      test "dead subscriber pid does not crash or block siblings", %{conn: conn} do
         dead = spawn(fn -> :ok end)
         ref = Process.monitor(dead)
         receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
 
-        {:ok, handle} = NIF.register_progress_hook(conn, dead, 1, nil)
+        live = spawn_collector()
+
+        {:ok, h_dead} = NIF.register_progress_hook(conn, dead, 1, "dead_tag")
+        {:ok, h_live} = NIF.register_progress_hook(conn, live, 1, "live_tag")
 
         :ok = run_workload(conn)
+        Process.sleep(50)
 
-        :ok = NIF.unregister_progress_hook(conn, handle)
+        msgs = get_collected(live)
+        assert length(msgs) > 0
+        # Live sibling sees only its own tag.
+        assert Enum.all?(msgs, fn {tag, _, _} -> tag == :live_tag end)
+
+        :ok = NIF.unregister_progress_hook(conn, h_dead)
+        :ok = NIF.unregister_progress_hook(conn, h_live)
       end
 
       test "GenServer-like process forwards progress events", %{conn: conn} do
@@ -234,6 +244,28 @@ defmodule Xqlite.NIF.ProgressHookTest do
         assert_receive {:forwarded_progress, {:xqlite_progress, :fwd, _, _}}, 2_000
 
         :ok = NIF.unregister_progress_hook(conn, handle)
+      end
+
+      test "concurrent register/unregister from multiple tasks does not crash",
+           %{conn: conn} do
+        tasks =
+          Enum.map(1..10, fn _ ->
+            Task.async(fn ->
+              for _ <- 1..20 do
+                {:ok, h} =
+                  NIF.register_progress_hook(conn, self(), 100, nil)
+
+                NIF.unregister_progress_hook(conn, h)
+              end
+            end)
+          end)
+
+        Task.await_many(tasks, 10_000)
+
+        {:ok, h} = NIF.register_progress_hook(conn, self(), 1, "post_concurrent")
+        :ok = run_workload(conn)
+        assert_receive {:xqlite_progress, :post_concurrent, _, _}, 2_000
+        :ok = NIF.unregister_progress_hook(conn, h)
       end
 
       test "survives 50 rapid register/unregister cycles", %{conn: conn} do

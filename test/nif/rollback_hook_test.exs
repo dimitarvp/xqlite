@@ -189,6 +189,30 @@ defmodule Xqlite.NIF.RollbackHookTest do
         :ok = NIF.unregister_rollback_hook(conn, h)
       end
 
+      test "concurrent register/unregister from multiple tasks does not crash",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+
+        tasks =
+          Enum.map(1..10, fn _ ->
+            Task.async(fn ->
+              for _ <- 1..20 do
+                {:ok, h} = NIF.register_rollback_hook(conn, self())
+                NIF.unregister_rollback_hook(conn, h)
+              end
+            end)
+          end)
+
+        Task.await_many(tasks, 10_000)
+
+        {:ok, h} = NIF.register_rollback_hook(conn, self())
+        :ok = NIF.begin(conn, :deferred)
+        :ok = NIF.rollback(conn)
+        assert_receive {:xqlite_rollback}, 500
+
+        :ok = NIF.unregister_rollback_hook(conn, h)
+      end
+
       test "ROLLBACK TO SAVEPOINT does NOT fire the hook", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
