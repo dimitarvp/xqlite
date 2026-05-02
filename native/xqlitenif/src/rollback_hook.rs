@@ -1,14 +1,49 @@
+//! Multi-subscriber dispatch for SQLite's rollback hook.
+//!
+//! Master closure installed once via `Connection::rollback_hook`;
+//! fans out each rollback event to a `HookList<RollbackSubscriber>`.
+
 use crate::error::XqliteError;
-use crate::hook_util;
+use crate::hook_util::{self, HookList};
 use rustler::sys::{enif_alloc_env, enif_free_env, enif_make_tuple_from_array, enif_send};
 use rustler::types::LocalPid;
+use std::sync::Arc;
 
-/// Send `{:xqlite_rollback}` to `pid`.
-///
+#[derive(Clone)]
+pub(crate) struct RollbackSubscriber {
+    pub(crate) pid: LocalPid,
+}
+
+impl std::fmt::Debug for RollbackSubscriber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RollbackSubscriber").finish()
+    }
+}
+
+impl RollbackSubscriber {
+    pub(crate) fn new(pid: LocalPid) -> Self {
+        Self { pid }
+    }
+}
+
+pub(crate) fn install_callback(
+    conn: &rusqlite::Connection,
+    list: Arc<HookList<RollbackSubscriber>>,
+) -> Result<(), XqliteError> {
+    conn.rollback_hook(Some(move || {
+        // SAFETY: closure-captured Arc keeps the list alive across calls.
+        unsafe {
+            list.for_each_snapshot(|entry| {
+                send_rollback_to_pid(&entry.state.pid);
+            });
+        }
+    }))?;
+    Ok(())
+}
+
 /// # Safety
 ///
-/// See `busy_handler::send_busy_to_pid` for the OTP 26.1 NULL-env
-/// invariant.
+/// See `busy_handler::send_busy_to_pid`.
 unsafe fn send_rollback_to_pid(pid: &LocalPid) {
     unsafe {
         let msg_env = enif_alloc_env();
@@ -23,21 +58,13 @@ unsafe fn send_rollback_to_pid(pid: &LocalPid) {
     }
 }
 
-/// Install a rollback hook on the given connection.
-///
-/// The hook sends `{:xqlite_rollback}` to `pid` after each rollback.
-pub(crate) fn set(conn: &rusqlite::Connection, pid: LocalPid) -> Result<(), XqliteError> {
-    conn.rollback_hook(Some(move || {
-        // SAFETY: see send_rollback_to_pid.
-        unsafe {
-            send_rollback_to_pid(&pid);
-        }
-    }))?;
-    Ok(())
+pub(crate) fn register(
+    list: &HookList<RollbackSubscriber>,
+    pid: LocalPid,
+) -> Result<u64, XqliteError> {
+    Ok(list.register(RollbackSubscriber::new(pid)))
 }
 
-/// Remove the rollback hook from the given connection.
-pub(crate) fn remove(conn: &rusqlite::Connection) -> Result<(), XqliteError> {
-    conn.rollback_hook(None::<fn()>)?;
-    Ok(())
+pub(crate) fn unregister(list: &HookList<RollbackSubscriber>, id: u64) {
+    let _ = list.unregister(id);
 }

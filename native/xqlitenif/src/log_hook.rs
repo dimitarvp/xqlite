@@ -1,39 +1,64 @@
+//! Multi-subscriber global log hook.
+//!
+//! SQLite's logging is configured process-wide via `sqlite3_config`. We
+//! install a single master callback once (lazily on first register, kept
+//! installed thereafter) that walks a `static HookList<LogSubscriber>`
+//! and fans events out to every subscriber.
+
+use crate::hook_util::{self, HookList};
 use rusqlite::trace;
 use rustler::sys::{
-    ERL_NIF_TERM, ErlNifEnv, enif_alloc_env, enif_free_env, enif_make_atom_len,
-    enif_make_int64, enif_make_new_binary, enif_make_tuple_from_array, enif_send,
+    enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
 use std::ffi::c_int;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-static LOG_HOOK_PID: Mutex<Option<LocalPid>> = Mutex::new(None);
+#[derive(Clone)]
+pub(crate) struct LogSubscriber {
+    pub(crate) pid: LocalPid,
+}
 
-/// The callback passed to `rusqlite::trace::config_log`.
-///
-/// Fires on any thread that triggers a SQLite diagnostic. Sends
-/// `{:xqlite_log, error_code, message}` to the registered PID
-/// using raw `enif_send` — no thread spawn needed.
+impl std::fmt::Debug for LogSubscriber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogSubscriber").finish()
+    }
+}
+
+impl LogSubscriber {
+    pub(crate) fn new(pid: LocalPid) -> Self {
+        Self { pid }
+    }
+}
+
+static LOG_SUBSCRIBERS: HookList<LogSubscriber> = HookList::new();
+static MASTER_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Serialises `sqlite3_config` calls — that API is itself not
+/// thread-safe.
+static MASTER_LOCK: Mutex<()> = Mutex::new(());
+
+/// SQLite log callback. Fan-out to all registered subscribers.
 fn log_callback(err_code: c_int, msg: &str) {
-    let pid = {
-        let guard = match LOG_HOOK_PID.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        match guard.as_ref() {
-            Some(pid) => *pid,
-            None => return,
-        }
-    };
+    // SAFETY: LOG_SUBSCRIBERS is 'static; snapshot iteration is
+    // wait-free. The HookList outlives every callback.
+    unsafe {
+        LOG_SUBSCRIBERS.for_each_snapshot(|entry| {
+            send_log_to_pid(&entry.state.pid, err_code, msg);
+        });
+    }
+}
 
-    // SAFETY: enif_send with NULL caller_env is valid from any thread
-    // since OTP 26.1. All data is copied into msg_env before send.
+/// # Safety
+///
+/// See `busy_handler::send_busy_to_pid`.
+unsafe fn send_log_to_pid(pid: &LocalPid, err_code: c_int, msg: &str) {
     unsafe {
         let msg_env = enif_alloc_env();
 
-        let tag = make_atom(msg_env, b"xqlite_log");
+        let tag = hook_util::make_atom(msg_env, b"xqlite_log");
         let code = enif_make_int64(msg_env, i64::from(err_code));
-        let message = make_binary(msg_env, msg.as_bytes());
+        let message = hook_util::make_binary(msg_env, msg.as_bytes());
 
         let elements = [tag, code, message];
         let tuple = enif_make_tuple_from_array(msg_env, elements.as_ptr(), 3);
@@ -44,50 +69,30 @@ fn log_callback(err_code: c_int, msg: &str) {
     }
 }
 
-#[inline]
-unsafe fn make_atom(env: *mut ErlNifEnv, name: &[u8]) -> ERL_NIF_TERM {
-    // SAFETY: env is a valid NIF environment, name is a valid byte slice.
-    unsafe { enif_make_atom_len(env, name.as_ptr().cast(), name.len()) }
+/// Add a log subscriber. Installs the master callback on first
+/// register; subsequent registers only modify the HookList.
+pub(crate) fn register(pid: LocalPid) -> Result<u64, String> {
+    let _guard = MASTER_LOCK.lock().map_err(|e| format!("lock error: {e}"))?;
+
+    if !MASTER_INSTALLED.load(Ordering::Acquire) {
+        // SAFETY: we hold MASTER_LOCK, so no concurrent config_log.
+        // The callback never invokes SQLite (it only sends Erlang
+        // messages via raw enif_send).
+        unsafe {
+            trace::config_log(Some(log_callback))
+                .map_err(|e| format!("sqlite3_config failed: {e}"))?;
+        }
+        MASTER_INSTALLED.store(true, Ordering::Release);
+    }
+
+    Ok(LOG_SUBSCRIBERS.register(LogSubscriber::new(pid)))
 }
 
-#[inline]
-unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TERM {
-    // SAFETY: env is valid, enif_make_new_binary returns a buffer of exactly data.len() bytes.
-    unsafe {
-        let mut term: ERL_NIF_TERM = 0;
-        let buf = enif_make_new_binary(env, data.len(), &mut term);
-        std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-        term
-    }
-}
-
-/// Register a PID to receive log events and install the global callback.
-pub(crate) fn set_log_hook(pid: LocalPid) -> Result<(), String> {
-    let mut guard = LOG_HOOK_PID
-        .lock()
-        .map_err(|e| format!("lock error: {e}"))?;
-    *guard = Some(pid);
-
-    // SAFETY: no concurrent `config_log` calls (we hold the mutex).
-    // The callback must not invoke SQLite calls (it doesn't — it only
-    // sends an Erlang message via raw enif_send).
-    unsafe {
-        trace::config_log(Some(log_callback))
-            .map_err(|e| format!("sqlite3_config failed: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Unregister the log hook.
-pub(crate) fn remove_log_hook() -> Result<(), String> {
-    let mut guard = LOG_HOOK_PID
-        .lock()
-        .map_err(|e| format!("lock error: {e}"))?;
-    *guard = None;
-
-    // SAFETY: same as above.
-    unsafe {
-        trace::config_log(None).map_err(|e| format!("sqlite3_config failed: {e}"))?;
-    }
+/// Remove a log subscriber by handle. Idempotent. The master callback
+/// stays installed even when the subscriber list empties — re-registering
+/// later is cheap.
+pub(crate) fn unregister(id: u64) -> Result<(), String> {
+    let _guard = MASTER_LOCK.lock().map_err(|e| format!("lock error: {e}"))?;
+    let _ = LOG_SUBSCRIBERS.unregister(id);
     Ok(())
 }

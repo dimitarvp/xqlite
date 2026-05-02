@@ -1,19 +1,72 @@
+//! Multi-subscriber dispatch for SQLite's update hook.
+//!
+//! rusqlite 0.39's `Connection::update_hook` accepts a `FnMut + Send +
+//! 'static` closure, so we install one master closure per connection at
+//! open time. The closure captures `Arc<HookList<UpdateSubscriber>>`
+//! and fans out each event to every subscriber. Register / unregister
+//! NIFs only modify the HookList; they never touch rusqlite.
+
 use crate::error::XqliteError;
-use crate::hook_util;
+use crate::hook_util::{self, HookList};
 use rusqlite::hooks::Action;
 use rustler::sys::{
     enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
+use std::sync::Arc;
 
-/// Send `{:xqlite_update, action, db_name, table, rowid}` to `pid`
-/// using raw `enif_send` — no thread spawn needed.
+#[derive(Clone)]
+pub(crate) struct UpdateSubscriber {
+    pub(crate) pid: LocalPid,
+}
+
+impl std::fmt::Debug for UpdateSubscriber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateSubscriber").finish()
+    }
+}
+
+impl UpdateSubscriber {
+    pub(crate) fn new(pid: LocalPid) -> Self {
+        Self { pid }
+    }
+}
+
+/// Install the master update-hook closure on a freshly opened
+/// connection. The closure captures `list` so subscriber-level
+/// register / unregister stays cheap (modifies the HookList only).
+pub(crate) fn install_callback(
+    conn: &rusqlite::Connection,
+    list: Arc<HookList<UpdateSubscriber>>,
+) -> Result<(), XqliteError> {
+    conn.update_hook(Some(
+        move |action: Action, db: &str, table: &str, rowid: i64| {
+            let action_name: &[u8] = match action {
+                Action::SQLITE_INSERT => b"insert",
+                Action::SQLITE_UPDATE => b"update",
+                Action::SQLITE_DELETE => b"delete",
+                _ => b"unknown",
+            };
+
+            // SAFETY: the closure captures Arc<HookList>, so the list
+            // outlives every callback. Snapshot iteration is wait-free.
+            unsafe {
+                list.for_each_snapshot(|entry| {
+                    send_update_to_pid(&entry.state.pid, action_name, db, table, rowid);
+                });
+            }
+        },
+    ))?;
+    Ok(())
+}
+
+/// Send `{:xqlite_update, action, db, table, rowid}` to `pid`.
 ///
 /// # Safety
 ///
-/// Since OTP 26.1, `enif_send` with NULL `caller_env` is valid from
-/// scheduler threads. We target OTP 26+. All data is copied into
-/// `msg_env` before send; the `&str` borrows are not held past this call.
+/// See `busy_handler::send_busy_to_pid` for the OTP 26.1 NULL-env
+/// invariant. All data is copied into a fresh msg_env; no references
+/// retained across the call.
 unsafe fn send_update_to_pid(
     pid: &LocalPid,
     action_name: &[u8],
@@ -21,9 +74,7 @@ unsafe fn send_update_to_pid(
     table_name: &str,
     rowid: i64,
 ) {
-    // SAFETY: all enif_* calls operate on a freshly allocated msg_env.
-    // enif_send with NULL caller_env is valid from any thread since OTP 26.1.
-    // After enif_send, msg_env is invalidated but still allocated — freed below.
+    // SAFETY: see fn doc.
     unsafe {
         let msg_env = enif_alloc_env();
 
@@ -42,31 +93,15 @@ unsafe fn send_update_to_pid(
     }
 }
 
-/// Install an update hook on the given connection.
-///
-/// The hook sends `{:xqlite_update, action, db_name, table, rowid}` to `pid`
-/// for every INSERT, UPDATE, or DELETE on this connection.
-pub(crate) fn set(conn: &rusqlite::Connection, pid: LocalPid) -> Result<(), XqliteError> {
-    conn.update_hook(Some(
-        move |action: Action, db: &str, table: &str, rowid: i64| {
-            let action_name: &[u8] = match action {
-                Action::SQLITE_INSERT => b"insert",
-                Action::SQLITE_UPDATE => b"update",
-                Action::SQLITE_DELETE => b"delete",
-                _ => b"unknown",
-            };
-
-            // SAFETY: see send_update_to_pid doc comment.
-            unsafe {
-                send_update_to_pid(&pid, action_name, db, table, rowid);
-            }
-        },
-    ))?;
-    Ok(())
+/// Add an update subscriber.
+pub(crate) fn register(
+    list: &HookList<UpdateSubscriber>,
+    pid: LocalPid,
+) -> Result<u64, XqliteError> {
+    Ok(list.register(UpdateSubscriber::new(pid)))
 }
 
-/// Remove the update hook from the given connection.
-pub(crate) fn remove(conn: &rusqlite::Connection) -> Result<(), XqliteError> {
-    conn.update_hook(None::<fn(Action, &str, &str, i64)>)?;
-    Ok(())
+/// Remove an update subscriber. Idempotent.
+pub(crate) fn unregister(list: &HookList<UpdateSubscriber>, id: u64) {
+    let _ = list.unregister(id);
 }

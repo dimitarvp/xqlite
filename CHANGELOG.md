@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Fan-out hooks renamed and made multi-subscriber.** Every hook that
+  fans out events to a subscriber pid (update, wal, commit, rollback,
+  log) now uses the `register_X_hook` / `unregister_X_hook(handle)`
+  verbs and returns an opaque integer handle. Multiple subscribers can
+  coexist independently on the same connection (or globally for
+  `log_hook`); each registration is independent. Migrations:
+  - `set_update_hook(conn, pid)` (returned `:ok`) →
+    `register_update_hook(conn, pid)` (returns `{:ok, handle}`)
+  - `remove_update_hook(conn)` →
+    `unregister_update_hook(conn, handle)` (idempotent on unknown
+    handles)
+  - Same shape for: `wal_hook`, `commit_hook`, `rollback_hook`,
+    `log_hook` (the latter is `register_log_hook(pid)` /
+    `unregister_log_hook(handle)` since it's global).
+  - `busy_handler` keeps the `set_busy_handler` / `remove_busy_handler`
+    verbs because its callback returns a policy decision and
+    multi-subscriber composition has no clean rule. A future
+    `register_busy_observer/1` will offer fan-out observation
+    alongside the single policy slot
+    (see `project_busy_handler_observer_split` design notes).
 - **Cancellable NIFs now take a list of tokens instead of a single
   token.** `XqliteNIF.query_cancellable/4`,
   `query_with_changes_cancellable/4`, `execute_cancellable/4`,

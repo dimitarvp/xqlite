@@ -1091,156 +1091,150 @@ defmodule XqliteNIF do
   def sqlite_version(), do: err()
 
   @doc """
-  Registers a PID to receive SQLite diagnostic log events.
+  Registers a PID to receive SQLite diagnostic log events. Multi-subscriber.
 
   SQLite's global log callback (`sqlite3_config(SQLITE_CONFIG_LOG)`) sends
   diagnostic messages for events like auto-index creation, schema changes,
-  and warnings that don't surface as errors.
+  and warnings that don't surface as errors. Each registered PID receives
+  messages in the form `{:xqlite_log, error_code, message}`.
 
-  The registered PID receives messages in the form:
-  `{:xqlite_log, error_code, message}` where `error_code` is a SQLite
-  result code (integer) and `message` is a string.
+  This is a **global, per-process** subscription — but multiple PIDs can
+  subscribe independently. The first call installs the master callback;
+  subsequent calls just add to the subscriber list. Use the returned
+  `handle` to unregister this specific subscriber via
+  `unregister_log_hook/1`.
 
-  This is a **global, per-process** setting — only one PID can receive log
-  events at a time. Calling `set_log_hook/1` again replaces the previous
-  listener. Use `remove_log_hook/0` to unregister.
-
-  Returns `{:ok, :ok}` on success or `{:error, reason}` on failure.
+  Returns `{:ok, handle}` on success or `{:error, reason}` on failure.
   """
-  @spec set_log_hook(pid :: pid()) :: {:ok, :ok} | {:error, String.t()}
-  def set_log_hook(_pid), do: err()
+  @spec register_log_hook(pid :: pid()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def register_log_hook(_pid), do: err()
 
   @doc """
-  Unregisters the global SQLite log hook.
-
-  After calling this, no PID will receive `{:xqlite_log, ...}` messages.
-
-  Returns `{:ok, :ok}` on success or `{:error, reason}` on failure.
+  Unregisters a log subscriber by handle. Idempotent — unknown handles
+  are no-ops.
   """
-  @spec remove_log_hook() :: {:ok, :ok} | {:error, String.t()}
-  def remove_log_hook(), do: err()
+  @spec unregister_log_hook(handle :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def unregister_log_hook(_handle), do: err()
 
   @doc """
   Registers a PID to receive change notifications for this connection.
+  Multi-subscriber.
 
-  The registered PID receives messages in the form:
+  Each registered PID receives messages in the form:
   `{:xqlite_update, action, db_name, table_name, rowid}` where:
   - `action` is `:insert`, `:update`, or `:delete`
   - `db_name` is the database name (e.g., `"main"`, `"temp"`)
   - `table_name` is the table that was modified
   - `rowid` is the rowid of the affected row
 
-  This is a **per-connection** setting. Each connection can have at most one
-  update hook. Calling `set_update_hook/2` again replaces the previous hook.
+  Multiple subscribers can coexist on the same connection — each gets a
+  unique handle. The callback fires for every subscriber on every
+  update. Use the returned handle to unregister via
+  `unregister_update_hook/2`.
 
   The callback fires before the change is committed — if the enclosing
-  transaction rolls back, you will have already received the notification.
+  transaction rolls back, every subscriber will have already received
+  the notification.
 
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Returns `{:ok, handle}` on success or `{:error, reason}` on failure.
   """
-  @spec set_update_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
-  def set_update_hook(_conn, _pid), do: err()
+  @spec register_update_hook(conn :: Xqlite.conn(), pid :: pid()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def register_update_hook(_conn, _pid), do: err()
 
   @doc """
-  Removes the change notification hook from this connection.
-
-  After calling this, the connection will no longer send
-  `{:xqlite_update, ...}` messages to any PID.
-
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Unregisters an update subscriber by handle. Idempotent — unknown
+  handles are no-ops.
   """
-  @spec remove_update_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
-  def remove_update_hook(_conn), do: err()
+  @spec unregister_update_hook(conn :: Xqlite.conn(), handle :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def unregister_update_hook(_conn, _handle), do: err()
 
   @doc """
-  Installs a WAL hook on the connection.
+  Registers a PID to receive WAL events on the connection. Multi-subscriber.
 
-  After each commit in WAL mode, SQLite invokes the hook with the
-  attached database name and the number of frames in the WAL log. We
-  forward
+  After each commit in WAL mode, every registered subscriber receives
 
       {:xqlite_wal, db_name, pages}
 
-  to `pid` — `db_name` is a binary (`"main"`, `"temp"`, or an attached
-  database name), `pages` is a non-negative integer.
+  — `db_name` is a binary (`"main"`, `"temp"`, or attached database
+  name), `pages` is a non-negative integer (number of frames in the WAL
+  log).
 
   Useful for WAL-size monitoring and triggering manual checkpoints when
-  the log grows past a threshold.
+  the log grows past a threshold. Multiple subscribers register
+  independently; each gets a unique handle.
 
-  Only one WAL hook per connection. Replacing it atomically reclaims the
-  previous state.
-
-  > #### Warning — PRAGMA wal_autocheckpoint replaces this hook {: .warning}
+  > #### Warning — PRAGMA wal_autocheckpoint replaces our master hook {: .warning}
   >
   > SQLite's `wal_autocheckpoint` PRAGMA and the
   > `sqlite3_wal_autocheckpoint` C function both register their own
-  > internal WAL hook, silently replacing any previously installed one.
-  > Same memory-safety guarantees as `set_busy_handler/5`: no leak,
-  > messages just stop. Install this hook *after* any
-  > `wal_autocheckpoint` configuration, or switch to
+  > internal WAL hook, silently replacing the master callback we
+  > installed at connection open. After such a call, subscribers stop
+  > receiving messages. No memory is leaked. Install subscribers
+  > *after* any `wal_autocheckpoint` configuration, or switch to
   > `wal_checkpoint/3` for explicit checkpointing.
 
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Returns `{:ok, handle}` on success or `{:error, reason}` on failure.
   """
-  @spec set_wal_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
-  def set_wal_hook(_conn, _pid), do: err()
+  @spec register_wal_hook(conn :: Xqlite.conn(), pid :: pid()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def register_wal_hook(_conn, _pid), do: err()
 
   @doc """
-  Removes the WAL hook from this connection.
-
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Unregisters a WAL subscriber by handle. Idempotent.
   """
-  @spec remove_wal_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
-  def remove_wal_hook(_conn), do: err()
+  @spec unregister_wal_hook(conn :: Xqlite.conn(), handle :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def unregister_wal_hook(_conn, _handle), do: err()
 
   @doc """
-  Installs a commit hook on the connection.
+  Registers a PID to receive commit events on the connection.
+  Multi-subscriber.
 
-  Immediately before each commit (regardless of journal mode), forwards
+  Immediately before each commit (regardless of journal mode), every
+  registered subscriber receives
 
       {:xqlite_commit}
 
-  to `pid`. The hook is observation-only — it never vetoes the commit.
-
-  Only one commit hook per connection. Replacing it is atomic.
-
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Observation-only — the master callback never vetoes the commit.
   """
-  @spec set_commit_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
-  def set_commit_hook(_conn, _pid), do: err()
+  @spec register_commit_hook(conn :: Xqlite.conn(), pid :: pid()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def register_commit_hook(_conn, _pid), do: err()
 
   @doc """
-  Removes the commit hook from this connection.
-
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Unregisters a commit subscriber by handle. Idempotent.
   """
-  @spec remove_commit_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
-  def remove_commit_hook(_conn), do: err()
+  @spec unregister_commit_hook(conn :: Xqlite.conn(), handle :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def unregister_commit_hook(_conn, _handle), do: err()
 
   @doc """
-  Installs a rollback hook on the connection.
+  Registers a PID to receive rollback events on the connection.
+  Multi-subscriber.
 
-  After each rollback (whether user-initiated or forced by a
-  constraint / deferred-FK failure at commit), forwards
+  After each rollback (whether user-initiated or forced by a constraint
+  / deferred-FK failure at commit), every registered subscriber
+  receives
 
       {:xqlite_rollback}
 
-  to `pid`.
-
-  Only one rollback hook per connection. Replacing it is atomic.
-
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Note: SQLite does not invoke this callback for `ROLLBACK TO
+  SAVEPOINT` operations — only for outer-transaction rollbacks.
   """
-  @spec set_rollback_hook(conn :: Xqlite.conn(), pid :: pid()) :: :ok | Xqlite.error()
-  def set_rollback_hook(_conn, _pid), do: err()
+  @spec register_rollback_hook(conn :: Xqlite.conn(), pid :: pid()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def register_rollback_hook(_conn, _pid), do: err()
 
   @doc """
-  Removes the rollback hook from this connection.
-
-  Returns `:ok` on success or `{:error, reason}` on failure.
+  Unregisters a rollback subscriber by handle. Idempotent.
   """
-  @spec remove_rollback_hook(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
-  def remove_rollback_hook(_conn), do: err()
+  @spec unregister_rollback_hook(conn :: Xqlite.conn(), handle :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def unregister_rollback_hook(_conn, _handle), do: err()
 
   @doc """
   Registers a progress-tick subscriber on the connection.

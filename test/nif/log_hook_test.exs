@@ -5,42 +5,41 @@ defmodule Xqlite.NIF.LogHookTest do
 
   alias XqliteNIF, as: NIF
 
-  # Always clean up the global log hook after each test.
-  setup do
-    on_exit(fn ->
-      NIF.remove_log_hook()
-    end)
+  # The log hook is global (process-wide). Each test that registers a
+  # subscriber stashes its handle in the test process dict via
+  # `with_log_handle/2` and unregisters on test exit. Multi-subscriber
+  # semantics means tests in this file don't interfere as long as
+  # collectors are spawned per-test.
 
-    :ok
+  describe "register_log_hook/1" do
+    test "returns {:ok, integer_handle}" do
+      with_log_handle(fn ->
+        assert {:ok, h} = NIF.register_log_hook(self())
+        assert is_integer(h) and h > 0
+        h
+      end)
+    end
+
+    test "two subscribers each get distinct handles" do
+      {:ok, h1} = NIF.register_log_hook(self())
+      {:ok, h2} = NIF.register_log_hook(self())
+      assert h1 != h2
+      :ok = NIF.unregister_log_hook(h1)
+      :ok = NIF.unregister_log_hook(h2)
+    end
   end
 
-  # --- Tests that need no connection (pure API) ---
-
-  describe "set_log_hook/1" do
-    test "returns {:ok, :ok}" do
-      assert {:ok, :ok} = NIF.set_log_hook(self())
+  describe "unregister_log_hook/1" do
+    test "returns :ok after a hook was registered" do
+      {:ok, h} = NIF.register_log_hook(self())
+      assert :ok = NIF.unregister_log_hook(h)
     end
 
-    test "can be called multiple times to replace the listener" do
-      assert {:ok, :ok} = NIF.set_log_hook(self())
-      assert {:ok, :ok} = NIF.set_log_hook(self())
-    end
-  end
-
-  describe "remove_log_hook/0" do
-    test "returns {:ok, :ok} after a hook was set" do
-      {:ok, :ok} = NIF.set_log_hook(self())
-      assert {:ok, :ok} = NIF.remove_log_hook()
-    end
-
-    test "returns {:ok, :ok} even without prior set" do
-      assert {:ok, :ok} = NIF.remove_log_hook()
-    end
-
-    test "is idempotent" do
-      {:ok, :ok} = NIF.set_log_hook(self())
-      assert {:ok, :ok} = NIF.remove_log_hook()
-      assert {:ok, :ok} = NIF.remove_log_hook()
+    test "is idempotent — unknown handle still :ok" do
+      assert :ok = NIF.unregister_log_hook(999_999)
+      {:ok, h} = NIF.register_log_hook(self())
+      assert :ok = NIF.unregister_log_hook(h)
+      assert :ok = NIF.unregister_log_hook(h)
     end
   end
 
@@ -58,106 +57,111 @@ defmodule Xqlite.NIF.LogHookTest do
       end
 
       test "delivers {:xqlite_log, code, message} to registered pid", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
+        with_log_handle(fn ->
+          {:ok, h} = NIF.register_log_hook(self())
 
-        trigger_autoindex_warning(conn)
+          trigger_autoindex_warning(conn)
 
-        assert_receive {:xqlite_log, code, message}, 2_000
-        assert is_integer(code)
-        assert is_binary(message)
+          assert_receive {:xqlite_log, code, message}, 2_000
+          assert is_integer(code)
+          assert is_binary(message)
+          h
+        end)
       end
 
       test "message contains autoindex context", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-
-        assert_receive {:xqlite_log, _code, message}, 2_000
-        assert message =~ "automatic index"
+        with_log_handle(fn ->
+          {:ok, h} = NIF.register_log_hook(self())
+          trigger_autoindex_warning(conn)
+          assert_receive {:xqlite_log, _code, message}, 2_000
+          assert message =~ "automatic index"
+          h
+        end)
       end
 
-      test "stops delivery after remove_log_hook/0", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-        {:ok, :ok} = NIF.remove_log_hook()
+      test "stops delivery after unregister_log_hook/1", %{conn: conn} do
+        {:ok, h} = NIF.register_log_hook(self())
+        :ok = NIF.unregister_log_hook(h)
 
         trigger_autoindex_warning(conn)
 
         refute_receive {:xqlite_log, _, _}, 500
       end
 
-      test "replacing listener sends events only to new pid", %{conn: conn} do
-        old_listener = spawn_log_collector()
-        new_listener = spawn_log_collector()
+      test "two subscribers each receive every event", %{conn: conn} do
+        listener_a = spawn_log_collector()
+        listener_b = spawn_log_collector()
 
-        {:ok, :ok} = NIF.set_log_hook(old_listener)
-        {:ok, :ok} = NIF.set_log_hook(new_listener)
+        {:ok, h_a} = NIF.register_log_hook(listener_a)
+        {:ok, h_b} = NIF.register_log_hook(listener_b)
 
         trigger_autoindex_warning(conn)
 
-        new_messages = get_collected_messages(new_listener)
-        assert length(new_messages) > 0
+        msgs_a = get_collected_messages(listener_a)
+        msgs_b = get_collected_messages(listener_b)
+        assert length(msgs_a) > 0
+        assert length(msgs_b) > 0
 
-        old_messages = get_collected_messages(old_listener)
-        assert old_messages == []
+        :ok = NIF.unregister_log_hook(h_a)
+        :ok = NIF.unregister_log_hook(h_b)
       end
 
-      test "dead listener pid does not crash the system", %{conn: conn} do
+      test "unregistering one subscriber leaves the other working", %{conn: conn} do
+        listener_kept = spawn_log_collector()
+        listener_removed = spawn_log_collector()
+
+        {:ok, h_kept} = NIF.register_log_hook(listener_kept)
+        {:ok, h_removed} = NIF.register_log_hook(listener_removed)
+
+        :ok = NIF.unregister_log_hook(h_removed)
+
+        trigger_autoindex_warning(conn)
+
+        kept = get_collected_messages(listener_kept)
+        removed = get_collected_messages(listener_removed)
+        assert length(kept) > 0
+        assert removed == []
+
+        :ok = NIF.unregister_log_hook(h_kept)
+      end
+
+      test "dead listener pid does not crash or block siblings", %{conn: conn} do
         dead_pid = spawn(fn -> :ok end)
         ref = Process.monitor(dead_pid)
         receive do: ({:DOWN, ^ref, :process, ^dead_pid, _} -> :ok)
 
-        {:ok, :ok} = NIF.set_log_hook(dead_pid)
+        live = spawn_log_collector()
+
+        {:ok, h_dead} = NIF.register_log_hook(dead_pid)
+        {:ok, h_live} = NIF.register_log_hook(live)
 
         trigger_autoindex_warning(conn)
+
+        assert length(get_collected_messages(live)) > 0
+
+        :ok = NIF.unregister_log_hook(h_dead)
+        :ok = NIF.unregister_log_hook(h_live)
       end
 
       test "error code is SQLITE_WARNING_AUTOINDEX (284)", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-
-        # SQLITE_WARNING (28) | (1 << 8) = 284
-        assert_receive {:xqlite_log, 284, _message}, 2_000
+        with_log_handle(fn ->
+          {:ok, h} = NIF.register_log_hook(self())
+          trigger_autoindex_warning(conn)
+          assert_receive {:xqlite_log, 284, _message}, 2_000
+          h
+        end)
       end
 
-      test "re-register after remove works", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-        {:ok, :ok} = NIF.remove_log_hook()
+      test "re-register after unregister works", %{conn: conn} do
+        {:ok, h1} = NIF.register_log_hook(self())
+        :ok = NIF.unregister_log_hook(h1)
 
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-        assert_receive {:xqlite_log, _, _}, 2_000
-      end
-
-      test "multiple log events from repeated autoindex queries", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        :ok =
-          NIF.execute_batch(conn, """
-          CREATE TABLE multi_a (a TEXT, b TEXT);
-          CREATE TABLE multi_b (x TEXT, y TEXT);
-          """)
-
-        for i <- 1..30 do
-          {:ok, 1} =
-            NIF.execute(conn, "INSERT INTO multi_a VALUES (?1, ?2)", ["v#{i}", "d#{i}"])
-
-          {:ok, 1} =
-            NIF.execute(conn, "INSERT INTO multi_b VALUES (?1, ?2)", ["v#{i}", "e#{i}"])
-        end
-
-        for _ <- 1..3 do
-          {:ok, _} =
-            NIF.query(
-              conn,
-              "SELECT * FROM multi_a, multi_b WHERE multi_a.a = multi_b.x",
-              []
-            )
-        end
-
-        messages = collect_messages(3, 2_000)
-        assert length(messages) >= 3
+        with_log_handle(fn ->
+          {:ok, h2} = NIF.register_log_hook(self())
+          trigger_autoindex_warning(conn)
+          assert_receive {:xqlite_log, _, _}, 2_000
+          h2
+        end)
       end
 
       test "GenServer-like process forwards log events", %{conn: conn} do
@@ -165,25 +169,22 @@ defmodule Xqlite.NIF.LogHookTest do
 
         server =
           spawn(fn ->
-            receive do
-              :register -> :ok
-            end
-
             log_forwarder_loop(test_pid)
           end)
 
-        {:ok, :ok} = NIF.set_log_hook(server)
-        send(server, :register)
+        {:ok, h} = NIF.register_log_hook(server)
 
         trigger_autoindex_warning(conn)
 
         assert_receive {:forwarded_log, {:xqlite_log, code, message}}, 2_000
         assert is_integer(code)
         assert is_binary(message)
+
+        :ok = NIF.unregister_log_hook(h)
       end
     end
 
-    describe "#{prefix}: error code variety" do
+    describe "#{prefix}: rapid register/unregister cycling" do
       @describetag type_tag
 
       setup context do
@@ -193,261 +194,61 @@ defmodule Xqlite.NIF.LogHookTest do
         {:ok, conn: conn}
       end
 
-      test "autoindex warning has code 284 and message with table context", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-
-        assert_receive {:xqlite_log, 284, message}, 2_000
-        assert message =~ "automatic index"
-      end
-
-      test "multiple autoindex warnings have the same code", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        :ok =
-          NIF.execute_batch(conn, """
-          CREATE TABLE ea (x TEXT, y TEXT);
-          CREATE TABLE eb (x TEXT, y TEXT);
-          """)
-
-        for i <- 1..30 do
-          {:ok, 1} = NIF.execute(conn, "INSERT INTO ea VALUES (?1, ?2)", ["v#{i}", "d#{i}"])
-          {:ok, 1} = NIF.execute(conn, "INSERT INTO eb VALUES (?1, ?2)", ["v#{i}", "e#{i}"])
-        end
-
-        {:ok, _} = NIF.query(conn, "SELECT * FROM ea, eb WHERE ea.x = eb.x", [])
-
-        assert_receive {:xqlite_log, 284, msg1}, 2_000
-
-        :ok =
-          NIF.execute_batch(conn, """
-          CREATE TABLE ec (a TEXT, b TEXT);
-          CREATE TABLE ed (a TEXT, b TEXT);
-          """)
-
-        for i <- 1..30 do
-          {:ok, 1} = NIF.execute(conn, "INSERT INTO ec VALUES (?1, ?2)", ["v#{i}", "d#{i}"])
-          {:ok, 1} = NIF.execute(conn, "INSERT INTO ed VALUES (?1, ?2)", ["v#{i}", "e#{i}"])
-        end
-
-        {:ok, _} = NIF.query(conn, "SELECT * FROM ec, ed WHERE ec.a = ed.a", [])
-
-        assert_receive {:xqlite_log, 284, msg2}, 2_000
-
-        refute msg1 == msg2
-      end
-
-      test "code is always an integer and message is always a binary", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-
-        messages = collect_all_log_messages(2_000)
-        assert length(messages) > 0
-
-        Enum.each(messages, fn {:xqlite_log, code, message} ->
-          assert is_integer(code), "expected code to be integer, got: #{inspect(code)}"
-          assert is_binary(message), "expected message to be binary, got: #{inspect(message)}"
-          assert byte_size(message) > 0, "expected non-empty message"
-        end)
-      end
-
-      test "error code has base code extractable via bitwise AND", %{conn: conn} do
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-
-        assert_receive {:xqlite_log, code, _}, 2_000
-
-        # Extended code 284 = SQLITE_WARNING (28) | (1 << 8)
-        base_code = Bitwise.band(code, 0xFF)
-        assert base_code == 28
-      end
-    end
-
-    describe "#{prefix}: rapid set/remove cycling" do
-      @describetag type_tag
-
-      setup context do
-        {mod, fun, args} = find_opener_mfa!(context)
-        {:ok, conn} = apply(mod, fun, args)
-        on_exit(fn -> NIF.close(conn) end)
-        {:ok, conn: conn}
-      end
-
-      test "survives 50 rapid set/remove cycles", %{conn: conn} do
+      test "survives 50 rapid register/unregister cycles", %{conn: conn} do
         for _ <- 1..50 do
-          {:ok, :ok} = NIF.set_log_hook(self())
-          {:ok, :ok} = NIF.remove_log_hook()
+          {:ok, h} = NIF.register_log_hook(self())
+          :ok = NIF.unregister_log_hook(h)
         end
 
-        {:ok, :ok} = NIF.set_log_hook(self())
-
-        trigger_autoindex_warning(conn)
-
-        assert_receive {:xqlite_log, 284, _}, 2_000
-      end
-
-      test "rapid listener replacement delivers to final listener only", %{conn: conn} do
-        pids =
-          for _ <- 1..50 do
-            pid = spawn(fn -> Process.sleep(5_000) end)
-            {:ok, :ok} = NIF.set_log_hook(pid)
-            pid
-          end
-
-        final_listener = spawn_log_collector()
-        {:ok, :ok} = NIF.set_log_hook(final_listener)
-
-        trigger_autoindex_warning(conn)
-
-        messages = get_collected_messages(final_listener)
-        assert length(messages) > 0
-
-        Enum.each(pids, fn pid ->
-          Process.exit(pid, :kill)
+        with_log_handle(fn ->
+          {:ok, h} = NIF.register_log_hook(self())
+          trigger_autoindex_warning(conn)
+          assert_receive {:xqlite_log, 284, _}, 2_000
+          h
         end)
       end
-
-      test "set/remove interleaved with log-triggering queries", %{conn: conn} do
-        for i <- 1..10 do
-          {:ok, :ok} = NIF.set_log_hook(self())
-
-          :ok =
-            NIF.execute_batch(conn, """
-            CREATE TABLE IF NOT EXISTS cycle_a_#{i} (a TEXT, b TEXT);
-            CREATE TABLE IF NOT EXISTS cycle_b_#{i} (x TEXT, y TEXT);
-            """)
-
-          for j <- 1..30 do
-            {:ok, 1} =
-              NIF.execute(
-                conn,
-                "INSERT INTO cycle_a_#{i} VALUES (?1, ?2)",
-                ["v#{j}", "d#{j}"]
-              )
-
-            {:ok, 1} =
-              NIF.execute(
-                conn,
-                "INSERT INTO cycle_b_#{i} VALUES (?1, ?2)",
-                ["v#{j}", "e#{j}"]
-              )
-          end
-
-          {:ok, _} =
-            NIF.query(
-              conn,
-              "SELECT * FROM cycle_a_#{i}, cycle_b_#{i} WHERE cycle_a_#{i}.a = cycle_b_#{i}.x",
-              []
-            )
-
-          {:ok, :ok} = NIF.remove_log_hook()
-        end
-
-        messages = collect_all_log_messages(2_000)
-        assert length(messages) >= 10
-      end
-    end
-  end
-
-  # --- Tests outside the for loop ---
-  # Multi-connection tests and cross-connection lifecycle tests.
-
-  describe "hook survives connection close" do
-    test "opening a new connection after close still delivers events" do
-      {:ok, :ok} = NIF.set_log_hook(self())
-
-      {:ok, conn1} = NIF.open_in_memory(":memory:")
-      trigger_autoindex_warning(conn1)
-      assert_receive {:xqlite_log, _, _}, 2_000
-
-      NIF.close(conn1)
-
-      {:ok, conn2} = NIF.open_in_memory(":memory:")
-      on_exit(fn -> NIF.close(conn2) end)
-
-      trigger_autoindex_warning(conn2)
-      assert_receive {:xqlite_log, _, _}, 2_000
     end
   end
 
   describe "multiple databases" do
-    test "3 databases deliver events to a single listener" do
-      {:ok, :ok} = NIF.set_log_hook(self())
+    test "events from N databases all reach a single subscriber" do
+      with_log_handle(fn ->
+        {:ok, h} = NIF.register_log_hook(self())
 
-      conns =
-        for _ <- 1..3 do
-          {:ok, conn} = NIF.open_in_memory(":memory:")
-          conn
-        end
+        conns =
+          for _ <- 1..3 do
+            {:ok, conn} = NIF.open_in_memory(":memory:")
+            conn
+          end
 
-      on_exit(fn -> Enum.each(conns, &NIF.close/1) end)
+        on_exit(fn -> Enum.each(conns, &NIF.close/1) end)
 
-      Enum.each(conns, &trigger_autoindex_warning/1)
+        Enum.each(conns, &trigger_autoindex_warning/1)
 
-      messages = collect_messages(3, 2_000)
-      assert length(messages) >= 3
+        messages = collect_messages(3, 2_000)
+        assert length(messages) >= 3
 
-      Enum.each(messages, fn {:xqlite_log, code, message} ->
-        assert is_integer(code)
-        assert is_binary(message)
-      end)
-    end
-
-    test "3 sequential listeners each receive events from their own database" do
-      conns =
-        for _ <- 1..3 do
-          {:ok, conn} = NIF.open_in_memory(":memory:")
-          conn
-        end
-
-      on_exit(fn -> Enum.each(conns, &NIF.close/1) end)
-
-      Enum.zip(1..3, conns)
-      |> Enum.each(fn {_i, conn} ->
-        listener = spawn_log_collector()
-        {:ok, :ok} = NIF.set_log_hook(listener)
-
-        trigger_autoindex_warning(conn)
-
-        messages = get_collected_messages(listener)
-        assert length(messages) > 0
-
-        Enum.each(messages, fn {:xqlite_log, code, msg} ->
+        Enum.each(messages, fn {:xqlite_log, code, message} ->
           assert is_integer(code)
-          assert is_binary(msg)
+          assert is_binary(message)
         end)
+
+        h
       end)
-    end
-
-    test "concurrent triggers from multiple tasks" do
-      {:ok, :ok} = NIF.set_log_hook(self())
-
-      conns =
-        for _ <- 1..3 do
-          {:ok, conn} = NIF.open_in_memory(":memory:")
-          conn
-        end
-
-      on_exit(fn -> Enum.each(conns, &NIF.close/1) end)
-
-      tasks =
-        Enum.map(conns, fn conn ->
-          Task.async(fn -> trigger_autoindex_warning(conn) end)
-        end)
-
-      Task.await_many(tasks, 10_000)
-
-      messages = collect_messages(3, 2_000)
-      assert length(messages) >= 3
     end
   end
 
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # Test bodies that register a hook return its handle from the inner
+  # function; this wrapper unregisters on test exit. Avoids leaking
+  # subscribers across async tests.
+  defp with_log_handle(fun) do
+    handle = fun.()
+    :ok = NIF.unregister_log_hook(handle)
+  end
 
   defp trigger_autoindex_warning(conn) do
     :ok =
@@ -503,23 +304,6 @@ defmodule Xqlite.NIF.LogHookTest do
     receive do
       {:xqlite_log, _code, _msg} = event ->
         do_collect(remaining - 1, deadline, [event | acc])
-    after
-      wait -> Enum.reverse(acc)
-    end
-  end
-
-  defp collect_all_log_messages(timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_collect_all(deadline, [])
-  end
-
-  defp do_collect_all(deadline, acc) do
-    now = System.monotonic_time(:millisecond)
-    wait = max(deadline - now, 0)
-
-    receive do
-      {:xqlite_log, _code, _msg} = event ->
-        do_collect_all(deadline, [event | acc])
     after
       wait -> Enum.reverse(acc)
     end

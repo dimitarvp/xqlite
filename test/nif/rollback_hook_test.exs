@@ -16,10 +16,18 @@ defmodule Xqlite.NIF.RollbackHookTest do
         {:ok, conn: conn}
       end
 
-      test "hook fires on explicit rollback", %{conn: conn} do
+      test "register / unregister returns handle and is idempotent", %{conn: conn} do
+        assert {:ok, h} = NIF.register_rollback_hook(conn, self())
+        assert is_integer(h) and h > 0
+        assert :ok = NIF.unregister_rollback_hook(conn, h)
+        assert :ok = NIF.unregister_rollback_hook(conn, h)
+        assert :ok = NIF.unregister_rollback_hook(conn, 999_999)
+      end
+
+      test "single subscriber fires on explicit rollback", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_rollback_hook(conn, self())
+        {:ok, h} = NIF.register_rollback_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
@@ -27,13 +35,13 @@ defmodule Xqlite.NIF.RollbackHookTest do
 
         assert_receive {:xqlite_rollback}, 500
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
       end
 
-      test "hook does not fire on commit", %{conn: conn} do
+      test "does not fire on commit", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_rollback_hook(conn, self())
+        {:ok, h} = NIF.register_rollback_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
@@ -41,30 +49,31 @@ defmodule Xqlite.NIF.RollbackHookTest do
 
         refute_receive {:xqlite_rollback}, 100
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
       end
 
-      test "remove stops delivery", %{conn: conn} do
+      test "unregister stops delivery to that subscriber", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_rollback_hook(conn, self())
+        {:ok, h} = NIF.register_rollback_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         :ok = NIF.rollback(conn)
         assert_receive {:xqlite_rollback}, 500
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
 
         :ok = NIF.begin(conn, :deferred)
         :ok = NIF.rollback(conn)
         refute_receive {:xqlite_rollback}, 100
       end
 
-      test "multiple sequential rollbacks each fire exactly once", %{conn: conn} do
+      test "multiple sequential rollbacks each fire exactly once per subscriber",
+           %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
         collector = spawn_collector()
-        :ok = NIF.set_rollback_hook(conn, collector)
+        {:ok, h} = NIF.register_rollback_hook(conn, collector)
 
         for i <- 1..5 do
           :ok = NIF.begin(conn, :deferred)
@@ -74,58 +83,72 @@ defmodule Xqlite.NIF.RollbackHookTest do
 
         assert length(get_collected(collector)) == 5
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
       end
 
-      test "re-register after remove works", %{conn: conn} do
+      test "two subscribers each receive every rollback", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_rollback_hook(conn, self())
-        :ok = NIF.remove_rollback_hook(conn)
-        :ok = NIF.set_rollback_hook(conn, self())
+        listener_a = spawn_collector()
+        listener_b = spawn_collector()
+
+        {:ok, h_a} = NIF.register_rollback_hook(conn, listener_a)
+        {:ok, h_b} = NIF.register_rollback_hook(conn, listener_b)
 
         :ok = NIF.begin(conn, :deferred)
         :ok = NIF.rollback(conn)
-
-        assert_receive {:xqlite_rollback}, 500
-
-        :ok = NIF.remove_rollback_hook(conn)
-      end
-
-      test "replacing listener — old pid stops receiving", %{conn: conn} do
-        :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-
-        old_listener = spawn_collector()
-        new_listener = spawn_collector()
-
-        :ok = NIF.set_rollback_hook(conn, old_listener)
-        :ok = NIF.set_rollback_hook(conn, new_listener)
-
-        :ok = NIF.begin(conn, :deferred)
-        :ok = NIF.rollback(conn)
-
-        # Give the fire-and-forget send a moment to complete.
         Process.sleep(20)
 
-        assert length(get_collected(new_listener)) > 0
-        assert get_collected(old_listener) == []
+        msgs_a = get_collected(listener_a)
+        msgs_b = get_collected(listener_b)
+        assert length(msgs_a) == 1
+        assert length(msgs_b) == 1
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h_a)
+        :ok = NIF.unregister_rollback_hook(conn, h_b)
       end
 
-      test "dead subscriber pid does not crash the NIF", %{conn: conn} do
+      test "unregistering one subscriber leaves the other working", %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+
+        listener_kept = spawn_collector()
+        listener_removed = spawn_collector()
+
+        {:ok, h_kept} = NIF.register_rollback_hook(conn, listener_kept)
+        {:ok, h_removed} = NIF.register_rollback_hook(conn, listener_removed)
+
+        :ok = NIF.unregister_rollback_hook(conn, h_removed)
+
+        :ok = NIF.begin(conn, :deferred)
+        :ok = NIF.rollback(conn)
+        Process.sleep(20)
+
+        assert length(get_collected(listener_kept)) == 1
+        assert get_collected(listener_removed) == []
+
+        :ok = NIF.unregister_rollback_hook(conn, h_kept)
+      end
+
+      test "dead subscriber pid does not crash or block siblings", %{conn: conn} do
         dead = spawn(fn -> :ok end)
         ref = Process.monitor(dead)
         receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
 
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_rollback_hook(conn, dead)
+        live = spawn_collector()
+
+        {:ok, h_dead} = NIF.register_rollback_hook(conn, dead)
+        {:ok, h_live} = NIF.register_rollback_hook(conn, live)
 
         :ok = NIF.begin(conn, :deferred)
         :ok = NIF.rollback(conn)
+        Process.sleep(20)
 
-        :ok = NIF.remove_rollback_hook(conn)
+        assert length(get_collected(live)) == 1
+
+        :ok = NIF.unregister_rollback_hook(conn, h_dead)
+        :ok = NIF.unregister_rollback_hook(conn, h_live)
       end
 
       test "GenServer-like process forwards rollback events", %{conn: conn} do
@@ -138,38 +161,38 @@ defmodule Xqlite.NIF.RollbackHookTest do
             forwarder_loop(test_pid)
           end)
 
-        :ok = NIF.set_rollback_hook(conn, forwarder)
+        {:ok, h} = NIF.register_rollback_hook(conn, forwarder)
 
         :ok = NIF.begin(conn, :deferred)
         :ok = NIF.rollback(conn)
 
         assert_receive {:forwarded_rollback, {:xqlite_rollback}}, 500
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
       end
 
-      test "survives 50 rapid set/remove cycles", %{conn: conn} do
+      test "survives 50 rapid register/unregister cycles", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
         for _ <- 1..50 do
-          :ok = NIF.set_rollback_hook(conn, self())
-          :ok = NIF.remove_rollback_hook(conn)
+          {:ok, h} = NIF.register_rollback_hook(conn, self())
+          :ok = NIF.unregister_rollback_hook(conn, h)
         end
 
-        :ok = NIF.set_rollback_hook(conn, self())
+        {:ok, h} = NIF.register_rollback_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         :ok = NIF.rollback(conn)
 
         assert_receive {:xqlite_rollback}, 500
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
       end
 
       test "ROLLBACK TO SAVEPOINT does NOT fire the hook", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_rollback_hook(conn, self())
+        {:ok, h} = NIF.register_rollback_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1)", [])
@@ -179,38 +202,38 @@ defmodule Xqlite.NIF.RollbackHookTest do
         :ok = NIF.rollback_to_savepoint(conn, "sp1")
         :ok = NIF.release_savepoint(conn, "sp1")
 
-        # SQLite's documented behavior: rollback_hook is NOT invoked for
-        # ROLLBACK TO SAVEPOINT operations, only for outer-transaction
-        # rollbacks.
+        # SQLite documented behavior: rollback_hook is NOT invoked for
+        # ROLLBACK TO SAVEPOINT, only for outer-transaction rollbacks.
         refute_receive {:xqlite_rollback}, 100
 
-        # But an actual outer rollback still fires.
         :ok = NIF.rollback(conn)
         assert_receive {:xqlite_rollback}, 500
 
-        :ok = NIF.remove_rollback_hook(conn)
+        :ok = NIF.unregister_rollback_hook(conn, h)
       end
     end
   end
 
-  # Outside the per-connection-mode loop — closed-conn + multi-conn isolation.
-
   describe "closed connection" do
-    test "set_rollback_hook on closed connection returns error" do
+    test "register on closed connection returns error" do
       {:ok, conn} = XqliteNIF.open_in_memory(":memory:")
       :ok = XqliteNIF.close(conn)
-      assert {:error, :connection_closed} = XqliteNIF.set_rollback_hook(conn, self())
+
+      assert {:error, :connection_closed} =
+               XqliteNIF.register_rollback_hook(conn, self())
     end
 
-    test "remove_rollback_hook on closed connection returns error" do
+    test "unregister on closed connection returns error" do
       {:ok, conn} = XqliteNIF.open_in_memory(":memory:")
       :ok = XqliteNIF.close(conn)
-      assert {:error, :connection_closed} = XqliteNIF.remove_rollback_hook(conn)
+
+      assert {:error, :connection_closed} =
+               XqliteNIF.unregister_rollback_hook(conn, 1)
     end
   end
 
   describe "per-connection isolation" do
-    test "hook on conn1 does not fire for conn2 rollbacks" do
+    test "subscriber on conn1 does not fire for conn2 rollbacks" do
       {:ok, conn1} = XqliteNIF.open_in_memory(":memory:")
       {:ok, conn2} = XqliteNIF.open_in_memory(":memory:")
 
@@ -222,7 +245,7 @@ defmodule Xqlite.NIF.RollbackHookTest do
       :ok = XqliteNIF.execute_batch(conn2, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
       listener1 = spawn_collector()
-      :ok = XqliteNIF.set_rollback_hook(conn1, listener1)
+      {:ok, _h1} = XqliteNIF.register_rollback_hook(conn1, listener1)
 
       :ok = XqliteNIF.begin(conn2, :deferred)
       :ok = XqliteNIF.rollback(conn2)

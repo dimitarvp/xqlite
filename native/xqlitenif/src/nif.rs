@@ -1012,95 +1012,132 @@ fn sqlite_version() -> Result<String, XqliteError> {
 }
 
 // ---------------------------------------------------------------------------
-// Log Hook NIFs
+// Log Hook NIFs (global, multi-subscriber)
 // ---------------------------------------------------------------------------
 
 #[rustler::nif]
-fn set_log_hook(pid: rustler::LocalPid) -> Result<rustler::Atom, String> {
-    crate::log_hook::set_log_hook(pid)?;
-    Ok(ok())
+fn register_log_hook(env: Env<'_>, pid: rustler::LocalPid) -> Term<'_> {
+    match crate::log_hook::register(pid) {
+        Ok(id) => (ok(), id).encode(env),
+        Err(msg) => {
+            let err = XqliteError::CannotExecute(msg);
+            (error(), err).encode(env)
+        }
+    }
 }
 
 #[rustler::nif]
-fn remove_log_hook() -> Result<rustler::Atom, String> {
-    crate::log_hook::remove_log_hook()?;
-    Ok(ok())
+fn unregister_log_hook(env: Env<'_>, id: u64) -> Term<'_> {
+    match crate::log_hook::unregister(id) {
+        Ok(()) => ok().encode(env),
+        Err(msg) => {
+            let err = XqliteError::CannotExecute(msg);
+            (error(), err).encode(env)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Update Hook NIFs
+// Per-connection multi-subscriber hooks
 // ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn set_update_hook(
+fn register_update_hook(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     pid: rustler::LocalPid,
 ) -> Term<'_> {
-    let result = connection::with_conn(&handle, |conn| crate::update_hook::set(conn, pid));
-    singular_ok_or_error_tuple(env, result)
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::update_hook::register(&handle.update_hook, pid)
+    });
+    match result {
+        Ok(id) => (ok(), id).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn remove_update_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let result = connection::with_conn(&handle, crate::update_hook::remove);
-    singular_ok_or_error_tuple(env, result)
-}
-
-// ---------------------------------------------------------------------------
-// WAL / Commit / Rollback Hook NIFs
-// ---------------------------------------------------------------------------
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn set_wal_hook(
-    env: Env<'_>,
-    handle: ResourceArc<XqliteConn>,
-    pid: rustler::LocalPid,
-) -> Term<'_> {
-    let state = crate::wal_hook::WalHookState::new(pid);
-    let result = connection::with_conn(&handle, |conn| {
-        crate::wal_hook::install(conn, &handle.wal_hook, state)
+fn unregister_update_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>, id: u64) -> Term<'_> {
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::update_hook::unregister(&handle.update_hook, id);
+        Ok(())
     });
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn remove_wal_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let result = connection::with_conn(&handle, |conn| {
-        crate::wal_hook::uninstall(conn, &handle.wal_hook)
+fn register_wal_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::wal_hook::register(&handle.wal_hook, pid)
+    });
+    match result {
+        Ok(id) => (ok(), id).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn unregister_wal_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>, id: u64) -> Term<'_> {
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::wal_hook::unregister(&handle.wal_hook, id);
+        Ok(())
     });
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn set_commit_hook(
+fn register_commit_hook(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     pid: rustler::LocalPid,
 ) -> Term<'_> {
-    let result = connection::with_conn(&handle, |conn| crate::commit_hook::set(conn, pid));
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::commit_hook::register(&handle.commit_hook, pid)
+    });
+    match result {
+        Ok(id) => (ok(), id).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn unregister_commit_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>, id: u64) -> Term<'_> {
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::commit_hook::unregister(&handle.commit_hook, id);
+        Ok(())
+    });
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn remove_commit_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let result = connection::with_conn(&handle, crate::commit_hook::remove);
-    singular_ok_or_error_tuple(env, result)
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn set_rollback_hook(
+fn register_rollback_hook(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     pid: rustler::LocalPid,
 ) -> Term<'_> {
-    let result = connection::with_conn(&handle, |conn| crate::rollback_hook::set(conn, pid));
-    singular_ok_or_error_tuple(env, result)
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::rollback_hook::register(&handle.rollback_hook, pid)
+    });
+    match result {
+        Ok(id) => (ok(), id).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn remove_rollback_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let result = connection::with_conn(&handle, crate::rollback_hook::remove);
+fn unregister_rollback_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    id: u64,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |_conn| {
+        crate::rollback_hook::unregister(&handle.rollback_hook, id);
+        Ok(())
+    });
     singular_ok_or_error_tuple(env, result)
 }
 

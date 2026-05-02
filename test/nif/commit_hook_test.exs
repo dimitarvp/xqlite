@@ -16,34 +16,38 @@ defmodule Xqlite.NIF.CommitHookTest do
         {:ok, conn: conn}
       end
 
-      test "hook fires on implicit commit", %{conn: conn} do
-        :ok = NIF.set_commit_hook(conn, self())
-        :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-
-        # CREATE TABLE runs in an implicit transaction; commit fires.
-        assert_receive {:xqlite_commit}, 500
-
-        :ok = NIF.remove_commit_hook(conn)
+      test "register / unregister returns handle and is idempotent", %{conn: conn} do
+        assert {:ok, h} = NIF.register_commit_hook(conn, self())
+        assert is_integer(h) and h > 0
+        assert :ok = NIF.unregister_commit_hook(conn, h)
+        assert :ok = NIF.unregister_commit_hook(conn, h)
+        assert :ok = NIF.unregister_commit_hook(conn, 999_999)
       end
 
-      test "hook fires on explicit commit", %{conn: conn} do
+      test "single subscriber fires on implicit commit", %{conn: conn} do
+        {:ok, h} = NIF.register_commit_hook(conn, self())
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+        assert_receive {:xqlite_commit}, 500
+        :ok = NIF.unregister_commit_hook(conn, h)
+      end
+
+      test "single subscriber fires on explicit commit", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_commit_hook(conn, self())
+        {:ok, h} = NIF.register_commit_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
         :ok = NIF.commit(conn)
 
         assert_receive {:xqlite_commit}, 500
-
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h)
       end
 
-      test "hook does not fire on rollback", %{conn: conn} do
+      test "does not fire on rollback", %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-        :ok = NIF.set_commit_hook(conn, self())
+        {:ok, h} = NIF.register_commit_hook(conn, self())
 
         :ok = NIF.begin(conn, :deferred)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
@@ -51,25 +55,26 @@ defmodule Xqlite.NIF.CommitHookTest do
 
         refute_receive {:xqlite_commit}, 100
 
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h)
       end
 
-      test "remove stops delivery", %{conn: conn} do
-        :ok = NIF.set_commit_hook(conn, self())
+      test "unregister stops delivery to that subscriber", %{conn: conn} do
+        {:ok, h} = NIF.register_commit_hook(conn, self())
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
         assert_receive {:xqlite_commit}, 500
 
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h)
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
         refute_receive {:xqlite_commit}, 100
       end
 
-      test "multiple sequential commits each fire exactly once", %{conn: conn} do
+      test "multiple sequential commits each fire exactly once per subscriber",
+           %{conn: conn} do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
         collector = spawn_collector()
-        :ok = NIF.set_commit_hook(conn, collector)
+        {:ok, h} = NIF.register_commit_hook(conn, collector)
 
         for i <- 1..5 do
           :ok = NIF.begin(conn, :deferred)
@@ -79,46 +84,64 @@ defmodule Xqlite.NIF.CommitHookTest do
 
         assert length(get_collected(collector)) == 5
 
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h)
       end
 
-      test "re-register after remove works", %{conn: conn} do
-        :ok = NIF.set_commit_hook(conn, self())
-        :ok = NIF.remove_commit_hook(conn)
-        :ok = NIF.set_commit_hook(conn, self())
+      test "two subscribers each receive every commit", %{conn: conn} do
+        listener_a = spawn_collector()
+        listener_b = spawn_collector()
+
+        {:ok, h_a} = NIF.register_commit_hook(conn, listener_a)
+        {:ok, h_b} = NIF.register_commit_hook(conn, listener_b)
 
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-        assert_receive {:xqlite_commit}, 500
+        Process.sleep(20)
 
-        :ok = NIF.remove_commit_hook(conn)
+        msgs_a = get_collected(listener_a)
+        msgs_b = get_collected(listener_b)
+        assert length(msgs_a) > 0
+        assert length(msgs_b) > 0
+        assert length(msgs_a) == length(msgs_b)
+
+        :ok = NIF.unregister_commit_hook(conn, h_a)
+        :ok = NIF.unregister_commit_hook(conn, h_b)
       end
 
-      test "replacing listener — old pid stops receiving", %{conn: conn} do
-        old_listener = spawn_collector()
-        new_listener = spawn_collector()
+      test "unregistering one subscriber leaves the other working", %{conn: conn} do
+        listener_kept = spawn_collector()
+        listener_removed = spawn_collector()
 
-        :ok = NIF.set_commit_hook(conn, old_listener)
-        :ok = NIF.set_commit_hook(conn, new_listener)
+        {:ok, h_kept} = NIF.register_commit_hook(conn, listener_kept)
+        {:ok, h_removed} = NIF.register_commit_hook(conn, listener_removed)
+
+        :ok = NIF.unregister_commit_hook(conn, h_removed)
 
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+        Process.sleep(20)
 
-        assert length(get_collected(new_listener)) > 0
-        assert get_collected(old_listener) == []
+        assert length(get_collected(listener_kept)) > 0
+        assert get_collected(listener_removed) == []
 
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h_kept)
       end
 
-      test "dead subscriber pid does not crash the NIF", %{conn: conn} do
+      test "dead subscriber pid does not crash or block siblings", %{conn: conn} do
         dead = spawn(fn -> :ok end)
         ref = Process.monitor(dead)
         receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
 
-        :ok = NIF.set_commit_hook(conn, dead)
+        live = spawn_collector()
+
+        {:ok, h_dead} = NIF.register_commit_hook(conn, dead)
+        {:ok, h_live} = NIF.register_commit_hook(conn, live)
 
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
+        Process.sleep(20)
 
-        :ok = NIF.remove_commit_hook(conn)
+        assert length(get_collected(live)) > 0
+
+        :ok = NIF.unregister_commit_hook(conn, h_dead)
+        :ok = NIF.unregister_commit_hook(conn, h_live)
       end
 
       test "GenServer-like process forwards commit events", %{conn: conn} do
@@ -129,48 +152,47 @@ defmodule Xqlite.NIF.CommitHookTest do
             forwarder_loop(test_pid)
           end)
 
-        :ok = NIF.set_commit_hook(conn, forwarder)
-
+        {:ok, h} = NIF.register_commit_hook(conn, forwarder)
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
         assert_receive {:forwarded_commit, {:xqlite_commit}}, 500
 
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h)
       end
 
-      test "survives 50 rapid set/remove cycles", %{conn: conn} do
+      test "survives 50 rapid register/unregister cycles", %{conn: conn} do
         for _ <- 1..50 do
-          :ok = NIF.set_commit_hook(conn, self())
-          :ok = NIF.remove_commit_hook(conn)
+          {:ok, h} = NIF.register_commit_hook(conn, self())
+          :ok = NIF.unregister_commit_hook(conn, h)
         end
 
-        :ok = NIF.set_commit_hook(conn, self())
+        {:ok, h} = NIF.register_commit_hook(conn, self())
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
         assert_receive {:xqlite_commit}, 500
 
-        :ok = NIF.remove_commit_hook(conn)
+        :ok = NIF.unregister_commit_hook(conn, h)
       end
     end
   end
 
-  # Outside the per-connection-mode loop — closed-conn + multi-conn isolation.
-
   describe "closed connection" do
-    test "set_commit_hook on closed connection returns error" do
+    test "register on closed connection returns error" do
       {:ok, conn} = XqliteNIF.open_in_memory(":memory:")
       :ok = XqliteNIF.close(conn)
-      assert {:error, :connection_closed} = XqliteNIF.set_commit_hook(conn, self())
+
+      assert {:error, :connection_closed} =
+               XqliteNIF.register_commit_hook(conn, self())
     end
 
-    test "remove_commit_hook on closed connection returns error" do
+    test "unregister on closed connection returns error" do
       {:ok, conn} = XqliteNIF.open_in_memory(":memory:")
       :ok = XqliteNIF.close(conn)
-      assert {:error, :connection_closed} = XqliteNIF.remove_commit_hook(conn)
+      assert {:error, :connection_closed} = XqliteNIF.unregister_commit_hook(conn, 1)
     end
   end
 
   describe "per-connection isolation" do
-    test "hook on conn1 does not fire for conn2 commits" do
+    test "subscriber on conn1 does not fire for conn2 commits" do
       {:ok, conn1} = XqliteNIF.open_in_memory(":memory:")
       {:ok, conn2} = XqliteNIF.open_in_memory(":memory:")
 
@@ -180,7 +202,7 @@ defmodule Xqlite.NIF.CommitHookTest do
       end)
 
       listener1 = spawn_collector()
-      :ok = XqliteNIF.set_commit_hook(conn1, listener1)
+      {:ok, _h1} = XqliteNIF.register_commit_hook(conn1, listener1)
 
       :ok = XqliteNIF.execute_batch(conn2, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 

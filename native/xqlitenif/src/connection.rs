@@ -1,11 +1,15 @@
 use crate::atoms;
 use crate::busy_handler::BusyHandlerState;
+use crate::commit_hook::{self, CommitSubscriber};
 use crate::error::XqliteError;
-use crate::hook_util;
+use crate::hook_util::{self, HookList};
 use crate::progress_dispatch::{self, ProgressDispatch};
-use crate::wal_hook::WalHookState;
+use crate::rollback_hook::{self, RollbackSubscriber};
+use crate::update_hook::{self, UpdateSubscriber};
+use crate::wal_hook::{self, WalSubscriber};
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicPtr;
@@ -14,14 +18,23 @@ use std::sync::atomic::AtomicPtr;
 pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
     pub(crate) extensions_enabled: AtomicBool,
-    // Leaked `Box<*HookState>` pointers for the hooks that need FFI
-    // state management (the rusqlite-closure-accepting hooks —
-    // commit/rollback/update — do their own internal box management
-    // and don't live here). `install` / `uninstall` in each module
-    // manage the lifecycle; the `Drop` impl below reclaims stragglers
-    // when the connection resource is GC'd.
+
+    // The remaining single-subscriber FFI hook (busy_handler) — its
+    // callback returns a policy decision so multi-subscriber
+    // composition is ill-defined; see project_busy_handler_observer_split.
     pub(crate) busy_handler: AtomicPtr<BusyHandlerState>,
-    pub(crate) wal_hook: AtomicPtr<WalHookState>,
+
+    // Multi-subscriber per-connection hook lists. Each holds N
+    // `HookEntry<T>`s, one per registered subscriber. A master closure
+    // (or C callback for FFI hooks) is installed exactly once at open
+    // time; subscriber-level register/unregister only modifies the
+    // HookList. `Arc<HookList>` for the rusqlite-closure hooks because
+    // the closure captures a clone — this keeps the list alive across
+    // the closure's lifetime independently of XqliteConn's drop order.
+    pub(crate) wal_hook: HookList<WalSubscriber>,
+    pub(crate) update_hook: Arc<HookList<UpdateSubscriber>>,
+    pub(crate) commit_hook: Arc<HookList<CommitSubscriber>>,
+    pub(crate) rollback_hook: Arc<HookList<RollbackSubscriber>>,
 
     /// Multi-subscriber dispatch on SQLite's single
     /// `sqlite3_progress_handler` slot. Owned directly (no box
@@ -37,13 +50,12 @@ impl Resource for XqliteConn {}
 
 impl Drop for XqliteConn {
     fn drop(&mut self) {
+        // Field declaration order ensures `conn` (the SQLite Connection)
+        // drops first, so no callback can fire while we reclaim
+        // subscriber state below. Each HookList<T> reclaims its own
+        // box via its Drop impl; busy_handler is the only remaining
+        // boxed-pointer slot we manage explicitly.
         hook_util::drop_hook(&self.busy_handler);
-        hook_util::drop_hook(&self.wal_hook);
-        // ProgressDispatch's HookList<T> drop_all is invoked by its
-        // own Drop impl when this struct unwinds, so no explicit
-        // cleanup needed here. Field declaration order ensures
-        // `conn` (the SQLite Connection) drops first, so no callback
-        // can fire while progress_dispatch state is being reclaimed.
     }
 }
 
@@ -86,23 +98,31 @@ pub(crate) fn handle_open_result(
 ) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     match open_result {
         Ok(conn) => {
+            let update_hook_list = Arc::new(HookList::new());
+            let commit_hook_list = Arc::new(HookList::new());
+            let rollback_hook_list = Arc::new(HookList::new());
+
             let handle = ResourceArc::new(XqliteConn {
                 conn: Mutex::new(Some(conn)),
                 extensions_enabled: AtomicBool::new(false),
                 busy_handler: AtomicPtr::new(std::ptr::null_mut()),
-                wal_hook: AtomicPtr::new(std::ptr::null_mut()),
+                wal_hook: HookList::new(),
+                update_hook: Arc::clone(&update_hook_list),
+                commit_hook: Arc::clone(&commit_hook_list),
+                rollback_hook: Arc::clone(&rollback_hook_list),
                 progress_dispatch: ProgressDispatch::new(),
             });
-            // Register the progress dispatch callback once. The
-            // dispatch's address is stable for the resource's
-            // lifetime; both subscriber lists start empty so the
-            // callback is a 2-load no-op until the first
-            // `register_progress_hook` or cancellable query.
+
+            // Install master callbacks for every multi-subscriber hook.
+            // Each is registered exactly once for the connection's
+            // lifetime; subscriber-level register/unregister never
+            // touches SQLite again.
             //
-            // SAFETY: the dispatch reference is taken from inside the
-            // ResourceArc, so it lives as long as `handle`. We drop
-            // the conn (and any in-flight callback) before the
-            // dispatch via field declaration order.
+            // SAFETY for the FFI hooks (wal, progress): the HookList
+            // / ProgressDispatch references are taken from inside the
+            // ResourceArc, so they live as long as `handle`. The conn
+            // (and any in-flight callback) drops before subscriber
+            // state via field declaration order.
             {
                 let conn_guard = handle
                     .conn
@@ -114,7 +134,11 @@ pub(crate) fn handle_open_result(
                             conn_ref,
                             &handle.progress_dispatch,
                         );
+                        wal_hook::install_callback(conn_ref, &handle.wal_hook);
                     }
+                    update_hook::install_callback(conn_ref, update_hook_list)?;
+                    commit_hook::install_callback(conn_ref, commit_hook_list)?;
+                    rollback_hook::install_callback(conn_ref, rollback_hook_list)?;
                 }
             }
             Ok(handle)

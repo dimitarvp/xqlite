@@ -23,12 +23,12 @@ defmodule Xqlite.NIF.UpdateHookTest do
       end
 
       test "returns :ok", %{conn: conn} do
-        assert :ok = NIF.set_update_hook(conn, self())
+        assert {:ok, h} = NIF.register_update_hook(conn, self())
       end
 
       test "can be called multiple times to replace listener", %{conn: conn} do
-        assert :ok = NIF.set_update_hook(conn, self())
-        assert :ok = NIF.set_update_hook(conn, self())
+        assert {:ok, h} = NIF.register_update_hook(conn, self())
+        assert {:ok, h} = NIF.register_update_hook(conn, self())
       end
     end
 
@@ -43,18 +43,18 @@ defmodule Xqlite.NIF.UpdateHookTest do
       end
 
       test "returns :ok after hook was set", %{conn: conn} do
-        :ok = NIF.set_update_hook(conn, self())
-        assert :ok = NIF.remove_update_hook(conn)
+        {:ok, h} = NIF.register_update_hook(conn, self())
+        assert :ok = NIF.unregister_update_hook(conn, h)
       end
 
-      test "returns :ok even without prior set", %{conn: conn} do
-        assert :ok = NIF.remove_update_hook(conn)
+      test "returns :ok with unknown handle (idempotent)", %{conn: conn} do
+        assert :ok = NIF.unregister_update_hook(conn, 999_999)
       end
 
       test "is idempotent", %{conn: conn} do
-        :ok = NIF.set_update_hook(conn, self())
-        assert :ok = NIF.remove_update_hook(conn)
-        assert :ok = NIF.remove_update_hook(conn)
+        {:ok, h} = NIF.register_update_hook(conn, self())
+        assert :ok = NIF.unregister_update_hook(conn, h)
+        assert :ok = NIF.unregister_update_hook(conn, h)
       end
     end
 
@@ -71,7 +71,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           CREATE TABLE hook_test (id INTEGER PRIMARY KEY, val TEXT);
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -118,7 +118,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           INSERT INTO hook_test VALUES (1, 'before');
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -156,7 +156,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           INSERT INTO hook_test VALUES (2, 'also doomed');
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -192,31 +192,57 @@ defmodule Xqlite.NIF.UpdateHookTest do
       end
 
       test "stops delivery after remove_update_hook", %{conn: conn} do
-        :ok = NIF.set_update_hook(conn, self())
-        :ok = NIF.remove_update_hook(conn)
+        {:ok, h} = NIF.register_update_hook(conn, self())
+        :ok = NIF.unregister_update_hook(conn, h)
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO hook_test VALUES (1, 'silent')", [])
 
         refute_receive {:xqlite_update, _, _, _, _}, 500
       end
 
-      test "replacing listener sends events only to new pid", %{conn: conn} do
-        old_listener = spawn_collector()
-        new_listener = spawn_collector()
+      test "two subscribers each receive every event (multi-subscriber)",
+           %{conn: conn} do
+        listener_a = spawn_collector()
+        listener_b = spawn_collector()
 
-        :ok = NIF.set_update_hook(conn, old_listener)
-        :ok = NIF.set_update_hook(conn, new_listener)
+        {:ok, h_a} = NIF.register_update_hook(conn, listener_a)
+        {:ok, h_b} = NIF.register_update_hook(conn, listener_b)
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO hook_test VALUES (1, 'test')", [])
+        Process.sleep(20)
 
-        assert length(get_collected(new_listener)) > 0
-        assert get_collected(old_listener) == []
+        msgs_a = get_collected(listener_a)
+        msgs_b = get_collected(listener_b)
+
+        assert length(msgs_a) == 1
+        assert length(msgs_b) == 1
+
+        :ok = NIF.unregister_update_hook(conn, h_a)
+        :ok = NIF.unregister_update_hook(conn, h_b)
+      end
+
+      test "unregistering one subscriber leaves the other working", %{conn: conn} do
+        listener_kept = spawn_collector()
+        listener_removed = spawn_collector()
+
+        {:ok, h_kept} = NIF.register_update_hook(conn, listener_kept)
+        {:ok, h_removed} = NIF.register_update_hook(conn, listener_removed)
+
+        :ok = NIF.unregister_update_hook(conn, h_removed)
+
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO hook_test VALUES (1, 'test')", [])
+        Process.sleep(20)
+
+        assert length(get_collected(listener_kept)) == 1
+        assert get_collected(listener_removed) == []
+
+        :ok = NIF.unregister_update_hook(conn, h_kept)
       end
 
       test "re-register after remove works", %{conn: conn} do
-        :ok = NIF.set_update_hook(conn, self())
-        :ok = NIF.remove_update_hook(conn)
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
+        :ok = NIF.unregister_update_hook(conn, h)
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO hook_test VALUES (1, 'back')", [])
 
@@ -228,7 +254,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
         ref = Process.monitor(dead)
         receive do: ({:DOWN, ^ref, :process, ^dead, _} -> :ok)
 
-        :ok = NIF.set_update_hook(conn, dead)
+        {:ok, h} = NIF.register_update_hook(conn, dead)
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO hook_test VALUES (1, 'ghost')", [])
       end
@@ -247,7 +273,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           CREATE TABLE hook_test (id INTEGER PRIMARY KEY, val TEXT);
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -305,8 +331,8 @@ defmodule Xqlite.NIF.UpdateHookTest do
           CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, body TEXT);
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
-        {:ok, conn: conn}
+        {:ok, h} = NIF.register_update_hook(conn, self())
+        {:ok, conn: conn, hook_handle: h}
       end
 
       test "reports correct table name for each table", %{conn: conn} do
@@ -319,9 +345,9 @@ defmodule Xqlite.NIF.UpdateHookTest do
         assert_receive {:xqlite_update, :insert, "main", "posts", 1}, 2_000
       end
 
-      test "cascade delete fires for both tables", %{conn: conn} do
+      test "cascade delete fires for both tables", %{conn: conn, hook_handle: h} do
         # Enable foreign keys and recreate with cascade
-        :ok = NIF.remove_update_hook(conn)
+        :ok = NIF.unregister_update_hook(conn, h)
         {:ok, _} = NIF.set_pragma(conn, "foreign_keys", true)
 
         :ok =
@@ -341,7 +367,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO posts VALUES (1, 1, 'hello')", [])
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "DELETE FROM users WHERE id = 1", [])
 
@@ -371,7 +397,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
 
       test "hook fires correctly under concurrent inserts", %{conn: conn} do
         collector = spawn_collector()
-        :ok = NIF.set_update_hook(conn, collector)
+        {:ok, h} = NIF.register_update_hook(conn, collector)
 
         n = 30
 
@@ -409,7 +435,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
       end
 
       test "fires for each statement in a batch", %{conn: conn} do
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         :ok =
           NIF.execute_batch(conn, """
@@ -435,7 +461,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
         :ok =
           NIF.execute_batch(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -457,12 +483,12 @@ defmodule Xqlite.NIF.UpdateHookTest do
         {:ok, conn: conn}
       end
 
-      test "set_update_hook on closed connection returns error", %{conn: conn} do
-        assert {:error, :connection_closed} = NIF.set_update_hook(conn, self())
+      test "register_update_hook on closed connection returns error", %{conn: conn} do
+        assert {:error, :connection_closed} = NIF.register_update_hook(conn, self())
       end
 
-      test "remove_update_hook on closed connection returns error", %{conn: conn} do
-        assert {:error, :connection_closed} = NIF.remove_update_hook(conn)
+      test "unregister_update_hook on closed connection returns error", %{conn: conn} do
+        assert {:error, :connection_closed} = NIF.unregister_update_hook(conn, 1)
       end
     end
 
@@ -491,7 +517,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
             end
           end)
 
-        :ok = NIF.set_update_hook(conn, forwarder)
+        {:ok, h} = NIF.register_update_hook(conn, forwarder)
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1)", [])
 
         assert_receive {:forwarded, {:xqlite_update, :insert, "main", "t", 1}}, 2_000
@@ -523,7 +549,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           );
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -678,7 +704,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           END;
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO orders (product) VALUES (?1)", ["widget"])
 
@@ -705,7 +731,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO accounts VALUES (1, 100.0)", [])
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "UPDATE accounts SET balance = 75.0 WHERE id = 1", [])
 
@@ -731,7 +757,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO sessions VALUES (1, 42, 'abc123')", [])
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "DELETE FROM sessions WHERE id = 1", [])
 
@@ -758,7 +784,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           INSERT INTO items VALUES (3, 'active');
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 3} = NIF.execute(conn, "DELETE FROM items WHERE id IN (1, 2, 3)", [])
 
@@ -796,7 +822,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           END;
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t1 (val) VALUES ('origin')", [])
 
@@ -825,7 +851,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO kv VALUES ('foo', 'bar')", [])
 
@@ -839,7 +865,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           INSERT INTO kv VALUES ('k1', 'v1');
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "UPDATE kv SET value = 'v2' WHERE key = 'k1'", [])
 
@@ -853,7 +879,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           INSERT INTO kv VALUES ('k1', 'v1');
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "DELETE FROM kv WHERE key = 'k1'", [])
 
@@ -867,7 +893,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO kv VALUES ('k', 'v')", [])
         {:ok, 1} = NIF.execute(conn, "INSERT INTO regular VALUES (1, 'hello')", [])
@@ -891,7 +917,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT);
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -961,11 +987,11 @@ defmodule Xqlite.NIF.UpdateHookTest do
 
       test "survives rapid set/remove cycles on a single connection", %{conn: conn} do
         for _ <- 1..50 do
-          :ok = NIF.set_update_hook(conn, self())
-          :ok = NIF.remove_update_hook(conn)
+          {:ok, h} = NIF.register_update_hook(conn, self())
+          :ok = NIF.unregister_update_hook(conn, h)
         end
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1, 'survived')", [])
 
@@ -976,11 +1002,11 @@ defmodule Xqlite.NIF.UpdateHookTest do
         pids =
           for _ <- 1..50 do
             pid = spawn(fn -> Process.sleep(5_000) end)
-            :ok = NIF.set_update_hook(conn, pid)
+            {:ok, h} = NIF.register_update_hook(conn, pid)
             pid
           end
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
 
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1, 'final')", [])
 
@@ -991,30 +1017,33 @@ defmodule Xqlite.NIF.UpdateHookTest do
         end)
       end
 
-      test "concurrent set/remove from multiple tasks does not crash", %{conn: conn} do
+      test "concurrent register/unregister from multiple tasks does not crash",
+           %{conn: conn} do
         tasks =
           Enum.map(1..10, fn _ ->
             Task.async(fn ->
               for _ <- 1..20 do
-                NIF.set_update_hook(conn, self())
-                NIF.remove_update_hook(conn)
+                {:ok, h} = NIF.register_update_hook(conn, self())
+                NIF.unregister_update_hook(conn, h)
               end
             end)
           end)
 
         Task.await_many(tasks, 10_000)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1, 'calm')", [])
 
         assert_receive {:xqlite_update, :insert, "main", "t", 1}, 2_000
+
+        :ok = NIF.unregister_update_hook(conn, h)
       end
 
       test "set/remove interleaved with DML operations", %{conn: conn} do
         for i <- 1..20 do
-          :ok = NIF.set_update_hook(conn, self())
+          {:ok, h} = NIF.register_update_hook(conn, self())
           {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (?1, 'v')", [i])
-          :ok = NIF.remove_update_hook(conn)
+          :ok = NIF.unregister_update_hook(conn, h)
         end
 
         messages = collect_all_updates(2_000)
@@ -1052,7 +1081,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
           );
           """)
 
-        :ok = NIF.set_update_hook(conn, self())
+        {:ok, h} = NIF.register_update_hook(conn, self())
         {:ok, conn: conn}
       end
 
@@ -1114,7 +1143,7 @@ defmodule Xqlite.NIF.UpdateHookTest do
         NIF.execute_batch(conn2, "CREATE TABLE t (id INTEGER PRIMARY KEY);")
 
       listener1 = spawn_collector()
-      :ok = NIF.set_update_hook(conn1, listener1)
+      {:ok, h} = NIF.register_update_hook(conn1, listener1)
 
       # Only insert on conn2 — conn1's hook should not fire
       {:ok, 1} = NIF.execute(conn2, "INSERT INTO t VALUES (1)", [])
@@ -1139,8 +1168,8 @@ defmodule Xqlite.NIF.UpdateHookTest do
 
       listener1 = spawn_collector()
       listener2 = spawn_collector()
-      :ok = NIF.set_update_hook(conn1, listener1)
-      :ok = NIF.set_update_hook(conn2, listener2)
+      {:ok, _h1} = NIF.register_update_hook(conn1, listener1)
+      {:ok, _h2} = NIF.register_update_hook(conn2, listener2)
 
       {:ok, 1} = NIF.execute(conn1, "INSERT INTO t VALUES (1)", [])
       {:ok, 1} = NIF.execute(conn2, "INSERT INTO t VALUES (2)", [])
@@ -1170,9 +1199,9 @@ defmodule Xqlite.NIF.UpdateHookTest do
       :ok =
         NIF.execute_batch(conn2, "CREATE TABLE t (id INTEGER PRIMARY KEY);")
 
-      :ok = NIF.set_update_hook(conn1, self())
-      :ok = NIF.set_update_hook(conn2, self())
-      :ok = NIF.remove_update_hook(conn1)
+      {:ok, h1} = NIF.register_update_hook(conn1, self())
+      {:ok, _h2} = NIF.register_update_hook(conn2, self())
+      :ok = NIF.unregister_update_hook(conn1, h1)
 
       {:ok, 1} = NIF.execute(conn2, "INSERT INTO t VALUES (1)", [])
 

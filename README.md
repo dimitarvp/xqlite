@@ -107,20 +107,32 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 ### Receive per-connection change notifications
 
 ```elixir
-:ok = XqliteNIF.set_update_hook(conn, self())
+{:ok, handle} = XqliteNIF.register_update_hook(conn, self())
 {:ok, 1} = XqliteNIF.execute(conn, "INSERT INTO users (name) VALUES ('Bob')", [])
 # => receive {:xqlite_update, :insert, "main", "users", 2}
+:ok = XqliteNIF.unregister_update_hook(conn, handle)
 ```
+
+Multiple subscribers can coexist on the same connection — each
+registration returns a distinct handle, and unregistering one never
+affects the others.
 
 ### Transaction lifecycle hooks
 
 ```elixir
-:ok = XqliteNIF.set_commit_hook(conn, self())     # {:xqlite_commit} before each commit
-:ok = XqliteNIF.set_rollback_hook(conn, self())   # {:xqlite_rollback} after each rollback
-:ok = XqliteNIF.set_wal_hook(conn, self())        # {:xqlite_wal, db_name, pages} after WAL commits
+{:ok, c_h} = XqliteNIF.register_commit_hook(conn, self())     # {:xqlite_commit} before each commit
+{:ok, r_h} = XqliteNIF.register_rollback_hook(conn, self())   # {:xqlite_rollback} after each rollback
+{:ok, w_h} = XqliteNIF.register_wal_hook(conn, self())        # {:xqlite_wal, db_name, pages} after WAL commits
+# ...later, unregister specific subscribers by their handles:
+:ok = XqliteNIF.unregister_commit_hook(conn, c_h)
 ```
 
-The commit hook is observation-only and never vetoes the commit. Combined with `set_update_hook/2` and `set_busy_handler/5`, the connection exposes every SQLite-visible lifecycle event for telemetry without touching the SQL stream.
+All transaction-lifecycle hooks (commit, rollback, WAL) are
+multi-subscriber — multiple processes can subscribe to the same
+connection independently. The commit hook is observation-only and
+never vetoes the commit. Combined with `register_update_hook/2` and
+`set_busy_handler/5`, the connection exposes every SQLite-visible
+lifecycle event for telemetry without touching the SQL stream.
 
 ### Busy handler -- observe contention, retry, give up on a budget
 
