@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **Cancellable NIFs now take a list of tokens instead of a single
+  token.** `XqliteNIF.query_cancellable/4`,
+  `query_with_changes_cancellable/4`, `execute_cancellable/4`,
+  `execute_batch_cancellable/3`, and `backup_with_progress/6` now expect
+  the trailing argument to be `[reference()]` (possibly empty) rather
+  than `reference()`. OR-semantics: any signalled token cancels the
+  operation. Single-token callers wrap as `[token]`. The new
+  `Xqlite.query_cancellable/4` (and friends) plus
+  `Xqlite.backup_with_progress/6` accept either a single token or a list
+  and normalise via `List.wrap/1`.
 - **`XqliteNIF` is now the raw NIF boundary only.** Every function in
   `XqliteNIF` is a bare NIF stub; all ergonomic wrappers moved to the
   user-facing `Xqlite` module. Migrations:
@@ -43,9 +53,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rollback hook**: `XqliteNIF.set_rollback_hook/2` +
   `remove_rollback_hook/1`. Sends `{:xqlite_rollback}` to a pid after
   each rollback.
+- **Progress hook (multi-subscriber)**:
+  `XqliteNIF.register_progress_hook/4` +
+  `XqliteNIF.unregister_progress_hook/2` plus
+  `Xqlite.register_progress_hook/3` /
+  `Xqlite.unregister_progress_hook/2`. Multiple processes can subscribe
+  independently to the same connection; each receives
+  `{:xqlite_progress, count, elapsed_ms}` (or
+  `{:xqlite_progress, tag, count, elapsed_ms}` if a tag is supplied),
+  decimated by the per-subscriber `every_n` knob. Coexists with
+  cancellation on the single SQLite progress-handler slot — cancel
+  signals interrupt before tick emission.
+- **Multi-token cancellation**: cancellable NIFs and
+  `backup_with_progress` accept a list of tokens; any signal cancels
+  (OR-semantics). The high-level `Xqlite.query_cancellable/4` family
+  accepts either a single token or a list.
 
 ### Internal
 
+- New `progress_dispatch` Rust module multiplexes the single SQLite
+  `sqlite3_progress_handler` slot between cancellation checkers (per
+  cancellable-query lifetime) and tick subscribers (per-conn lifetime),
+  via two `HookList<T>`s. The C callback is registered eagerly at
+  connection open and stays for the lifetime of the connection;
+  subscriber install/uninstall is lock-free atomic-swap-and-reclaim.
+- New `HookList<T>` primitive in `hook_util`: lock-free copy-on-write
+  list of subscribers. Reads (in callbacks) are wait-free atomic loads;
+  writes (under the conn Mutex) clone the Vec, mutate the clone, and
+  atomic-swap. Vec is the proof-of-concept choice; ring buffer / lock-
+  free structures are tracked as a benchmark-gated future optimisation.
+- `cancel.rs::ProgressHandlerGuard` no longer touches FFI — it pushes
+  one `CancelSubscriber` per token onto the dispatch and unregisters
+  them on drop. Holds the owning `Arc<AtomicBool>` for each subscriber
+  so the raw pointer stays valid for the registration's lifetime.
 - Shared `hook_util` Rust module deduplicates term-construction
   (`make_atom` / `make_binary`) and atomic-slot lifecycle
   (`install_hook` / `uninstall_hook` / `drop_hook`) across the FFI-based

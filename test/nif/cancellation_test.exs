@@ -63,7 +63,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
       test "query_cancellable/4 successfully cancels a running query", %{conn: conn} do
         assert_cancellation(conn, fn conn, token ->
-          NIF.query_cancellable(conn, @slow_query, [], token)
+          NIF.query_cancellable(conn, @slow_query, [], [token])
         end)
       end
 
@@ -72,13 +72,13 @@ defmodule Xqlite.NIF.CancellationTest do
 
         # Run the query cancellably, but don't trigger the token
         assert {:ok, %{rows: [[_result]]}} =
-                 NIF.query_cancellable(conn, @slow_query, [], token)
+                 NIF.query_cancellable(conn, @slow_query, [], [token])
       end
 
       test "normal query works after a cancelled query (handler unregistered)", %{conn: conn} do
         # --- Part 1: Run and cancel a query using the helper ---
         assert_cancellation(conn, fn conn, token ->
-          NIF.query_cancellable(conn, @slow_query, [], token)
+          NIF.query_cancellable(conn, @slow_query, [], [token])
         end)
 
         # --- Part 2: Run a normal, non-cancellable query on the same connection ---
@@ -91,7 +91,7 @@ defmodule Xqlite.NIF.CancellationTest do
         {:ok, token} = NIF.create_cancel_token()
 
         assert {:ok, %{rows: [[_result]]}} =
-                 NIF.query_cancellable(conn, @slow_query, [], token)
+                 NIF.query_cancellable(conn, @slow_query, [], [token])
 
         assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT 1;", [])
@@ -106,7 +106,7 @@ defmodule Xqlite.NIF.CancellationTest do
             conn,
             "INSERT INTO cancel_trigger_test (id) VALUES (1);",
             [],
-            token
+            [token]
           )
         end)
       end
@@ -120,7 +120,7 @@ defmodule Xqlite.NIF.CancellationTest do
                    conn,
                    "INSERT INTO cancel_trigger_test (id) VALUES (1);",
                    [],
-                   token
+                   [token]
                  )
       end
 
@@ -134,7 +134,7 @@ defmodule Xqlite.NIF.CancellationTest do
             conn,
             "INSERT INTO cancel_trigger_test (id) VALUES (1);",
             [],
-            token
+            [token]
           )
         end)
 
@@ -151,7 +151,7 @@ defmodule Xqlite.NIF.CancellationTest do
         long_batch = generate_long_batch(@batch_cancel_table)
 
         assert_cancellation(conn, fn conn, token ->
-          NIF.execute_batch_cancellable(conn, long_batch, token)
+          NIF.execute_batch_cancellable(conn, long_batch, [token])
         end)
 
         # Add an assertion to prove the batch was cancelled *during* execution.
@@ -167,7 +167,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
         # Use a much smaller batch that completes quickly
         short_batch = "UPDATE #{@batch_cancel_table} SET data = 'batch_update' WHERE id=0;"
-        assert :ok = NIF.execute_batch_cancellable(conn, short_batch, token)
+        assert :ok = NIF.execute_batch_cancellable(conn, short_batch, [token])
 
         assert {:ok, %{rows: [["batch_update"]]}} =
                  NIF.query(conn, "SELECT data FROM #{@batch_cancel_table} WHERE id = 0;", [])
@@ -180,7 +180,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
         # --- Part 1: Run and cancel a batch ---
         assert_cancellation(conn, fn conn, token ->
-          NIF.execute_batch_cancellable(conn, long_batch, token)
+          NIF.execute_batch_cancellable(conn, long_batch, [token])
         end)
 
         # --- Part 2: Run a normal, non-cancellable batch on the same connection ---
@@ -211,7 +211,9 @@ defmodule Xqlite.NIF.CancellationTest do
     task =
       Task.async(fn ->
         send(parent, {:nif_started, self()})
-        # The provided function is called here with the conn and token
+        # The provided function is called with the conn and a single
+        # token; lambdas wrap it with `[token]` themselves to match the
+        # NIF signature.
         nif_fun.(conn, token)
       end)
 

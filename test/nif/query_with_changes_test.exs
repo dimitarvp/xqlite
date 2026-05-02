@@ -186,7 +186,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
     {:ok, token} = NIF.create_cancel_token()
 
     assert {:ok, %{columns: ["id", "val"], rows: [[1, "a"]], num_rows: 1, changes: 0}} =
-             NIF.query_with_changes_cancellable(conn, "SELECT * FROM qwcc", [], token)
+             NIF.query_with_changes_cancellable(conn, "SELECT * FROM qwcc", [], [token])
 
     NIF.close(conn)
   end
@@ -201,7 +201,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
                conn,
                "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt LIMIT 5000000) SELECT SUM(x) FROM cnt",
                [],
-               token
+               [token]
              )
 
     NIF.close(conn)

@@ -164,9 +164,13 @@ defmodule XqliteNIF do
   `conn` is the database connection resource.
   `sql` is the SQL query string.
   `params` is an optional list of positional or keyword parameters.
-  `cancel_token` is a resource created by `create_cancel_token/0`. If this token
-  is cancelled via `cancel_operation/1` while the query is executing, the
-  query will be interrupted.
+  `cancel_tokens` is a list of resources created by `create_cancel_token/0`.
+  If *any* token in the list is cancelled via `cancel_operation/1` while the
+  query is executing, the query will be interrupted (OR-semantics — the
+  earliest signal wins). Pass an empty list to run without cancellation.
+
+  Use `Xqlite.query_cancellable/4` to pass either a single token or a list;
+  this raw NIF accepts only the list form.
 
   Returns `{:ok, result_map}` on successful completion, where `result_map` is
   `%{columns: [...], rows: [...], num_rows: ...}`.
@@ -177,9 +181,9 @@ defmodule XqliteNIF do
           conn :: Xqlite.conn(),
           sql :: String.t(),
           params :: list() | keyword(),
-          cancel_token :: reference()
+          cancel_tokens :: [reference()]
         ) :: {:ok, Xqlite.query_result()} | Xqlite.error()
-  def query_cancellable(_conn, _sql, _params, _cancel_token), do: err()
+  def query_cancellable(_conn, _sql, _params, _cancel_tokens), do: err()
 
   @doc """
   Executes a SQL query and returns results with the affected row count.
@@ -202,14 +206,16 @@ defmodule XqliteNIF do
 
   @doc """
   Cancellable version of `query_with_changes/3`.
+
+  `cancel_tokens` is a list of references; OR-semantics on cancellation.
   """
   @spec query_with_changes_cancellable(
           conn :: Xqlite.conn(),
           sql :: String.t(),
           params :: list() | keyword(),
-          cancel_token :: reference()
+          cancel_tokens :: [reference()]
         ) :: {:ok, map()} | Xqlite.error()
-  def query_with_changes_cancellable(_conn, _sql, _params, _cancel_token), do: err()
+  def query_with_changes_cancellable(_conn, _sql, _params, _cancel_tokens), do: err()
 
   @doc """
   Runs a SQL statement and returns a structured report of how SQLite executed it.
@@ -296,25 +302,22 @@ defmodule XqliteNIF do
   This is a cancellable version of `execute/3`.
   See `execute/3` for details on parameters, return values, and general behavior.
 
-  `conn` is the database connection resource.
-  `sql` is the SQL statement string.
-  `params` is an optional list of positional parameters.
-  `cancel_token` is a resource created by `create_cancel_token/0`. If this token
-  is cancelled via `cancel_operation/1` while the statement is executing, the
-  operation will be interrupted.
+  `cancel_tokens` is a list of references created by `create_cancel_token/0`;
+  any signal cancels the operation (OR-semantics). Empty list = no
+  cancellation.
 
   Returns `{:ok, affected_rows}` on successful completion.
-  Returns `{:error, :operation_cancelled}` if the operation was cancelled.
+  Returns `{:error, :operation_cancelled}` if any token was cancelled.
   Returns `{:error, other_reason}` for other types of failures.
   """
   @spec execute_cancellable(
           conn :: Xqlite.conn(),
           sql :: String.t(),
           params :: list(),
-          cancel_token :: reference()
+          cancel_tokens :: [reference()]
         ) ::
           {:ok, non_neg_integer()} | Xqlite.error()
-  def execute_cancellable(_conn, _sql, _params, _cancel_token), do: err()
+  def execute_cancellable(_conn, _sql, _params, _cancel_tokens), do: err()
 
   @doc """
   Executes one or more SQL statements separated by semicolons.
@@ -344,23 +347,20 @@ defmodule XqliteNIF do
   This is a cancellable version of `execute_batch/2`.
   See `execute_batch/2` for details on parameters, return values, and general behavior.
 
-  `conn` is the database connection resource.
-  `sql_batch` is a string containing one or more SQL statements.
-  `cancel_token` is a resource created by `create_cancel_token/0`. If this token
-  is cancelled via `cancel_operation/1` while the batch is executing, the
-  operation will be interrupted.
+  `cancel_tokens` is a list of references; any signal cancels (OR-semantics).
+  Empty list = no cancellation.
 
   Returns `:ok` if all statements in the batch execute successfully.
-  Returns `{:error, :operation_cancelled}` if the operation was cancelled.
+  Returns `{:error, :operation_cancelled}` if any token was cancelled.
   Returns `{:error, other_reason}` for other types of failures.
   """
   @spec execute_batch_cancellable(
           conn :: Xqlite.conn(),
           sql_batch :: String.t(),
-          cancel_token :: reference()
+          cancel_tokens :: [reference()]
         ) ::
           :ok | Xqlite.error()
-  def execute_batch_cancellable(_conn, _sql_batch, _cancel_token), do: err()
+  def execute_batch_cancellable(_conn, _sql_batch, _cancel_tokens), do: err()
 
   @doc """
   Conceptually closes the database connection.
@@ -1243,6 +1243,58 @@ defmodule XqliteNIF do
   def remove_rollback_hook(_conn), do: err()
 
   @doc """
+  Registers a progress-tick subscriber on the connection.
+
+  After every ~64 SQLite VM instructions (8 ops × `every_n` callback
+  invocations), forwards
+
+      {:xqlite_progress, count, elapsed_ms}              # tag = nil
+      {:xqlite_progress, tag, count, elapsed_ms}         # tag != nil
+
+  to `pid`. `count` is the per-subscriber decimated counter (starts at
+  0, incremented every callback fire, emit when divisible by `every_n`).
+  `elapsed_ms` is the wall time since this subscriber was registered.
+
+  Multiple subscribers can coexist on the same connection — each gets a
+  unique handle. Subscribers are independent: registering or
+  unregistering one never affects another. The registration handle is
+  the value returned in `{:ok, handle}` and is what `unregister_progress_hook/2`
+  expects.
+
+  `every_n` must be `>= 1`. `tag` is a string (typically
+  `Atom.to_string(:my_atom)` from the `Xqlite.register_progress_hook/3`
+  wrapper) used to disambiguate messages from multiple subscribers
+  inside the same listener process; pass `nil` to omit the tag.
+
+  This subscriber-list shares the SQLite progress-handler slot with
+  cancellation. Both compose: cancel signals interrupt the query
+  *before* tick emission. Tick subscribers do not affect cancellation
+  latency beyond a handful of nanoseconds per fire.
+
+  Returns `{:ok, handle}` on success or `{:error, reason}` on failure.
+  """
+  @spec register_progress_hook(
+          conn :: Xqlite.conn(),
+          pid :: pid(),
+          every_n :: pos_integer(),
+          tag :: String.t() | nil
+        ) :: {:ok, non_neg_integer()} | Xqlite.error()
+  def register_progress_hook(_conn, _pid, _every_n, _tag), do: err()
+
+  @doc """
+  Unregisters a progress-tick subscriber by its handle.
+
+  Idempotent — passing an unknown handle (already-unregistered, or
+  never registered on this connection) is a no-op and returns `:ok`.
+
+  Returns `:ok` on success or `{:error, :connection_closed}` if the
+  connection has been closed.
+  """
+  @spec unregister_progress_hook(conn :: Xqlite.conn(), handle :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def unregister_progress_hook(_conn, _handle), do: err()
+
+  @doc """
   Serializes an attached database to a contiguous binary.
 
   Atomic, point-in-time snapshot. Use `Xqlite.serialize/1` for a default
@@ -1346,11 +1398,12 @@ defmodule XqliteNIF do
 
   Copies `pages_per_step` pages at a time, sending
   `{:xqlite_backup_progress, remaining, pagecount}` messages to `pid`
-  after each step. Check the `cancel_token` between steps — if cancelled,
-  returns `{:error, :operation_cancelled}`.
+  after each step. Between steps, all of `cancel_tokens` are polled —
+  if *any* is signalled, returns `{:error, :operation_cancelled}`
+  (OR-semantics). Pass an empty list for no-cancellation.
 
-  Use `create_cancel_token/0` to create the token, and `cancel_operation/1`
-  from another process to cancel.
+  Use `create_cancel_token/0` to create tokens and `cancel_operation/1`
+  from another process to signal one.
   """
   @spec backup_with_progress(
           conn :: Xqlite.conn(),
@@ -1358,9 +1411,9 @@ defmodule XqliteNIF do
           dest_path :: String.t(),
           pid :: pid(),
           pages_per_step :: pos_integer(),
-          cancel_token :: reference()
+          cancel_tokens :: [reference()]
         ) :: :ok | Xqlite.error()
-  def backup_with_progress(_conn, _schema, _dest_path, _pid, _pages_per_step, _cancel_token),
+  def backup_with_progress(_conn, _schema, _dest_path, _pid, _pages_per_step, _cancel_tokens),
     do: err()
 
   # ---------------------------------------------------------------------------

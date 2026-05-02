@@ -2,6 +2,7 @@ use crate::atoms;
 use crate::busy_handler::BusyHandlerState;
 use crate::error::XqliteError;
 use crate::hook_util;
+use crate::progress_dispatch::{self, ProgressDispatch};
 use crate::wal_hook::WalHookState;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
@@ -21,6 +22,14 @@ pub(crate) struct XqliteConn {
     // when the connection resource is GC'd.
     pub(crate) busy_handler: AtomicPtr<BusyHandlerState>,
     pub(crate) wal_hook: AtomicPtr<WalHookState>,
+
+    /// Multi-subscriber dispatch on SQLite's single
+    /// `sqlite3_progress_handler` slot. Owned directly (no box
+    /// indirection); its address is stable for the lifetime of the
+    /// resource and is what we register with SQLite at open time.
+    /// Holds two `HookList`s — `cancels` (cancellable-query lifetime)
+    /// and `ticks` (per-conn, registered via `register_progress_hook`).
+    pub(crate) progress_dispatch: ProgressDispatch,
 }
 
 #[resource_impl]
@@ -30,6 +39,11 @@ impl Drop for XqliteConn {
     fn drop(&mut self) {
         hook_util::drop_hook(&self.busy_handler);
         hook_util::drop_hook(&self.wal_hook);
+        // ProgressDispatch's HookList<T> drop_all is invoked by its
+        // own Drop impl when this struct unwinds, so no explicit
+        // cleanup needed here. Field declaration order ensures
+        // `conn` (the SQLite Connection) drops first, so no callback
+        // can fire while progress_dispatch state is being reclaimed.
     }
 }
 
@@ -71,12 +85,40 @@ pub(crate) fn handle_open_result(
     path: String,
 ) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     match open_result {
-        Ok(conn) => Ok(ResourceArc::new(XqliteConn {
-            conn: Mutex::new(Some(conn)),
-            extensions_enabled: AtomicBool::new(false),
-            busy_handler: AtomicPtr::new(std::ptr::null_mut()),
-            wal_hook: AtomicPtr::new(std::ptr::null_mut()),
-        })),
+        Ok(conn) => {
+            let handle = ResourceArc::new(XqliteConn {
+                conn: Mutex::new(Some(conn)),
+                extensions_enabled: AtomicBool::new(false),
+                busy_handler: AtomicPtr::new(std::ptr::null_mut()),
+                wal_hook: AtomicPtr::new(std::ptr::null_mut()),
+                progress_dispatch: ProgressDispatch::new(),
+            });
+            // Register the progress dispatch callback once. The
+            // dispatch's address is stable for the resource's
+            // lifetime; both subscriber lists start empty so the
+            // callback is a 2-load no-op until the first
+            // `register_progress_hook` or cancellable query.
+            //
+            // SAFETY: the dispatch reference is taken from inside the
+            // ResourceArc, so it lives as long as `handle`. We drop
+            // the conn (and any in-flight callback) before the
+            // dispatch via field declaration order.
+            {
+                let conn_guard = handle
+                    .conn
+                    .lock()
+                    .map_err(|e| XqliteError::LockError(e.to_string()))?;
+                if let Some(conn_ref) = conn_guard.as_ref() {
+                    unsafe {
+                        progress_dispatch::install_callback(
+                            conn_ref,
+                            &handle.progress_dispatch,
+                        );
+                    }
+                }
+            }
+            Ok(handle)
+        }
         Err(e) => Err(match e {
             RusqliteError::SqliteFailure(ffi_err, msg_opt) => {
                 XqliteError::CannotOpenDatabase {

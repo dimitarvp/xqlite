@@ -1,4 +1,3 @@
-use crate::cancel::ProgressHandlerGuard;
 use crate::connection::XqliteQueryResult;
 use crate::error::XqliteError;
 use crate::util::{
@@ -8,20 +7,13 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, ToSql};
 use rustler::types::atom::nil;
 use rustler::{Env, Term, TermType};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 pub(crate) fn core_query<'a>(
     env: Env<'a>,
     conn: &Connection,
     sql: &str,
     params_term: Term<'a>,
-    token_bool_opt: Option<Arc<AtomicBool>>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    let _guard = token_bool_opt
-        .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
-        .transpose()?;
-
     let mut stmt = conn.prepare(sql)?;
     let column_names: Vec<String> =
         stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -70,12 +62,7 @@ pub(crate) fn core_execute<'a>(
     conn: &Connection,
     sql: &str,
     params_term: Term<'a>,
-    token_bool_opt: Option<Arc<AtomicBool>>,
 ) -> Result<usize, XqliteError> {
-    let _guard = token_bool_opt
-        .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
-        .transpose()?;
-
     let mut stmt = conn.prepare(sql)?;
 
     let affected_rows = match params_term.get_type() {
@@ -111,11 +98,7 @@ pub(crate) fn core_execute<'a>(
 pub(crate) fn core_execute_batch(
     conn: &Connection,
     sql_batch: &str,
-    token_bool_opt: Option<Arc<AtomicBool>>,
 ) -> Result<(), XqliteError> {
-    let _guard = token_bool_opt
-        .map(|token_bool| ProgressHandlerGuard::new(conn, token_bool, 8))
-        .transpose()?;
     conn.execute_batch(sql_batch)?;
     Ok(())
 }

@@ -172,6 +172,7 @@ pub(crate) mod atoms {
         xqlite_busy,
         xqlite_commit,
         xqlite_log,
+        xqlite_progress,
         xqlite_rollback,
         xqlite_update,
         xqlite_wal
@@ -190,6 +191,7 @@ mod hook_util;
 mod log_hook;
 mod nif;
 mod pragma;
+mod progress_dispatch;
 mod query;
 mod rollback_hook;
 mod schema;

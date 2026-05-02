@@ -87,7 +87,7 @@ fn query<'a>(
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
-        query::core_query(env, conn, &sql, params_term, None)
+        query::core_query(env, conn, &sql, params_term)
     })
 }
 
@@ -99,7 +99,7 @@ fn execute<'a>(
     params_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
     connection::with_conn(&handle, |conn| {
-        query::core_execute(env, conn, &sql, params_term, None)
+        query::core_execute(env, conn, &sql, params_term)
     })
 }
 
@@ -109,9 +109,8 @@ fn execute_batch(
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
 ) -> Term<'_> {
-    let execution_result = connection::with_conn(&handle, |conn| {
-        query::core_execute_batch(conn, &sql_batch, None)
-    });
+    let execution_result =
+        connection::with_conn(&handle, |conn| query::core_execute_batch(conn, &sql_batch));
     singular_ok_or_error_tuple(env, execution_result)
 }
 
@@ -123,7 +122,7 @@ fn query_with_changes<'a>(
     params_term: Term<'a>,
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
-        let qr = query::core_query(env, conn, &sql, params_term, None)?;
+        let qr = query::core_query(env, conn, &sql, params_term)?;
         let changes = if qr.columns.is_empty() {
             conn.changes()
         } else {
@@ -144,11 +143,14 @@ fn query_with_changes_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    token: ResourceArc<XqliteCancelToken>,
+    tokens: Vec<ResourceArc<XqliteCancelToken>>,
 ) -> Term<'a> {
-    let token_bool = token.0.clone();
+    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        tokens.iter().map(|t| t.0.clone()).collect();
     let result = connection::with_conn(&handle, |conn| {
-        let qr = query::core_query(env, conn, &sql, params_term, Some(token_bool))?;
+        let _guard =
+            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+        let qr = query::core_query(env, conn, &sql, params_term)?;
         let changes = if qr.columns.is_empty() {
             conn.changes()
         } else {
@@ -169,11 +171,14 @@ fn query_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    token: ResourceArc<XqliteCancelToken>,
+    tokens: Vec<ResourceArc<XqliteCancelToken>>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    let token_bool = token.0.clone();
+    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        tokens.iter().map(|t| t.0.clone()).collect();
     connection::with_conn(&handle, |conn| {
-        query::core_query(env, conn, &sql, params_term, Some(token_bool))
+        let _guard =
+            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+        query::core_query(env, conn, &sql, params_term)
     })
 }
 
@@ -183,11 +188,14 @@ fn execute_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    token: ResourceArc<XqliteCancelToken>,
+    tokens: Vec<ResourceArc<XqliteCancelToken>>,
 ) -> Result<usize, XqliteError> {
-    let token_bool = token.0.clone();
+    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        tokens.iter().map(|t| t.0.clone()).collect();
     connection::with_conn(&handle, |conn| {
-        query::core_execute(env, conn, &sql, params_term, Some(token_bool))
+        let _guard =
+            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+        query::core_execute(env, conn, &sql, params_term)
     })
 }
 
@@ -196,11 +204,14 @@ fn execute_batch_cancellable(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
-    token: ResourceArc<XqliteCancelToken>,
+    tokens: Vec<ResourceArc<XqliteCancelToken>>,
 ) -> Term<'_> {
-    let token_bool = token.0.clone();
+    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        tokens.iter().map(|t| t.0.clone()).collect();
     let execution_result = connection::with_conn(&handle, |conn| {
-        query::core_execute_batch(conn, &sql_batch, Some(token_bool))
+        let _guard =
+            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+        query::core_execute_batch(conn, &sql_batch)
     });
     singular_ok_or_error_tuple(env, execution_result)
 }
@@ -1094,6 +1105,55 @@ fn remove_rollback_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'
 }
 
 // ---------------------------------------------------------------------------
+// Progress hook NIFs (multi-subscriber on the progress_dispatch slot)
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn register_progress_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+    every_n: u32,
+    tag: Option<String>,
+) -> Term<'_> {
+    if every_n == 0 {
+        let err = XqliteError::CannotExecute(
+            "register_progress_hook: every_n must be >= 1".to_string(),
+        );
+        return (error(), err).encode(env);
+    }
+
+    let result = connection::with_conn(&handle, |_conn| {
+        let tag_bytes = tag.map(|s| s.into_bytes());
+        let subscriber =
+            crate::progress_dispatch::TickSubscriber::new(pid, every_n, tag_bytes);
+        let id = handle.progress_dispatch.ticks.register(subscriber);
+        Ok(id)
+    });
+
+    match result {
+        Ok(id) => (ok(), id).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn unregister_progress_hook(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    id: u64,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |_conn| {
+        // Idempotent — true if removed, false if no matching id; both
+        // are :ok at the API layer (the user shouldn't have to track
+        // whether a particular handle is still live).
+        let _ = handle.progress_dispatch.ticks.unregister(id);
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+// ---------------------------------------------------------------------------
 // Serialize / Deserialize NIFs
 // ---------------------------------------------------------------------------
 
@@ -1223,7 +1283,7 @@ fn backup_with_progress<'a>(
     dest_path: String,
     pid: rustler::types::LocalPid,
     pages_per_step: i32,
-    cancel_token: ResourceArc<XqliteCancelToken>,
+    cancel_tokens: Vec<ResourceArc<XqliteCancelToken>>,
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
         let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
@@ -1231,7 +1291,9 @@ fn backup_with_progress<'a>(
             rusqlite::backup::Backup::new_with_names(conn, schema.as_str(), &mut dst, "main")?;
 
         loop {
-            if cancel_token.0.load(Ordering::Acquire) {
+            // OR-semantics: any signalled token cancels the backup.
+            let cancelled = cancel_tokens.iter().any(|t| t.0.load(Ordering::Acquire));
+            if cancelled {
                 return Err(XqliteError::OperationCancelled);
             }
 

@@ -44,7 +44,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        assert :ok = NIF.backup_with_progress(conn, "main", path, self(), 5, token)
+        assert :ok = NIF.backup_with_progress(conn, "main", path, self(), 5, [token])
 
         # Should have received at least one progress message
         assert_received {:xqlite_backup_progress, remaining, pagecount}
@@ -66,7 +66,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 5, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 5, [token])
 
         # Drain all messages and check the last one
         messages = drain_progress_messages()
@@ -90,7 +90,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 2, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 2, [token])
 
         messages = drain_progress_messages()
         assert length(messages) >= 2
@@ -114,7 +114,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 3, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 3, [token])
 
         messages = drain_progress_messages()
         pagecounts = messages |> Enum.map(fn {_, pc} -> pc end) |> Enum.uniq()
@@ -136,7 +136,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO bkp_data VALUES (3, 'gamma')", [])
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 10, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 10, [token])
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -159,7 +159,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 10, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 10, [token])
 
         {:ok, verify_conn} = NIF.open_readonly(path)
 
@@ -200,7 +200,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         :ok = NIF.cancel_operation(token)
 
         assert {:error, :operation_cancelled} =
-                 NIF.backup_with_progress(conn, "main", path, self(), 1, token)
+                 NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
       end
 
       test "cancellation mid-backup via async cancel", %{conn: conn, backup_path: path} do
@@ -222,7 +222,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
 
         task =
           Task.async(fn ->
-            NIF.backup_with_progress(conn, "main", path, self(), 1, token)
+            NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
           end)
 
         # Give it a moment to start, then cancel
@@ -250,7 +250,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 1, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
 
         message_count = length(drain_progress_messages())
         assert message_count >= 3 and message_count <= 20
@@ -268,7 +268,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         end
 
         {:ok, token} = NIF.create_cancel_token()
-        :ok = NIF.backup_with_progress(conn, "main", path, self(), 1000, token)
+        :ok = NIF.backup_with_progress(conn, "main", path, self(), 1000, [token])
 
         messages = drain_progress_messages()
         # Large step size on small DB → very few messages (likely 1)
@@ -290,7 +290,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
                    "/no/such/dir/backup.db",
                    self(),
                    10,
-                   token
+                   [token]
                  )
       end
 
@@ -304,13 +304,13 @@ defmodule Xqlite.NIF.BackupProgressTest do
                    path,
                    self(),
                    10,
-                   token
+                   [token]
                  )
       end
 
       test "empty database backup succeeds", %{conn: conn, backup_path: path} do
         {:ok, token} = NIF.create_cancel_token()
-        assert :ok = NIF.backup_with_progress(conn, "main", path, self(), 10, token)
+        assert :ok = NIF.backup_with_progress(conn, "main", path, self(), 10, [token])
 
         assert File.exists?(path)
         assert File.stat!(path).size > 0
@@ -337,7 +337,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
                "/tmp/xqlite_closed.db",
                self(),
                10,
-               token
+               [token]
              )
   end
 
@@ -378,7 +378,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
 
     # Tiny pages_per_step so we fire the send repeatedly against a dead pid.
     # Every send must be a no-op; the backup must complete.
-    assert :ok = NIF.backup_with_progress(conn, "main", dest, dead, 1, token)
+    assert :ok = NIF.backup_with_progress(conn, "main", dest, dead, 1, [token])
 
     assert File.exists?(dest)
     assert File.stat!(dest).size > 0
@@ -418,7 +418,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
       end)
 
     {:ok, token} = NIF.create_cancel_token()
-    :ok = NIF.backup_with_progress(conn, "main", dest, forwarder, 5, token)
+    :ok = NIF.backup_with_progress(conn, "main", dest, forwarder, 5, [token])
 
     # At least one forwarded event must arrive with the right shape.
     assert_receive {:forwarded_backup_progress,

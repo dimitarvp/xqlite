@@ -816,4 +816,149 @@ defmodule Xqlite do
       :ok
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Progress hook (multi-subscriber on the progress_handler slot)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Registers a progress-tick subscriber on the connection.
+
+  After every ~64 SQLite VM instructions × `every_n`, sends
+
+      {:xqlite_progress, count, elapsed_ms}              # tag = nil
+      {:xqlite_progress, tag, count, elapsed_ms}         # tag set
+
+  to `pid`. `count` is the per-subscriber decimated counter; `elapsed_ms`
+  is the wall time since this specific subscriber was registered.
+
+  Multiple subscribers can coexist independently — each gets its own
+  opaque handle, and unregistering one never affects another.
+
+  ## Options
+
+    * `:every_n` (positive integer, default `1000`) — emit every Nth
+      progress callback fire. The progress callback fires every 8 SQLite
+      VM instructions (currently fixed); `every_n` decimates further.
+    * `:tag` (atom, default `nil`) — included in each emitted message
+      as the second tuple element when set. Useful when a single
+      listener process subscribes to multiple connections and needs to
+      tell them apart without spawning a process per connection.
+
+  Returns `{:ok, handle}` where `handle` is the value to pass to
+  `unregister_progress_hook/2`. Returns `{:error, reason}` on failure.
+  """
+  @spec register_progress_hook(conn(), pid(), keyword()) ::
+          {:ok, non_neg_integer()} | error()
+  def register_progress_hook(conn, pid, opts \\ [])
+      when is_pid(pid) and is_list(opts) do
+    every_n = Keyword.get(opts, :every_n, 1000)
+    tag_atom = Keyword.get(opts, :tag, nil)
+
+    tag =
+      case tag_atom do
+        nil -> nil
+        a when is_atom(a) -> Atom.to_string(a)
+      end
+
+    XqliteNIF.register_progress_hook(conn, pid, every_n, tag)
+  end
+
+  @doc """
+  Unregisters a progress-tick subscriber by handle.
+
+  Idempotent — unregistering an unknown handle returns `:ok`. Returns
+  `{:error, :connection_closed}` if the connection is closed.
+  """
+  @spec unregister_progress_hook(conn(), non_neg_integer()) :: :ok | error()
+  def unregister_progress_hook(conn, handle) when is_integer(handle) do
+    XqliteNIF.unregister_progress_hook(conn, handle)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Cancellable wrappers — accept either a single token or a list
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Cancellable `query/3`. Accepts either a single cancel token or a list of
+  tokens; OR-semantics — any signalled token interrupts the query.
+
+  See `XqliteNIF.query_cancellable/4` for the raw NIF (list form only).
+  """
+  @spec query_cancellable(
+          conn(),
+          String.t(),
+          list() | keyword(),
+          reference() | [reference()]
+        ) :: {:ok, query_result()} | error()
+  def query_cancellable(conn, sql, params, token_or_tokens) do
+    XqliteNIF.query_cancellable(conn, sql, params, List.wrap(token_or_tokens))
+  end
+
+  @doc """
+  Cancellable `execute/3`. Accepts either a single cancel token or a list.
+  """
+  @spec execute_cancellable(
+          conn(),
+          String.t(),
+          list(),
+          reference() | [reference()]
+        ) :: {:ok, non_neg_integer()} | error()
+  def execute_cancellable(conn, sql, params, token_or_tokens) do
+    XqliteNIF.execute_cancellable(conn, sql, params, List.wrap(token_or_tokens))
+  end
+
+  @doc """
+  Cancellable `execute_batch/2`. Accepts either a single cancel token or a list.
+  """
+  @spec execute_batch_cancellable(conn(), String.t(), reference() | [reference()]) ::
+          :ok | error()
+  def execute_batch_cancellable(conn, sql_batch, token_or_tokens) do
+    XqliteNIF.execute_batch_cancellable(conn, sql_batch, List.wrap(token_or_tokens))
+  end
+
+  @doc """
+  Cancellable `query_with_changes/3`. Accepts either a single cancel token or a list.
+  """
+  @spec query_with_changes_cancellable(
+          conn(),
+          String.t(),
+          list() | keyword(),
+          reference() | [reference()]
+        ) :: {:ok, map()} | error()
+  def query_with_changes_cancellable(conn, sql, params, token_or_tokens) do
+    XqliteNIF.query_with_changes_cancellable(
+      conn,
+      sql,
+      params,
+      List.wrap(token_or_tokens)
+    )
+  end
+
+  @doc """
+  Online backup with progress messages and cancellation. Accepts either a
+  single cancel token or a list (OR-semantics).
+
+  Sends `{:xqlite_backup_progress, remaining, pagecount}` to `pid` after
+  each `pages_per_step`-page step. Returns `{:error, :operation_cancelled}`
+  if any token signals between steps.
+  """
+  @spec backup_with_progress(
+          conn(),
+          String.t(),
+          String.t(),
+          pid(),
+          pos_integer(),
+          reference() | [reference()]
+        ) :: :ok | error()
+  def backup_with_progress(conn, schema, dest_path, pid, pages_per_step, token_or_tokens) do
+    XqliteNIF.backup_with_progress(
+      conn,
+      schema,
+      dest_path,
+      pid,
+      pages_per_step,
+      List.wrap(token_or_tokens)
+    )
+  end
 end
