@@ -4,6 +4,8 @@ defmodule Xqlite do
   Note that they delegate to other modules which you can also use directly.
   """
 
+  import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
+
   @type conn :: reference()
 
   # ---------------------------------------------------------------------------
@@ -551,8 +553,30 @@ defmodule Xqlite do
   @spec query(conn(), String.t(), list() | keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def query(conn, sql, params \\ []) do
-    with {:ok, map} <- XqliteNIF.query_with_changes(conn, sql, params) do
-      {:ok, Xqlite.Result.from_map(map)}
+    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: false}
+
+    span_with_stop_metadata [:xqlite, :query], start_md do
+      case XqliteNIF.query_with_changes(conn, sql, params) do
+        {:ok, map} ->
+          result = Xqlite.Result.from_map(map)
+
+          {{:ok, result},
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             num_rows: result.num_rows,
+             changes: result.changes
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             num_rows: nil,
+             changes: nil
+           })}
+      end
     end
   end
 
@@ -564,14 +588,58 @@ defmodule Xqlite do
   @spec execute(conn(), String.t(), list() | keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def execute(conn, sql, params \\ []) do
-    with {:ok, affected} <- XqliteNIF.execute(conn, sql, params) do
-      {:ok,
-       %Xqlite.Result{
-         columns: [],
-         rows: [],
-         num_rows: 0,
-         changes: affected
-       }}
+    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: false}
+
+    span_with_stop_metadata [:xqlite, :execute], start_md do
+      case XqliteNIF.execute(conn, sql, params) do
+        {:ok, affected} ->
+          result = %Xqlite.Result{
+            columns: [],
+            rows: [],
+            num_rows: 0,
+            changes: affected
+          }
+
+          {{:ok, result},
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             affected_rows: affected
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             affected_rows: nil
+           })}
+      end
+    end
+  end
+
+  @doc """
+  Executes a SQL batch (multiple statements separated by semicolons).
+
+  Wraps `XqliteNIF.execute_batch/2` and emits `[:xqlite, :execute_batch, :*]`
+  telemetry. No parameter binding inside the batch.
+  """
+  @spec execute_batch(conn(), String.t()) :: :ok | error()
+  def execute_batch(conn, sql_batch) when is_binary(sql_batch) do
+    start_md = %{
+      conn: conn,
+      sql_batch_size_bytes: byte_size(sql_batch),
+      cancellable?: false
+    }
+
+    span_with_stop_metadata [:xqlite, :execute_batch], start_md do
+      case XqliteNIF.execute_batch(conn, sql_batch) do
+        :ok = ok ->
+          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+
+        {:error, reason} = err ->
+          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
     end
   end
 
@@ -596,8 +664,32 @@ defmodule Xqlite do
   @spec explain_analyze(conn(), String.t(), list() | keyword()) ::
           {:ok, Xqlite.ExplainAnalyze.t()} | error()
   def explain_analyze(conn, sql, params \\ []) do
-    with {:ok, map} <- XqliteNIF.explain_analyze(conn, sql, params) do
-      {:ok, Xqlite.ExplainAnalyze.from_map(map)}
+    start_md = %{conn: conn, sql: sql, params_count: params_count(params)}
+
+    span_with_stop_metadata [:xqlite, :explain_analyze], start_md do
+      case XqliteNIF.explain_analyze(conn, sql, params) do
+        {:ok, map} ->
+          report = Xqlite.ExplainAnalyze.from_map(map)
+
+          {{:ok, report},
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             wall_time_ns: report.wall_time_ns,
+             rows_produced: report.rows_produced,
+             scan_count: length(report.scans)
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             wall_time_ns: nil,
+             rows_produced: nil,
+             scan_count: nil
+           })}
+      end
     end
   end
 
@@ -892,7 +984,30 @@ defmodule Xqlite do
           reference() | [reference()]
         ) :: {:ok, query_result()} | error()
   def query_cancellable(conn, sql, params, token_or_tokens) do
-    XqliteNIF.query_cancellable(conn, sql, params, List.wrap(token_or_tokens))
+    tokens = List.wrap(token_or_tokens)
+    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
+
+    span_with_stop_metadata [:xqlite, :query], start_md do
+      case XqliteNIF.query_cancellable(conn, sql, params, tokens) do
+        {:ok, result} ->
+          {{:ok, result},
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             num_rows: Map.get(result, :num_rows, 0),
+             changes: nil
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             num_rows: nil,
+             changes: nil
+           })}
+      end
+    end
   end
 
   @doc """
@@ -905,7 +1020,28 @@ defmodule Xqlite do
           reference() | [reference()]
         ) :: {:ok, non_neg_integer()} | error()
   def execute_cancellable(conn, sql, params, token_or_tokens) do
-    XqliteNIF.execute_cancellable(conn, sql, params, List.wrap(token_or_tokens))
+    tokens = List.wrap(token_or_tokens)
+    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
+
+    span_with_stop_metadata [:xqlite, :execute], start_md do
+      case XqliteNIF.execute_cancellable(conn, sql, params, tokens) do
+        {:ok, affected} = ok ->
+          {ok,
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             affected_rows: affected
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             affected_rows: nil
+           })}
+      end
+    end
   end
 
   @doc """
@@ -914,7 +1050,23 @@ defmodule Xqlite do
   @spec execute_batch_cancellable(conn(), String.t(), reference() | [reference()]) ::
           :ok | error()
   def execute_batch_cancellable(conn, sql_batch, token_or_tokens) do
-    XqliteNIF.execute_batch_cancellable(conn, sql_batch, List.wrap(token_or_tokens))
+    tokens = List.wrap(token_or_tokens)
+
+    start_md = %{
+      conn: conn,
+      sql_batch_size_bytes: byte_size(sql_batch),
+      cancellable?: true
+    }
+
+    span_with_stop_metadata [:xqlite, :execute_batch], start_md do
+      case XqliteNIF.execute_batch_cancellable(conn, sql_batch, tokens) do
+        :ok = ok ->
+          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+
+        {:error, reason} = err ->
+          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+      end
+    end
   end
 
   @doc """
@@ -927,12 +1079,30 @@ defmodule Xqlite do
           reference() | [reference()]
         ) :: {:ok, map()} | error()
   def query_with_changes_cancellable(conn, sql, params, token_or_tokens) do
-    XqliteNIF.query_with_changes_cancellable(
-      conn,
-      sql,
-      params,
-      List.wrap(token_or_tokens)
-    )
+    tokens = List.wrap(token_or_tokens)
+    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
+
+    span_with_stop_metadata [:xqlite, :query_with_changes], start_md do
+      case XqliteNIF.query_with_changes_cancellable(conn, sql, params, tokens) do
+        {:ok, map} ->
+          {{:ok, map},
+           Map.merge(start_md, %{
+             result_class: :ok,
+             error_reason: nil,
+             num_rows: Map.get(map, :num_rows, 0),
+             changes: Map.get(map, :changes, 0)
+           })}
+
+        {:error, reason} = err ->
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: reason,
+             num_rows: nil,
+             changes: nil
+           })}
+      end
+    end
   end
 
   @doc """
@@ -961,4 +1131,166 @@ defmodule Xqlite do
       List.wrap(token_or_tokens)
     )
   end
+
+  # ---------------------------------------------------------------------------
+  # Transactions (telemetry-instrumented thin wrappers)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Begins a transaction in the given mode (`:deferred`, `:immediate`, or
+  `:exclusive`). Emits `[:xqlite, :transaction, :begin]` telemetry.
+  """
+  @spec begin(conn(), :deferred | :immediate | :exclusive) :: :ok | error()
+  def begin(conn, mode \\ :deferred) when mode in [:deferred, :immediate, :exclusive] do
+    case XqliteNIF.begin(conn, mode) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :transaction, :begin],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{
+            conn: conn,
+            mode: mode
+          }
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Commits the current transaction. Emits `[:xqlite, :transaction, :commit]`.
+  """
+  @spec commit(conn()) :: :ok | error()
+  def commit(conn) do
+    case XqliteNIF.commit(conn) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :transaction, :commit],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{
+            conn: conn
+          }
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Rolls back the current transaction. Emits
+  `[:xqlite, :transaction, :rollback]` with `reason: :user_initiated`.
+
+  SQLite-internal rollbacks (constraint violations, deferred-FK failures
+  at commit time) surface as errors from `commit/1` rather than passing
+  through here — those events come from the `register_rollback_hook/2`
+  fan-out instead.
+  """
+  @spec rollback(conn()) :: :ok | error()
+  def rollback(conn) do
+    case XqliteNIF.rollback(conn) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :transaction, :rollback],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{
+            conn: conn,
+            reason: :user_initiated
+          }
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Creates a savepoint with the given name. Emits
+  `[:xqlite, :savepoint, :create]`.
+  """
+  @spec savepoint(conn(), String.t()) :: :ok | error()
+  def savepoint(conn, name) when is_binary(name) do
+    case XqliteNIF.savepoint(conn, name) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :savepoint, :create],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{
+            conn: conn,
+            name: name
+          }
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Releases a savepoint. Emits `[:xqlite, :savepoint, :release]`.
+  """
+  @spec release_savepoint(conn(), String.t()) :: :ok | error()
+  def release_savepoint(conn, name) when is_binary(name) do
+    case XqliteNIF.release_savepoint(conn, name) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :savepoint, :release],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{
+            conn: conn,
+            name: name
+          }
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Rolls back to a savepoint without releasing it. Emits
+  `[:xqlite, :savepoint, :rollback_to]`.
+
+  Note: this does NOT invoke SQLite's `rollback_hook` — that fires only
+  for outer-transaction rollbacks. Use `register_rollback_hook/2` for
+  outer rollback observability; this telemetry event is what's
+  available for partial-rollback observability.
+  """
+  @spec rollback_to_savepoint(conn(), String.t()) :: :ok | error()
+  def rollback_to_savepoint(conn, name) when is_binary(name) do
+    case XqliteNIF.rollback_to_savepoint(conn, name) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :savepoint, :rollback_to],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{
+            conn: conn,
+            name: name
+          }
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Internal helpers
+  # ---------------------------------------------------------------------------
+
+  defp params_count(params) when is_list(params), do: length(params)
+  defp params_count(_), do: 0
 end
