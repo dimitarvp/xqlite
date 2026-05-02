@@ -1174,6 +1174,55 @@ defmodule Xqlite do
   # ---------------------------------------------------------------------------
 
   @doc """
+  Creates a cancellation token. Emits `[:xqlite, :cancel, :token_created]`.
+
+  The token is an opaque reference passed into cancellable operations
+  (`query_cancellable/4`, `execute_cancellable/4`, etc.). Signalling it via
+  `cancel_operation/1` from any process interrupts in-flight cancellable
+  operations holding the same token.
+  """
+  @spec create_cancel_token() :: {:ok, reference()} | error()
+  def create_cancel_token do
+    case XqliteNIF.create_cancel_token() do
+      {:ok, token} = ok ->
+        emit(
+          [:xqlite, :cancel, :token_created],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{token: token}
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Signals a cancellation token. Emits `[:xqlite, :cancel, :signalled]`.
+
+  Idempotent at the SQLite level — signalling twice is the same as once.
+  Telemetry fires on every call, so consumers see distinct signal events
+  even from repeated signals.
+  """
+  @spec cancel_operation(reference()) :: :ok | error()
+  def cancel_operation(token) when is_reference(token) do
+    case XqliteNIF.cancel_operation(token) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :cancel, :signalled],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{token: token}
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
   Cancellable `query/3`. Accepts either a single cancel token or a list of
   tokens; OR-semantics — any signalled token interrupts the query.
 
@@ -1197,6 +1246,17 @@ defmodule Xqlite do
              result_class: :ok,
              error_reason: nil,
              num_rows: Map.get(result, :num_rows, 0),
+             changes: nil
+           })}
+
+        {:error, :operation_cancelled} = err ->
+          emit_cancel_honored(conn, :query, tokens)
+
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: :operation_cancelled,
+             num_rows: nil,
              changes: nil
            })}
 
@@ -1235,6 +1295,16 @@ defmodule Xqlite do
              affected_rows: affected
            })}
 
+        {:error, :operation_cancelled} = err ->
+          emit_cancel_honored(conn, :execute, tokens)
+
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: :operation_cancelled,
+             affected_rows: nil
+           })}
+
         {:error, reason} = err ->
           {err,
            Map.merge(start_md, %{
@@ -1265,6 +1335,12 @@ defmodule Xqlite do
         :ok = ok ->
           {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
+        {:error, :operation_cancelled} = err ->
+          emit_cancel_honored(conn, :execute_batch, tokens)
+
+          {err,
+           Map.merge(start_md, %{result_class: :error, error_reason: :operation_cancelled})}
+
         {:error, reason} = err ->
           {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
       end
@@ -1293,6 +1369,17 @@ defmodule Xqlite do
              error_reason: nil,
              num_rows: Map.get(map, :num_rows, 0),
              changes: Map.get(map, :changes, 0)
+           })}
+
+        {:error, :operation_cancelled} = err ->
+          emit_cancel_honored(conn, :query_with_changes, tokens)
+
+          {err,
+           Map.merge(start_md, %{
+             result_class: :error,
+             error_reason: :operation_cancelled,
+             num_rows: nil,
+             changes: nil
            })}
 
         {:error, reason} = err ->
@@ -1495,4 +1582,12 @@ defmodule Xqlite do
 
   defp params_count(params) when is_list(params), do: length(params)
   defp params_count(_), do: 0
+
+  defp emit_cancel_honored(conn, operation, tokens) do
+    emit(
+      [:xqlite, :cancel, :honored],
+      %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+      %{conn: conn, operation: operation, tokens: tokens}
+    )
+  end
 end

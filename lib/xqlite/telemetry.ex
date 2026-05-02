@@ -399,4 +399,69 @@ defmodule Xqlite.Telemetry do
   """
   @spec monotonic_time() :: integer()
   def monotonic_time, do: System.monotonic_time(:nanosecond)
+
+  # ---------------------------------------------------------------------------
+  # Hook → telemetry bridge (Tier B)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Bridges per-connection hook deliveries into `:telemetry` events.
+
+  Subscribes to the requested hooks on `conn` via the standard
+  `register_*_hook` API and forwards each delivery as an
+  `[:xqlite, :hook, :*]` telemetry event. Returns
+  `{:ok, %Xqlite.Telemetry.Bridge{}}` on success — pass that struct
+  to `unbridge/1` to tear down.
+
+  ## Options
+
+    * `:hooks` — list of hook kinds to subscribe to. Either an explicit
+      list (`[:wal, :commit, :rollback, :update, :progress]`) or `:all`
+      (default) for every per-connection hook.
+    * `:tag` — arbitrary term forwarded as `:tag` in every
+      `[:xqlite, :hook, :*]` event's metadata. Useful when one
+      handler receives bridged events from multiple connections.
+    * `:progress` — keyword opts forwarded to
+      `register_progress_hook/3` (default `every_n: 1000`).
+
+  Returns `{:error, :telemetry_disabled}` when telemetry is
+  compile-disabled — the bridge would otherwise install hooks that
+  produce nothing.
+
+  > #### Note on busy_handler {: .info}
+  >
+  > `busy_handler` is single-subscriber and not part of the per-conn
+  > bridge. To get busy events as telemetry, register your own busy
+  > handler with a forwarder pid that emits the desired event.
+  > See `Xqlite.Telemetry.Bridge` for the rationale.
+  """
+  @spec bridge(reference(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def bridge(conn, opts \\ []) when is_reference(conn) do
+    Xqlite.Telemetry.Bridge.bridge_per_conn(conn, opts)
+  end
+
+  @doc """
+  Bridges the global SQLite log hook into `:telemetry` events.
+
+  Subscribes to the process-wide log hook and re-emits each diagnostic
+  as `[:xqlite, :hook, :log]`. Returns
+  `{:ok, %Xqlite.Telemetry.Bridge{}}` — call `unbridge/1` to detach.
+
+  ## Options
+
+    * `:tag` — arbitrary term forwarded as `:tag` in event metadata.
+  """
+  @spec bridge_log(keyword()) :: {:ok, struct()} | {:error, term()}
+  def bridge_log(opts \\ []) when is_list(opts) do
+    Xqlite.Telemetry.Bridge.bridge_log_global(opts)
+  end
+
+  @doc """
+  Tears down a bridge — unregisters every subscribed hook and stops
+  the forwarder GenServer.
+  """
+  @spec unbridge(struct()) :: :ok
+  def unbridge(bridge) do
+    Xqlite.Telemetry.Bridge.unbridge(bridge)
+  end
 end
