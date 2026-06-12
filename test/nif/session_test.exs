@@ -1,621 +1,611 @@
 defmodule Xqlite.NIF.SessionTest do
   use ExUnit.Case, async: true
 
+  import Xqlite.ConnCase
+
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
   alias XqliteNIF, as: NIF
 
-  for {type_tag, prefix, _opener_mfa} <- connection_openers() do
-    describe "session using #{prefix}" do
-      @describetag type_tag
+  for_each_opener "session" do
+    # -------------------------------------------------------------------
+    # Session lifecycle
+    # -------------------------------------------------------------------
 
-      setup context do
-        {mod, fun, args} = find_opener_mfa!(context)
-        assert {:ok, conn} = apply(mod, fun, args)
+    test "create and delete session", %{conn: conn} do
+      assert {:ok, session} = NIF.session_new(conn)
+      assert :ok = NIF.session_delete(session)
+    end
 
-        on_exit(fn -> NIF.close(conn) end)
-        {:ok, conn: conn}
-      end
+    test "session_delete is idempotent", %{conn: conn} do
+      {:ok, session} = NIF.session_new(conn)
+      assert :ok = NIF.session_delete(session)
+      assert :ok = NIF.session_delete(session)
+    end
 
-      # -------------------------------------------------------------------
-      # Session lifecycle
-      # -------------------------------------------------------------------
+    test "new session is empty", %{conn: conn} do
+      {:ok, session} = NIF.session_new(conn)
+      assert NIF.session_is_empty(session) == {:ok, true}
+      NIF.session_delete(session)
+    end
 
-      test "create and delete session", %{conn: conn} do
-        assert {:ok, session} = NIF.session_new(conn)
-        assert :ok = NIF.session_delete(session)
-      end
+    # -------------------------------------------------------------------
+    # Attach and track changes
+    # -------------------------------------------------------------------
 
-      test "session_delete is idempotent", %{conn: conn} do
-        {:ok, session} = NIF.session_new(conn)
-        assert :ok = NIF.session_delete(session)
-        assert :ok = NIF.session_delete(session)
-      end
+    test "attach specific table", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_t1 (id INTEGER PRIMARY KEY, val TEXT);")
 
-      test "new session is empty", %{conn: conn} do
-        {:ok, session} = NIF.session_new(conn)
-        assert NIF.session_is_empty(session) == {:ok, true}
-        NIF.session_delete(session)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      assert :ok = NIF.session_attach(session, "sess_t1")
 
-      # -------------------------------------------------------------------
-      # Attach and track changes
-      # -------------------------------------------------------------------
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_t1 VALUES (1, 'hello')", [])
+      assert NIF.session_is_empty(session) == {:ok, false}
 
-      test "attach specific table", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_t1 (id INTEGER PRIMARY KEY, val TEXT);")
+      NIF.session_delete(session)
+    end
 
-        {:ok, session} = NIF.session_new(conn)
-        assert :ok = NIF.session_attach(session, "sess_t1")
+    test "attach nil tracks all tables", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE sess_all1 (id INTEGER PRIMARY KEY, val TEXT);
+        CREATE TABLE sess_all2 (id INTEGER PRIMARY KEY, val TEXT);
+        """)
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_t1 VALUES (1, 'hello')", [])
-        assert NIF.session_is_empty(session) == {:ok, false}
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-        NIF.session_delete(session)
-      end
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_all1 VALUES (1, 'a')", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_all2 VALUES (1, 'b')", [])
 
-      test "attach nil tracks all tables", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, """
-          CREATE TABLE sess_all1 (id INTEGER PRIMARY KEY, val TEXT);
-          CREATE TABLE sess_all2 (id INTEGER PRIMARY KEY, val TEXT);
-          """)
+      assert NIF.session_is_empty(session) == {:ok, false}
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      NIF.session_delete(session)
+    end
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_all1 VALUES (1, 'a')", [])
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_all2 VALUES (1, 'b')", [])
+    test "untracked table changes are not recorded", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE sess_tracked (id INTEGER PRIMARY KEY, val TEXT);
+        CREATE TABLE sess_untracked (id INTEGER PRIMARY KEY, val TEXT);
+        """)
 
-        assert NIF.session_is_empty(session) == {:ok, false}
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, "sess_tracked")
 
-        NIF.session_delete(session)
-      end
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_untracked VALUES (1, 'ignored')", [])
 
-      test "untracked table changes are not recorded", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, """
-          CREATE TABLE sess_tracked (id INTEGER PRIMARY KEY, val TEXT);
-          CREATE TABLE sess_untracked (id INTEGER PRIMARY KEY, val TEXT);
-          """)
+      assert NIF.session_is_empty(session) == {:ok, true}
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, "sess_tracked")
+      NIF.session_delete(session)
+    end
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_untracked VALUES (1, 'ignored')", [])
+    # -------------------------------------------------------------------
+    # Changeset capture
+    # -------------------------------------------------------------------
 
-        assert NIF.session_is_empty(session) == {:ok, true}
+    test "changeset captures INSERT", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(
+          conn,
+          "CREATE TABLE sess_cs_ins (id INTEGER PRIMARY KEY, val TEXT);"
+        )
 
-        NIF.session_delete(session)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      # -------------------------------------------------------------------
-      # Changeset capture
-      # -------------------------------------------------------------------
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_ins VALUES (1, 'hello')", [])
 
-      test "changeset captures INSERT", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(
-            conn,
-            "CREATE TABLE sess_cs_ins (id INTEGER PRIMARY KEY, val TEXT);"
-          )
+      assert {:ok, changeset} = NIF.session_changeset(session)
+      assert is_binary(changeset)
+      assert byte_size(changeset) > 0
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      NIF.session_delete(session)
+    end
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_ins VALUES (1, 'hello')", [])
+    test "changeset captures UPDATE", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(
+          conn,
+          "CREATE TABLE sess_cs_upd (id INTEGER PRIMARY KEY, val TEXT);"
+        )
 
-        assert {:ok, changeset} = NIF.session_changeset(session)
-        assert is_binary(changeset)
-        assert byte_size(changeset) > 0
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_upd VALUES (1, 'old')", [])
 
-        NIF.session_delete(session)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      test "changeset captures UPDATE", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(
-            conn,
-            "CREATE TABLE sess_cs_upd (id INTEGER PRIMARY KEY, val TEXT);"
-          )
+      {:ok, 1} = NIF.execute(conn, "UPDATE sess_cs_upd SET val = 'new' WHERE id = 1", [])
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_upd VALUES (1, 'old')", [])
+      assert {:ok, changeset} = NIF.session_changeset(session)
+      assert byte_size(changeset) > 0
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      NIF.session_delete(session)
+    end
 
-        {:ok, 1} = NIF.execute(conn, "UPDATE sess_cs_upd SET val = 'new' WHERE id = 1", [])
+    test "changeset captures DELETE", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(
+          conn,
+          "CREATE TABLE sess_cs_del (id INTEGER PRIMARY KEY, val TEXT);"
+        )
 
-        assert {:ok, changeset} = NIF.session_changeset(session)
-        assert byte_size(changeset) > 0
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_del VALUES (1, 'doomed')", [])
 
-        NIF.session_delete(session)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      test "changeset captures DELETE", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(
-            conn,
-            "CREATE TABLE sess_cs_del (id INTEGER PRIMARY KEY, val TEXT);"
-          )
+      {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_cs_del WHERE id = 1", [])
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_del VALUES (1, 'doomed')", [])
+      assert {:ok, changeset} = NIF.session_changeset(session)
+      assert byte_size(changeset) > 0
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      NIF.session_delete(session)
+    end
 
-        {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_cs_del WHERE id = 1", [])
+    test "empty changeset when no changes", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE sess_cs_empty (id INTEGER PRIMARY KEY);")
 
-        assert {:ok, changeset} = NIF.session_changeset(session)
-        assert byte_size(changeset) > 0
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-        NIF.session_delete(session)
-      end
+      assert {:ok, changeset} = NIF.session_changeset(session)
+      assert byte_size(changeset) == 0
 
-      test "empty changeset when no changes", %{conn: conn} do
-        :ok = NIF.execute_batch(conn, "CREATE TABLE sess_cs_empty (id INTEGER PRIMARY KEY);")
+      NIF.session_delete(session)
+    end
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+    # -------------------------------------------------------------------
+    # Patchset capture
+    # -------------------------------------------------------------------
 
-        assert {:ok, changeset} = NIF.session_changeset(session)
-        assert byte_size(changeset) == 0
+    test "patchset captures changes", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_ps (id INTEGER PRIMARY KEY, val TEXT);")
 
-        NIF.session_delete(session)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      # -------------------------------------------------------------------
-      # Patchset capture
-      # -------------------------------------------------------------------
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ps VALUES (1, 'patch')", [])
 
-      test "patchset captures changes", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_ps (id INTEGER PRIMARY KEY, val TEXT);")
+      assert {:ok, patchset} = NIF.session_patchset(session)
+      assert is_binary(patchset)
+      assert byte_size(patchset) > 0
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      NIF.session_delete(session)
+    end
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ps VALUES (1, 'patch')", [])
+    # -------------------------------------------------------------------
+    # Apply changeset
+    # -------------------------------------------------------------------
 
-        assert {:ok, patchset} = NIF.session_patchset(session)
-        assert is_binary(patchset)
-        assert byte_size(patchset) > 0
+    test "apply changeset replicates INSERT to another connection", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_ap (id INTEGER PRIMARY KEY, val TEXT);")
 
-        NIF.session_delete(session)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      # -------------------------------------------------------------------
-      # Apply changeset
-      # -------------------------------------------------------------------
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap VALUES (1, 'replicated')", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap VALUES (2, 'also')", [])
 
-      test "apply changeset replicates INSERT to another connection", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_ap (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap VALUES (1, 'replicated')", [])
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap VALUES (2, 'also')", [])
+      :ok =
+        NIF.execute_batch(conn2, "CREATE TABLE sess_ap (id INTEGER PRIMARY KEY, val TEXT);")
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      assert :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: rows, num_rows: 2}} =
+               NIF.query(conn2, "SELECT * FROM sess_ap ORDER BY id", [])
 
-        :ok =
-          NIF.execute_batch(conn2, "CREATE TABLE sess_ap (id INTEGER PRIMARY KEY, val TEXT);")
+      assert rows == [[1, "replicated"], [2, "also"]]
+      NIF.close(conn2)
+    end
 
-        assert :ok = NIF.changeset_apply(conn2, changeset, :omit)
+    test "apply changeset replicates UPDATE", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_ap_u (id INTEGER PRIMARY KEY, val TEXT);")
 
-        assert {:ok, %{rows: rows, num_rows: 2}} =
-                 NIF.query(conn2, "SELECT * FROM sess_ap ORDER BY id", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_u VALUES (1, 'before')", [])
 
-        assert rows == [[1, "replicated"], [2, "also"]]
-        NIF.close(conn2)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      test "apply changeset replicates UPDATE", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_ap_u (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, 1} = NIF.execute(conn, "UPDATE sess_ap_u SET val = 'after' WHERE id = 1", [])
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_u VALUES (1, 'before')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, 1} = NIF.execute(conn, "UPDATE sess_ap_u SET val = 'after' WHERE id = 1", [])
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_ap_u (id INTEGER PRIMARY KEY, val TEXT);
+        INSERT INTO sess_ap_u VALUES (1, 'before');
+        """)
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, "after"]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_ap_u", [])
 
-        :ok =
-          NIF.execute_batch(conn2, """
-          CREATE TABLE sess_ap_u (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO sess_ap_u VALUES (1, 'before');
-          """)
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
+    test "apply changeset replicates DELETE", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_ap_d (id INTEGER PRIMARY KEY, val TEXT);")
 
-        assert {:ok, %{rows: [[1, "after"]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_ap_u", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_d VALUES (1, 'doomed')", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_d VALUES (2, 'safe')", [])
 
-        NIF.close(conn2)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      test "apply changeset replicates DELETE", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_ap_d (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_ap_d WHERE id = 1", [])
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_d VALUES (1, 'doomed')", [])
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_d VALUES (2, 'safe')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_ap_d WHERE id = 1", [])
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_ap_d (id INTEGER PRIMARY KEY, val TEXT);
+        INSERT INTO sess_ap_d VALUES (1, 'doomed');
+        INSERT INTO sess_ap_d VALUES (2, 'safe');
+        """)
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[2, "safe"]], num_rows: 1}} =
+               NIF.query(conn2, "SELECT * FROM sess_ap_d", [])
 
-        :ok =
-          NIF.execute_batch(conn2, """
-          CREATE TABLE sess_ap_d (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO sess_ap_d VALUES (1, 'doomed');
-          INSERT INTO sess_ap_d VALUES (2, 'safe');
-          """)
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
+    # -------------------------------------------------------------------
+    # Changeset invert
+    # -------------------------------------------------------------------
 
-        assert {:ok, %{rows: [[2, "safe"]], num_rows: 1}} =
-                 NIF.query(conn2, "SELECT * FROM sess_ap_d", [])
+    test "inverted changeset undoes changes", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_inv (id INTEGER PRIMARY KEY, val TEXT);")
 
-        NIF.close(conn2)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      # -------------------------------------------------------------------
-      # Changeset invert
-      # -------------------------------------------------------------------
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_inv VALUES (1, 'hello')", [])
 
-      test "inverted changeset undoes changes", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_inv (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, inverted} = NIF.changeset_invert(changeset)
+      assert is_binary(inverted)
+      assert byte_size(inverted) > 0
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_inv VALUES (1, 'hello')", [])
+      :ok = NIF.changeset_apply(conn, inverted, :omit)
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      assert {:ok, %{rows: [], num_rows: 0}} =
+               NIF.query(conn, "SELECT * FROM sess_inv", [])
+    end
 
-        {:ok, inverted} = NIF.changeset_invert(changeset)
-        assert is_binary(inverted)
-        assert byte_size(inverted) > 0
+    test "double invert produces equivalent changeset", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_dinv (id INTEGER PRIMARY KEY, val TEXT);")
 
-        :ok = NIF.changeset_apply(conn, inverted, :omit)
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-        assert {:ok, %{rows: [], num_rows: 0}} =
-                 NIF.query(conn, "SELECT * FROM sess_inv", [])
-      end
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_dinv VALUES (1, 'test')", [])
 
-      test "double invert produces equivalent changeset", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_dinv (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, inv1} = NIF.changeset_invert(changeset)
+      {:ok, inv2} = NIF.changeset_invert(inv1)
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_dinv VALUES (1, 'test')", [])
+      # Double-inverted should be equivalent to original — apply to fresh DB
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok =
+        NIF.execute_batch(
+          conn2,
+          "CREATE TABLE sess_dinv (id INTEGER PRIMARY KEY, val TEXT);"
+        )
 
-        {:ok, inv1} = NIF.changeset_invert(changeset)
-        {:ok, inv2} = NIF.changeset_invert(inv1)
+      :ok = NIF.changeset_apply(conn2, inv2, :omit)
 
-        # Double-inverted should be equivalent to original — apply to fresh DB
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, "test"]], num_rows: 1}} =
+               NIF.query(conn2, "SELECT * FROM sess_dinv", [])
 
-        :ok =
-          NIF.execute_batch(
-            conn2,
-            "CREATE TABLE sess_dinv (id INTEGER PRIMARY KEY, val TEXT);"
-          )
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, inv2, :omit)
+    # -------------------------------------------------------------------
+    # Changeset concat
+    # -------------------------------------------------------------------
 
-        assert {:ok, %{rows: [[1, "test"]], num_rows: 1}} =
-                 NIF.query(conn2, "SELECT * FROM sess_dinv", [])
+    test "concatenated changesets apply as one", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_cat (id INTEGER PRIMARY KEY, val TEXT);")
 
-        NIF.close(conn2)
-      end
+      {:ok, s1} = NIF.session_new(conn)
+      :ok = NIF.session_attach(s1, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cat VALUES (1, 'first')", [])
+      {:ok, cs1} = NIF.session_changeset(s1)
+      NIF.session_delete(s1)
 
-      # -------------------------------------------------------------------
-      # Changeset concat
-      # -------------------------------------------------------------------
+      {:ok, s2} = NIF.session_new(conn)
+      :ok = NIF.session_attach(s2, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cat VALUES (2, 'second')", [])
+      {:ok, cs2} = NIF.session_changeset(s2)
+      NIF.session_delete(s2)
 
-      test "concatenated changesets apply as one", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_cat (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, combined} = NIF.changeset_concat(cs1, cs2)
+      assert byte_size(combined) > 0
 
-        {:ok, s1} = NIF.session_new(conn)
-        :ok = NIF.session_attach(s1, nil)
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cat VALUES (1, 'first')", [])
-        {:ok, cs1} = NIF.session_changeset(s1)
-        NIF.session_delete(s1)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, s2} = NIF.session_new(conn)
-        :ok = NIF.session_attach(s2, nil)
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cat VALUES (2, 'second')", [])
-        {:ok, cs2} = NIF.session_changeset(s2)
-        NIF.session_delete(s2)
+      :ok =
+        NIF.execute_batch(conn2, "CREATE TABLE sess_cat (id INTEGER PRIMARY KEY, val TEXT);")
 
-        {:ok, combined} = NIF.changeset_concat(cs1, cs2)
-        assert byte_size(combined) > 0
+      :ok = NIF.changeset_apply(conn2, combined, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, "first"], [2, "second"]], num_rows: 2}} =
+               NIF.query(conn2, "SELECT * FROM sess_cat ORDER BY id", [])
 
-        :ok =
-          NIF.execute_batch(conn2, "CREATE TABLE sess_cat (id INTEGER PRIMARY KEY, val TEXT);")
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, combined, :omit)
+    # -------------------------------------------------------------------
+    # Conflict strategies
+    # -------------------------------------------------------------------
 
-        assert {:ok, %{rows: [[1, "first"], [2, "second"]], num_rows: 2}} =
-                 NIF.query(conn2, "SELECT * FROM sess_cat ORDER BY id", [])
+    test "conflict :omit skips conflicting rows", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_omit (id INTEGER PRIMARY KEY, val TEXT);")
 
-        NIF.close(conn2)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_omit VALUES (1, 'from_source')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-      # -------------------------------------------------------------------
-      # Conflict strategies
-      # -------------------------------------------------------------------
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-      test "conflict :omit skips conflicting rows", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_omit (id INTEGER PRIMARY KEY, val TEXT);")
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_omit (id INTEGER PRIMARY KEY, val TEXT);
+        INSERT INTO sess_omit VALUES (1, 'existing');
+        """)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_omit VALUES (1, 'from_source')", [])
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, "existing"]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_omit", [])
 
-        :ok =
-          NIF.execute_batch(conn2, """
-          CREATE TABLE sess_omit (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO sess_omit VALUES (1, 'existing');
-          """)
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
+    test "conflict :replace overwrites conflicting rows", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_repl (id INTEGER PRIMARY KEY, val TEXT);")
 
-        assert {:ok, %{rows: [[1, "existing"]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_omit", [])
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl VALUES (1, 'from_source')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        NIF.close(conn2)
-      end
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-      test "conflict :replace overwrites conflicting rows", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_repl (id INTEGER PRIMARY KEY, val TEXT);")
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_repl (id INTEGER PRIMARY KEY, val TEXT);
+        INSERT INTO sess_repl VALUES (1, 'existing');
+        """)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl VALUES (1, 'from_source')", [])
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok = NIF.changeset_apply(conn2, changeset, :replace)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, "from_source"]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_repl", [])
 
-        :ok =
-          NIF.execute_batch(conn2, """
-          CREATE TABLE sess_repl (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO sess_repl VALUES (1, 'existing');
-          """)
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, changeset, :replace)
+    test "conflict :abort returns error on conflict", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);")
 
-        assert {:ok, %{rows: [[1, "from_source"]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_repl", [])
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_abrt VALUES (1, 'from_source')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        NIF.close(conn2)
-      end
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-      test "conflict :abort returns error on conflict", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);")
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);
+        INSERT INTO sess_abrt VALUES (1, 'existing');
+        """)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_abrt VALUES (1, 'from_source')", [])
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      assert {:error, _} = NIF.changeset_apply(conn2, changeset, :abort)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, "existing"]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_abrt", [])
 
-        :ok =
-          NIF.execute_batch(conn2, """
-          CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO sess_abrt VALUES (1, 'existing');
-          """)
+      NIF.close(conn2)
+    end
 
-        assert {:error, _} = NIF.changeset_apply(conn2, changeset, :abort)
+    test "invalid conflict strategy returns error", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE sess_bad (id INTEGER PRIMARY KEY);")
 
-        assert {:ok, %{rows: [[1, "existing"]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_abrt", [])
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_bad VALUES (1)", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        NIF.close(conn2)
-      end
+      assert {:error, :invalid_conflict_strategy} =
+               NIF.changeset_apply(conn, changeset, :invalid)
+    end
 
-      test "invalid conflict strategy returns error", %{conn: conn} do
-        :ok = NIF.execute_batch(conn, "CREATE TABLE sess_bad (id INTEGER PRIMARY KEY);")
+    # -------------------------------------------------------------------
+    # Multiple operations in one changeset
+    # -------------------------------------------------------------------
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_bad VALUES (1)", [])
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+    test "changeset with INSERT + UPDATE + DELETE", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_mix (id INTEGER PRIMARY KEY, val TEXT);")
 
-        assert {:error, :invalid_conflict_strategy} =
-                 NIF.changeset_apply(conn, changeset, :invalid)
-      end
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (1, 'keep')", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (2, 'update_me')", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (3, 'delete_me')", [])
 
-      # -------------------------------------------------------------------
-      # Multiple operations in one changeset
-      # -------------------------------------------------------------------
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      test "changeset with INSERT + UPDATE + DELETE", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_mix (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (4, 'new')", [])
+      {:ok, 1} = NIF.execute(conn, "UPDATE sess_mix SET val = 'updated' WHERE id = 2", [])
+      {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_mix WHERE id = 3", [])
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (1, 'keep')", [])
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (2, 'update_me')", [])
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (3, 'delete_me')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (4, 'new')", [])
-        {:ok, 1} = NIF.execute(conn, "UPDATE sess_mix SET val = 'updated' WHERE id = 2", [])
-        {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_mix WHERE id = 3", [])
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_mix (id INTEGER PRIMARY KEY, val TEXT);
+        INSERT INTO sess_mix VALUES (1, 'keep');
+        INSERT INTO sess_mix VALUES (2, 'update_me');
+        INSERT INTO sess_mix VALUES (3, 'delete_me');
+        """)
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: rows}} =
+               NIF.query(conn2, "SELECT * FROM sess_mix ORDER BY id", [])
 
-        :ok =
-          NIF.execute_batch(conn2, """
-          CREATE TABLE sess_mix (id INTEGER PRIMARY KEY, val TEXT);
-          INSERT INTO sess_mix VALUES (1, 'keep');
-          INSERT INTO sess_mix VALUES (2, 'update_me');
-          INSERT INTO sess_mix VALUES (3, 'delete_me');
-          """)
+      assert rows == [[1, "keep"], [2, "updated"], [4, "new"]]
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
+    # -------------------------------------------------------------------
+    # Edge cases
+    # -------------------------------------------------------------------
 
-        assert {:ok, %{rows: rows}} =
-                 NIF.query(conn2, "SELECT * FROM sess_mix ORDER BY id", [])
+    test "changeset with NULL values", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_null (id INTEGER PRIMARY KEY, val TEXT);")
 
-        assert rows == [[1, "keep"], [2, "updated"], [4, "new"]]
-        NIF.close(conn2)
-      end
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-      # -------------------------------------------------------------------
-      # Edge cases
-      # -------------------------------------------------------------------
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_null VALUES (1, NULL)", [])
 
-      test "changeset with NULL values", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_null (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_null VALUES (1, NULL)", [])
+      :ok =
+        NIF.execute_batch(
+          conn2,
+          "CREATE TABLE sess_null (id INTEGER PRIMARY KEY, val TEXT);"
+        )
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[1, nil]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_null", [])
 
-        :ok =
-          NIF.execute_batch(
-            conn2,
-            "CREATE TABLE sess_null (id INTEGER PRIMARY KEY, val TEXT);"
-          )
+      NIF.close(conn2)
+    end
 
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
+    test "changeset with all SQLite types", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(
+          conn,
+          "CREATE TABLE sess_types (id INTEGER PRIMARY KEY, i INTEGER, r REAL, t TEXT, b BLOB);"
+        )
 
-        assert {:ok, %{rows: [[1, nil]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_null", [])
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
 
-        NIF.close(conn2)
-      end
+      {:ok, 1} =
+        NIF.execute(
+          conn,
+          "INSERT INTO sess_types VALUES (1, 42, 3.14, 'hello', X'DEADBEEF')",
+          []
+        )
 
-      test "changeset with all SQLite types", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(
-            conn,
-            "CREATE TABLE sess_types (id INTEGER PRIMARY KEY, i INTEGER, r REAL, t TEXT, b BLOB);"
-          )
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
+      :ok =
+        NIF.execute_batch(
+          conn2,
+          "CREATE TABLE sess_types (id INTEGER PRIMARY KEY, i INTEGER, r REAL, t TEXT, b BLOB);"
+        )
+
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
+
+      assert {:ok, %{rows: [[1, 42, pi, "hello", blob]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_types", [])
+
+      assert_in_delta pi, 3.14, 0.001
+      assert blob == <<0xDE, 0xAD, 0xBE, 0xEF>>
+      NIF.close(conn2)
+    end
+
+    test "large batch of changes in one session", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE sess_bulk (id INTEGER PRIMARY KEY, val TEXT);")
+
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+
+      for i <- 1..500 do
         {:ok, 1} =
-          NIF.execute(
-            conn,
-            "INSERT INTO sess_types VALUES (1, 42, 3.14, 'hello', X'DEADBEEF')",
-            []
-          )
-
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
-
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
-
-        :ok =
-          NIF.execute_batch(
-            conn2,
-            "CREATE TABLE sess_types (id INTEGER PRIMARY KEY, i INTEGER, r REAL, t TEXT, b BLOB);"
-          )
-
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
-
-        assert {:ok, %{rows: [[1, 42, pi, "hello", blob]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_types", [])
-
-        assert_in_delta pi, 3.14, 0.001
-        assert blob == <<0xDE, 0xAD, 0xBE, 0xEF>>
-        NIF.close(conn2)
+          NIF.execute(conn, "INSERT INTO sess_bulk VALUES (?1, ?2)", [i, "row_#{i}"])
       end
 
-      test "large batch of changes in one session", %{conn: conn} do
-        :ok =
-          NIF.execute_batch(conn, "CREATE TABLE sess_bulk (id INTEGER PRIMARY KEY, val TEXT);")
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
 
-        {:ok, session} = NIF.session_new(conn)
-        :ok = NIF.session_attach(session, nil)
+      assert byte_size(changeset) > 0
 
-        for i <- 1..500 do
-          {:ok, 1} =
-            NIF.execute(conn, "INSERT INTO sess_bulk VALUES (?1, ?2)", [i, "row_#{i}"])
-        end
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
 
-        {:ok, changeset} = NIF.session_changeset(session)
-        NIF.session_delete(session)
+      :ok =
+        NIF.execute_batch(
+          conn2,
+          "CREATE TABLE sess_bulk (id INTEGER PRIMARY KEY, val TEXT);"
+        )
 
-        assert byte_size(changeset) > 0
+      :ok = NIF.changeset_apply(conn2, changeset, :omit)
 
-        {:ok, conn2} = NIF.open_in_memory(":memory:")
+      assert {:ok, %{rows: [[500]]}} =
+               NIF.query(conn2, "SELECT COUNT(*) FROM sess_bulk", [])
 
-        :ok =
-          NIF.execute_batch(
-            conn2,
-            "CREATE TABLE sess_bulk (id INTEGER PRIMARY KEY, val TEXT);"
-          )
+      assert {:ok, %{rows: [[1, "row_1"]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_bulk WHERE id = 1", [])
 
-        :ok = NIF.changeset_apply(conn2, changeset, :omit)
+      assert {:ok, %{rows: [[500, "row_500"]]}} =
+               NIF.query(conn2, "SELECT * FROM sess_bulk WHERE id = 500", [])
 
-        assert {:ok, %{rows: [[500]]}} =
-                 NIF.query(conn2, "SELECT COUNT(*) FROM sess_bulk", [])
-
-        assert {:ok, %{rows: [[1, "row_1"]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_bulk WHERE id = 1", [])
-
-        assert {:ok, %{rows: [[500, "row_500"]]}} =
-                 NIF.query(conn2, "SELECT * FROM sess_bulk WHERE id = 500", [])
-
-        NIF.close(conn2)
-      end
+      NIF.close(conn2)
     end
   end
 
