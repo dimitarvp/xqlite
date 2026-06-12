@@ -10,7 +10,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rusqlite = { version = "0.39.0", features = [
+rusqlite = { version = "0.40.1", features = [
   "backup",
   "blob",
   "bundled",
@@ -21,7 +21,7 @@ rusqlite = { version = "0.39.0", features = [
   "session",
   "trace",
 ] }
-rustler = { version = "0.37.3", default-features = false, features = ["nif_version_2_15"] }
+rustler = { version = "0.38.0", default-features = false, features = ["nif_version_2_15"] }
 
 [features]
 default = ["nif_version_2_17"]

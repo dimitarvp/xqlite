@@ -3,11 +3,11 @@
 [![Hex version](https://img.shields.io/hexpm/v/xqlite.svg?style=flat)](https://hex.pm/packages/xqlite)
 [![Hexdocs](https://img.shields.io/badge/hex-docs-blue.svg)](https://hexdocs.pm/xqlite)
 [![Downloads](https://img.shields.io/hexpm/dt/xqlite.svg)](https://hex.pm/packages/xqlite)
-[![SQLite](https://img.shields.io/badge/SQLite-3.51.3-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/releaselog/3_51_3.html)
+[![SQLite](https://img.shields.io/badge/SQLite-3.53.2-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/releaselog/3_53_2.html)
 [![Build Status](https://github.com/dimitarvp/xqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/dimitarvp/xqlite/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Low-level, fast, panic-free NIF bindings to SQLite 3 for Elixir. Will never crash the BEAM VM. Powered by Rust with [rusqlite](https://crates.io/crates/rusqlite) and [rustler](https://github.com/rusterlium/rustler). Bundled SQLite 3.51.3 -- no need to have SQLite already installed on your machine.
+Low-level, fast, panic-free NIF bindings to SQLite 3 for Elixir. Will never crash the BEAM VM. Powered by Rust with [rusqlite](https://crates.io/crates/rusqlite) and [rustler](https://github.com/rusterlium/rustler). Bundled SQLite 3.53.2 -- no need to have SQLite already installed on your machine.
 
 For Ecto 3.x integration see [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3), built on top of xqlite (work in progress).
 
@@ -217,7 +217,7 @@ For me the choice came down to _not panicking_ and never bringing down the BEAM 
 The cost is of course real: the stack is C -> `libsqlite3-sys` -> `rusqlite` -> `rustler` -> Elixir, and architecturally I don't like it. In practice, every benchmark I've run shows the overhead is anywhere from minuscule to invisible. In return I get a pure-Rust error list/taxonomy, `ResourceArc` + `Mutex<Connection>` + `Drop` as first-class citizens rather than convention-driven discipline (no resource leaks due to human forgetfulness), and the exhaustiveness guarantee mentioned above. The tradeoff has been worth it so far. I am very happy with the Rust code, even its ugly parts -- they are needed to get the job done and fulfill the promises that this library makes.
 
 **What SQLite version is bundled?**
-Currently: SQLite 3.51.3. The exact version is also available at runtime via `XqliteNIF.sqlite_version/0`.
+Currently: SQLite 3.53.2. The exact version is also available at runtime via `XqliteNIF.sqlite_version/0`.
 
 **Can I use Xqlite and [exqlite](https://github.com/elixir-sqlite/exqlite) in the same application?**
 Yes. They're separate Hex packages with separate NIFs and no shared runtime state. Projects could use Xqlite for one specific capability (e.g. session changesets for sync, or incremental blob I/O) while keeping exqlite for the main query path. There is no conflict at the BEAM level, though concurrent access remains an immutable SQLite limitation none of us can do anything about until SQLite gets fundamentally modified (which is extremely unlikely).
