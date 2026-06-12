@@ -66,7 +66,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
 12. **NIF version features in `Cargo.toml`.** Rustler 0.37 requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
 13. **Delete old checksum file before regenerating.** `mix rustler_precompiled.download --all` won't overwrite stale entries from a prior version. Always `rm -f checksum-Elixir.XqliteNIF.exs` first. If `mix hex.publish` still fails with a checksum mismatch, `--only-local` can add just the local platform's entry.
-14. **rusqlite upgrade (post-0.38.0).** PR #1819 (fixes our #1817) changes `Error::Utf8Error(err)` → `Error::Utf8Error(col, err)` and replaces `From<ValueRef> for Value` with `TryFrom`. Update the pattern match in `error.rs`; our `row.get::<_, Value>()?` calls need no changes.
+14. **rusqlite upgrades touch `error.rs` first.** Historical example: PR #1819 changed `Error::Utf8Error(err)` → `Error::Utf8Error(col, err)` and replaced `From<ValueRef> for Value` with `TryFrom` (absorbed in our 0.39 upgrade). When bumping rusqlite, expect the `From<RusqliteError>` match in `error.rs` to be the breakage point; `row.get::<_, Value>()?` call sites usually survive untouched.
 15. **Windows paths in Elixir.** `CARGO_HOME` and other env vars on Windows use backslashes. `Path.join` appends with forward slashes, producing mixed-separator paths that `Path.wildcard` cannot match. Always normalize with `String.replace("\\", "/")` before globbing. This bit us in `test_helper.exs`.
 16. **C compiler on Windows GHA runners.** `cl.exe` (MSVC) is NOT on PATH — it needs `ilammy/msvc-dev-cmd@v1` or manual `vcvarsall.bat` setup. MinGW `gcc` IS on PATH (gcc 14.2.0 at `C:\mingw64\bin`). Use `gcc -shared` for compiling SQLite extensions on Windows — proven by sqlean project. SQLite extensions use a function-pointer ABI so MinGW vs MSVC is irrelevant.
 17. **`mix clean` before checksum download after version bump.** After bumping the version in `mix.exs` and `Cargo.toml`, stale build artifacts retain the old version. `mix rustler_precompiled.download --no-config` reads the version from the compiled beam, not the source. Always run `mix clean && mix compile` before `mix rustler_precompiled.download` on release day.
@@ -131,10 +131,10 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 - **Our Mutex vs NOMUTEX.** rusqlite defaults to `SQLITE_OPEN_NO_MUTEX` (disables SQLite's internal mutex). Our `Mutex<Connection>` is still required by Rust's type system (`Connection` is `!Sync`). The two are complementary, not redundant: NOMUTEX is safe *because* our Mutex serializes access.
 - **API_ARMOR as defense-in-depth.** `ENABLE_API_ARMOR` adds NULL-pointer and invalid-argument checks at every SQLite C API entry point. Our Rust layer (Mutex, Option, AtomicPtr) already guards against most misuse, but API_ARMOR is the safety net beneath our raw FFI paths in `stream.rs` and `util.rs` — where we call `sqlite3_step`, `sqlite3_column_*`, `sqlite3_bind_*`, and `sqlite3_finalize` on raw pointers. Without it, a bug in our unsafe code would segfault; with it, we get `SQLITE_MISUSE`. Negligible performance cost. Never remove it.
 
-## Current State (March 2026)
+## Current State (June 2026)
 
-- v0.5.0 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
-- Rust edition 2024. Rustler 0.37, rusqlite 0.39.
+- v0.7.0 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
+- Rust edition 2024. Rustler 0.38, rusqlite 0.40 (bundled SQLite 3.53.2).
 - `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
 - CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.16–1.19 × OTP 26–28). Uses `XQLITE_BUILD=true` to force source compilation.
