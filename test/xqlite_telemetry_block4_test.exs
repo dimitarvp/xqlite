@@ -156,13 +156,11 @@ defmodule Xqlite.XqliteTelemetryBlock4Test do
         for ext <- ["", "-wal", "-shm"], do: File.rm(path <> ext)
       end)
 
-      # Use the raw NIF + set journal_mode manually to avoid
-      # `Xqlite.open/2`'s `wal_autocheckpoint` PRAGMA, which silently
-      # replaces our master wal hook callback at the SQLite C level.
-      # Documented in the WAL hook moduledoc warning.
-      {:ok, conn} = XqliteNIF.open(path)
+      # Regression: `Xqlite.open/2` applies the `wal_autocheckpoint`
+      # PRAGMA, which steals the wal_hook slot; `set_pragma` must
+      # re-install the master callback or no wal events ever fire.
+      {:ok, conn} = Xqlite.open(path)
       on_exit(fn -> XqliteNIF.close(conn) end)
-      {:ok, _} = XqliteNIF.set_pragma(conn, "journal_mode", "WAL")
 
       {:ok, bridge} = Xqlite.Telemetry.bridge(conn, hooks: [:wal])
 

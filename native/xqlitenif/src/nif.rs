@@ -485,7 +485,19 @@ fn get_pragma(
     handle: ResourceArc<XqliteConn>,
     pragma_name: String,
 ) -> Result<Term<'_>, XqliteError> {
-    connection::with_conn(&handle, |conn| pragma::get(env, conn, &pragma_name))
+    connection::with_conn(&handle, |conn| {
+        // The real PRAGMA read would always report 0 here: SQLite only
+        // reports a wal_autocheckpoint threshold while ITS internal
+        // hook occupies the wal_hook slot, and our master callback
+        // holds that slot (emulating the autocheckpoint). Report the
+        // emulated threshold — the effective value.
+        if pragma_name == "wal_autocheckpoint" {
+            let pages = handle.wal_hook.autocheckpoint_pages.load(Ordering::Relaxed);
+            Ok((pages as i64).encode(env))
+        } else {
+            pragma::get(env, conn, &pragma_name)
+        }
+    })
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -496,7 +508,30 @@ fn set_pragma<'a>(
     value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
-        pragma::set(env, conn, &pragma_name, value_term)
+        let result = pragma::set(env, conn, &pragma_name, value_term)?;
+
+        // `PRAGMA wal_autocheckpoint` installs SQLite's internal
+        // autocheckpoint wal_hook, evicting our master callback from
+        // the shared slot. Take the slot back and mirror the threshold
+        // SQLite reports, so our callback both notifies subscribers and
+        // emulates the autocheckpoint the caller just configured. Raw
+        // SQL (`query`/`execute_batch` "PRAGMA ...") bypasses this
+        // repair — documented limitation.
+        if pragma_name == "wal_autocheckpoint" {
+            if let Ok(pages) = result.decode::<i64>() {
+                let clamped = pages.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                handle
+                    .wal_hook
+                    .autocheckpoint_pages
+                    .store(clamped, Ordering::Relaxed);
+            }
+            // SAFETY: with_conn holds the connection Mutex for the
+            // duration of this closure; the WalDispatch lives in the
+            // same XqliteConn as `conn` (drop-order safe).
+            unsafe { crate::wal_hook::install_callback(conn, &handle.wal_hook) };
+        }
+
+        Ok(result)
     })
 }
 
@@ -1072,7 +1107,7 @@ fn register_wal_hook(
     pid: rustler::LocalPid,
 ) -> Term<'_> {
     let result = connection::with_conn(&handle, |_conn| {
-        crate::wal_hook::register(&handle.wal_hook, pid)
+        crate::wal_hook::register(&handle.wal_hook.list, pid)
     });
     match result {
         Ok(id) => (ok(), id).encode(env),
@@ -1083,7 +1118,7 @@ fn register_wal_hook(
 #[rustler::nif(schedule = "DirtyIo")]
 fn unregister_wal_hook(env: Env<'_>, handle: ResourceArc<XqliteConn>, id: u64) -> Term<'_> {
     let result = connection::with_conn(&handle, |_conn| {
-        crate::wal_hook::unregister(&handle.wal_hook, id);
+        crate::wal_hook::unregister(&handle.wal_hook.list, id);
         Ok(())
     });
     singular_ok_or_error_tuple(env, result)

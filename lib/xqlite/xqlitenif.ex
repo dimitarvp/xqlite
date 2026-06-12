@@ -404,6 +404,12 @@ defmodule XqliteNIF do
   part of the `name` string itself if SQLite supports that syntax. For more complex
   PRAGMA queries, use `XqliteNIF.query/3`. The `Xqlite.Pragma` module provides
   higher-level helpers for many common PRAGMAs.
+
+  Reading `wal_autocheckpoint` reports xqlite's emulated threshold rather
+  than issuing the PRAGMA: SQLite only reports a threshold while its own
+  internal WAL hook occupies the hook slot, which xqlite's master callback
+  holds (see `register_wal_hook/2`). A raw `PRAGMA wal_autocheckpoint;`
+  query would always report `0` on an xqlite connection.
   """
   @spec get_pragma(conn :: Xqlite.conn(), name :: String.t()) ::
           {:ok, term() | :no_value} | Xqlite.error()
@@ -431,6 +437,13 @@ defmodule XqliteNIF do
   valid PRAGMA. Returns `{:error, reason}` if there's an issue preparing or
   executing the PRAGMA statement (e.g., unsupported Elixir type for `value`,
   syntax error).
+
+  Setting `wal_autocheckpoint` through this function additionally repairs
+  the WAL hook slot: the PRAGMA installs SQLite's internal autocheckpoint
+  callback in place of xqlite's master WAL callback, so this NIF
+  re-installs the master and mirrors the new threshold into its emulated
+  autocheckpoint (see `register_wal_hook/2`). Raw-SQL `PRAGMA` statements
+  get no such repair.
 
   The `Xqlite.Pragma` module provides higher-level helpers for setting many
   common PRAGMAs with more type safety.
@@ -1167,15 +1180,20 @@ defmodule XqliteNIF do
   the log grows past a threshold. Multiple subscribers register
   independently; each gets a unique handle.
 
-  > #### Warning — PRAGMA wal_autocheckpoint replaces our master hook {: .warning}
+  WAL subscribers coexist with automatic checkpointing: SQLite's
+  wal_hook slot and its built-in autocheckpoint are mutually exclusive
+  at the C level, so xqlite's master callback emulates the
+  autocheckpoint itself (passive checkpoint once the WAL reaches the
+  `wal_autocheckpoint` threshold, default 1000 pages). Changing the
+  threshold through `set_pragma/3` keeps both behaviors intact.
+
+  > #### Warning — raw-SQL `PRAGMA wal_autocheckpoint` {: .warning}
   >
-  > SQLite's `wal_autocheckpoint` PRAGMA and the
-  > `sqlite3_wal_autocheckpoint` C function both register their own
-  > internal WAL hook, silently replacing the master callback we
-  > installed at connection open. After such a call, subscribers stop
-  > receiving messages. No memory is leaked. Install subscribers
-  > *after* any `wal_autocheckpoint` configuration, or switch to
-  > `wal_checkpoint/3` for explicit checkpointing.
+  > Issuing `PRAGMA wal_autocheckpoint = N` through `query/3`,
+  > `execute/3`, or `execute_batch/2` installs SQLite's internal WAL
+  > hook in place of ours: subscribers silently stop receiving events
+  > (no memory is leaked). Only `set_pragma/3` repairs the slot —
+  > always set this PRAGMA through it.
 
   Returns `{:ok, handle}` on success or `{:error, reason}` on failure.
   """

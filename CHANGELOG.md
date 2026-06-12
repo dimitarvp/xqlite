@@ -65,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs and README.
 - **WAL hook**: `XqliteNIF.set_wal_hook/2` + `remove_wal_hook/1`. Sends
   `{:xqlite_wal, db_name, pages}` to a pid after each commit in WAL mode.
-  Front-and-center warning about `PRAGMA wal_autocheckpoint` silently
-  replacing the hook (same semantics as busy_handler).
+  Coexists with automatic checkpointing (see the slot-conflict fix
+  below); only raw-SQL `PRAGMA wal_autocheckpoint` still steals the
+  hook slot.
 - **Commit hook**: `XqliteNIF.set_commit_hook/2` + `remove_commit_hook/1`.
   Sends `{:xqlite_commit}` to a pid immediately before each commit.
   Observation-only — never vetoes the commit.
@@ -88,6 +89,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `backup_with_progress` accept a list of tokens; any signal cancels
   (OR-semantics). The high-level `Xqlite.query_cancellable/4` family
   accepts either a single token or a list.
+
+### Fixed
+
+- **WAL hook ↔ `wal_autocheckpoint` slot conflict.** SQLite implements
+  automatic checkpointing *as* a wal_hook, so the two share one C-level
+  slot and silently disable each other. Both directions affected the
+  in-development hook work: `Xqlite.open/2`'s default
+  `wal_autocheckpoint` pragma evicted the master WAL callback (no
+  subscriber ever received events), and on raw `XqliteNIF.open`
+  connections the master callback itself disabled autocheckpointing
+  (unbounded WAL growth). The master callback now owns the slot and
+  emulates the autocheckpoint — a passive checkpoint once the WAL
+  reaches the configured threshold (default 1000 pages, mirroring
+  SQLite) — and the `set_pragma` NIF re-installs the master callback
+  and syncs the threshold whenever `wal_autocheckpoint` is set.
+  Remaining caveat (documented): issuing `PRAGMA wal_autocheckpoint`
+  through raw SQL (`query`, `execute`, `execute_batch`) bypasses the
+  repair and still steals the slot.
 
 ### Internal
 

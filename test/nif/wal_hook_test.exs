@@ -209,6 +209,111 @@ defmodule Xqlite.NIF.WalHookTest do
   end
 
   # ---------------------------------------------------------------------------
+  # wal_autocheckpoint slot conflict (see WalDispatch in wal_hook.rs)
+  #
+  # SQLite's wal_hook and its built-in autocheckpoint share one C-level
+  # slot. Our master callback owns the slot and emulates the
+  # autocheckpoint; the set_pragma NIF re-installs the master after the
+  # wal_autocheckpoint PRAGMA steals the slot.
+  # ---------------------------------------------------------------------------
+
+  test "subscribers receive events on conns opened via Xqlite.open defaults" do
+    # Regression: Xqlite.open applies wal_autocheckpoint in its default
+    # pragmas, which used to silently evict the master wal callback.
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "xqlite_walhook_open_#{:erlang.unique_integer([:positive])}.db"
+      )
+
+    on_exit(fn ->
+      for ext <- ["", "-wal", "-shm", "-journal"], do: File.rm(path <> ext)
+    end)
+
+    {:ok, conn} = Xqlite.open(path)
+    on_exit(fn -> NIF.close(conn) end)
+
+    {:ok, h} = NIF.register_wal_hook(conn, self())
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    :ok = NIF.unregister_wal_hook(conn, h)
+  end
+
+  test "set_pragma(wal_autocheckpoint) after registration keeps subscribers alive",
+       %{conn: conn} do
+    {:ok, h} = NIF.register_wal_hook(conn, self())
+    {:ok, 500} = NIF.set_pragma(conn, "wal_autocheckpoint", 500)
+    {:ok, 500} = NIF.get_pragma(conn, "wal_autocheckpoint")
+
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    :ok = NIF.unregister_wal_hook(conn, h)
+  end
+
+  test "emulated autocheckpoint keeps the WAL bounded at the set threshold",
+       %{conn: conn} do
+    {:ok, h} = NIF.register_wal_hook(conn, self())
+    {:ok, 2} = NIF.set_pragma(conn, "wal_autocheckpoint", 2)
+
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    n = 12
+    for _ <- 1..n, do: {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
+
+    pages_seen =
+      for _ <- 1..n do
+        assert_receive {:xqlite_wal, "main", p}, 500
+        p
+      end
+
+    # The sole connection's passive checkpoint always completes, so the
+    # next commit restarts the WAL: the frame count oscillates near the
+    # threshold instead of growing with every commit.
+    assert Enum.max(pages_seen) < 8
+
+    assert pages_seen
+           |> Enum.chunk_every(2, 1, :discard)
+           |> Enum.any?(fn [a, b] -> b < a end)
+
+    :ok = NIF.unregister_wal_hook(conn, h)
+  end
+
+  test "wal_autocheckpoint 0 disables emulated autocheckpoint, events keep firing",
+       %{conn: conn} do
+    {:ok, h} = NIF.register_wal_hook(conn, self())
+    {:ok, 0} = NIF.set_pragma(conn, "wal_autocheckpoint", 0)
+
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+
+    n = 6
+    for _ <- 1..n, do: {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
+
+    pages_seen =
+      for _ <- 1..n do
+        assert_receive {:xqlite_wal, "main", p}, 500
+        p
+      end
+
+    # No checkpointing: the WAL only grows.
+    assert pages_seen == Enum.sort(pages_seen)
+    assert List.last(pages_seen) >= n
+
+    :ok = NIF.unregister_wal_hook(conn, h)
+  end
+
+  test "emulated autocheckpoint defaults to SQLite's stock 1000 pages",
+       %{conn: conn} do
+    # get_pragma reports the emulated threshold: the real PRAGMA read
+    # would always say 0 while our master callback holds the wal_hook
+    # slot (SQLite only reports a threshold for its own internal hook).
+    assert {:ok, 1000} = NIF.get_pragma(conn, "wal_autocheckpoint")
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 

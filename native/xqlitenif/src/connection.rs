@@ -6,7 +6,7 @@ use crate::hook_util::{self, HookList};
 use crate::progress_dispatch::{self, ProgressDispatch};
 use crate::rollback_hook::{self, RollbackSubscriber};
 use crate::update_hook::{self, UpdateSubscriber};
-use crate::wal_hook::{self, WalSubscriber};
+use crate::wal_hook::{self, WalDispatch};
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::sync::Arc;
@@ -31,7 +31,13 @@ pub(crate) struct XqliteConn {
     // HookList. `Arc<HookList>` for the rusqlite-closure hooks because
     // the closure captures a clone — this keeps the list alive across
     // the closure's lifetime independently of XqliteConn's drop order.
-    pub(crate) wal_hook: HookList<WalSubscriber>,
+    //
+    // `wal_hook` carries the subscriber list plus the emulated
+    // autocheckpoint threshold (the wal_hook C slot and SQLite's
+    // built-in autocheckpoint are mutually exclusive — see WalDispatch).
+    // The master callback is re-installed by the `set_pragma` NIF when
+    // the `wal_autocheckpoint` PRAGMA steals the slot.
+    pub(crate) wal_hook: WalDispatch,
     pub(crate) update_hook: Arc<HookList<UpdateSubscriber>>,
     pub(crate) commit_hook: Arc<HookList<CommitSubscriber>>,
     pub(crate) rollback_hook: Arc<HookList<RollbackSubscriber>>,
@@ -106,7 +112,7 @@ pub(crate) fn handle_open_result(
                 conn: Mutex::new(Some(conn)),
                 extensions_enabled: AtomicBool::new(false),
                 busy_handler: AtomicPtr::new(std::ptr::null_mut()),
-                wal_hook: HookList::new(),
+                wal_hook: WalDispatch::new(),
                 update_hook: Arc::clone(&update_hook_list),
                 commit_hook: Arc::clone(&commit_hook_list),
                 rollback_hook: Arc::clone(&rollback_hook_list),
@@ -118,7 +124,7 @@ pub(crate) fn handle_open_result(
             // lifetime; subscriber-level register/unregister never
             // touches SQLite again.
             //
-            // SAFETY for the FFI hooks (wal, progress): the HookList
+            // SAFETY for the FFI hooks (wal, progress): the WalDispatch
             // / ProgressDispatch references are taken from inside the
             // ResourceArc, so they live as long as `handle`. The conn
             // (and any in-flight callback) drops before subscriber
