@@ -16,6 +16,8 @@ defmodule Xqlite.XqliteTelemetryTest do
 
   use ExUnit.Case, async: true
 
+  import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
+
   setup do
     {:ok, conn} = Xqlite.open_in_memory()
 
@@ -37,13 +39,12 @@ defmodule Xqlite.XqliteTelemetryTest do
           "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c');"
         )
 
-      handler_id = "test-query-success-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :query, :start],
-        [:xqlite, :query, :stop],
-        [:xqlite, :query, :exception]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :query, :start],
+          [:xqlite, :query, :stop],
+          [:xqlite, :query, :exception]
+        ])
 
       {:ok, %Xqlite.Result{}} = Xqlite.query(conn, "SELECT * FROM t", [])
 
@@ -65,16 +66,15 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert metadata_stop.error_reason == nil
       assert metadata_stop.num_rows == 3
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "fires :stop with :error on bad SQL", %{conn: conn} do
-      handler_id = "test-query-error-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :query, :start],
-        [:xqlite, :query, :stop]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :query, :start],
+          [:xqlite, :query, :stop]
+        ])
 
       {:error, _} = Xqlite.query(conn, "SELECT * FROM nonexistent", [])
 
@@ -86,32 +86,30 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert metadata.error_reason != nil
       assert metadata.num_rows == nil
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "params_count reflects actual list length", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-      handler_id = "test-query-params-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [[:xqlite, :query, :start]])
+      handler_id = attach_capture([[:xqlite, :query, :start]])
 
       Xqlite.query(conn, "SELECT * FROM t WHERE id IN (?, ?, ?)", [1, 2, 3])
 
       assert_receive {:telemetry_event, [:xqlite, :query, :start], _, %{params_count: 3}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
   describe "Xqlite.execute/3 telemetry" do
     test "fires :stop with affected_rows on success", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-      handler_id = "test-exec-#{:erlang.unique_integer([:positive])}"
 
-      attach_capture(handler_id, [
-        [:xqlite, :execute, :start],
-        [:xqlite, :execute, :stop]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :execute, :start],
+          [:xqlite, :execute, :stop]
+        ])
 
       {:ok, %Xqlite.Result{}} = Xqlite.execute(conn, "INSERT INTO t VALUES (1)", [])
 
@@ -123,7 +121,7 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert metadata.affected_rows == 1
       assert metadata.cancellable? == false
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "fires :stop with :error on constraint violation", %{conn: conn} do
@@ -133,8 +131,7 @@ defmodule Xqlite.XqliteTelemetryTest do
           "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);"
         )
 
-      handler_id = "test-exec-constraint-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :execute, :stop]])
+      handler_id = attach_capture([[:xqlite, :execute, :stop]])
 
       # Duplicate primary key — constraint violation.
       {:error, _} = Xqlite.execute(conn, "INSERT INTO t VALUES (1)", [])
@@ -144,18 +141,17 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert metadata.result_class == :error
       assert metadata.error_reason != nil
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
   describe "Xqlite.execute_batch/2 telemetry" do
     test "fires with sql_batch_size_bytes", %{conn: conn} do
-      handler_id = "test-batch-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :execute_batch, :start],
-        [:xqlite, :execute_batch, :stop]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :execute_batch, :start],
+          [:xqlite, :execute_batch, :stop]
+        ])
 
       sql = "CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1);"
       :ok = Xqlite.execute_batch(conn, sql)
@@ -167,7 +163,7 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert_receive {:telemetry_event, [:xqlite, :execute_batch, :stop], _,
                       %{result_class: :ok}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -179,8 +175,7 @@ defmodule Xqlite.XqliteTelemetryTest do
           "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t VALUES (1, 'a'), (2, 'b');"
         )
 
-      handler_id = "test-ea-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :explain_analyze, :stop]])
+      handler_id = attach_capture([[:xqlite, :explain_analyze, :stop]])
 
       {:ok, %Xqlite.ExplainAnalyze{}} =
         Xqlite.explain_analyze(conn, "SELECT * FROM t", [])
@@ -193,7 +188,7 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert is_integer(metadata.rows_produced) and metadata.rows_produced >= 0
       assert is_integer(metadata.scan_count) and metadata.scan_count >= 0
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -204,12 +199,11 @@ defmodule Xqlite.XqliteTelemetryTest do
 
       {:ok, token} = XqliteNIF.create_cancel_token()
 
-      handler_id = "test-qc-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :query, :start],
-        [:xqlite, :query, :stop]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :query, :start],
+          [:xqlite, :query, :stop]
+        ])
 
       {:ok, _} = Xqlite.query_cancellable(conn, "SELECT * FROM t", [], token)
 
@@ -218,15 +212,14 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert_receive {:telemetry_event, [:xqlite, :query, :stop], _,
                       %{cancellable?: true, result_class: :ok}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "fires :stop with error_reason: :operation_cancelled on cancel", %{conn: conn} do
       {:ok, token} = XqliteNIF.create_cancel_token()
       :ok = XqliteNIF.cancel_operation(token)
 
-      handler_id = "test-qc-cancel-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :query, :stop]])
+      handler_id = attach_capture([[:xqlite, :query, :stop]])
 
       {:error, :operation_cancelled} =
         Xqlite.query_cancellable(
@@ -241,7 +234,7 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert metadata.result_class == :error
       assert metadata.error_reason == :operation_cancelled
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -252,12 +245,11 @@ defmodule Xqlite.XqliteTelemetryTest do
     end
 
     test "begin / commit fire single events with metadata", %{conn: conn} do
-      handler_id = "test-tx-bc-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :transaction, :begin],
-        [:xqlite, :transaction, :commit]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :transaction, :begin],
+          [:xqlite, :transaction, :commit]
+        ])
 
       :ok = Xqlite.begin(conn, :immediate)
       :ok = Xqlite.commit(conn)
@@ -271,13 +263,11 @@ defmodule Xqlite.XqliteTelemetryTest do
 
       assert_receive {:telemetry_event, [:xqlite, :transaction, :commit], _, %{conn: ^conn}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "rollback fires with reason: :user_initiated", %{conn: conn} do
-      handler_id = "test-tx-rb-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [[:xqlite, :transaction, :rollback]])
+      handler_id = attach_capture([[:xqlite, :transaction, :rollback]])
 
       :ok = Xqlite.begin(conn, :deferred)
       {:ok, _} = XqliteNIF.execute(conn, "INSERT INTO tx VALUES (1)", [])
@@ -286,17 +276,16 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert_receive {:telemetry_event, [:xqlite, :transaction, :rollback], _,
                       %{conn: ^conn, reason: :user_initiated}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "savepoint create / rollback_to / release fire with name", %{conn: conn} do
-      handler_id = "test-sp-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :savepoint, :create],
-        [:xqlite, :savepoint, :rollback_to],
-        [:xqlite, :savepoint, :release]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :savepoint, :create],
+          [:xqlite, :savepoint, :rollback_to],
+          [:xqlite, :savepoint, :release]
+        ])
 
       :ok = Xqlite.begin(conn, :deferred)
       :ok = Xqlite.savepoint(conn, "sp1")
@@ -308,22 +297,21 @@ defmodule Xqlite.XqliteTelemetryTest do
       assert_receive {:telemetry_event, [:xqlite, :savepoint, :rollback_to], _, %{name: "sp1"}}
       assert_receive {:telemetry_event, [:xqlite, :savepoint, :release], _, %{name: "sp1"}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "begin/commit on failure does NOT emit (event only fires on :ok)", %{conn: conn} do
-      handler_id = "test-tx-fail-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :transaction, :begin],
-        [:xqlite, :transaction, :commit]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :transaction, :begin],
+          [:xqlite, :transaction, :commit]
+        ])
 
       # Try to commit when no transaction is active — should error and not emit.
       {:error, _} = Xqlite.commit(conn)
       refute_receive {:telemetry_event, [:xqlite, :transaction, :commit], _, _}, 100
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -338,17 +326,4 @@ defmodule Xqlite.XqliteTelemetryTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
-
-  defp attach_capture(handler_id, events) do
-    test_pid = self()
-
-    :telemetry.attach_many(
-      handler_id,
-      events,
-      fn name, measurements, metadata, _ ->
-        send(test_pid, {:telemetry_event, name, measurements, metadata})
-      end,
-      nil
-    )
-  end
 end

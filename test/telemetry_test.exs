@@ -1,6 +1,8 @@
 defmodule Xqlite.TelemetryTest do
   use ExUnit.Case, async: true
 
+  import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
+
   alias Xqlite.Telemetry
 
   describe "compile-time flag" do
@@ -56,7 +58,7 @@ defmodule Xqlite.TelemetryTest do
 
       assert_receive {:emitted, [:xqlite, :test, :unit], %{count: 1}, %{token: :unit_test}}
 
-      :telemetry.detach("telemetry-test-emit")
+      detach("telemetry-test-emit")
     end
 
     test "fires no event when no handler is attached (smoke test)" do
@@ -70,11 +72,12 @@ defmodule Xqlite.TelemetryTest do
     require Telemetry
 
     test "fires :start and :stop when block succeeds" do
-      attach_capture("test-span-success", [
-        [:xqlite, :test, :span, :start],
-        [:xqlite, :test, :span, :stop],
-        [:xqlite, :test, :span, :exception]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :test, :span, :start],
+          [:xqlite, :test, :span, :stop],
+          [:xqlite, :test, :span, :exception]
+        ])
 
       result =
         Telemetry.span([:xqlite, :test, :span], %{tag: :ok_path}, do: 42)
@@ -89,15 +92,16 @@ defmodule Xqlite.TelemetryTest do
 
       assert is_integer(dur) and dur >= 0
 
-      :telemetry.detach("test-span-success")
+      detach(handler_id)
     end
 
     test "fires :exception when block raises and re-raises" do
-      attach_capture("test-span-exception", [
-        [:xqlite, :test, :span2, :start],
-        [:xqlite, :test, :span2, :stop],
-        [:xqlite, :test, :span2, :exception]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :test, :span2, :start],
+          [:xqlite, :test, :span2, :stop],
+          [:xqlite, :test, :span2, :exception]
+        ])
 
       assert_raise RuntimeError, "boom", fn ->
         Telemetry.span([:xqlite, :test, :span2], %{tag: :err_path}, do: raise("boom"))
@@ -113,7 +117,7 @@ defmodule Xqlite.TelemetryTest do
       assert metadata.kind == :error
       assert metadata.reason == %RuntimeError{message: "boom"}
 
-      :telemetry.detach("test-span-exception")
+      detach(handler_id)
     end
   end
 
@@ -121,10 +125,11 @@ defmodule Xqlite.TelemetryTest do
     require Telemetry
 
     test "merges start metadata with block-returned stop metadata" do
-      attach_capture("test-span-merge", [
-        [:xqlite, :test, :merge, :start],
-        [:xqlite, :test, :merge, :stop]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :test, :merge, :start],
+          [:xqlite, :test, :merge, :stop]
+        ])
 
       result =
         Telemetry.span_with_stop_metadata [:xqlite, :test, :merge], %{
@@ -141,7 +146,7 @@ defmodule Xqlite.TelemetryTest do
       assert_receive {:telemetry_event, [:xqlite, :test, :merge, :stop], _measurements,
                       %{phase: :start, rows: 7}}
 
-      :telemetry.detach("test-span-merge")
+      detach(handler_id)
     end
   end
 
@@ -150,17 +155,4 @@ defmodule Xqlite.TelemetryTest do
   # ---------------------------------------------------------------------------
 
   defp self_pid(%{pid: pid}), do: pid
-
-  defp attach_capture(handler_id, events) do
-    test_pid = self()
-
-    :telemetry.attach_many(
-      handler_id,
-      events,
-      fn name, measurements, metadata, _ ->
-        send(test_pid, {:telemetry_event, name, measurements, metadata})
-      end,
-      nil
-    )
-  end
 end

@@ -11,6 +11,8 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
 
   use ExUnit.Case, async: true
 
+  import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
+
   setup do
     {:ok, conn} = Xqlite.open_in_memory()
     on_exit(fn -> XqliteNIF.close(conn) end)
@@ -25,14 +27,13 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
           "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1), (2), (3);"
         )
 
-      handler_id = "test-stream-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :stream, :open, :start],
-        [:xqlite, :stream, :open, :stop],
-        [:xqlite, :stream, :fetch],
-        [:xqlite, :stream, :close]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :stream, :open, :start],
+          [:xqlite, :stream, :open, :stop],
+          [:xqlite, :stream, :fetch],
+          [:xqlite, :stream, :close]
+        ])
 
       stream = Xqlite.stream(conn, "SELECT id FROM t", [], batch_size: 2)
       results = Enum.to_list(stream)
@@ -59,30 +60,28 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert close_measurements.total_rows == 3
       assert close_metadata.reason in [:drained, :errored, :halted]
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "open :stop fires with :error on bad SQL", %{conn: conn} do
-      handler_id = "test-stream-bad-#{:erlang.unique_integer([:positive])}"
-
-      attach_capture(handler_id, [
-        [:xqlite, :stream, :open, :stop]
-      ])
+      handler_id =
+        attach_capture([
+          [:xqlite, :stream, :open, :stop]
+        ])
 
       {:error, _} = Xqlite.stream(conn, "SELECT * FROM nonexistent", [])
 
       assert_receive {:telemetry_event, [:xqlite, :stream, :open, :stop], _, metadata}
       assert metadata.result_class == :error
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
   describe "serialize telemetry" do
     test "fires :stop with byte_size on success", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
-      handler_id = "test-serialize-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :serialize, :stop]])
+      handler_id = attach_capture([[:xqlite, :serialize, :stop]])
 
       {:ok, bin} = Xqlite.serialize(conn, "main")
       assert is_binary(bin)
@@ -92,7 +91,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert metadata.byte_size == byte_size(bin)
       assert metadata.schema == "main"
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -104,8 +103,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       {:ok, conn2} = Xqlite.open_in_memory()
       on_exit(fn -> XqliteNIF.close(conn2) end)
 
-      handler_id = "test-deserialize-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :deserialize, :stop]])
+      handler_id = attach_capture([[:xqlite, :deserialize, :stop]])
 
       :ok = Xqlite.deserialize(conn2, bin, "main", false)
 
@@ -114,7 +112,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert metadata.read_only? == false
       assert metadata.byte_size == byte_size(bin)
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -127,8 +125,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
 
       on_exit(fn -> File.rm(path) end)
 
-      handler_id = "test-backup-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :backup, :stop]])
+      handler_id = attach_capture([[:xqlite, :backup, :stop]])
 
       :ok = Xqlite.backup(conn, path)
 
@@ -137,12 +134,11 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert is_integer(metadata.byte_size) and metadata.byte_size > 0
       assert metadata.dest_path == path
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "backup :stop with :error for invalid path", %{conn: conn} do
-      handler_id = "test-backup-err-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :backup, :stop]])
+      handler_id = attach_capture([[:xqlite, :backup, :stop]])
 
       {:error, _} = Xqlite.backup(conn, "/no/such/dir/backup.db")
 
@@ -150,7 +146,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert metadata.result_class == :error
       assert metadata.byte_size == nil
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "restore :stop fires with src_path", %{conn: conn} do
@@ -162,8 +158,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       on_exit(fn -> File.rm(path) end)
       :ok = Xqlite.backup(conn, path)
 
-      handler_id = "test-restore-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :restore, :stop]])
+      handler_id = attach_capture([[:xqlite, :restore, :stop]])
 
       {:ok, conn2} = Xqlite.open_in_memory()
       on_exit(fn -> XqliteNIF.close(conn2) end)
@@ -174,7 +169,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert metadata.result_class == :ok
       assert metadata.src_path == path
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
@@ -199,8 +194,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
           "CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);"
         )
 
-      handler_id = "test-wal-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :wal_checkpoint, :stop]])
+      handler_id = attach_capture([[:xqlite, :wal_checkpoint, :stop]])
 
       {:ok, _} = Xqlite.wal_checkpoint(conn, :passive, "main")
 
@@ -212,14 +206,13 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert is_integer(metadata.checkpointed_pages)
       assert is_boolean(metadata.busy?)
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
   describe "load_extension / enable_load_extension telemetry" do
     test "load_extension :stop fires with :error for nonexistent path", %{conn: conn} do
-      handler_id = "test-loadext-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :extension, :load, :stop]])
+      handler_id = attach_capture([[:xqlite, :extension, :load, :stop]])
 
       :ok = Xqlite.enable_load_extension(conn, true)
       {:error, _} = Xqlite.load_extension(conn, "/no/such/extension")
@@ -229,12 +222,11 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert metadata.path == "/no/such/extension"
 
       :ok = Xqlite.enable_load_extension(conn, false)
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "enable_load_extension fires :enable event", %{conn: conn} do
-      handler_id = "test-enableext-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :extension, :enable]])
+      handler_id = attach_capture([[:xqlite, :extension, :enable]])
 
       :ok = Xqlite.enable_load_extension(conn, true)
       assert_receive {:telemetry_event, [:xqlite, :extension, :enable], _, %{enabled: true}}
@@ -242,14 +234,13 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       :ok = Xqlite.enable_load_extension(conn, false)
       assert_receive {:telemetry_event, [:xqlite, :extension, :enable], _, %{enabled: false}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
   describe "pragma get/set telemetry" do
     test "set fires :pragma, :set with name + value", %{conn: conn} do
-      handler_id = "test-pragma-set-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :pragma, :set]])
+      handler_id = attach_capture([[:xqlite, :pragma, :set]])
 
       {:ok, _} = Xqlite.set_pragma(conn, "cache_size", 100)
 
@@ -257,46 +248,31 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
       assert metadata.name == "cache_size"
       assert metadata.value == 100
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "get fires :pragma, :get with name", %{conn: conn} do
-      handler_id = "test-pragma-get-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :pragma, :get]])
+      handler_id = attach_capture([[:xqlite, :pragma, :get]])
 
       {:ok, _} = Xqlite.get_pragma(conn, "cache_size")
 
       assert_receive {:telemetry_event, [:xqlite, :pragma, :get], _, %{name: "cache_size"}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
 
     test "atom names get converted to strings", %{conn: conn} do
-      handler_id = "test-pragma-atom-#{:erlang.unique_integer([:positive])}"
-      attach_capture(handler_id, [[:xqlite, :pragma, :get]])
+      handler_id = attach_capture([[:xqlite, :pragma, :get]])
 
       {:ok, _} = Xqlite.get_pragma(conn, :cache_size)
 
       assert_receive {:telemetry_event, [:xqlite, :pragma, :get], _, %{name: "cache_size"}}
 
-      :telemetry.detach(handler_id)
+      detach(handler_id)
     end
   end
 
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
-
-  defp attach_capture(handler_id, events) do
-    test_pid = self()
-
-    :telemetry.attach_many(
-      handler_id,
-      events,
-      fn name, measurements, metadata, _ ->
-        send(test_pid, {:telemetry_event, name, measurements, metadata})
-      end,
-      nil
-    )
-  end
 end
