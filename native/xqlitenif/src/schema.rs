@@ -2,7 +2,298 @@ use crate::atoms;
 use crate::error::XqliteError;
 use crate::util::quote_identifier;
 use rusqlite::Connection;
-use rustler::{Atom, NifStruct};
+use rustler::types::atom::nil;
+use rustler::{Atom, Encoder, Env, NifStruct, OwnedBinary, Term};
+
+/// A column default, classified from the verbatim `dflt_value` text
+/// that `PRAGMA table_xinfo` returns.
+///
+/// SQLite stores defaults as raw SQL text (outer parentheses of
+/// expression defaults are stripped, surrounding whitespace is
+/// normalized, keyword case is preserved). We parse the closed
+/// literal grammar of the DEFAULT clause — NULL / TRUE / FALSE /
+/// CURRENT_* / signed integers (incl. hex) / floats / `'...'`
+/// strings / `x'...'` blobs — and classify everything else as a
+/// verbatim expression. Never guessed, never constant-folded:
+/// `1+2` stays an expression; SQLite folds it at insert time, not us.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DefaultValue {
+    /// Column declares no default at all.
+    None,
+    /// Explicit `DEFAULT NULL`.
+    LiteralNull,
+    /// `DEFAULT TRUE` / `DEFAULT FALSE` (stored by SQLite as INTEGER
+    /// 1/0; surfaced as booleans for Elixir ergonomics by decision).
+    LiteralBool(bool),
+    LiteralInt(i64),
+    LiteralFloat(f64),
+    LiteralText(String),
+    /// `x'...'` hex blob, decoded. May be arbitrary bytes.
+    Blob(Vec<u8>),
+    /// CURRENT_TIME / CURRENT_DATE / CURRENT_TIMESTAMP.
+    Current(CurrentKind),
+    /// Anything else, verbatim as SQLite stored it.
+    Expr(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CurrentKind {
+    Time,
+    Date,
+    Timestamp,
+}
+
+impl Encoder for DefaultValue {
+    fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
+        match self {
+            DefaultValue::None => atoms::none().encode(env),
+            DefaultValue::LiteralNull => (atoms::literal(), nil()).encode(env),
+            DefaultValue::LiteralBool(b) => (atoms::literal(), b).encode(env),
+            DefaultValue::LiteralInt(i) => (atoms::literal(), i).encode(env),
+            DefaultValue::LiteralFloat(f) => (atoms::literal(), f).encode(env),
+            DefaultValue::LiteralText(s) => (atoms::literal(), s.as_str()).encode(env),
+            DefaultValue::Blob(bytes) => {
+                let mut bin = OwnedBinary::new(bytes.len())
+                    .expect("blob default allocation cannot fail for schema-sized data");
+                bin.as_mut_slice().copy_from_slice(bytes);
+                (atoms::blob(), Term::from(bin.release(env))).encode(env)
+            }
+            DefaultValue::Current(kind) => {
+                let k = match kind {
+                    CurrentKind::Time => atoms::time(),
+                    CurrentKind::Date => atoms::date(),
+                    CurrentKind::Timestamp => atoms::timestamp(),
+                };
+                (atoms::current(), k).encode(env)
+            }
+            DefaultValue::Expr(s) => (atoms::expr(), s.as_str()).encode(env),
+        }
+    }
+}
+
+// Required by the NifStruct derive on ColumnInfo even though
+// ColumnInfo never flows Elixir→Rust; mirrors the Encoder exactly.
+impl<'a> rustler::Decoder<'a> for DefaultValue {
+    fn decode(term: Term<'a>) -> rustler::NifResult<Self> {
+        if let Ok(atom) = term.decode::<Atom>() {
+            if atom == atoms::none() {
+                return Ok(DefaultValue::None);
+            }
+            return Err(rustler::Error::BadArg);
+        }
+
+        let (tag, value): (Atom, Term<'a>) = term.decode()?;
+
+        if tag == atoms::literal() {
+            // bool first: true/false are atoms, so the nil/atom branch
+            // below would otherwise swallow them.
+            if let Ok(b) = value.decode::<bool>() {
+                return Ok(DefaultValue::LiteralBool(b));
+            }
+            if let Ok(inner) = value.decode::<Atom>() {
+                if inner == nil() {
+                    return Ok(DefaultValue::LiteralNull);
+                }
+                return Err(rustler::Error::BadArg);
+            }
+            if let Ok(i) = value.decode::<i64>() {
+                return Ok(DefaultValue::LiteralInt(i));
+            }
+            if let Ok(f) = value.decode::<f64>() {
+                return Ok(DefaultValue::LiteralFloat(f));
+            }
+            return Ok(DefaultValue::LiteralText(value.decode::<String>()?));
+        }
+
+        if tag == atoms::blob() {
+            let bin: rustler::Binary = value.decode()?;
+            return Ok(DefaultValue::Blob(bin.as_slice().to_vec()));
+        }
+
+        if tag == atoms::current() {
+            let kind: Atom = value.decode()?;
+            let kind = if kind == atoms::time() {
+                CurrentKind::Time
+            } else if kind == atoms::date() {
+                CurrentKind::Date
+            } else if kind == atoms::timestamp() {
+                CurrentKind::Timestamp
+            } else {
+                return Err(rustler::Error::BadArg);
+            };
+            return Ok(DefaultValue::Current(kind));
+        }
+
+        if tag == atoms::expr() {
+            return Ok(DefaultValue::Expr(value.decode::<String>()?));
+        }
+
+        Err(rustler::Error::BadArg)
+    }
+}
+
+/// Classify a raw `dflt_value` into a `DefaultValue`. Total: any
+/// input yields a valid classification; unparseable forms fall back
+/// to `Expr(verbatim)`.
+pub(crate) fn classify_default(raw: Option<String>) -> DefaultValue {
+    let Some(s) = raw else {
+        return DefaultValue::None;
+    };
+    let t = s.trim();
+
+    if t.eq_ignore_ascii_case("NULL") {
+        return DefaultValue::LiteralNull;
+    }
+    if t.eq_ignore_ascii_case("TRUE") {
+        return DefaultValue::LiteralBool(true);
+    }
+    if t.eq_ignore_ascii_case("FALSE") {
+        return DefaultValue::LiteralBool(false);
+    }
+    if t.eq_ignore_ascii_case("CURRENT_TIME") {
+        return DefaultValue::Current(CurrentKind::Time);
+    }
+    if t.eq_ignore_ascii_case("CURRENT_DATE") {
+        return DefaultValue::Current(CurrentKind::Date);
+    }
+    if t.eq_ignore_ascii_case("CURRENT_TIMESTAMP") {
+        return DefaultValue::Current(CurrentKind::Timestamp);
+    }
+    if let Some(text) = parse_text_literal(t) {
+        return DefaultValue::LiteralText(text);
+    }
+    if let Some(bytes) = parse_blob_literal(t) {
+        return DefaultValue::Blob(bytes);
+    }
+    if looks_like_int(t) {
+        return match parse_int_literal(t) {
+            Some(i) => DefaultValue::LiteralInt(i),
+            // Integer-shaped but beyond i64 (SQLite would coerce to
+            // REAL at insert) — surface verbatim rather than silently
+            // changing numeric type.
+            None => DefaultValue::Expr(s),
+        };
+    }
+    if let Some(f) = parse_float_literal(t) {
+        return DefaultValue::LiteralFloat(f);
+    }
+    DefaultValue::Expr(s)
+}
+
+/// `'...'` with `''` as the only escape; must span the entire input.
+fn parse_text_literal(t: &str) -> Option<String> {
+    let inner = t.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            // Must be a doubled quote; a lone interior quote means the
+            // input is not a single text literal (e.g. `'a' || 'b'`).
+            match chars.next() {
+                Some('\'') => out.push('\''),
+                _ => return None,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// `x'hex'` / `X'hex'`, even-length hex, spanning the entire input.
+fn parse_blob_literal(t: &str) -> Option<Vec<u8>> {
+    let rest = t.strip_prefix('x').or_else(|| t.strip_prefix('X'))?;
+    let inner = rest.strip_prefix('\'')?.strip_suffix('\'')?;
+    if inner.len() % 2 != 0 || !inner.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(inner.len() / 2);
+    let raw = inner.as_bytes();
+    for pair in raw.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        bytes.push(((hi << 4) | lo) as u8);
+    }
+    Some(bytes)
+}
+
+/// Pure-integer shape: optional sign, then decimal digits or a hex
+/// literal. Distinguishes "integer-shaped but overflowing" from
+/// "not an integer at all" so overflow can fall back to Expr instead
+/// of being silently reparsed as a float.
+fn looks_like_int(t: &str) -> bool {
+    let body = t
+        .strip_prefix('-')
+        .or_else(|| t.strip_prefix('+'))
+        .unwrap_or(t);
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        return !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn parse_int_literal(t: &str) -> Option<i64> {
+    let (neg, body) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        // SQLite interprets hex literals as 64-bit two's complement
+        // (0xFFFFFFFFFFFFFFFF is -1); mirror that exactly.
+        let value = u64::from_str_radix(hex, 16).ok()? as i64;
+        return if neg {
+            value.checked_neg()
+        } else {
+            Some(value)
+        };
+    }
+    // Decimal: parse the signed text in one go — i64::MIN has no
+    // positive counterpart, so sign-splitting would reject it.
+    let signed = if neg { t } else { body };
+    signed.parse::<i64>().ok()
+}
+
+/// Float shape per SQLite's numeric grammar: digits with a decimal
+/// point (either side optional, not both) and/or an exponent. Must
+/// be finite; `9e999` (Inf) falls back to Expr.
+fn parse_float_literal(t: &str) -> Option<f64> {
+    let body = t
+        .strip_prefix('-')
+        .or_else(|| t.strip_prefix('+'))
+        .unwrap_or(t);
+    let (mantissa, exponent) = match body.split_once(['e', 'E']) {
+        Some((m, e)) => (m, Some(e)),
+        None => (body, None),
+    };
+    let mantissa_ok = match mantissa.split_once('.') {
+        Some((int_part, frac_part)) => {
+            (!int_part.is_empty() || !frac_part.is_empty())
+                && int_part.bytes().all(|b| b.is_ascii_digit())
+                && frac_part.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => !mantissa.is_empty() && mantissa.bytes().all(|b| b.is_ascii_digit()),
+    };
+    if !mantissa_ok {
+        return None;
+    }
+    // Without a dot or an exponent this is integer territory, never ours.
+    if !body.contains('.') && exponent.is_none() {
+        return None;
+    }
+    if let Some(e) = exponent {
+        let e_body = e
+            .strip_prefix('-')
+            .or_else(|| e.strip_prefix('+'))
+            .unwrap_or(e);
+        if e_body.is_empty() || !e_body.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    match t.parse::<f64>() {
+        Ok(f) if f.is_finite() => Some(f),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, NifStruct)]
 #[module = "Xqlite.Schema.DatabaseInfo"]
@@ -30,7 +321,7 @@ pub(crate) struct ColumnInfo {
     pub type_affinity: Atom,
     pub declared_type: String,
     pub nullable: bool,
-    pub default_value: Option<String>,
+    pub default_value: DefaultValue,
     pub primary_key_index: u8,
     pub hidden_kind: Atom,
 }
@@ -389,7 +680,7 @@ pub(crate) fn columns(
                     type_affinity: type_affinity_atom,
                     declared_type: temp_data.type_str,
                     nullable,
-                    default_value: temp_data.dflt_value,
+                    default_value: classify_default(temp_data.dflt_value),
                     primary_key_index,
                     hidden_kind: hidden_kind_atom,
                 });

@@ -62,6 +62,7 @@ defmodule Xqlite.MixProject do
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:ex_doc, "~> 0.20", only: :dev, runtime: false},
       {:excoveralls, "~> 0.11", only: :test},
+      {:stream_data, "~> 1.1", only: [:dev, :test]},
       {:jason, "~> 1.4"}
     ]
   end

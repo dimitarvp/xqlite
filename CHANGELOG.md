@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`ColumnInfo.default_value` is now classified, not raw text.**
+  Previously the verbatim `dflt_value` string from
+  `PRAGMA table_xinfo` (or `nil`); now a typed classification:
+  `:none` (no default — distinct from explicit `DEFAULT NULL`),
+  `{:literal, nil | boolean | integer | float | String.t()}` (with
+  SQLite's `''` string escaping undone, hex integers as 64-bit
+  two's complement, `TRUE`/`FALSE` as booleans),
+  `{:blob, binary}` (`x'...'` hex-decoded, may be any bytes),
+  `{:current, :time | :date | :timestamp}`, or `{:expr, sql}`
+  verbatim for everything else (SQLite strips expression defaults'
+  outer parentheses; nothing is constant-folded; integer-shaped
+  values beyond 64 bits and non-finite floats land here).
+  Parsing happens in Rust at the NIF boundary. Date/time-looking
+  strings remain strings — no type divination at the schema layer.
+
 ### Changed
 
 - Upgraded rusqlite 0.39 → 0.40.1 (bundled SQLite 3.51.3 → 3.53.2)

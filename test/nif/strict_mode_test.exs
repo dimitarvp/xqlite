@@ -672,20 +672,20 @@ defmodule Xqlite.NIF.StrictModeTest do
         col_c = Enum.find(columns_info, &(&1.name == "c"))
 
         assert !is_nil(col_a)
-        assert col_a.default_value == nil
+        assert col_a.default_value == :none
         assert col_a.type_affinity == :integer
         assert col_a.hidden_kind == :normal
 
         assert !is_nil(col_b)
         # PRAGMA table_xinfo returns NULL in dflt_value for generated columns.
         # The expression itself is not in this field from the PRAGMA.
-        assert col_b.default_value == nil
+        assert col_b.default_value == :none
         assert col_b.type_affinity == :text
         assert col_b.hidden_kind == :stored_generated
 
         assert !is_nil(col_c)
         # PRAGMA table_xinfo returns NULL in dflt_value for generated columns.
-        assert col_c.default_value == nil
+        assert col_c.default_value == :none
         assert col_c.type_affinity == :integer
         assert col_c.hidden_kind == :virtual_generated
       end

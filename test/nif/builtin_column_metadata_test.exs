@@ -136,7 +136,7 @@ defmodule Xqlite.NIF.BuiltinColumnMetadataTest do
 
         score_col = Enum.find(columns, fn c -> c.name == "score" end)
         assert score_col.declared_type == "REAL"
-        assert score_col.default_value == "0.0"
+        assert score_col.default_value == {:literal, 0.0}
       end
 
       test "schema_columns on table with no explicit types", %{conn: conn} do

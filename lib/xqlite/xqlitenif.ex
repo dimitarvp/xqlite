@@ -637,9 +637,11 @@ defmodule XqliteNIF do
     - `:type_affinity` (atom): Resolved data type affinity (e.g., `:integer`, `:text`).
     - `:declared_type` (String.t()): Original data type string from `CREATE TABLE`.
     - `:nullable` (boolean()): `true` if the column allows NULL values.
-    - `:default_value` (String.t() | nil): Default value expression as a string literal,
-      or `nil`. For generated columns, this will be `nil` as the expression is not
-      in this field from `PRAGMA table_xinfo`.
+    - `:default_value` (`t:Xqlite.Schema.ColumnInfo.default_value/0`): the
+      column default, classified — `:none`, `{:literal, value}`,
+      `{:blob, binary}`, `{:current, :time | :date | :timestamp}`, or
+      `{:expr, sql}`. For generated columns this is `:none`; their
+      expression is not exposed by `PRAGMA table_xinfo`.
     - `:primary_key_index` (non_neg_integer()): 1-based index within the PK if part of it, else `0`.
     - `:hidden_kind` (atom): Indicates if/how a column is hidden/generated
       (e.g., `:normal`, `:stored_generated`, `:virtual_generated`).

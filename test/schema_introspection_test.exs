@@ -108,7 +108,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :integer,
             declared_type: "INTEGER",
             nullable: true,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 1,
             hidden_kind: :normal
           },
@@ -118,7 +118,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :integer,
             declared_type: "INTEGER",
             nullable: true,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 0,
             hidden_kind: :normal
           },
@@ -128,7 +128,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :text,
             declared_type: "TEXT",
             nullable: false,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 0,
             hidden_kind: :normal
           },
@@ -138,7 +138,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :text,
             declared_type: "TEXT",
             nullable: true,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 0,
             hidden_kind: :normal
           },
@@ -148,7 +148,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :float,
             declared_type: "REAL",
             nullable: true,
-            default_value: "0.0",
+            default_value: {:literal, 0.0},
             primary_key_index: 0,
             hidden_kind: :normal
           },
@@ -158,7 +158,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :binary,
             declared_type: "BLOB",
             nullable: true,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 0,
             hidden_kind: :normal
           }
@@ -175,7 +175,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :text,
             declared_type: "TEXT",
             nullable: false,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 1,
             hidden_kind: :normal
           },
@@ -185,7 +185,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :text,
             declared_type: "TEXT",
             nullable: true,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 0,
             hidden_kind: :normal
           },
@@ -196,7 +196,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
             type_affinity: :float,
             declared_type: "REAL",
             nullable: true,
-            default_value: nil,
+            default_value: :none,
             primary_key_index: 0,
             hidden_kind: :normal
           }
