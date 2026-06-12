@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-06-12
 
 ### Breaking
 
@@ -56,6 +56,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in `:telemetry` instrumentation** across the whole API surface.
+  Compile-time flag (`config :xqlite, :telemetry_enabled, true` +
+  recompile); when disabled (the default) no telemetry call exists in
+  the bytecode at all. Span events (`:start`/`:stop` with integer-
+  nanosecond `monotonic_time`/`duration`) for query / execute /
+  execute_batch / explain_analyze and their cancellable variants,
+  transactions and savepoints, streams (open / per-batch fetch /
+  close), backup, wal_checkpoint, serialize / deserialize, extension
+  loading, and pragma get/set. Cancellation lifecycle events:
+  `[:xqlite, :cancel, :token_created | :signalled | :honored]`.
+- **`Xqlite.Telemetry.bridge/2` + `bridge_log/1`** — forward the
+  multi-subscriber hook fan-outs (update / wal / commit / rollback /
+  progress, plus the global log hook) as `[:xqlite, :hook, :*]`
+  telemetry events. New "Wiring xqlite telemetry" ExDoc guide covers
+  conventions, the full event surface, and sample handlers.
+- **Connection observability NIFs** — `Xqlite.wal_checkpoint/3`
+  (`:passive` / `:full` / `:restart` / `:truncate`, returns structured
+  busy / log-pages / checkpointed-pages), `XqliteNIF.connection_stats/1`,
+  `XqliteNIF.autocommit/1`, and `XqliteNIF.txn_state/2`.
 - **`Xqlite.busy_timeout/2`** — sets a plain `sqlite3_busy_timeout` while
   cleanly reclaiming any xqlite-installed busy handler first. Prefer this
   over `PRAGMA busy_timeout`, which silently replaces the busy handler at
@@ -63,17 +82,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removing our internal slot.
 - Busy-handler PRAGMA-replacement warning front-and-center in the module
   docs and README.
-- **WAL hook**: `XqliteNIF.set_wal_hook/2` + `remove_wal_hook/1`. Sends
-  `{:xqlite_wal, db_name, pages}` to a pid after each commit in WAL mode.
-  Coexists with automatic checkpointing (see the slot-conflict fix
-  below); only raw-SQL `PRAGMA wal_autocheckpoint` still steals the
-  hook slot.
-- **Commit hook**: `XqliteNIF.set_commit_hook/2` + `remove_commit_hook/1`.
-  Sends `{:xqlite_commit}` to a pid immediately before each commit.
-  Observation-only — never vetoes the commit.
-- **Rollback hook**: `XqliteNIF.set_rollback_hook/2` +
-  `remove_rollback_hook/1`. Sends `{:xqlite_rollback}` to a pid after
-  each rollback.
+- **WAL hook**: `XqliteNIF.register_wal_hook/2` +
+  `unregister_wal_hook/2`. Sends `{:xqlite_wal, db_name, pages}` to
+  each subscriber after each commit in WAL mode. Coexists with
+  automatic checkpointing (see the slot-conflict fix below); only
+  raw-SQL `PRAGMA wal_autocheckpoint` still steals the hook slot.
+- **Commit hook**: `XqliteNIF.register_commit_hook/2` +
+  `unregister_commit_hook/2`. Sends `{:xqlite_commit}` to each
+  subscriber immediately before each commit. Observation-only — never
+  vetoes the commit.
+- **Rollback hook**: `XqliteNIF.register_rollback_hook/2` +
+  `unregister_rollback_hook/2`. Sends `{:xqlite_rollback}` to each
+  subscriber after each rollback.
 - **Progress hook (multi-subscriber)**:
   `XqliteNIF.register_progress_hook/4` +
   `XqliteNIF.unregister_progress_hook/2` plus
@@ -317,6 +337,7 @@ Initial public release. The supported SQLite functionality:
   callers).
 - **SQLite introspection** — `compile_options` and `sqlite_version`.
 
+[0.7.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.7.0
 [0.6.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.6.0
 [0.5.2]: https://github.com/dimitarvp/xqlite/releases/tag/v0.5.2
 [0.5.1]: https://github.com/dimitarvp/xqlite/releases/tag/v0.5.1

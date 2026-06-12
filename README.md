@@ -28,13 +28,14 @@ Xqlite is inspired by [exqlite](https://github.com/elixir-sqlite/exqlite), which
 - **Online backup with progress and cancellation.** Single-call backup API to a file path, progress messages to a PID, canceling respected even mid-backup.
 - **Structured schema introspection.** `PRAGMA table_list`, `table_xinfo`, `index_list`, `index_xinfo`, `foreign_key_list`, and others are all converted and returned as struct-shaped data -- generated columns, STRICT/WITHOUT ROWID markers, collation per index column, FK match clauses all included.
 - **68 typed PRAGMAs** with validated get/set.
+- **Deep observability.** Multi-subscriber hooks for every SQLite-visible lifecycle event (update / commit / rollback / WAL / progress ticks / busy retries / global log), transaction-state and per-connection counters, a structured `wal_checkpoint` wrapper -- plus opt-in, compile-time-eliminated `:telemetry` instrumentation across the whole API. I hate black boxes with a passion; this library lets you poke into the guts of your SQLite databases without introducing quantum uncertainty or cryptic crashes.
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:xqlite, "~> 0.5.2"}
+    {:xqlite, "~> 0.7"}
   ]
 end
 ```
@@ -67,13 +68,14 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Schema introspection:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 68 PRAGMAs
 - **Type extensions:** bidirectional encode/decode; `DateTime`, `Date`, `Time`, `NaiveDateTime` built-in
-- **Hooks:** SQLite log hook (global, forwarded to a PID), update hook (per-connection, `{:xqlite_update, action, db, table, rowid}`)
+- **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy handler with retry policy and `{:xqlite_busy, ...}` forwarding
+- **Telemetry (opt-in):** compile-time-flagged `:telemetry` events for every operation (spans with nanosecond timings), cancellation lifecycle events, and a bridge that re-emits hook fan-outs as `[:xqlite, :hook, :*]` -- see the "Wiring xqlite telemetry" guide
 - **Serialize / deserialize:** atomic in-memory snapshots to/from binary
 - **Extensions:** opt-in `load_extension/2` and `load_extension/3`
 - **Backup / restore:** one-shot to/from file path; incremental with progress messages and cancellation
 - **Sessions:** session extension -- changeset capture, apply with conflict strategies, invert, concat
 - **Blob I/O:** `blob_open/read/write/close` for incremental access
-- **Diagnostics:** `compile_options/1`, `sqlite_version/0`
+- **Diagnostics & connection state:** `compile_options/1`, `sqlite_version/0`, `connection_stats/1` (per-connection `sqlite3_db_status` counters), `autocommit/1`, `txn_state/2`, structured `wal_checkpoint/3`
 - **Result integration:** `Xqlite.Result` implements `Table.Reader` (works with Explorer, Kino, VegaLite)
 
 Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
@@ -133,6 +135,13 @@ connection independently. The commit hook is observation-only and
 never vetoes the commit. Combined with `register_update_hook/2` and
 `set_busy_handler/5`, the connection exposes every SQLite-visible
 lifecycle event for telemetry without touching the SQL stream.
+
+WAL subscribers coexist with automatic checkpointing: SQLite's
+wal_hook slot and its built-in autocheckpoint are mutually exclusive
+at the C level, so xqlite's master callback emulates the checkpoint
+itself at the configured `wal_autocheckpoint` threshold. Set that
+PRAGMA through `set_pragma/3` (raw-SQL `PRAGMA wal_autocheckpoint`
+bypasses the repair and silently steals the hook slot).
 
 ### Busy handler -- observe contention, retry, give up on a budget
 
@@ -220,7 +229,7 @@ I run it in my own projects (currently not as much as I'd like to). The test cov
 SQLite permits a single writer at a time per database file. I use the WAL mode by default to make sure readers remain fully parallel and writers are limited to one at a time, but that can only take you so far. Xqlite serializes access to each connection via a Rust `Mutex`; concurrent writers across _different_ connections to the same file fall back on SQLite's own WAL mode and busy-timeout logic. For a connection pool with parallel readers plus a serialised writer, use `xqlite_ecto3` (or DBConnection directly, or your own pooling solution). For anything requiring true multi-master replication, tools like [Litestream](https://litestream.io) and [LiteFS](https://fly.io/docs/litefs/) live outside of SQLite itself.
 
 **Does Xqlite support telemetry / OpenTelemetry?**
-Not yet. The plan is to emit structured `[:xqlite, ...]` events via the standard `:telemetry` Erlang package — no direct OpenTelemetry dependency. Users who want OTel spans wire the `opentelemetry_telemetry` bridge in their own application; users who only want Prometheus metrics via `:telemetry_metrics` do that; users who want nothing pay nothing. It will be added and it will be thorough.
+Yes — structured `[:xqlite, ...]` events via the standard `:telemetry` Erlang package, covering every operation (spans with nanosecond timings), the cancellation lifecycle, and an opt-in bridge that re-emits hook fan-outs as telemetry. It is compile-time opt-in: with the flag off (the default) no telemetry call exists in the bytecode, so users who want nothing pay nothing. There is no direct OpenTelemetry dependency — users who want OTel spans wire the `opentelemetry_telemetry` bridge in their own application; users who only want Prometheus metrics use `:telemetry_metrics`. See the "Wiring xqlite telemetry" guide on hexdocs.
 
 ## Thread safety
 
@@ -285,10 +294,8 @@ To get the actual affected row count after DML, call `changes/1` immediately aft
 
 Planned for Xqlite core, in priority order:
 
-1. **Multi-writer concurrency observability.** Expose SQLite's transaction-state, WAL checkpoint progress, busy-retry events, and per-connection counters as structured data so callers can build their own concurrency strategies. Concretely: `sqlite3_busy_handler` forwarded to a PID, `sqlite3_wal_hook` forwarded to a PID, `sqlite3_commit_hook` + `sqlite3_rollback_hook`, `sqlite3_txn_state`, `sqlite3_db_status` counters, a structured wrapper around `sqlite3_wal_checkpoint_v2`. I hate black boxes with a passion — one of the main goals of this library is to let you poke into the guts of your SQLite databases without introducing quantum uncertainty or cryptic crashes.
-2. **`:telemetry` integration.** Every significant operation (query, execute, stream, transaction, savepoint, backup, cancellation, extension load, session capture, serialize/deserialize, each of the observability hooks above) emits structured `[:xqlite, ...]` events via the standard `:telemetry` package. OpenTelemetry integration is a downstream bridge via `opentelemetry_telemetry` — no adapter-side OTel dependency.
-3. **Manual statement lifecycle** — optional prepare/bind/step/reset/release for patterns not covered by the existing helpers. Still not 100% certain about this one but I've heard it enough times from people that I'm considering adding it proactively (before being asked to). Feedback on whether this would have a direct value for you is very welcome.
-4. **SQLCipher support (optional)** — for encrypted-at-rest use cases.
+1. **Manual statement lifecycle** — optional prepare/bind/step/reset/release for patterns not covered by the existing helpers. Still not 100% certain about this one but I've heard it enough times from people that I'm considering adding it proactively (before being asked to). Feedback on whether this would have a direct value for you is very welcome.
+2. **SQLCipher support (optional)** — for encrypted-at-rest use cases.
 
 Lower priority (though UDFs remain the lowest priority for now):
 
