@@ -1,4 +1,4 @@
-defmodule Mix.Tasks.Precommit do
+defmodule Mix.Tasks.Verify do
   @moduledoc """
   Runs all checks that CI will enforce, in fast-to-slow order.
 
@@ -17,7 +17,7 @@ defmodule Mix.Tasks.Precommit do
 
   ## Usage
 
-      mix precommit
+      mix verify
   """
 
   use Mix.Task
@@ -61,7 +61,7 @@ defmodule Mix.Tasks.Precommit do
         IO.puts("\n✓ All checks passed. Safe to commit.")
 
       {:error, failed_step} ->
-        Mix.raise("precommit failed at: #{failed_step}")
+        Mix.raise("verify failed at: #{failed_step}")
     end
   end
 

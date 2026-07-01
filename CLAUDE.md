@@ -4,11 +4,11 @@ Low-level Elixir NIF library for SQLite3 via Rust (rusqlite 0.38 + Rustler 0.37)
 
 ## Build & Test
 
-**NON-NEGOTIABLE: Run `mix precommit` before every commit.** This runs all CI checks locally (formatting, compilation warnings, clippy, dialyzer, tests) and stops on the first failure. Never commit without a passing `mix precommit`.
+**NON-NEGOTIABLE: Run `mix verify` before every commit.** This runs all CI checks locally (formatting, compilation warnings, clippy, dialyzer, tests) and stops on the first failure. Never commit without a passing `mix verify`.
 
 ```bash
 mix deps.get          # fetches Elixir deps + triggers Rust NIF compilation
-mix precommit         # REQUIRED before every commit: all CI checks in one command
+mix verify            # REQUIRED before every commit: all CI checks in one command
 mix test.seq          # runs tests sequentially, one file at a time (see Gotchas)
 cargo fmt --manifest-path native/xqlitenif/Cargo.toml
 cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings

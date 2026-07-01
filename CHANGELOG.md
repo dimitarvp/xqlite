@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Parsing happens in Rust at the NIF boundary. Date/time-looking
   strings remain strings — no type divination at the schema layer.
 
+- **`mix precommit` is now `mix verify`.** Same checks, same
+  fast-to-slow order, new name. The task module ships in the
+  package, so the old task name is gone.
+
 ### Changed
 
 - Upgraded rusqlite 0.39 → 0.40.1 (bundled SQLite 3.51.3 → 3.53.2)
