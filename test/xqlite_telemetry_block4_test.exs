@@ -14,6 +14,7 @@ defmodule Xqlite.XqliteTelemetryBlock4Test do
   use ExUnit.Case, async: true
 
   import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
 
   alias Xqlite.Telemetry.Bridge
 
@@ -145,12 +146,7 @@ defmodule Xqlite.XqliteTelemetryBlock4Test do
     end
 
     test "wal hook bridge re-emits with db_name + pages" do
-      path =
-        Path.join(System.tmp_dir!(), "xqlite_bridge_#{:erlang.unique_integer([:positive])}.db")
-
-      on_exit(fn ->
-        for ext <- ["", "-wal", "-shm"], do: File.rm(path <> ext)
-      end)
+      path = tmp_db_path("bridge")
 
       # Regression: `Xqlite.open/2` applies the `wal_autocheckpoint`
       # PRAGMA, which steals the wal_hook slot; `set_pragma` must

@@ -12,6 +12,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
   use ExUnit.Case, async: true
 
   import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
 
   setup do
     {:ok, conn} = Xqlite.open_in_memory()
@@ -120,10 +121,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
     test "backup :stop fires with byte_size on success", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-      path =
-        Path.join(System.tmp_dir!(), "xqlite_bk_tel_#{:erlang.unique_integer([:positive])}.db")
-
-      on_exit(fn -> File.rm(path) end)
+      path = tmp_db_path("bk_tel")
 
       handler_id = attach_capture([[:xqlite, :backup, :stop]])
 
@@ -152,10 +150,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
     test "restore :stop fires with src_path", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
-      path =
-        Path.join(System.tmp_dir!(), "xqlite_rs_tel_#{:erlang.unique_integer([:positive])}.db")
-
-      on_exit(fn -> File.rm(path) end)
+      path = tmp_db_path("rs_tel")
       :ok = Xqlite.backup(conn, path)
 
       handler_id = attach_capture([[:xqlite, :restore, :stop]])
@@ -175,15 +170,7 @@ defmodule Xqlite.XqliteTelemetryBlock3Test do
 
   describe "wal_checkpoint telemetry" do
     test "fires :stop with mode + page counts on success" do
-      path =
-        Path.join(
-          System.tmp_dir!(),
-          "xqlite_wal_tel_#{:erlang.unique_integer([:positive])}.db"
-        )
-
-      on_exit(fn ->
-        for ext <- ["", "-wal", "-shm"], do: File.rm(path <> ext)
-      end)
+      path = tmp_db_path("wal_tel")
 
       {:ok, conn} = Xqlite.open(path)
       on_exit(fn -> XqliteNIF.close(conn) end)

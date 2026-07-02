@@ -4,17 +4,12 @@ defmodule Xqlite.NIF.BusyHandlerTest do
   # contention; in-memory connections have separate lock domains.
   use ExUnit.Case, async: true
 
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
+
   alias XqliteNIF, as: NIF
 
   setup do
-    path =
-      Path.join(System.tmp_dir!(), "xqlite_busy_#{:erlang.unique_integer([:positive])}.db")
-
-    on_exit(fn ->
-      for ext <- ["", "-wal", "-shm", "-journal"], do: File.rm(path <> ext)
-    end)
-
-    {:ok, path: path}
+    {:ok, path: tmp_db_path("busy")}
   end
 
   # Build a probe connection ready for contention:

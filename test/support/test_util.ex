@@ -10,6 +10,24 @@ defmodule Xqlite.TestUtil do
 
   @tag_to_mfa_map Map.new(@connection_openers, fn {tag, _prefix, mfa} -> {tag, mfa} end)
 
+  # Unique tmp-file DB path with self-registered cleanup: the file and its
+  # -wal/-shm/-journal siblings are removed on test exit. LIFO caveat: call
+  # this BEFORE registering a conn-closing on_exit so removal runs after
+  # the close.
+  def tmp_db_path(kind) when is_binary(kind) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "xqlite_#{kind}_#{:erlang.unique_integer([:positive])}.db"
+      )
+
+    ExUnit.Callbacks.on_exit(fn ->
+      for ext <- ["", "-wal", "-shm", "-journal"], do: File.rm(path <> ext)
+    end)
+
+    path
+  end
+
   defp open_and_configure({mod, fun, args}) do
     with {:ok, conn} <- apply(mod, fun, args),
          {:ok, _} <- NIF.set_pragma(conn, "journal_mode", "WAL"),

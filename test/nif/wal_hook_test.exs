@@ -3,15 +3,12 @@ defmodule Xqlite.NIF.WalHookTest do
   # anonymous databases, so no wal_hook would ever fire there.
   use ExUnit.Case, async: true
 
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
+
   alias XqliteNIF, as: NIF
 
   setup do
-    path =
-      Path.join(System.tmp_dir!(), "xqlite_walhook_#{:erlang.unique_integer([:positive])}.db")
-
-    on_exit(fn ->
-      for ext <- ["", "-wal", "-shm", "-journal"], do: File.rm(path <> ext)
-    end)
+    path = tmp_db_path("walhook")
 
     {:ok, conn} = NIF.open(path)
     {:ok, _} = NIF.set_pragma(conn, "journal_mode", "WAL")
@@ -220,15 +217,7 @@ defmodule Xqlite.NIF.WalHookTest do
   test "subscribers receive events on conns opened via Xqlite.open defaults" do
     # Regression: Xqlite.open applies wal_autocheckpoint in its default
     # pragmas, which used to silently evict the master wal callback.
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "xqlite_walhook_open_#{:erlang.unique_integer([:positive])}.db"
-      )
-
-    on_exit(fn ->
-      for ext <- ["", "-wal", "-shm", "-journal"], do: File.rm(path <> ext)
-    end)
+    path = tmp_db_path("walhook_open")
 
     {:ok, conn} = Xqlite.open(path)
     on_exit(fn -> NIF.close(conn) end)

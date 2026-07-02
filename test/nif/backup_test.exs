@@ -1,7 +1,7 @@
 defmodule Xqlite.NIF.BackupTest do
   use ExUnit.Case, async: true
 
-  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1, tmp_db_path: 1]
 
   alias XqliteNIF, as: NIF
 
@@ -13,16 +13,9 @@ defmodule Xqlite.NIF.BackupTest do
         {mod, fun, args} = find_opener_mfa!(context)
         assert {:ok, conn} = apply(mod, fun, args)
 
-        backup_path =
-          Path.join(
-            System.tmp_dir!(),
-            "xqlite_backup_#{:erlang.unique_integer([:positive])}.db"
-          )
+        backup_path = tmp_db_path("backup")
 
-        on_exit(fn ->
-          NIF.close(conn)
-          File.rm(backup_path)
-        end)
+        on_exit(fn -> NIF.close(conn) end)
 
         {:ok, conn: conn, backup_path: backup_path}
       end
@@ -281,16 +274,11 @@ defmodule Xqlite.NIF.BackupTest do
       end
 
       test "restore from corrupt file returns error", %{conn: conn} do
-        corrupt_path =
-          Path.join(
-            System.tmp_dir!(),
-            "xqlite_corrupt_#{:erlang.unique_integer([:positive])}.db"
-          )
+        corrupt_path = tmp_db_path("corrupt")
 
         File.write!(corrupt_path, "this is not a sqlite database")
 
         result = NIF.restore(conn, "main", corrupt_path)
-        File.rm(corrupt_path)
 
         assert {:error, _} = result
       end
@@ -367,11 +355,7 @@ defmodule Xqlite.NIF.BackupTest do
     :ok = NIF.execute_batch(src, "CREATE TABLE xfer (id INTEGER PRIMARY KEY, msg TEXT);")
     {:ok, 1} = NIF.execute(src, "INSERT INTO xfer VALUES (1, 'transferred')", [])
 
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "xqlite_xfer_#{:erlang.unique_integer([:positive])}.db"
-      )
+    path = tmp_db_path("xfer")
 
     :ok = NIF.backup(src, "main", path)
     NIF.close(src)
@@ -383,6 +367,5 @@ defmodule Xqlite.NIF.BackupTest do
              NIF.query(dst, "SELECT * FROM xfer", [])
 
     NIF.close(dst)
-    File.rm(path)
   end
 end

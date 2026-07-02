@@ -1,7 +1,7 @@
 defmodule Xqlite.NIF.BackupProgressTest do
   use ExUnit.Case, async: true
 
-  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1, tmp_db_path: 1]
 
   alias XqliteNIF, as: NIF
 
@@ -13,16 +13,9 @@ defmodule Xqlite.NIF.BackupProgressTest do
         {mod, fun, args} = find_opener_mfa!(context)
         assert {:ok, conn} = apply(mod, fun, args)
 
-        backup_path =
-          Path.join(
-            System.tmp_dir!(),
-            "xqlite_bkp_#{:erlang.unique_integer([:positive])}.db"
-          )
+        backup_path = tmp_db_path("bkp")
 
-        on_exit(fn ->
-          NIF.close(conn)
-          File.rm(backup_path)
-        end)
+        on_exit(fn -> NIF.close(conn) end)
 
         {:ok, conn: conn, backup_path: backup_path}
       end
@@ -362,13 +355,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         ])
     end
 
-    dest =
-      Path.join(
-        System.tmp_dir!(),
-        "xqlite_bkp_dead_#{:erlang.unique_integer([:positive])}.db"
-      )
-
-    on_exit(fn -> File.rm(dest) end)
+    dest = tmp_db_path("bkp_dead")
 
     dead = spawn(fn -> :ok end)
     ref = Process.monitor(dead)
@@ -402,13 +389,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         NIF.execute(conn, "INSERT INTO bkp_fwd VALUES (?1, ?2)", [i, "row_#{i}"])
     end
 
-    dest =
-      Path.join(
-        System.tmp_dir!(),
-        "xqlite_bkp_fwd_#{:erlang.unique_integer([:positive])}.db"
-      )
-
-    on_exit(fn -> File.rm(dest) end)
+    dest = tmp_db_path("bkp_fwd")
 
     test_pid = self()
 

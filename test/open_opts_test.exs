@@ -1,6 +1,8 @@
 defmodule Xqlite.OpenOptsTest do
   use ExUnit.Case, async: true
 
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
+
   alias XqliteNIF, as: NIF
 
   # ---------------------------------------------------------------------------
@@ -97,7 +99,7 @@ defmodule Xqlite.OpenOptsTest do
     end
 
     test "journal_mode :wal on file DB" do
-      path = temp_db_path()
+      path = tmp_db_path("open_opts")
       {:ok, conn} = Xqlite.open(path)
       {:ok, mode} = NIF.get_pragma(conn, "journal_mode")
       assert mode == "wal"
@@ -105,7 +107,7 @@ defmodule Xqlite.OpenOptsTest do
     end
 
     test "journal_mode :delete" do
-      path = temp_db_path()
+      path = tmp_db_path("open_opts")
       {:ok, conn} = Xqlite.open(path, journal_mode: :delete)
       {:ok, mode} = NIF.get_pragma(conn, "journal_mode")
       assert mode == "delete"
@@ -193,7 +195,7 @@ defmodule Xqlite.OpenOptsTest do
     end
 
     test "mmap_size custom value on file DB" do
-      path = temp_db_path()
+      path = tmp_db_path("open_opts")
       {:ok, conn} = Xqlite.open(path, mmap_size: 268_435_456)
       {:ok, val} = NIF.get_pragma(conn, "mmap_size")
       assert val == 268_435_456
@@ -247,29 +249,18 @@ defmodule Xqlite.OpenOptsTest do
 
   describe "Xqlite.open/2 with file path" do
     test "creates database file" do
-      path = temp_db_path()
+      path = tmp_db_path("open_opts")
       {:ok, conn} = Xqlite.open(path)
       assert File.exists?(path)
       NIF.close(conn)
     end
 
     test "applies PRAGMAs on file-backed DB" do
-      path = temp_db_path()
+      path = tmp_db_path("open_opts")
       {:ok, conn} = Xqlite.open(path, busy_timeout: 8_000)
       {:ok, timeout} = NIF.get_pragma(conn, "busy_timeout")
       assert timeout == 8_000
       NIF.close(conn)
     end
-  end
-
-  defp temp_db_path do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "xqlite_open_opts_test_#{:erlang.unique_integer([:positive])}.db"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    path
   end
 end

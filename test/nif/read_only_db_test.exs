@@ -1,6 +1,8 @@
 defmodule Xqlite.NIF.ReadOnlyDbTest do
   use ExUnit.Case, async: true
 
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
+
   alias XqliteNIF, as: NIF
 
   @test_table_name "ro_test_table"
@@ -13,14 +15,8 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   ]
 
   defp create_temp_db_file() do
-    temp_db_path =
-      Path.join(
-        System.tmp_dir!(),
-        "read_only_test_" <>
-          Integer.to_string(:erlang.unique_integer([:positive])) <> ".db"
-      )
+    temp_db_path = tmp_db_path("read_only")
 
-    File.rm(temp_db_path)
     {:ok, conn_rw} = NIF.open(temp_db_path)
     {:ok, 0} = NIF.execute(conn_rw, @create_table_sql, [])
     {:ok, 1} = NIF.execute(conn_rw, @insert_sql, [])
@@ -44,10 +40,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
         db_path = create_temp_db_file()
         {:ok, ro_conn} = unquote(opener_fun)(db_path)
 
-        on_exit(fn ->
-          NIF.close(ro_conn)
-          File.rm(db_path)
-        end)
+        on_exit(fn -> NIF.close(ro_conn) end)
 
         {:ok, conn: ro_conn, db_path: db_path}
       end
@@ -136,11 +129,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
   end
 
   test "open_readonly does not create the file" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "should_not_exist_#{:erlang.unique_integer([:positive])}.db"
-      )
+    path = tmp_db_path("should_not_exist")
 
     NIF.open_readonly(path)
     refute File.exists?(path)
