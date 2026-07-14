@@ -74,6 +74,7 @@ defmodule Xqlite.MixProject do
       name: "Xqlite",
       source_url: "https://github.com/dimitarvp/xqlite",
       source_ref: "v0.8.0",
+      skip_undefined_reference_warnings_on: &(&1 == "CHANGELOG.md"),
       extras: [
         "README.md",
         "CHANGELOG.md",

@@ -819,7 +819,7 @@ defmodule Xqlite do
   while statements are outstanding keeps the underlying SQLite handle alive
   until the process exits (abandoned statements are still finalized by
   garbage collection, and every operation on them after an explicit
-  `Xqlite.close/1` returns `{:error, :connection_closed}`).
+  `XqliteNIF.close/1` returns `{:error, :connection_closed}`).
 
   Steps are not cancellable; for cancellation use `query_cancellable/4` and
   friends. No telemetry is emitted for statement-lifecycle operations.
