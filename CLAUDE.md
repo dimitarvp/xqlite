@@ -131,9 +131,9 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 - **Our Mutex vs NOMUTEX.** rusqlite defaults to `SQLITE_OPEN_NO_MUTEX` (disables SQLite's internal mutex). Our `Mutex<Connection>` is still required by Rust's type system (`Connection` is `!Sync`). The two are complementary, not redundant: NOMUTEX is safe *because* our Mutex serializes access.
 - **API_ARMOR as defense-in-depth.** `ENABLE_API_ARMOR` adds NULL-pointer and invalid-argument checks at every SQLite C API entry point. Our Rust layer (Mutex, Option, AtomicPtr) already guards against most misuse, but API_ARMOR is the safety net beneath our raw FFI paths in `stream.rs` and `util.rs` — where we call `sqlite3_step`, `sqlite3_column_*`, `sqlite3_bind_*`, and `sqlite3_finalize` on raw pointers. Without it, a bug in our unsafe code would segfault; with it, we get `SQLITE_MISUSE`. Negligible performance cost. Never remove it.
 
-## Current State (June 2026)
+## Current State (July 2026)
 
-- v0.7.0 released on Hex. Elixir `~> 1.15`, OTP 26/27/28.
+- v0.8.0 released on Hex (2026-07-14). Elixir `~> 1.15`, OTP 26/27/28.
 - Rust edition 2024. Rustler 0.38, rusqlite 0.40 (bundled SQLite 3.53.2).
 - `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
