@@ -100,13 +100,9 @@ pub(crate) fn process_rows<'a, 'rows>(
             Ok(Some(row)) => {
                 let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
                 for i in 0..column_count {
-                    match row.get::<usize, Value>(i) {
-                        Ok(val) => {
-                            let term = encode_val(env, val);
-                            row_values.push(term);
-                        }
-                        Err(e) => return Err(e.into()),
-                    };
+                    let val = row.get::<usize, Value>(i)?;
+                    let term = encode_val(env, val);
+                    row_values.push(term);
                 }
                 results.push(row_values);
             }

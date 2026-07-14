@@ -1,4 +1,5 @@
 use crate::atoms;
+use crate::authorizer;
 use crate::blob::{self, XqliteBlob};
 use crate::busy_handler::{self, BusyHandlerState};
 use crate::cancel::XqliteCancelToken;
@@ -289,6 +290,32 @@ fn remove_busy_handler(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_
     let result = connection::with_conn(&handle, |conn| {
         busy_handler::uninstall(conn, &handle.busy_handler)
     });
+    singular_ok_or_error_tuple(env, result)
+}
+
+// ---------------------------------------------------------------------------
+// Authorizer (deny-list, single slot)
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn set_authorizer<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    denied_actions: Vec<rustler::Atom>,
+) -> Term<'a> {
+    // Validate the whole list before touching the connection, so an
+    // unrecognized atom installs nothing.
+    let denied = match authorizer::parse_denied(denied_actions) {
+        Ok(set) => set,
+        Err(e) => return (error(), e).encode(env),
+    };
+    let result = connection::with_conn(&handle, |conn| authorizer::set(conn, denied));
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn remove_authorizer(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, authorizer::clear);
     singular_ok_or_error_tuple(env, result)
 }
 

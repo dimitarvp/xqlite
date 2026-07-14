@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Deny-list authorizer.** `Xqlite.set_authorizer/2` and
+  `remove_authorizer/1` (plus the raw `XqliteNIF` stubs) install a
+  single-slot authorizer that rejects a chosen set of SQLite action
+  kinds at statement-preparation time. Denied statements fail with
+  `{:error, {:authorization_denied, message}}`; an unrecognized action
+  atom returns `{:error, {:invalid_authorizer_action, atom}}` and
+  installs nothing (the list is validated atomically). v1 is
+  action-kind granularity only (no table/column filtering) and
+  deny-only (no `IGNORE`). Denying `:pragma` also turns off
+  `get_pragma`/`set_pragma`.
+
 ### Breaking
 
 - **`ColumnInfo.default_value` is now classified, not raw text.**

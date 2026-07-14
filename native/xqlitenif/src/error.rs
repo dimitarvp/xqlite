@@ -119,6 +119,9 @@ pub(crate) enum XqliteError {
     InvalidParameterName(String),
     InvalidPragmaName(String),
     InvalidTransactionMode,
+    InvalidAuthorizerAction {
+        action: Atom,
+    },
     NulErrorInString,
     MultipleStatements,
 
@@ -166,6 +169,10 @@ pub(crate) enum XqliteError {
     },
     ReadOnlyDatabase {
         // SQLITE_READONLY
+        message: String,
+    },
+    AuthorizationDenied {
+        // SQLITE_AUTH — statement rejected by an installed authorizer
         message: String,
     },
 
@@ -299,6 +306,9 @@ impl Display for XqliteError {
             XqliteError::ReadOnlyDatabase { message } => {
                 write!(f, "Database is read-only: {message}") // SQLITE_READONLY
             }
+            XqliteError::AuthorizationDenied { message } => {
+                write!(f, "Authorization denied: {message}")
+            }
             XqliteError::CannotOpenDatabase {
                 path,
                 code,
@@ -336,6 +346,9 @@ impl Display for XqliteError {
                     f,
                     "Invalid transaction mode. Allowed: :deferred, :immediate, :exclusive"
                 )
+            }
+            XqliteError::InvalidAuthorizerAction { action: _ } => {
+                write!(f, "Invalid authorizer action atom")
             }
             XqliteError::NulErrorInString => {
                 write!(f, "Input string contains embedded null byte")
@@ -463,6 +476,9 @@ impl Encoder for XqliteError {
             XqliteError::ReadOnlyDatabase { message } => {
                 (atoms::read_only_database(), message).encode(env)
             }
+            XqliteError::AuthorizationDenied { message } => {
+                (atoms::authorization_denied(), message).encode(env)
+            }
             XqliteError::CannotOpenDatabase {
                 path,
                 code,
@@ -501,6 +517,9 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidTransactionMode => {
                 atoms::invalid_transaction_mode().encode(env)
+            }
+            XqliteError::InvalidAuthorizerAction { action } => {
+                (atoms::invalid_authorizer_action(), *action).encode(env)
             }
             XqliteError::NulErrorInString => atoms::null_byte_in_string().encode(env),
             XqliteError::MultipleStatements => atoms::multiple_statements().encode(env),
@@ -621,6 +640,18 @@ impl Encoder for XqliteError {
 
 impl RefUnwindSafe for XqliteError {}
 
+/// True when a rusqlite error is a SQLITE_AUTH (authorizer) denial. Lets
+/// callers that would otherwise flatten errors into a generic variant (e.g.
+/// the PRAGMA layer) surface the dedicated `AuthorizationDenied` instead.
+pub(crate) fn is_sqlite_auth(err: &RusqliteError) -> bool {
+    let extended_code = match err {
+        RusqliteError::SqliteFailure(ffi_err, _) => ffi_err.extended_code,
+        RusqliteError::SqlInputError { error, .. } => error.extended_code,
+        _ => return false,
+    };
+    (extended_code & 0xFF) == ffi::SQLITE_AUTH
+}
+
 fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteError {
     let lower_msg = message_string.to_lowercase();
     let primary_code = ffi_err.extended_code & 0xFF;
@@ -634,6 +665,9 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
             message: message_string,
         },
         ffi::SQLITE_SCHEMA => XqliteError::SchemaChanged {
+            message: message_string,
+        },
+        ffi::SQLITE_AUTH => XqliteError::AuthorizationDenied {
             message: message_string,
         },
         ffi::SQLITE_CONSTRAINT => {

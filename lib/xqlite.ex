@@ -139,6 +139,7 @@ defmodule Xqlite do
           | :null_byte_in_string
           | :operation_cancelled
           | :unsupported_atom
+          | {:authorization_denied, String.t()}
           | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
@@ -152,6 +153,7 @@ defmodule Xqlite do
           | {:index_exists, String.t()}
           | {:integral_value_out_of_range, non_neg_integer(), integer()}
           | {:internal_encoding_error, String.t()}
+          | {:invalid_authorizer_action, atom()}
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
@@ -1110,6 +1112,86 @@ defmodule Xqlite do
       :ok
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Authorizer (deny-list, single slot)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Installs a deny-list authorizer on the connection.
+
+  SQLite consults an authorizer callback while *preparing* every statement.
+  This installs one that denies a fixed set of action kinds: if a statement
+  attempts any denied action, preparation fails and the call returns
+  `{:error, {:authorization_denied, message}}`. Everything else is allowed.
+
+  `denied_actions` is a list of action-kind atoms. The set mirrors SQLite's
+  authorizer action codes — `:select`, `:read`, `:insert`, `:update`,
+  `:delete`, `:transaction`, `:savepoint`, `:pragma`, `:attach`, `:detach`,
+  `:alter_table`, `:reindex`, `:analyze`, `:function`, `:recursive`, the
+  `create_*` / `drop_*` object verbs (`:create_table`, `:drop_index`,
+  `:create_trigger`, `:create_view`, `:create_vtable`, `:drop_vtable`, …)
+  including their `*_temp_*` variants, and `:unknown` for action codes a
+  future SQLite reports that this build does not map. An unrecognized atom
+  returns `{:error, {:invalid_authorizer_action, atom}}` and installs
+  nothing — the list is validated in full before anything changes.
+
+  Single slot per connection: a second call replaces the previous list, and
+  `remove_authorizer/1` clears it. Both are idempotent.
+
+  ## Limits (v1)
+
+    * **Action-kind granularity only.** The decision is made purely on the
+      action *kind*; the table, column, trigger and database arguments SQLite
+      passes to the authorizer are ignored. You cannot (yet) deny `DELETE` on
+      one table while allowing it on another.
+    * **Deny-only.** An action is allowed or denied (SQLite's `DENY`). The
+      `IGNORE` disposition (silently treat the access as a NULL/no-op) is not
+      exposed.
+
+  ## Caveat — denying `:pragma` disables `get_pragma`/`set_pragma`
+
+  `XqliteNIF.get_pragma/2` and `set_pragma/3` run `PRAGMA` statements, which
+  SQLite authorizes as the `:pragma` action; the schema-introspection helpers
+  lean on PRAGMAs too. Denying `:pragma` therefore makes all of them fail with
+  `{:error, {:authorization_denied, _}}`. Deny it only when you intend to lock
+  those paths out as well.
+
+  No telemetry is emitted for authorizer install/remove or for denials.
+
+  ## Examples
+
+      iex> {:ok, conn} = Xqlite.open_in_memory()
+      iex> XqliteNIF.execute(conn, "CREATE TABLE t(id INTEGER)", [])
+      {:ok, 0}
+      iex> Xqlite.set_authorizer(conn, [:delete])
+      :ok
+      iex> match?({:error, {:authorization_denied, _}}, XqliteNIF.execute(conn, "DELETE FROM t", []))
+      true
+      iex> match?({:ok, _}, XqliteNIF.query(conn, "SELECT id FROM t", []))
+      true
+      iex> Xqlite.set_authorizer(conn, [:bogus])
+      {:error, {:invalid_authorizer_action, :bogus}}
+      iex> Xqlite.remove_authorizer(conn)
+      :ok
+      iex> XqliteNIF.execute(conn, "DELETE FROM t", [])
+      {:ok, 0}
+  """
+  @spec set_authorizer(conn(), [atom()]) :: :ok | error()
+  def set_authorizer(conn, denied_actions) when is_list(denied_actions) do
+    XqliteNIF.set_authorizer(conn, denied_actions)
+  end
+
+  @doc """
+  Removes any authorizer installed on the connection.
+
+  Safe to call when none is installed (no-op). After removal, statement
+  preparation is unrestricted again.
+
+  No telemetry is emitted.
+  """
+  @spec remove_authorizer(conn()) :: :ok | error()
+  def remove_authorizer(conn), do: XqliteNIF.remove_authorizer(conn)
 
   # ---------------------------------------------------------------------------
   # Progress hook (multi-subscriber on the progress_handler slot)

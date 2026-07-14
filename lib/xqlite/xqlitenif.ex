@@ -980,6 +980,40 @@ defmodule XqliteNIF do
   def remove_busy_handler(_conn), do: err()
 
   @doc """
+  Installs a deny-list authorizer on the connection (raw NIF).
+
+  Most users want `Xqlite.set_authorizer/2`.
+
+  SQLite consults the authorizer while *preparing* every statement.
+  `denied_actions` is a list of action-kind atoms (e.g. `[:delete,
+  :drop_table]`); any statement whose action kind is in the list fails at
+  preparation with `{:error, {:authorization_denied, message}}`. Everything
+  else is allowed. Granularity is the action kind only (table/column
+  arguments are ignored) and the only disposition is deny.
+
+  The list is validated in full before anything is installed: an
+  unrecognized atom returns `{:error, {:invalid_authorizer_action, atom}}`
+  and installs nothing. Single slot per connection — a second call replaces
+  the previous list.
+
+  Returns `:ok`.
+  """
+  @spec set_authorizer(conn :: Xqlite.conn(), denied_actions :: [atom()]) ::
+          :ok | Xqlite.error()
+  def set_authorizer(_conn, _denied_actions), do: err()
+
+  @doc """
+  Removes any authorizer from the connection (raw NIF).
+
+  Safe to call when none is installed (no-op). After removal, statement
+  preparation is unrestricted again.
+
+  Returns `:ok`.
+  """
+  @spec remove_authorizer(Xqlite.conn()) :: :ok | Xqlite.error()
+  def remove_authorizer(_conn), do: err()
+
+  @doc """
   Signals an intent to cancel operations associated with a given cancellation token.
 
   When this function is called, any active SQLite operations (executed via
