@@ -18,8 +18,10 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 pub(crate) struct XqliteStatement {
     pub(crate) atomic_raw_stmt: AtomicPtr<ffi::sqlite3_stmt>,
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
+    /// Prepare-time snapshot, served by `stmt_column_names` only after
+    /// finalization; live statements read column metadata directly so
+    /// v2 auto-reprepare (schema changes) is reflected.
     pub(crate) column_names: Vec<String>,
-    pub(crate) column_count: usize,
 }
 
 #[rustler::resource_impl]

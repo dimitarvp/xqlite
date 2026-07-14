@@ -272,6 +272,41 @@ defmodule Xqlite.NIF.StatementTest do
     assert :ok = Xqlite.finalize(stmt)
   end
 
+  test "text params with interior NUL bytes bind and round-trip" do
+    {:ok, conn} = Xqlite.open_in_memory()
+    on_exit(fn -> NIF.close(conn) end)
+    :ok = NIF.execute_batch(conn, "CREATE TABLE nuls (v ANY);")
+
+    payload = <<1, 0, 2, 0, 3>>
+    {:ok, stmt} = Xqlite.prepare(conn, "INSERT INTO nuls (v) VALUES (?1)")
+    :ok = Xqlite.bind(stmt, [payload])
+    :done = Xqlite.step(stmt)
+    :ok = Xqlite.finalize(stmt)
+
+    assert {:ok, %Xqlite.Result{rows: [[^payload]]}} =
+             Xqlite.query(conn, "SELECT v FROM nuls", [])
+  end
+
+  test "SELECT * through a live statement re-expands after ALTER TABLE" do
+    {:ok, conn} = Xqlite.open_in_memory()
+    on_exit(fn -> NIF.close(conn) end)
+
+    :ok =
+      NIF.execute_batch(conn, "CREATE TABLE widen (a INTEGER); INSERT INTO widen VALUES (1);")
+
+    {:ok, stmt} = Xqlite.prepare(conn, "SELECT * FROM widen")
+    assert {:row, [1]} = Xqlite.step(stmt)
+    :ok = Xqlite.reset(stmt)
+
+    {:ok, _} = NIF.execute(conn, "ALTER TABLE widen ADD COLUMN b TEXT", [])
+
+    # sqlite3_step's v2 auto-reprepare re-expands the star; both the row
+    # width and the live column names must reflect the new schema.
+    assert {:row, [1, nil]} = Xqlite.step(stmt)
+    assert {:ok, ["a", "b"]} = Xqlite.column_names(stmt)
+    :ok = Xqlite.finalize(stmt)
+  end
+
   defp seed(conn, n) do
     values = Enum.map_join(1..n, ", ", fn i -> "(#{i}, 'v#{i}')" end)
     :ok = NIF.execute_batch(conn, "INSERT INTO items (id, label) VALUES #{values};")

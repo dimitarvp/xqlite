@@ -806,7 +806,6 @@ fn stmt_prepare(
                 atomic_raw_stmt: AtomicPtr::new(non_null_raw_stmt.as_ptr()),
                 conn_resource_arc: conn_resource_arc_clone,
                 column_names,
-                column_count,
             })
         }
     })
@@ -859,8 +858,8 @@ fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
         // SAFETY: with_live_stmt holds the connection mutex and proved
-        // stmt_ptr live; column_count is immutable since prepare.
-        unsafe { process_single_step(env, stmt_ptr, stmt_handle.column_count, db_handle) }
+        // stmt_ptr live.
+        unsafe { process_single_step(env, stmt_ptr, db_handle) }
     });
 
     match result {
@@ -931,10 +930,8 @@ fn stmt_multi_step_impl<'a>(
 
         for _ in 0..batch_size {
             // SAFETY: with_live_stmt holds the connection mutex and proved
-            // stmt_ptr live; column_count is immutable since prepare.
-            match unsafe {
-                process_single_step(env, stmt_ptr, stmt_handle.column_count, db_handle)
-            }? {
+            // stmt_ptr live.
+            match unsafe { process_single_step(env, stmt_ptr, db_handle) }? {
                 Some(row_terms) => rows.push(row_terms),
                 None => {
                     done = true;
@@ -993,7 +990,41 @@ fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) 
 fn stmt_column_names(
     stmt_handle: ResourceArc<XqliteStatement>,
 ) -> Result<Vec<String>, XqliteError> {
-    Ok(stmt_handle.column_names.clone())
+    let live = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
+        // SAFETY: with_live_stmt holds the connection mutex and proved
+        // stmt_ptr live. Live reads reflect v2 auto-reprepare after schema
+        // changes (e.g. SELECT * re-expansion), which the prepare-time
+        // snapshot cannot.
+        unsafe {
+            let count = ffi::sqlite3_column_count(stmt_ptr) as usize;
+            let mut names = Vec::with_capacity(count);
+            for i in 0..count {
+                let name_ptr = ffi::sqlite3_column_name(stmt_ptr, i as std::os::raw::c_int);
+                if name_ptr.is_null() {
+                    return Err(XqliteError::InternalEncodingError {
+                        context: format!("SQLite returned null column name for index {i}"),
+                    });
+                }
+                names.push(
+                    std::ffi::CStr::from_ptr(name_ptr)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            Ok(names)
+        }
+    });
+
+    match live {
+        Ok(names) => Ok(names),
+        // When live reading is impossible for lifecycle reasons — statement
+        // finalized or connection closed — callers still get the
+        // prepare-time snapshot.
+        Err(XqliteError::StatementFinalized) | Err(XqliteError::ConnectionClosed) => {
+            Ok(stmt_handle.column_names.clone())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1065,7 +1096,6 @@ fn stream_open<'a>(
                         atomic_raw_stmt: AtomicPtr::new(std::ptr::null_mut()),
                         conn_resource_arc: conn_resource_arc_clone,
                         column_names: Vec::new(),
-                        column_count: 0,
                     });
                 }
             };
@@ -1132,7 +1162,6 @@ fn stream_open<'a>(
                 atomic_raw_stmt: AtomicPtr::new(non_null_raw_stmt.as_ptr()),
                 conn_resource_arc: conn_resource_arc_clone,
                 column_names,
-                column_count,
             })
         }
     })
@@ -1263,15 +1292,7 @@ fn stream_fetch<'a>(
 
         // SAFETY: current_stmt_ptr was loaded non-null from the AtomicPtr above.
         // conn_lock_guard is held, so the db_handle is valid for error reporting.
-        // column_count was set at prepare time and is immutable.
-        match unsafe {
-            process_single_step(
-                env,
-                current_stmt_ptr,
-                stream_handle.column_count,
-                db_handle_for_errors,
-            )
-        } {
+        match unsafe { process_single_step(env, current_stmt_ptr, db_handle_for_errors) } {
             Ok(Some(row_terms)) => {
                 fetched_rows.push(row_terms);
             }

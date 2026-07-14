@@ -1197,8 +1197,10 @@ defmodule XqliteNIF do
   @doc """
   Returns the result column names of a prepared statement (raw NIF).
 
-  Most users want `Xqlite.column_names/1`. The names are captured at prepare
-  time, so this works even after finalization.
+  Most users want `Xqlite.column_names/1`. Live statements read the names
+  directly, so SQLite's auto-reprepare after schema changes (e.g. `SELECT *`
+  re-expansion) is reflected; finalized statements answer with the
+  prepare-time snapshot.
   """
   @spec stmt_column_names(stmt :: Xqlite.stmt()) :: {:ok, [String.t()]} | Xqlite.error()
   def stmt_column_names(_stmt), do: err()

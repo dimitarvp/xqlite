@@ -15,7 +15,6 @@ pub(crate) struct XqliteStream {
     // These are immutable after stream_open completes
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
     pub(crate) column_names: Vec<String>,
-    pub(crate) column_count: usize,
 }
 
 #[rustler::resource_impl]
@@ -86,17 +85,19 @@ impl Drop for XqliteStream {
 
 /// Steps a prepared statement once and returns the row data if available.
 ///
+/// The column count is read AFTER the step, not taken from a prepare-time
+/// snapshot: sqlite3_step's v2 auto-reprepare after a schema change can
+/// legitimately change it (e.g. `SELECT *` re-expansion).
+///
 /// # Safety
 ///
 /// - `stmt_ptr` must be non-null and point to a valid, prepared `sqlite3_stmt`.
 /// - `db_handle_for_error_reporting` must be the `sqlite3*` handle that owns `stmt_ptr`.
-/// - `column_count` must match the statement's actual column count.
 /// - The caller must hold the connection mutex for the duration of this call.
 #[inline]
 pub(crate) unsafe fn process_single_step<'a>(
     env: Env<'a>,
     stmt_ptr: *mut ffi::sqlite3_stmt,
-    column_count: usize,
     db_handle_for_error_reporting: *mut ffi::sqlite3,
 ) -> Result<Option<Vec<Term<'a>>>, XqliteError> {
     // SAFETY: Caller guarantees stmt_ptr and db_handle are valid and exclusively held.
@@ -104,6 +105,10 @@ pub(crate) unsafe fn process_single_step<'a>(
 
     match step_result {
         ffi::SQLITE_ROW => {
+            // SAFETY: stmt_ptr is valid and we just confirmed SQLITE_ROW; the
+            // mutex is held, so the post-step column count is stable while we
+            // decode this row.
+            let column_count = unsafe { ffi::sqlite3_column_count(stmt_ptr) } as usize;
             // SAFETY: stmt_ptr is valid and we just confirmed SQLITE_ROW.
             unsafe { sqlite_row_to_elixir_terms(env, stmt_ptr, column_count) }.map(Some)
         }
@@ -145,18 +150,20 @@ fn bind_value_to_raw_stmt(
             Value::Integer(val) => ffi::sqlite3_bind_int64(raw_stmt_ptr, bind_idx, *val),
             Value::Real(val) => ffi::sqlite3_bind_double(raw_stmt_ptr, bind_idx, *val),
             Value::Text(s_val) => {
-                let c_text = std::ffi::CString::new(s_val.as_str())
-                    .map_err(|_e| XqliteError::NulErrorInString)?;
-                let len = c_int::try_from(c_text.as_bytes().len()).map_err(|_| {
+                // Bind with an explicit length instead of a CString: TEXT may
+                // legitimately contain interior NUL bytes (SQLite stores them
+                // fine), and sqlite3_bind_text never needs NUL termination
+                // when a length is supplied. SQLITE_TRANSIENT copies at once.
+                let len = c_int::try_from(s_val.len()).map_err(|_| {
                     XqliteError::CannotConvertToSqliteValue {
-                        value_str: format!("<text len {}>", c_text.as_bytes().len()),
+                        value_str: format!("<text len {}>", s_val.len()),
                         reason: "text length exceeds c_int range".to_string(),
                     }
                 })?;
                 ffi::sqlite3_bind_text(
                     raw_stmt_ptr,
                     bind_idx,
-                    c_text.as_ptr(),
+                    s_val.as_ptr() as *const std::os::raw::c_char,
                     len,
                     ffi::SQLITE_TRANSIENT(),
                 )

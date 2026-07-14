@@ -927,7 +927,9 @@ defmodule Xqlite do
   @doc """
   Returns the result column names of a prepared statement.
 
-  Captured at prepare time, so this also works after finalization.
+  Live statements reflect SQLite's auto-reprepare after schema changes
+  (e.g. `SELECT *` re-expansion); finalized statements answer with the
+  prepare-time snapshot.
   """
   @spec column_names(stmt()) :: {:ok, [String.t()]} | error()
   def column_names(stmt), do: XqliteNIF.stmt_column_names(stmt)

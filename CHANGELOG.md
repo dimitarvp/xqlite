@@ -90,6 +90,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Raw statement/stream binding accepts text with interior NUL
+  bytes.** The shared FFI binder built a `CString` for TEXT values
+  and rejected legitimate NUL-containing payloads with
+  `:null_byte_in_string`; it now binds pointer+length, matching the
+  one-shot query path (SQLite stores such TEXT fine).
+
+- **Statement column metadata is read live, not snapshotted.**
+  `SELECT *` through a prepared statement now re-expands after a
+  schema change (SQLite's v2 auto-reprepare); previously the row
+  width and `column_names` were frozen at prepare time. Finalized
+  statements still answer `column_names` from the prepare-time
+  snapshot.
+
 - **Finalizing after a failed step no longer reports a phantom
   error.** `sqlite3_finalize` echoes the statement's most recent
   evaluation error (e.g. `SQLITE_INTERRUPT` after a cancelled step)
