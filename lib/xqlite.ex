@@ -894,6 +894,21 @@ defmodule Xqlite do
   end
 
   @doc """
+  Like `multi_step/2` but cancellable.
+
+  Accepts a single cancel token or a list (OR-semantics — any signalled
+  token aborts with `{:error, :operation_cancelled}`). Cancellation rides
+  the connection's progress handler, exactly like `query_cancellable/4`.
+  After a cancellation, `reset/1` the statement before stepping it again.
+  """
+  @spec multi_step_cancellable(stmt(), pos_integer(), reference() | [reference()]) ::
+          {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
+  def multi_step_cancellable(stmt, batch_size, token_or_tokens)
+      when is_integer(batch_size) do
+    XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, List.wrap(token_or_tokens))
+  end
+
+  @doc """
   Resets a prepared statement so it can be stepped from the start again.
 
   Bindings are preserved (SQLite semantics); use `clear_bindings/1` to drop

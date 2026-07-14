@@ -1161,6 +1161,21 @@ defmodule XqliteNIF do
   def stmt_multi_step(_stmt, _batch_size), do: err()
 
   @doc """
+  Advances a prepared statement up to `batch_size` rows, cancellable (raw NIF).
+
+  Most users want `Xqlite.multi_step_cancellable/3`. Same return shape as
+  `stmt_multi_step/2`; any signalled token in the list aborts the loop with
+  `{:error, :operation_cancelled}` (OR-semantics; an empty list means plain
+  stepping).
+  """
+  @spec stmt_multi_step_cancellable(
+          stmt :: Xqlite.stmt(),
+          batch_size :: pos_integer(),
+          tokens :: [reference()]
+        ) :: {:ok, %{rows: [[Xqlite.sqlite_value()]], done: boolean()}} | Xqlite.error()
+  def stmt_multi_step_cancellable(_stmt, _batch_size, _tokens), do: err()
+
+  @doc """
   Resets a prepared statement so it can be stepped again (raw NIF).
 
   Most users want `Xqlite.reset/1`. Bindings are preserved (SQLite

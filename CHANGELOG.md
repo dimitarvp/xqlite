@@ -22,8 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{:invalid_parameter_count, %{provided: _, expected: _}}`); using
   a finalized statement returns `{:error, :statement_finalized}`.
   Abandoned statements are finalized by garbage collection; finalize
-  before closing the owning connection. Steps are not cancellable
-  and emit no telemetry (documented).
+  before closing the owning connection. Plain steps are not
+  cancellable; `multi_step_cancellable/3` provides token-based
+  cancellable batch stepping over the connection's progress handler
+  (single token or OR-semantics list, like `query_cancellable/4`).
+  No telemetry on statement operations (documented).
 
 - **Deny-list authorizer.** `Xqlite.set_authorizer/2` and
   `remove_authorizer/1` (plus the raw `XqliteNIF` stubs) install a
@@ -84,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mix precommit` is now `mix verify`.** Same checks, same
   fast-to-slow order, new name. The task module ships in the
   package, so the old task name is gone.
+
+### Fixed
+
+- **Finalizing after a failed step no longer reports a phantom
+  error.** `sqlite3_finalize` echoes the statement's most recent
+  evaluation error (e.g. `SQLITE_INTERRUPT` after a cancelled step)
+  even though the statement is destroyed regardless; `stream_close/1`
+  and `Xqlite.finalize/1` treated that echo as a cleanup failure.
+  Cleanup now always succeeds — the evaluation error was already
+  surfaced at step/fetch time.
 
 ### Changed
 

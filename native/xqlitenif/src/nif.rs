@@ -876,6 +876,27 @@ fn stmt_multi_step<'a>(
     stmt_handle: ResourceArc<XqliteStatement>,
     batch_size: i64,
 ) -> Term<'a> {
+    stmt_multi_step_impl(env, stmt_handle, batch_size, Vec::new())
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_multi_step_cancellable<'a>(
+    env: Env<'a>,
+    stmt_handle: ResourceArc<XqliteStatement>,
+    batch_size: i64,
+    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+) -> Term<'a> {
+    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        tokens.iter().map(|t| t.0.clone()).collect();
+    stmt_multi_step_impl(env, stmt_handle, batch_size, token_bools)
+}
+
+fn stmt_multi_step_impl<'a>(
+    env: Env<'a>,
+    stmt_handle: ResourceArc<XqliteStatement>,
+    batch_size: i64,
+    token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Term<'a> {
     use crate::stream::process_single_step;
 
     if batch_size < 1 {
@@ -899,6 +920,15 @@ fn stmt_multi_step<'a>(
     let mut done = false;
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        // Registers the cancel tokens on the connection's progress dispatch
+        // for the duration of the step loop (RAII; empty input is a no-op
+        // guard). with_live_stmt holds the connection Mutex, satisfying the
+        // guard's contract.
+        let _guard = crate::cancel::ProgressHandlerGuard::new(
+            &stmt_handle.conn_resource_arc.progress_dispatch,
+            token_bools,
+        );
+
         for _ in 0..batch_size {
             // SAFETY: with_live_stmt holds the connection mutex and proved
             // stmt_ptr live; column_count is immutable since prepare.

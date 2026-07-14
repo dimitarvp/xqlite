@@ -49,42 +49,21 @@ pub(crate) fn take_and_finalize_raw(
         // thread is currently inside sqlite3_step on this connection. Without
         // this lock, a concurrent step could be mid-flight when we finalize
         // the statement out from under it.
-        let conn_guard = conn_resource_arc
+        let _conn_guard = conn_resource_arc
             .conn
             .lock()
             .map_err(|e| XqliteError::LockError(e.to_string()))?;
 
         // SAFETY: old_ptr was obtained via atomic swap, guaranteeing exclusive
         // ownership. The connection lock is held, ensuring no concurrent sqlite3_step.
-        let result_code = unsafe { ffi::sqlite3_finalize(old_ptr) };
-        if result_code != ffi::SQLITE_OK {
-            let ffi_err = ffi::Error::new(result_code);
-            let mut message =
-                format!("Failed to finalize SQLite statement (code: {result_code})");
-
-            if let Some(conn) = conn_guard.as_ref() {
-                // SAFETY: conn_guard holds the mutex. sqlite3_errmsg returns a
-                // pointer valid until the next API call; we copy immediately.
-                let specific_sqlite_msg = unsafe {
-                    let err_msg_ptr = ffi::sqlite3_errmsg(conn.handle());
-                    if !err_msg_ptr.is_null() {
-                        std::ffi::CStr::from_ptr(err_msg_ptr)
-                            .to_string_lossy()
-                            .into_owned()
-                    } else {
-                        String::new()
-                    }
-                };
-                if !specific_sqlite_msg.is_empty()
-                    && specific_sqlite_msg.to_lowercase() != "not an error"
-                {
-                    message = specific_sqlite_msg;
-                }
-            }
-
-            let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(message));
-            return Err(XqliteError::from(rusqlite_err));
-        }
+        //
+        // sqlite3_finalize echoes the statement's most recent EVALUATION
+        // error (e.g. SQLITE_INTERRUPT after a cancelled step) — but the
+        // statement is destroyed regardless, per the SQLite docs. That
+        // error was already surfaced to the caller at step time, so
+        // reporting it again here would turn successful cleanup into a
+        // phantom failure. Deliberately discarded.
+        let _ = unsafe { ffi::sqlite3_finalize(old_ptr) };
     }
     // If old_ptr was null, it was already finalized by another call or was never set.
     Ok(())
