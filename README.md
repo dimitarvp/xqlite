@@ -35,7 +35,7 @@ Xqlite is inspired by [exqlite](https://github.com/elixir-sqlite/exqlite), which
 ```elixir
 def deps do
   [
-    {:xqlite, "~> 0.7"}
+    {:xqlite, "~> 0.8"}
   ]
 end
 ```
