@@ -553,16 +553,35 @@ defmodule Xqlite do
   Uses `XqliteNIF.query_with_changes/3` which captures the affected row count
   atomically inside the connection lock. For zero-overhead access without the
   changes field, use `XqliteNIF.query/3` directly.
+
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules.
+      Parameters are encoded through the chain before binding and result
+      rows are decoded through it after fetching (first match wins, same
+      semantics as `stream/4`). Default: `[]` (values pass through
+      untouched).
   """
-  @spec query(conn(), String.t(), list() | keyword()) ::
+  @spec query(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
-  def query(conn, sql, params \\ []) do
-    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: false}
+  def query(conn, sql, params \\ [], opts \\ []) do
+    extensions = Keyword.get(opts, :type_extensions, [])
+    bound_params = Xqlite.TypeExtension.encode_params(params, extensions)
+
+    start_md = %{
+      conn: conn,
+      sql: sql,
+      params_count: params_count(bound_params),
+      cancellable?: false
+    }
 
     span_with_stop_metadata [:xqlite, :query], start_md do
-      case XqliteNIF.query_with_changes(conn, sql, params) do
+      case XqliteNIF.query_with_changes(conn, sql, bound_params) do
         {:ok, map} ->
-          result = Xqlite.Result.from_map(map)
+          result =
+            map
+            |> Xqlite.Result.from_map()
+            |> decode_result_rows(extensions)
 
           {{:ok, result},
            Map.merge(start_md, %{
@@ -588,14 +607,28 @@ defmodule Xqlite do
   Executes a non-returning SQL statement and returns a `%Xqlite.Result{}`.
 
   For DML statements, `changes` contains the number of affected rows.
+
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
+      parameters are encoded through the chain before binding (there are
+      no result rows to decode). Default: `[]`.
   """
-  @spec execute(conn(), String.t(), list() | keyword()) ::
+  @spec execute(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
-  def execute(conn, sql, params \\ []) do
-    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: false}
+  def execute(conn, sql, params \\ [], opts \\ []) do
+    extensions = Keyword.get(opts, :type_extensions, [])
+    bound_params = Xqlite.TypeExtension.encode_params(params, extensions)
+
+    start_md = %{
+      conn: conn,
+      sql: sql,
+      params_count: params_count(bound_params),
+      cancellable?: false
+    }
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
-      case XqliteNIF.execute(conn, sql, params) do
+      case XqliteNIF.execute(conn, sql, bound_params) do
         {:ok, affected} ->
           result = %Xqlite.Result{
             columns: [],
@@ -620,6 +653,12 @@ defmodule Xqlite do
            })}
       end
     end
+  end
+
+  defp decode_result_rows(%Xqlite.Result{} = result, []), do: result
+
+  defp decode_result_rows(%Xqlite.Result{rows: rows} = result, extensions) do
+    %{result | rows: Xqlite.TypeExtension.decode_rows(rows, extensions)}
   end
 
   @doc """

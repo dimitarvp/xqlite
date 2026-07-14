@@ -61,7 +61,7 @@ XQLITE_BUILD=true mix deps.compile xqlite
 
 Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access. See [hexdocs](https://hexdocs.pm/xqlite) for the full API.
 
-- **Queries & execution:** `query/3`, `query_cancellable/4`, `query_with_changes/3`, `execute/3`, `execute_batch/2` and cancellable variants
+- **Queries & execution:** `query/4`, `query_cancellable/4`, `query_with_changes/3`, `execute/4`, `execute_batch/2` and cancellable variants; `query/4` and `execute/4` take optional `:type_extensions`
 - **Streaming:** `Xqlite.stream/4` (with optional `:type_extensions`) and the lower-level `stream_open/fetch/close`
 - **Transactions:** `:deferred`/`:immediate`/`:exclusive` modes, savepoints with release and rollback-to
 - **Cancellation:** per-operation, progress-handler-based, any process can cancel

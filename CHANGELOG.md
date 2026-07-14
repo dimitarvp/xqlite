@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deny-only (no `IGNORE`). Denying `:pragma` also turns off
   `get_pragma`/`set_pragma`.
 
+- **`:type_extensions` on `Xqlite.query/4` and `execute/4`.**
+  Previously stream-only: the option now also encodes parameters and
+  decodes result rows on the one-shot query/execute paths (same
+  first-match chain semantics as `stream/4`; arity-3 calls are
+  unchanged).
+
 - **Three more built-in type extensions.**
   `Xqlite.TypeExtension.JSON` (plain maps/lists ↔ JSON text via
   `Jason`; structs and unencodable terms skip), `.UUID` (canonical
