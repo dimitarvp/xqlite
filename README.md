@@ -70,6 +70,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Type extensions:** bidirectional encode/decode; `DateTime`, `Date`, `Time`, `NaiveDateTime` built-in
 - **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy handler with retry policy and `{:xqlite_busy, ...}` forwarding
 - **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, msg}`
+- **Manual statement lifecycle:** `prepare/2`, `bind/2` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
 - **Telemetry (opt-in):** compile-time-flagged `:telemetry` events for every operation (spans with nanosecond timings), cancellation lifecycle events, and a bridge that re-emits hook fan-outs as `[:xqlite, :hook, :*]` -- see the "Wiring xqlite telemetry" guide
 - **Serialize / deserialize:** atomic in-memory snapshots to/from binary
 - **Extensions:** opt-in `load_extension/2` and `load_extension/3`
@@ -295,8 +296,7 @@ To get the actual affected row count after DML, call `changes/1` immediately aft
 
 Planned for Xqlite core, in priority order:
 
-1. **Manual statement lifecycle** — optional prepare/bind/step/reset/release for patterns not covered by the existing helpers. Still not 100% certain about this one but I've heard it enough times from people that I'm considering adding it proactively (before being asked to). Feedback on whether this would have a direct value for you is very welcome.
-2. **SQLCipher support (optional)** — for encrypted-at-rest use cases.
+1. **SQLCipher support (optional)** — for encrypted-at-rest use cases.
 
 Lower priority (though UDFs remain the lowest priority for now):
 

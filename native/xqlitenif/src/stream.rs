@@ -25,63 +25,69 @@ impl XqliteStream {
     // Helper performs the atomic swap and finalization.
     // Called by Drop and by stream_close NIF.
     // It is pub(crate) for use by nif.rs.
-    pub(crate) fn take_and_finalize_atomic_stmt(
-        &self, // Takes &self to access atomic_raw_stmt and conn_resource_arc
-    ) -> Result<(), XqliteError> {
-        // Atomically swap the current pointer with null_mut(), getting the old pointer.
-        // Ordering::AcqRel ensures that this operation synchronizes with other atomic
-        // operations on other threads: acquire for the read (load of old value)
-        // and release for the write (store of null_mut).
-        let old_ptr = self
-            .atomic_raw_stmt
-            .swap(std::ptr::null_mut(), Ordering::AcqRel);
-
-        if !old_ptr.is_null() {
-            // Acquire the connection lock before finalizing. This ensures no other
-            // thread is currently inside sqlite3_step on this connection. Without
-            // this lock, a concurrent stream_fetch could be mid-step when we finalize
-            // the statement out from under it.
-            let conn_guard = self
-                .conn_resource_arc
-                .conn
-                .lock()
-                .map_err(|e| XqliteError::LockError(e.to_string()))?;
-
-            // SAFETY: old_ptr was obtained via atomic swap, guaranteeing exclusive
-            // ownership. The connection lock is held, ensuring no concurrent sqlite3_step.
-            let result_code = unsafe { ffi::sqlite3_finalize(old_ptr) };
-            if result_code != ffi::SQLITE_OK {
-                let ffi_err = ffi::Error::new(result_code);
-                let mut message =
-                    format!("Failed to finalize SQLite statement (code: {result_code})");
-
-                if let Some(conn) = conn_guard.as_ref() {
-                    // SAFETY: conn_guard holds the mutex. sqlite3_errmsg returns a
-                    // pointer valid until the next API call; we copy immediately.
-                    let specific_sqlite_msg = unsafe {
-                        let err_msg_ptr = ffi::sqlite3_errmsg(conn.handle());
-                        if !err_msg_ptr.is_null() {
-                            std::ffi::CStr::from_ptr(err_msg_ptr)
-                                .to_string_lossy()
-                                .into_owned()
-                        } else {
-                            String::new()
-                        }
-                    };
-                    if !specific_sqlite_msg.is_empty()
-                        && specific_sqlite_msg.to_lowercase() != "not an error"
-                    {
-                        message = specific_sqlite_msg;
-                    }
-                }
-
-                let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(message));
-                return Err(XqliteError::from(rusqlite_err));
-            }
-        }
-        // If old_ptr was null, it was already finalized by another call or was never set.
-        Ok(())
+    pub(crate) fn take_and_finalize_atomic_stmt(&self) -> Result<(), XqliteError> {
+        take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc)
     }
+}
+
+/// Atomically takes a raw statement pointer and finalizes it under the
+/// connection Mutex. Shared by every resource that owns a raw
+/// `sqlite3_stmt` (`XqliteStream`, `XqliteStatement`) — their Drop impls
+/// and explicit close/finalize NIFs all funnel here.
+pub(crate) fn take_and_finalize_raw(
+    atomic_raw_stmt: &AtomicPtr<ffi::sqlite3_stmt>,
+    conn_resource_arc: &ResourceArc<XqliteConn>,
+) -> Result<(), XqliteError> {
+    // Atomically swap the current pointer with null_mut(), getting the old pointer.
+    // Ordering::AcqRel ensures that this operation synchronizes with other atomic
+    // operations on other threads: acquire for the read (load of old value)
+    // and release for the write (store of null_mut).
+    let old_ptr = atomic_raw_stmt.swap(std::ptr::null_mut(), Ordering::AcqRel);
+
+    if !old_ptr.is_null() {
+        // Acquire the connection lock before finalizing. This ensures no other
+        // thread is currently inside sqlite3_step on this connection. Without
+        // this lock, a concurrent step could be mid-flight when we finalize
+        // the statement out from under it.
+        let conn_guard = conn_resource_arc
+            .conn
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+
+        // SAFETY: old_ptr was obtained via atomic swap, guaranteeing exclusive
+        // ownership. The connection lock is held, ensuring no concurrent sqlite3_step.
+        let result_code = unsafe { ffi::sqlite3_finalize(old_ptr) };
+        if result_code != ffi::SQLITE_OK {
+            let ffi_err = ffi::Error::new(result_code);
+            let mut message =
+                format!("Failed to finalize SQLite statement (code: {result_code})");
+
+            if let Some(conn) = conn_guard.as_ref() {
+                // SAFETY: conn_guard holds the mutex. sqlite3_errmsg returns a
+                // pointer valid until the next API call; we copy immediately.
+                let specific_sqlite_msg = unsafe {
+                    let err_msg_ptr = ffi::sqlite3_errmsg(conn.handle());
+                    if !err_msg_ptr.is_null() {
+                        std::ffi::CStr::from_ptr(err_msg_ptr)
+                            .to_string_lossy()
+                            .into_owned()
+                    } else {
+                        String::new()
+                    }
+                };
+                if !specific_sqlite_msg.is_empty()
+                    && specific_sqlite_msg.to_lowercase() != "not an error"
+                {
+                    message = specific_sqlite_msg;
+                }
+            }
+
+            let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(message));
+            return Err(XqliteError::from(rusqlite_err));
+        }
+    }
+    // If old_ptr was null, it was already finalized by another call or was never set.
+    Ok(())
 }
 
 impl Drop for XqliteStream {

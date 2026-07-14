@@ -12,6 +12,7 @@ use crate::schema::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, SchemaObjectInfo,
 };
 use crate::session::{self, XqliteSession};
+use crate::statement::XqliteStatement;
 use crate::stream::XqliteStream;
 use crate::transaction;
 use crate::util::singular_ok_or_error_tuple;
@@ -705,6 +706,270 @@ fn total_changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
 // ---------------------------------------------------------------------------
 // Stream NIFs
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Manual statement lifecycle NIFs (prepare / bind / step / reset / finalize)
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_prepare(
+    conn_handle: ResourceArc<XqliteConn>,
+    sql: String,
+) -> Result<ResourceArc<XqliteStatement>, XqliteError> {
+    let conn_resource_arc_clone = conn_handle.clone();
+
+    connection::with_conn(&conn_handle, |conn| {
+        // SAFETY: with_conn holds the connection mutex for the duration of
+        // this closure. The raw statement is transferred into the
+        // XqliteStatement's AtomicPtr on success, or finalized on every
+        // error path before returning.
+        unsafe {
+            let db_handle = conn.handle();
+            let mut raw_stmt_ptr: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+            let mut tail_ptr: *const std::os::raw::c_char = std::ptr::null();
+            let c_sql = std::ffi::CString::new(sql.as_str())
+                .map_err(|_| XqliteError::NulErrorInString)?;
+
+            let prepare_rc = ffi::sqlite3_prepare_v2(
+                db_handle,
+                c_sql.as_ptr(),
+                std::os::raw::c_int::try_from(c_sql.as_bytes().len()).map_err(|_| {
+                    XqliteError::CannotExecute(
+                        "SQL string length exceeds c_int range".to_string(),
+                    )
+                })?,
+                &mut raw_stmt_ptr,
+                &mut tail_ptr,
+            );
+
+            if prepare_rc != ffi::SQLITE_OK {
+                let error_message = {
+                    let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
+                    if err_msg_ptr.is_null() {
+                        format!(
+                            "SQLite preparation error (code {prepare_rc}) but no message available. SQL: {sql}"
+                        )
+                    } else {
+                        std::ffi::CStr::from_ptr(err_msg_ptr)
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                };
+                let ffi_err = ffi::Error::new(prepare_rc);
+                let rusqlite_err =
+                    rusqlite::Error::SqliteFailure(ffi_err, Some(error_message));
+                return Err(XqliteError::from(rusqlite_err));
+            }
+
+            // Null with SQLITE_OK means the SQL was whitespace/comments only.
+            // A manual statement must be exactly one real statement.
+            let non_null_raw_stmt = match NonNull::new(raw_stmt_ptr) {
+                Some(ptr) => ptr,
+                None => {
+                    return Err(XqliteError::CannotExecute(
+                        "SQL contains no statement".to_string(),
+                    ));
+                }
+            };
+
+            // Reject trailing SQL after the first statement instead of
+            // silently compiling only the first one.
+            if !tail_ptr.is_null() {
+                let tail = std::ffi::CStr::from_ptr(tail_ptr).to_string_lossy();
+                if !tail.trim().is_empty() {
+                    ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                    return Err(XqliteError::MultipleStatements);
+                }
+            }
+
+            let column_count =
+                ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
+            let mut column_names = Vec::with_capacity(column_count);
+            for i in 0..column_count {
+                let name_ptr = ffi::sqlite3_column_name(
+                    non_null_raw_stmt.as_ptr(),
+                    i as std::os::raw::c_int,
+                );
+                if name_ptr.is_null() {
+                    ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                    return Err(XqliteError::InternalEncodingError {
+                        context: format!(
+                            "SQLite returned null column name for index {i} during statement prepare"
+                        ),
+                    });
+                }
+                let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
+                column_names.push(name_c_str.to_string_lossy().into_owned());
+            }
+
+            Ok(XqliteStatement {
+                atomic_raw_stmt: AtomicPtr::new(non_null_raw_stmt.as_ptr()),
+                conn_resource_arc: conn_resource_arc_clone,
+                column_names,
+                column_count,
+            })
+        }
+    })
+    .map(ResourceArc::new)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_bind<'a>(
+    env: Env<'a>,
+    stmt_handle: ResourceArc<XqliteStatement>,
+    params_term: Term<'a>,
+) -> Term<'a> {
+    use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
+    use crate::util::{decode_exec_keyword_params, decode_plain_list_params, is_keyword};
+
+    let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        match params_term.get_type() {
+            TermType::List => {
+                if params_term.is_empty_list() {
+                    Ok(())
+                } else if is_keyword(params_term) {
+                    let named = decode_exec_keyword_params(env, params_term)?;
+                    bind_named_params_ffi(stmt_ptr, &named, db_handle)
+                } else {
+                    let positional = decode_plain_list_params(env, params_term)?;
+                    // SAFETY: with_live_stmt holds the connection mutex and
+                    // proved stmt_ptr live.
+                    let expected =
+                        unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) } as usize;
+                    if positional.len() != expected {
+                        return Err(XqliteError::InvalidParameterCount {
+                            provided: positional.len(),
+                            expected,
+                        });
+                    }
+                    bind_positional_params_ffi(stmt_ptr, &positional, db_handle)
+                }
+            }
+            _ => Err(XqliteError::ExpectedList {
+                value_str: format!("Parameters term was not a list: {params_term:?}"),
+            }),
+        }
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'a> {
+    use crate::stream::process_single_step;
+
+    let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        // SAFETY: with_live_stmt holds the connection mutex and proved
+        // stmt_ptr live; column_count is immutable since prepare.
+        unsafe { process_single_step(env, stmt_ptr, stmt_handle.column_count, db_handle) }
+    });
+
+    match result {
+        Ok(Some(row_terms)) => (atoms::row(), row_terms).encode(env),
+        Ok(None) => atoms::done().encode(env),
+        Err(e) => (error(), e).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_multi_step<'a>(
+    env: Env<'a>,
+    stmt_handle: ResourceArc<XqliteStatement>,
+    batch_size: i64,
+) -> Term<'a> {
+    use crate::stream::process_single_step;
+
+    if batch_size < 1 {
+        let details = map_new(env)
+            .map_put(atoms::provided(), batch_size)
+            .and_then(|m| m.map_put(atoms::minimum(), 1_usize));
+        return match details {
+            Ok(details_map) => {
+                (error(), (atoms::invalid_batch_size(), details_map)).encode(env)
+            }
+            Err(_) => {
+                let e = XqliteError::InternalEncodingError {
+                    context: "Failed to create details map for InvalidBatchSize".to_string(),
+                };
+                (error(), e).encode(env)
+            }
+        };
+    }
+
+    let mut rows: Vec<Vec<Term<'a>>> = Vec::new();
+    let mut done = false;
+
+    let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        for _ in 0..batch_size {
+            // SAFETY: with_live_stmt holds the connection mutex and proved
+            // stmt_ptr live; column_count is immutable since prepare.
+            match unsafe {
+                process_single_step(env, stmt_ptr, stmt_handle.column_count, db_handle)
+            }? {
+                Some(row_terms) => rows.push(row_terms),
+                None => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => {
+            let map = map_new(env)
+                .map_put(atoms::rows(), &rows)
+                .and_then(|m| m.map_put(atoms::done(), done));
+            match map {
+                Ok(result_map) => (ok(), result_map).encode(env),
+                Err(_) => {
+                    let e = XqliteError::InternalEncodingError {
+                        context: "Failed to create result map for stmt_multi_step".to_string(),
+                    };
+                    (error(), e).encode(env)
+                }
+            }
+        }
+        Err(e) => (error(), e).encode(env),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_reset(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'_> {
+    let result = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
+        // SAFETY: with_live_stmt holds the connection mutex and proved
+        // stmt_ptr live. sqlite3_reset's return code echoes the most recent
+        // step error rather than reporting the reset itself — resetting a
+        // stepped-to-error statement is legal — so it is deliberately not
+        // treated as a failure here.
+        unsafe { ffi::sqlite3_reset(stmt_ptr) };
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'_> {
+    let result = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
+        // SAFETY: with_live_stmt holds the connection mutex and proved
+        // stmt_ptr live. sqlite3_clear_bindings always returns SQLITE_OK.
+        unsafe { ffi::sqlite3_clear_bindings(stmt_ptr) };
+        Ok(())
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn stmt_column_names(
+    stmt_handle: ResourceArc<XqliteStatement>,
+) -> Result<Vec<String>, XqliteError> {
+    Ok(stmt_handle.column_names.clone())
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stmt_finalize(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'_> {
+    singular_ok_or_error_tuple(env, stmt_handle.take_and_finalize())
+}
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn stream_open<'a>(

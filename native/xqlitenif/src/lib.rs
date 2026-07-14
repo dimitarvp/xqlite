@@ -153,6 +153,7 @@ pub(crate) mod atoms {
         reprepare,
         restart,
         restrict,
+        row,
         rows,
         rows_produced,
         rows_visited,
@@ -174,6 +175,7 @@ pub(crate) mod atoms {
         sql,
         sql_input_error,
         sqlite_failure,
+        statement_finalized,
         stmt_counters,
         stmt_used,
         stored_generated,
@@ -232,6 +234,7 @@ mod query;
 mod rollback_hook;
 mod schema;
 mod session;
+mod statement;
 mod stream;
 mod transaction;
 mod update_hook;

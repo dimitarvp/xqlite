@@ -7,6 +7,7 @@ defmodule Xqlite do
   import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
 
   @type conn :: reference()
+  @type stmt :: reference()
 
   # ---------------------------------------------------------------------------
   # Connection options (validated via NimbleOptions)
@@ -138,6 +139,7 @@ defmodule Xqlite do
           | :multiple_statements
           | :null_byte_in_string
           | :operation_cancelled
+          | :statement_finalized
           | :unsupported_atom
           | {:authorization_denied, String.t()}
           | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
@@ -756,6 +758,135 @@ defmodule Xqlite do
       end
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Manual statement lifecycle
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Prepares a manually managed statement.
+
+  The lifecycle is `prepare/2` → (`bind/2` → `step/1` / `multi_step/2` →
+  `reset/1`)* → `finalize/1`. Preparing once and rebinding in a loop skips
+  SQL parsing/planning on every iteration — the reason prepared statements
+  exist. For one-shot calls, `query/3` and `execute/3` remain simpler.
+
+  Exactly ONE statement is compiled: whitespace/comment-only SQL returns
+  `{:error, {:cannot_execute, reason}}` and trailing statements after the
+  first return `{:error, :multiple_statements}` — nothing is silently
+  dropped.
+
+  Finalize statements before closing their connection: a connection closed
+  while statements are outstanding keeps the underlying SQLite handle alive
+  until the process exits (abandoned statements are still finalized by
+  garbage collection, and every operation on them after an explicit
+  `Xqlite.close/1` returns `{:error, :connection_closed}`).
+
+  Steps are not cancellable; for cancellation use `query_cancellable/4` and
+  friends. No telemetry is emitted for statement-lifecycle operations.
+
+  ## Examples
+
+      iex> {:ok, conn} = Xqlite.open_in_memory()
+      iex> {:ok, 0} = XqliteNIF.execute(conn, "CREATE TABLE pairs (a INTEGER, b TEXT)", [])
+      iex> {:ok, stmt} = Xqlite.prepare(conn, "INSERT INTO pairs (a, b) VALUES (?1, ?2)")
+      iex> for {a, b} <- [{1, "one"}, {2, "two"}] do
+      ...>   :ok = Xqlite.bind(stmt, [a, b])
+      ...>   :done = Xqlite.step(stmt)
+      ...>   :ok = Xqlite.reset(stmt)
+      ...> end
+      [:ok, :ok]
+      iex> Xqlite.finalize(stmt)
+      :ok
+      iex> {:ok, query} = Xqlite.prepare(conn, "SELECT a, b FROM pairs ORDER BY a")
+      iex> Xqlite.step(query)
+      {:row, [1, "one"]}
+      iex> Xqlite.multi_step(query, 10)
+      {:ok, %{rows: [[2, "two"]], done: true}}
+      iex> Xqlite.column_names(query)
+      {:ok, ["a", "b"]}
+      iex> Xqlite.finalize(query)
+      :ok
+  """
+  @spec prepare(conn(), String.t()) :: {:ok, stmt()} | error()
+  def prepare(conn, sql) when is_binary(sql) do
+    XqliteNIF.stmt_prepare(conn, sql)
+  end
+
+  @doc """
+  Binds parameters to a prepared statement.
+
+  Accepts a plain list for positional placeholders (`?1`, `?2`, …; the
+  count must match, otherwise `{:error, {:invalid_parameter_count,
+  %{provided: _, expected: _}}}`) or a keyword list for named placeholders.
+  Once stepping has started, call `reset/1` before rebinding — SQLite
+  rejects mid-run rebinds.
+  """
+  @spec bind(stmt(), list()) :: :ok | error()
+  def bind(stmt, params) when is_list(params) do
+    XqliteNIF.stmt_bind(stmt, params)
+  end
+
+  @doc """
+  Advances a prepared statement one row.
+
+  Returns `{:row, values}`, `:done` when exhausted, or `{:error, reason}`.
+  Stepping past `:done` without a `reset/1` returns whatever SQLite reports
+  for the re-step (a fresh automatic rerun on modern SQLite).
+  """
+  @spec step(stmt()) :: {:row, [sqlite_value()]} | :done | error()
+  def step(stmt), do: XqliteNIF.stmt_step(stmt)
+
+  @doc """
+  Advances a prepared statement up to `batch_size` rows.
+
+  Returns `{:ok, %{rows: rows, done: done?}}` — `done: true` means the
+  statement exhausted within this batch (fewer than `batch_size` rows may
+  be returned in that case) — or `{:error, reason}`.
+
+  Calling again after `done: true` without a `reset/1` RERUNS the query
+  from the top (v2-prepared statements auto-reset when stepped past done —
+  SQLite semantics, same as `step/1`).
+  """
+  @spec multi_step(stmt(), pos_integer()) ::
+          {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
+  def multi_step(stmt, batch_size) when is_integer(batch_size) do
+    XqliteNIF.stmt_multi_step(stmt, batch_size)
+  end
+
+  @doc """
+  Resets a prepared statement so it can be stepped from the start again.
+
+  Bindings are preserved (SQLite semantics); use `clear_bindings/1` to drop
+  them to NULL. Always returns `:ok` for a live statement — `sqlite3_reset`'s
+  return code echoes the most recent step error, not the reset itself.
+  """
+  @spec reset(stmt()) :: :ok | error()
+  def reset(stmt), do: XqliteNIF.stmt_reset(stmt)
+
+  @doc """
+  Clears all parameter bindings on a prepared statement back to NULL.
+  """
+  @spec clear_bindings(stmt()) :: :ok | error()
+  def clear_bindings(stmt), do: XqliteNIF.stmt_clear_bindings(stmt)
+
+  @doc """
+  Returns the result column names of a prepared statement.
+
+  Captured at prepare time, so this also works after finalization.
+  """
+  @spec column_names(stmt()) :: {:ok, [String.t()]} | error()
+  def column_names(stmt), do: XqliteNIF.stmt_column_names(stmt)
+
+  @doc """
+  Finalizes a prepared statement, releasing its SQLite resources.
+
+  Idempotent — repeated finalization returns `:ok`. Prefer explicit
+  finalization over relying on garbage collection, and finalize before
+  closing the owning connection (see `prepare/2`).
+  """
+  @spec finalize(stmt()) :: :ok | error()
+  def finalize(stmt), do: XqliteNIF.stmt_finalize(stmt)
 
   # ---------------------------------------------------------------------------
   # Backup / serialize / deserialize

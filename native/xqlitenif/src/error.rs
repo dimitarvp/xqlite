@@ -224,6 +224,7 @@ pub(crate) enum XqliteError {
 
     // Connection state
     ConnectionClosed,
+    StatementFinalized,
 
     // Internal
     InternalEncodingError {
@@ -327,6 +328,9 @@ impl Display for XqliteError {
             }
             XqliteError::ConnectionClosed => {
                 write!(f, "Connection is closed")
+            }
+            XqliteError::StatementFinalized => {
+                write!(f, "Statement is already finalized")
             }
             XqliteError::InternalEncodingError { context } => {
                 write!(f, "Internal error during result encoding: {context}")
@@ -492,6 +496,7 @@ impl Encoder for XqliteError {
                 (atoms::invalid_stream_handle(), reason).encode(env)
             }
             XqliteError::ConnectionClosed => atoms::connection_closed().encode(env),
+            XqliteError::StatementFinalized => atoms::statement_finalized().encode(env),
             XqliteError::InternalEncodingError { context } => {
                 (atoms::internal_encoding_error(), context).encode(env)
             }

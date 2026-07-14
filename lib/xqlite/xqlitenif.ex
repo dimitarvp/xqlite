@@ -1114,6 +1114,93 @@ defmodule XqliteNIF do
   def stream_close(_stream_handle), do: err()
 
   @doc """
+  Prepares a manually managed statement (raw NIF).
+
+  Most users want `Xqlite.prepare/2`. Compiles exactly ONE SQL statement:
+  whitespace/comment-only SQL and trailing statements after the first are
+  structured errors (`{:cannot_execute, _}` / `:multiple_statements`) — no
+  silent partial compilation. The returned handle must eventually be
+  finalized via `stmt_finalize/1` (garbage collection also finalizes
+  abandoned handles).
+  """
+  @spec stmt_prepare(conn :: Xqlite.conn(), sql :: String.t()) ::
+          {:ok, Xqlite.stmt()} | Xqlite.error()
+  def stmt_prepare(_conn, _sql), do: err()
+
+  @doc """
+  Binds parameters to a prepared statement (raw NIF).
+
+  Most users want `Xqlite.bind/2`. Accepts a plain list (positional `?1`,
+  `?2`, … — the count must match or `{:error, {:invalid_parameter_count,
+  %{provided: _, expected: _}}}` is returned) or a keyword list (named
+  parameters). After stepping has started, `stmt_reset/1` must run before
+  rebinding (SQLite lifecycle).
+  """
+  @spec stmt_bind(stmt :: Xqlite.stmt(), params :: list()) :: :ok | Xqlite.error()
+  def stmt_bind(_stmt, _params), do: err()
+
+  @doc """
+  Advances a prepared statement one row (raw NIF).
+
+  Most users want `Xqlite.step/1`. Returns `{:row, values}` for a produced
+  row, `:done` when the statement is exhausted, or `{:error, reason}`.
+  """
+  @spec stmt_step(stmt :: Xqlite.stmt()) ::
+          {:row, [Xqlite.sqlite_value()]} | :done | Xqlite.error()
+  def stmt_step(_stmt), do: err()
+
+  @doc """
+  Advances a prepared statement up to `batch_size` rows (raw NIF).
+
+  Most users want `Xqlite.multi_step/2`. Returns
+  `{:ok, %{rows: rows, done: boolean}}` — `done: true` means the statement
+  exhausted within this batch — or `{:error, reason}`.
+  """
+  @spec stmt_multi_step(stmt :: Xqlite.stmt(), batch_size :: pos_integer()) ::
+          {:ok, %{rows: [[Xqlite.sqlite_value()]], done: boolean()}} | Xqlite.error()
+  def stmt_multi_step(_stmt, _batch_size), do: err()
+
+  @doc """
+  Resets a prepared statement so it can be stepped again (raw NIF).
+
+  Most users want `Xqlite.reset/1`. Bindings are preserved (SQLite
+  semantics) — use `stmt_clear_bindings/1` to drop them. The return code of
+  `sqlite3_reset` echoes the most recent step error rather than reporting
+  the reset itself, so this returns `:ok` for any live statement.
+  """
+  @spec stmt_reset(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
+  def stmt_reset(_stmt), do: err()
+
+  @doc """
+  Clears all parameter bindings on a prepared statement back to NULL (raw NIF).
+
+  Most users want `Xqlite.clear_bindings/1`.
+  """
+  @spec stmt_clear_bindings(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
+  def stmt_clear_bindings(_stmt), do: err()
+
+  @doc """
+  Returns the result column names of a prepared statement (raw NIF).
+
+  Most users want `Xqlite.column_names/1`. The names are captured at prepare
+  time, so this works even after finalization.
+  """
+  @spec stmt_column_names(stmt :: Xqlite.stmt()) :: {:ok, [String.t()]} | Xqlite.error()
+  def stmt_column_names(_stmt), do: err()
+
+  @doc """
+  Finalizes a prepared statement, releasing its SQLite resources (raw NIF).
+
+  Most users want `Xqlite.finalize/1`. Idempotent — finalizing an
+  already-finalized statement returns `:ok`. Abandoned statements are also
+  finalized when garbage-collected, but explicit finalization is preferred:
+  closing a connection while statements are still outstanding keeps the
+  underlying SQLite handle alive until the process exits.
+  """
+  @spec stmt_finalize(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
+  def stmt_finalize(_stmt), do: err()
+
+  @doc """
   Retrieves the compile-time options the linked SQLite C library was built with.
 
   Corresponds to the `PRAGMA compile_options;` statement. This is useful for

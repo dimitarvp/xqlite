@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Manual statement lifecycle.** `Xqlite.prepare/2`, `bind/2`
+  (positional list or keyword-named), `step/1` (`{:row, values}` /
+  `:done`), `multi_step/2` (`{:ok, %{rows: rows, done: bool}}`),
+  `reset/1` (bindings preserved), `clear_bindings/1`,
+  `column_names/1`, `finalize/1` (idempotent) — plus the raw
+  `XqliteNIF.stmt_*` stubs. Prepare once and rebind in a loop to skip
+  re-parsing; consume partially without LIMIT rewrites. Exactly one
+  statement per prepare: empty SQL and trailing statements are
+  structured errors, never silently dropped. Positional bind
+  validates the parameter count
+  (`{:invalid_parameter_count, %{provided: _, expected: _}}`); using
+  a finalized statement returns `{:error, :statement_finalized}`.
+  Abandoned statements are finalized by garbage collection; finalize
+  before closing the owning connection. Steps are not cancellable
+  and emit no telemetry (documented).
+
 - **Deny-list authorizer.** `Xqlite.set_authorizer/2` and
   `remove_authorizer/1` (plus the raw `XqliteNIF` stubs) install a
   single-slot authorizer that rejects a chosen set of SQLite action
