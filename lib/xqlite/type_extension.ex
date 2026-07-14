@@ -19,13 +19,21 @@ defmodule Xqlite.TypeExtension do
   ## Built-in extensions
 
     * `Xqlite.TypeExtension.DateTime` — `DateTime` ↔ ISO 8601 text
+      (offsets included both ways, so timezone-aware round-trips work)
     * `Xqlite.TypeExtension.NaiveDateTime` — `NaiveDateTime` ↔ ISO 8601 text
     * `Xqlite.TypeExtension.Date` — `Date` ↔ `YYYY-MM-DD` text
     * `Xqlite.TypeExtension.Time` — `Time` ↔ `HH:MM:SS` text
+    * `Xqlite.TypeExtension.Instant` — `DateTime` → int64 epoch
+      nanoseconds (encode-only; the integer alternative to `DateTime`)
+    * `Xqlite.TypeExtension.Duration` — exact-unit `Duration` → int64
+      nanoseconds (encode-only; Elixir 1.17+)
     * `Xqlite.TypeExtension.JSON` — plain maps/lists ↔ JSON text
     * `Xqlite.TypeExtension.UUID` — canonical UUID text ↔ compact 16-byte value
     * `Xqlite.TypeExtension.Decimal` — `Decimal` → TEXT (encode-only; needs the
       optional `:decimal` dependency)
+
+  Arrays need no dedicated extension — `Xqlite.TypeExtension.JSON`
+  encodes and decodes lists.
 
   ## Extension ordering
 

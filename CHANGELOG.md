@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first-match chain semantics as `stream/4`; arity-3 calls are
   unchanged).
 
+- **`Instant` and `Duration` type extensions.** Encode-only mirrors
+  of the Ecto-layer types: `DateTime` → int64 epoch nanoseconds
+  (`Instant` — the integer alternative to the ISO-text `DateTime`
+  extension; pick one per chain) and exact-unit `Duration` → int64
+  nanosecond spans (calendar units skip; Elixir 1.17+ gated like
+  `Decimal`). No decode on either — a stored nanosecond count is
+  indistinguishable from any other integer. Timezone-aware datetimes
+  and arrays need no new modules: the `DateTime` extension already
+  round-trips offsets and `JSON` already handles lists. This
+  completes the core-layer type mirroring.
+
 - **Three more built-in type extensions.**
   `Xqlite.TypeExtension.JSON` (plain maps/lists ↔ JSON text via
   `Jason`; structs and unencodable terms skip), `.UUID` (canonical
