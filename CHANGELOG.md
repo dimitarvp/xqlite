@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deny-only (no `IGNORE`). Denying `:pragma` also turns off
   `get_pragma`/`set_pragma`.
 
+- **Three more built-in type extensions.**
+  `Xqlite.TypeExtension.JSON` (plain maps/lists ↔ JSON text via
+  `Jason`; structs and unencodable terms skip), `.UUID` (canonical
+  hyphenated text ↔ the compact 16-byte value it encodes; decode is a
+  16-byte heuristic that cannot tell a BLOB from a same-length TEXT),
+  and `.Decimal` (encode-only, `Decimal` → exact TEXT). `Decimal`
+  introduces xqlite's first optional dependency — a deliberate policy
+  change: the module compiles only when `:decimal` is installed, so the
+  core package stays dependency-light. Geo/spatial types remain out of
+  scope for core.
+
 ### Breaking
 
 - **`ColumnInfo.default_value` is now classified, not raw text.**

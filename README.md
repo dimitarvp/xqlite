@@ -67,7 +67,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Cancellation:** per-operation, progress-handler-based, any process can cancel
 - **Schema introspection:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 68 PRAGMAs
-- **Type extensions:** bidirectional encode/decode; `DateTime`, `Date`, `Time`, `NaiveDateTime` built-in
+- **Type extensions:** bidirectional encode/decode; `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), and `Decimal` (encode-only, needs the optional `:decimal` dep) built-in
 - **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy handler with retry policy and `{:xqlite_busy, ...}` forwarding
 - **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, msg}`
 - **Manual statement lifecycle:** `prepare/2`, `bind/2` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements

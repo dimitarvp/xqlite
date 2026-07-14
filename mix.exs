@@ -56,6 +56,7 @@ defmodule Xqlite.MixProject do
       {:nimble_options, "~> 1.1"},
       {:table, "~> 0.1.0"},
       {:telemetry, "~> 1.0"},
+      {:decimal, "~> 2.0 or ~> 3.0", optional: true},
 
       # dev / test.
       {:benchee, "~> 1.0", only: :dev, runtime: false},

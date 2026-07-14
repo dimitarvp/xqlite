@@ -22,13 +22,19 @@ defmodule Xqlite.TypeExtension do
     * `Xqlite.TypeExtension.NaiveDateTime` — `NaiveDateTime` ↔ ISO 8601 text
     * `Xqlite.TypeExtension.Date` — `Date` ↔ `YYYY-MM-DD` text
     * `Xqlite.TypeExtension.Time` — `Time` ↔ `HH:MM:SS` text
+    * `Xqlite.TypeExtension.JSON` — plain maps/lists ↔ JSON text
+    * `Xqlite.TypeExtension.UUID` — canonical UUID text ↔ compact 16-byte value
+    * `Xqlite.TypeExtension.Decimal` — `Decimal` → TEXT (encode-only; needs the
+      optional `:decimal` dependency)
 
   ## Extension ordering
 
   Extensions are applied in list order. The first extension that returns
   `{:ok, value}` wins — remaining extensions are not consulted. This matters
-  most for `decode/1`, where multiple extensions might match the same string
-  format. Place more specific extensions before general ones.
+  most for `decode/1`, where multiple extensions might match the same value.
+  Place more specific extensions before general, shape-driven ones: `JSON`
+  decodes any JSON-shaped TEXT and `UUID` decodes any 16-byte binary, so a
+  narrower converter must precede them to win.
 
   ## Example
 
