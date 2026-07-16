@@ -236,6 +236,46 @@ defmodule Xqlite do
     XqliteNIF.open_in_memory_readonly(uri)
   end
 
+  @doc """
+  Closes the connection, releasing the underlying SQLite handle.
+
+  Idempotent: closing an already-closed connection returns `:ok`. Any
+  operation on a closed connection returns
+  `{:error, :connection_closed}`.
+
+  Finalize outstanding prepared statements before closing — a
+  connection closed while statements are outstanding keeps the
+  underlying SQLite handle alive until the owning process exits (see
+  `prepare/2`).
+
+  Emits `[:xqlite, :close, :start | :stop]` telemetry.
+  """
+  @spec close(conn()) :: :ok
+  def close(conn) do
+    start_md = %{conn: conn, path: current_db_path(conn)}
+
+    span_with_stop_metadata [:xqlite, :close], start_md do
+      {XqliteNIF.close(conn), start_md}
+    end
+  end
+
+  @doc """
+  Returns the filesystem path of the connection's main database.
+
+  `{:ok, path}` for file-backed databases, `{:ok, nil}` for in-memory
+  and temporary databases (they have no backing file). No telemetry
+  is emitted.
+  """
+  @spec db_path(conn()) :: {:ok, String.t() | nil} | error()
+  def db_path(conn), do: XqliteNIF.db_path(conn)
+
+  defp current_db_path(conn) do
+    case XqliteNIF.db_path(conn) do
+      {:ok, path} -> path
+      {:error, _} -> nil
+    end
+  end
+
   defp validate_open_opts(opts) do
     allowed = allowed_open_opt_keys()
 
@@ -819,7 +859,7 @@ defmodule Xqlite do
   while statements are outstanding keeps the underlying SQLite handle alive
   until the process exits (abandoned statements are still finalized by
   garbage collection, and every operation on them after an explicit
-  `XqliteNIF.close/1` returns `{:error, :connection_closed}`).
+  `Xqlite.close/1` returns `{:error, :connection_closed}`).
 
   Steps are not cancellable; for cancellation use `query_cancellable/4` and
   friends. No telemetry is emitted for statement-lifecycle operations.

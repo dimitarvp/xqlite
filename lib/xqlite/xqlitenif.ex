@@ -384,6 +384,17 @@ defmodule XqliteNIF do
   def close(_conn), do: err()
 
   @doc """
+  Returns the filesystem path of the connection's main database.
+
+  `{:ok, path}` for file-backed databases. `{:ok, nil}` for databases
+  that have no backing file — in-memory and temporary databases
+  (SQLite reports an empty filename for those; it is normalized to
+  `nil` here).
+  """
+  @spec db_path(conn :: Xqlite.conn()) :: {:ok, String.t() | nil} | Xqlite.error()
+  def db_path(_conn), do: err()
+
+  @doc """
   Reads the current value of an SQLite PRAGMA.
 
   PRAGMA statements are used to modify the operation of the SQLite library or

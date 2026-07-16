@@ -31,6 +31,16 @@ defmodule Xqlite.NIF.ConnectionTest do
         assert :ok = NIF.close(conn)
       end
 
+      test "Xqlite.close/1 wrapper is idempotent and blocks further ops", %{conn: conn} do
+        assert :ok = Xqlite.close(conn)
+        assert :ok = Xqlite.close(conn)
+        assert {:error, :connection_closed} = NIF.query(conn, "SELECT 1;", [])
+      end
+
+      test "db_path returns nil (no backing file)", %{conn: conn} do
+        assert {:ok, nil} = NIF.db_path(conn)
+      end
+
       test "basic query execution works", %{conn: conn} do
         assert {:ok, %{columns: ["1"], rows: [[1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT 1;", [])
@@ -142,6 +152,20 @@ defmodule Xqlite.NIF.ConnectionTest do
     test "schema_databases shows empty file path", %{conn: conn} do
       assert {:ok, [%Schema.DatabaseInfo{name: "main", file: ""}]} =
                NIF.schema_databases(conn)
+    end
+  end
+
+  describe "db_path on a file-backed DB" do
+    test "returns the file's path and errors after close" do
+      path = Xqlite.TestUtil.tmp_db_path("db_path")
+      assert {:ok, conn} = NIF.open(path)
+
+      assert {:ok, db_path} = NIF.db_path(conn)
+      assert is_binary(db_path)
+      assert String.ends_with?(db_path, Path.basename(path))
+
+      assert :ok = NIF.close(conn)
+      assert {:error, :connection_closed} = NIF.db_path(conn)
     end
   end
 

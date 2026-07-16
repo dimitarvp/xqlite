@@ -77,6 +77,15 @@ fn close(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
     singular_ok_or_error_tuple(env, result)
 }
 
+#[rustler::nif]
+fn db_path(handle: ResourceArc<XqliteConn>) -> Result<Option<String>, XqliteError> {
+    connection::with_conn(&handle, |conn| {
+        // SQLite reports an empty filename for in-memory and temporary
+        // databases; normalize that to None so Elixir sees nil.
+        Ok(conn.path().filter(|p| !p.is_empty()).map(String::from))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Query / Execute NIFs
 // ---------------------------------------------------------------------------

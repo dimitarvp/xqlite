@@ -315,6 +315,48 @@ defmodule Xqlite.XqliteTelemetryTest do
     end
   end
 
+  describe "Xqlite.close/1 telemetry" do
+    test "fires :start and :stop with conn and path metadata", %{conn: conn} do
+      handler_id =
+        attach_capture([
+          [:xqlite, :close, :start],
+          [:xqlite, :close, :stop]
+        ])
+
+      assert :ok = Xqlite.close(conn)
+
+      assert_receive {:telemetry_event, [:xqlite, :close, :start], start_measurements,
+                      start_metadata}
+
+      assert is_integer(start_measurements.monotonic_time)
+      assert is_integer(start_measurements.system_time)
+      assert start_metadata.conn == conn
+      assert start_metadata.path == nil
+
+      assert_receive {:telemetry_event, [:xqlite, :close, :stop], stop_measurements,
+                      stop_metadata}
+
+      assert is_integer(stop_measurements.duration)
+      assert stop_metadata.conn == conn
+      assert stop_metadata.path == nil
+
+      detach(handler_id)
+    end
+
+    test "closing an already-closed connection still spans", %{conn: conn} do
+      assert :ok = Xqlite.close(conn)
+
+      handler_id = attach_capture([[:xqlite, :close, :stop]])
+
+      assert :ok = Xqlite.close(conn)
+
+      assert_receive {:telemetry_event, [:xqlite, :close, :stop], _measurements, metadata}
+      assert metadata.path == nil
+
+      detach(handler_id)
+    end
+  end
+
   describe "telemetry-disabled mode (smoke)" do
     test "Xqlite.Telemetry.enabled?() reflects test config" do
       # In test env we set :telemetry_enabled to true. Confirms the
