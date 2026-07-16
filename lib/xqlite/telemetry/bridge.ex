@@ -75,9 +75,6 @@ defmodule Xqlite.Telemetry.Bridge do
           hook_handles: [{hook_kind(), non_neg_integer()}]
         }
 
-  @per_conn_hooks [:wal, :commit, :rollback, :update, :progress]
-  @valid_per_conn_hooks @per_conn_hooks ++ [:all]
-
   @doc false
   def start_link(scope, tag) do
     GenServer.start_link(__MODULE__, %{scope: scope, tag: tag})
@@ -92,11 +89,20 @@ defmodule Xqlite.Telemetry.Bridge do
     {:noreply, state}
   end
 
-  # --- Bridge construction (per-conn) ----------------------------------------
+  # --- Bridge construction ----------------------------------------------------
 
-  @doc false
-  def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts) do
-    if Xqlite.Telemetry.enabled?() do
+  # Branch at compile time (same switch `Xqlite.Telemetry` itself uses):
+  # a runtime `if Xqlite.Telemetry.enabled?()` trips Elixir 1.20's type
+  # checker in disabled builds (the condition is provably false), and the
+  # disabled constructors should carry no dead registration code anyway.
+  @telemetry_enabled Xqlite.Telemetry.enabled?()
+
+  if @telemetry_enabled do
+    @per_conn_hooks [:wal, :commit, :rollback, :update, :progress]
+    @valid_per_conn_hooks @per_conn_hooks ++ [:all]
+
+    @doc false
+    def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts) do
       hooks = expand_hooks(Keyword.get(opts, :hooks, :all))
       tag = Keyword.get(opts, :tag, nil)
       progress_opts = Keyword.get(opts, :progress, [])
@@ -114,16 +120,10 @@ defmodule Xqlite.Telemetry.Bridge do
       else
         {:error, _} = err -> err
       end
-    else
-      {:error, :telemetry_disabled}
     end
-  end
 
-  # --- Bridge construction (global log) --------------------------------------
-
-  @doc false
-  def bridge_log_global(opts) when is_list(opts) do
-    if Xqlite.Telemetry.enabled?() do
+    @doc false
+    def bridge_log_global(opts) when is_list(opts) do
       tag = Keyword.get(opts, :tag, nil)
 
       with {:ok, pid} <- start_link(:log, tag),
@@ -138,9 +138,71 @@ defmodule Xqlite.Telemetry.Bridge do
       else
         {:error, _} = err -> err
       end
-    else
-      {:error, :telemetry_disabled}
     end
+
+    defp expand_hooks(:all), do: @per_conn_hooks
+    defp expand_hooks(list) when is_list(list), do: list
+
+    defp validate_hooks(hooks) do
+      case Enum.find(hooks, fn h -> h not in @valid_per_conn_hooks end) do
+        nil ->
+          :ok
+
+        bad ->
+          {:error, {:invalid_hook, bad, valid: @valid_per_conn_hooks}}
+      end
+    end
+
+    defp register_per_conn_hooks(pid, conn, hooks, progress_opts) do
+      Enum.reduce_while(hooks, {:ok, []}, fn hook, {:ok, acc} ->
+        case register_per_conn_hook(pid, conn, hook, progress_opts) do
+          {:ok, handle} ->
+            {:cont, {:ok, [{hook, handle} | acc]}}
+
+          {:error, _} = err ->
+            # Roll back any handles we already registered before this failure.
+            Enum.each(acc, fn {h, hh} -> unregister_hook({:conn, conn}, h, hh) end)
+            if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
+            {:halt, err}
+        end
+      end)
+      |> case do
+        {:ok, handles} -> {:ok, Enum.reverse(handles)}
+        err -> err
+      end
+    end
+
+    defp register_per_conn_hook(pid, conn, :wal, _opts), do: NIF.register_wal_hook(conn, pid)
+
+    defp register_per_conn_hook(pid, conn, :commit, _opts),
+      do: NIF.register_commit_hook(conn, pid)
+
+    defp register_per_conn_hook(pid, conn, :rollback, _opts),
+      do: NIF.register_rollback_hook(conn, pid)
+
+    defp register_per_conn_hook(pid, conn, :update, _opts),
+      do: NIF.register_update_hook(conn, pid)
+
+    defp register_per_conn_hook(pid, conn, :progress, opts) do
+      every_n = Keyword.get(opts, :every_n, 1000)
+      tag = Keyword.get(opts, :tag, nil)
+
+      tag_str =
+        case tag do
+          nil -> nil
+          a when is_atom(a) -> Atom.to_string(a)
+        end
+
+      NIF.register_progress_hook(conn, pid, every_n, tag_str)
+    end
+  else
+    @doc false
+    def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts),
+      do: {:error, :telemetry_disabled}
+
+    @doc false
+    def bridge_log_global(opts) when is_list(opts),
+      do: {:error, :telemetry_disabled}
   end
 
   # --- Teardown --------------------------------------------------------------
@@ -159,62 +221,6 @@ defmodule Xqlite.Telemetry.Bridge do
   end
 
   # --- Internal helpers ------------------------------------------------------
-
-  defp expand_hooks(:all), do: @per_conn_hooks
-  defp expand_hooks(list) when is_list(list), do: list
-
-  defp validate_hooks(hooks) do
-    case Enum.find(hooks, fn h -> h not in @valid_per_conn_hooks end) do
-      nil ->
-        :ok
-
-      bad ->
-        {:error, {:invalid_hook, bad, valid: @valid_per_conn_hooks}}
-    end
-  end
-
-  defp register_per_conn_hooks(pid, conn, hooks, progress_opts) do
-    Enum.reduce_while(hooks, {:ok, []}, fn hook, {:ok, acc} ->
-      case register_per_conn_hook(pid, conn, hook, progress_opts) do
-        {:ok, handle} ->
-          {:cont, {:ok, [{hook, handle} | acc]}}
-
-        {:error, _} = err ->
-          # Roll back any handles we already registered before this failure.
-          Enum.each(acc, fn {h, hh} -> unregister_hook({:conn, conn}, h, hh) end)
-          if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
-          {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, handles} -> {:ok, Enum.reverse(handles)}
-      err -> err
-    end
-  end
-
-  defp register_per_conn_hook(pid, conn, :wal, _opts), do: NIF.register_wal_hook(conn, pid)
-
-  defp register_per_conn_hook(pid, conn, :commit, _opts),
-    do: NIF.register_commit_hook(conn, pid)
-
-  defp register_per_conn_hook(pid, conn, :rollback, _opts),
-    do: NIF.register_rollback_hook(conn, pid)
-
-  defp register_per_conn_hook(pid, conn, :update, _opts),
-    do: NIF.register_update_hook(conn, pid)
-
-  defp register_per_conn_hook(pid, conn, :progress, opts) do
-    every_n = Keyword.get(opts, :every_n, 1000)
-    tag = Keyword.get(opts, :tag, nil)
-
-    tag_str =
-      case tag do
-        nil -> nil
-        a when is_atom(a) -> Atom.to_string(a)
-      end
-
-    NIF.register_progress_hook(conn, pid, every_n, tag_str)
-  end
 
   defp unregister_hook({:conn, conn}, :wal, handle), do: NIF.unregister_wal_hook(conn, handle)
 
