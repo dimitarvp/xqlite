@@ -69,7 +69,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Schema introspection:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
 - **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 68 PRAGMAs
 - **Type extensions:** bidirectional encode/decode; `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), and `Decimal` (encode-only, needs the optional `:decimal` dep) built-in
-- **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy handler with retry policy and `{:xqlite_busy, ...}` forwarding
+- **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy retry policy (`set_busy_policy/2`) plus any number of busy observers receiving `{:xqlite_busy, ...}`
 - **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, msg}`
 - **Manual statement lifecycle:** `prepare/2`, `bind/2` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
 - **Telemetry (opt-in):** compile-time-flagged `:telemetry` events for every operation (spans with nanosecond timings), cancellation lifecycle events, and a bridge that re-emits hook fan-outs as `[:xqlite, :hook, :*]` -- see the "Wiring xqlite telemetry" guide
@@ -237,7 +237,7 @@ I run it in my own projects (currently not as much as I'd like to). The test cov
 SQLite permits a single writer at a time per database file. I use the WAL mode by default to make sure readers remain fully parallel and writers are limited to one at a time, but that can only take you so far. Xqlite serializes access to each connection via a Rust `Mutex`; concurrent writers across _different_ connections to the same file fall back on SQLite's own WAL mode and busy-timeout logic. For a connection pool with parallel readers plus a serialised writer, use `xqlite_ecto3` (or DBConnection directly, or your own pooling solution). For anything requiring true multi-master replication, tools like [Litestream](https://litestream.io) and [LiteFS](https://fly.io/docs/litefs/) live outside of SQLite itself.
 
 **Does Xqlite support telemetry / OpenTelemetry?**
-Yes — structured `[:xqlite, ...]` events via the standard `:telemetry` Erlang package, covering every operation (spans with nanosecond timings), the cancellation lifecycle, and an opt-in bridge that re-emits hook fan-outs as telemetry. It is compile-time opt-in: with the flag off (the default) no telemetry call exists in the bytecode, so users who want nothing pay nothing. There is no direct OpenTelemetry dependency — users who want OTel spans wire the `opentelemetry_telemetry` bridge in their own application; users who only want Prometheus metrics use `:telemetry_metrics`. See the "Wiring xqlite telemetry" guide on hexdocs.
+Yes — structured `[:xqlite, ...]` events via the standard `:telemetry` Erlang package, covering every operation (spans with nanosecond timings), the cancellation lifecycle, and an opt-in bridge that re-emits hook fan-outs as telemetry. It is compile-time opt-in: with the flag off (the default) no telemetry call exists in the bytecode, so users who want nothing pay nothing. There is no direct OpenTelemetry dependency — users who want OTel spans wire the `opentelemetry_telemetry` bridge in their own application; users who only want Prometheus metrics use `:telemetry_metrics`. For OTel specifically, `Xqlite.Telemetry.OpenTelemetry` ships a pure, dependency-free mapping from xqlite's events to the stable database semantic-convention attributes (`db.system.name`, `db.query.text`, ...) so your handler emits spec-correct span attributes without guesswork. See the "Wiring xqlite telemetry" guide on hexdocs.
 
 ## Thread safety
 
@@ -306,9 +306,7 @@ Planned for Xqlite core, in priority order:
 
 Lower priority (though UDFs remain the lowest priority for now):
 
-- Geometry / Geography support (via SpatiaLite)
-- GIN / GiST / SP-GiST-style index equivalents
-- Mirroring the Ecto-layer custom types (duration, array, UUID, timezone-aware datetime) at the raw xqlite layer — today they live in [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) as `Ecto.Type` modules and won't move unless raw-xqlite users ask
+- Deeper SpatiaLite support beyond the shipped guide — a bundling story and geometry type extensions, if users ask for them
 
 Then: [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3) — full Ecto 3.x adapter with `DBConnection`, migrations, associations, streaming, and the same structured-error surface.
 
