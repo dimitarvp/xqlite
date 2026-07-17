@@ -1320,83 +1320,106 @@ defmodule Xqlite do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Installs a busy handler on the connection.
+  Sets the busy retry POLICY on the connection.
 
   When SQLite encounters a locked database (another writer holds
-  `RESERVED+`) the handler decides whether to retry or surface
-  `SQLITE_BUSY` to the caller. Each invocation is also forwarded to `pid` as
-
-      {:xqlite_busy, retries_so_far, elapsed_ms}
-
-  so callers can observe contention (telemetry, structured logging,
-  adaptive backoff).
+  `RESERVED+`) the policy decides whether to retry or surface
+  `SQLITE_BUSY` to the caller. The policy is single-slot by design — a
+  retry decision cannot compose. To OBSERVE contention (telemetry,
+  structured logging, adaptive backoff), register any number of
+  subscribers with `register_busy_observer/2`; the two halves are
+  independent.
 
   ## Options
 
     * `:max_retries` (non-negative integer, default `50`) — stop after this
       many retries and let the caller see `SQLITE_BUSY`.
     * `:max_elapsed_ms` (non-negative integer, default `5_000`) — absolute
-      time ceiling in milliseconds from the first busy event in the window.
+      time ceiling in milliseconds from the busy slot's first installation.
     * `:sleep_ms` (non-negative integer, default `10`) — milliseconds to
       sleep between retries. Zero disables the pause (tight spin; rarely
       what you want).
 
-  Replacing an existing handler is atomic: the previous handler's state is
-  reclaimed before the new one takes effect.
+  Replacing an existing policy is atomic; observers are unaffected.
 
-  > #### Warning — PRAGMA busy_timeout silently replaces your handler {: .warning}
+  > #### Warning — PRAGMA busy_timeout silently replaces the callback {: .warning}
   >
-  > SQLite allows the busy handler to be silently replaced by
-  > `sqlite3_busy_timeout`, `PRAGMA busy_timeout`, or another
-  > `sqlite3_busy_handler` call. If you install an xqlite handler and then
-  > run `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
-  > "busy_timeout", ms)`), SQLite replaces our callback with its built-in
-  > sleep-and-retry one and you stop receiving `{:xqlite_busy, …}`
-  > messages. No memory is leaked — our internal state is reclaimed on the
-  > next `set_busy_handler/3`, `remove_busy_handler/1`, or connection
-  > close — but the messages will have silently stopped.
-  >
-  > To switch to plain-timeout semantics without surprises, use
-  > `busy_timeout/2`.
+  > Running `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
+  > "busy_timeout", ms)`) replaces our C callback with SQLite's built-in
+  > sleep-and-retry one: the policy stops applying AND every busy
+  > observer silently stops receiving `{:xqlite_busy, …}` messages. No
+  > memory is leaked — the internal state is reclaimed on the next slot
+  > mutation or connection close. To switch to plain-timeout semantics
+  > without surprises, use `busy_timeout/2`.
   """
-  @spec set_busy_handler(conn(), pid(), keyword()) :: :ok | error()
-  def set_busy_handler(conn, pid, opts \\ []) when is_pid(pid) and is_list(opts) do
+  @spec set_busy_policy(conn(), keyword()) :: :ok | error()
+  def set_busy_policy(conn, opts \\ []) when is_list(opts) do
     max_retries = Keyword.get(opts, :max_retries, 50)
     max_elapsed_ms = Keyword.get(opts, :max_elapsed_ms, 5_000)
     sleep_ms = Keyword.get(opts, :sleep_ms, 10)
-    XqliteNIF.set_busy_handler(conn, pid, max_retries, max_elapsed_ms, sleep_ms)
+    XqliteNIF.set_busy_policy(conn, max_retries, max_elapsed_ms, sleep_ms)
   end
 
   @doc """
-  Removes any busy handler installed on the connection.
+  Removes the busy retry policy from the connection.
 
-  Safe to call when no handler is installed (no-op on both the SQLite and
-  xqlite sides). After removal, SQLite returns `SQLITE_BUSY` immediately on
-  contention unless a `busy_timeout` is subsequently set (see
-  `busy_timeout/2`).
+  Observers registered with `register_busy_observer/2` keep receiving
+  `{:xqlite_busy, …}` messages; without a policy SQLite surfaces
+  `SQLITE_BUSY` immediately after they fire. Safe to call when no
+  policy is installed.
   """
-  @spec remove_busy_handler(conn()) :: :ok | error()
-  def remove_busy_handler(conn), do: XqliteNIF.remove_busy_handler(conn)
+  @spec remove_busy_policy(conn()) :: :ok | error()
+  def remove_busy_policy(conn), do: XqliteNIF.remove_busy_policy(conn)
 
   @doc """
-  Sets a plain `sqlite3_busy_timeout` on the connection, replacing any
-  xqlite-installed busy handler cleanly.
+  Registers a busy-contention observer on the connection.
 
-  Calls `remove_busy_handler/1` first (so our internal state is reclaimed
-  and `{:xqlite_busy, …}` messages stop for an understood reason), then
-  sets `PRAGMA busy_timeout = ms`.
+  Every `SQLITE_BUSY` callback invocation sends
 
-  Prefer this helper over reaching for `PRAGMA busy_timeout` directly: the
-  raw PRAGMA silently replaces any installed xqlite handler at the SQLite
-  level, stopping `{:xqlite_busy, …}` deliveries without clearing our
-  internal slot. This function keeps both sides consistent.
+      {:xqlite_busy, retries_so_far, elapsed_ms}
+
+  to `pid`. Any number of observers can be registered — each gets its
+  own handle for `unregister_busy_observer/2` — and they fire whether
+  or not a retry policy is installed. `Xqlite.Telemetry.bridge/2` can
+  subscribe with `hooks: [:busy]` to re-emit deliveries as
+  `[:xqlite, :hook, :busy]` telemetry.
+  """
+  @spec register_busy_observer(conn(), pid()) :: {:ok, non_neg_integer()} | error()
+  def register_busy_observer(conn, pid) when is_pid(pid) do
+    XqliteNIF.register_busy_observer(conn, pid)
+  end
+
+  @doc """
+  Unregisters a busy-contention observer by handle.
+
+  Idempotent — an unknown or already-removed handle is a no-op.
+  """
+  @spec unregister_busy_observer(conn(), non_neg_integer()) :: :ok | error()
+  def unregister_busy_observer(conn, handle) when is_integer(handle) and handle >= 0 do
+    XqliteNIF.unregister_busy_observer(conn, handle)
+  end
+
+  @doc """
+  Sets a plain `sqlite3_busy_timeout` on the connection, replacing the
+  xqlite busy slot cleanly.
+
+  Calls `remove_busy_policy/1` first, then sets
+  `PRAGMA busy_timeout = ms`. Note that the raw PRAGMA replaces the
+  whole C callback: any registered busy observers stop receiving
+  `{:xqlite_busy, …}` messages too — unregister them first if you want
+  their state reclaimed eagerly rather than at connection close.
+
+  Prefer this helper over reaching for `PRAGMA busy_timeout` directly:
+  the raw PRAGMA silently replaces the callback at the SQLite level
+  without clearing our internal slot. This function keeps both sides
+  consistent.
 
   `ms` is the timeout in milliseconds. `0` disables the timeout entirely
   (SQLite returns `SQLITE_BUSY` immediately on contention).
   """
   @spec busy_timeout(conn(), non_neg_integer()) :: :ok | error()
   def busy_timeout(conn, ms) when is_integer(ms) and ms >= 0 do
-    with :ok <- XqliteNIF.remove_busy_handler(conn),
+    with :ok <- XqliteNIF.remove_busy_policy(conn),
          {:ok, _} <- XqliteNIF.set_pragma(conn, "busy_timeout", ms) do
       :ok
     end

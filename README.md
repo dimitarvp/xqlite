@@ -136,7 +136,7 @@ All transaction-lifecycle hooks (commit, rollback, WAL) are
 multi-subscriber — multiple processes can subscribe to the same
 connection independently. The commit hook is observation-only and
 never vetoes the commit. Combined with `register_update_hook/2` and
-`set_busy_handler/5`, the connection exposes every SQLite-visible
+`register_busy_observer/2`, the connection exposes every SQLite-visible
 lifecycle event for telemetry without touching the SQL stream.
 
 WAL subscribers coexist with automatic checkpointing: SQLite's
@@ -146,26 +146,31 @@ itself at the configured `wal_autocheckpoint` threshold. Set that
 PRAGMA through `set_pragma/3` (raw-SQL `PRAGMA wal_autocheckpoint`
 bypasses the repair and silently steals the hook slot).
 
-### Busy handler -- observe contention, retry, give up on a budget
+### Busy contention -- a retry policy, plus any number of observers
 
 ```elixir
-:ok = Xqlite.set_busy_handler(conn, self(), max_retries: 50, max_elapsed_ms: 5_000, sleep_ms: 10)
-# every SQLITE_BUSY retry delivers: {:xqlite_busy, retries_so_far, elapsed_ms}
-# surfaces SQLITE_BUSY to the caller once either ceiling is hit
+:ok = Xqlite.set_busy_policy(conn, max_retries: 50, max_elapsed_ms: 5_000, sleep_ms: 10)
+# decides retry vs give-up; surfaces SQLITE_BUSY once either ceiling is hit
 
-:ok = Xqlite.remove_busy_handler(conn)                     # back to "fail fast" behavior
-:ok = Xqlite.busy_timeout(conn, 1_000)                     # plain timeout, no handler
+{:ok, handle} = Xqlite.register_busy_observer(conn, self())
+# every SQLITE_BUSY callback delivers: {:xqlite_busy, retries_so_far, elapsed_ms}
+# observers are multi-subscriber and fire with or without a policy
+
+:ok = Xqlite.unregister_busy_observer(conn, handle)
+:ok = Xqlite.remove_busy_policy(conn)                      # observers keep firing
+:ok = Xqlite.busy_timeout(conn, 1_000)                     # plain timeout instead
 ```
 
+The policy is single-slot by design (a retry decision cannot compose);
+observation is fan-out, and the telemetry bridge re-emits it as
+`[:xqlite, :hook, :busy]`.
+
 > **Warning.** `PRAGMA busy_timeout` / `sqlite3_busy_timeout` silently
-> replaces any installed busy handler at the SQLite C level. If you
-> install an xqlite handler and then run `PRAGMA busy_timeout`, SQLite
-> replaces our callback with its built-in sleep-and-retry one and
-> `{:xqlite_busy, …}` messages stop. No memory is leaked (our internal
-> state is reclaimed on the next `set_busy_handler`, `remove_busy_handler`,
-> or connection close), but the message stream goes quiet. Use
-> `Xqlite.busy_timeout/2` — it removes our handler cleanly first, then
-> installs the plain timeout.
+> replaces the whole callback at the SQLite C level: the policy stops
+> applying and every observer's `{:xqlite_busy, …}` stream goes quiet.
+> No memory is leaked (state is reclaimed on the next slot mutation or
+> connection close). Use `Xqlite.busy_timeout/2` — it clears the policy
+> cleanly first, then installs the plain timeout.
 
 ### Online backup with progress and cancellation
 

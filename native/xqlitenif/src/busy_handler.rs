@@ -6,65 +6,87 @@ use rustler::sys::{
 };
 use rustler::types::LocalPid;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Instant;
 
-/// State kept alive while a busy handler is installed on a connection.
+/// Retry policy half of the busy slot: decides retry vs give up.
+/// Single-slot by design — a policy cannot compose.
+#[derive(Clone)]
+pub(crate) struct BusyPolicy {
+    pub(crate) max_retries: u32,
+    pub(crate) max_elapsed_ms: u64,
+    pub(crate) sleep_ms: u64,
+}
+
+/// State kept alive while the busy callback is installed on a connection:
+/// an optional retry policy plus any number of observer subscribers.
 ///
 /// Allocated via `Box::into_raw`, stored as a raw pointer in
-/// `XqliteConn.busy_handler`, and reclaimed by `uninstall` or the
-/// `XqliteConn` Drop impl.
-pub(crate) struct BusyHandlerState {
-    pid: LocalPid,
-    max_retries: u32,
-    max_elapsed_ms: u64,
-    sleep_ms: u64,
+/// `XqliteConn.busy_handler`, and reclaimed on mutation, by `Drop`, or
+/// when the slot empties (no policy, no observers → callback removed).
+///
+/// Mutation concurrency: every mutator runs under the connection Mutex,
+/// and the C callback only ever runs inside `sqlite3_step`/friends —
+/// which also hold that Mutex — so a mutation can never race a callback
+/// read. Plain snapshot-build-swap is sufficient; no copy-on-write list.
+pub(crate) struct BusySlotState {
+    policy: Option<BusyPolicy>,
+    observers: Vec<(u64, LocalPid)>,
+    next_handle: u64,
     start: Instant,
 }
 
-impl std::fmt::Debug for BusyHandlerState {
+impl std::fmt::Debug for BusySlotState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BusyHandlerState")
-            .field("max_retries", &self.max_retries)
-            .field("max_elapsed_ms", &self.max_elapsed_ms)
-            .field("sleep_ms", &self.sleep_ms)
+        f.debug_struct("BusySlotState")
+            .field("has_policy", &self.policy.is_some())
+            .field("observer_count", &self.observers.len())
             .finish()
     }
 }
 
-/// The C callback SQLite invokes on SQLITE_BUSY. Decides retry vs give up,
-/// forwards a `{:xqlite_busy, retries, elapsed_ms}` message to the
-/// subscriber PID.
+/// The C callback SQLite invokes on SQLITE_BUSY. Fans
+/// `{:xqlite_busy, retries, elapsed_ms}` out to every observer, then
+/// applies the policy: retry (1) or surface SQLITE_BUSY (0). With no
+/// policy installed the answer is always 0 — pure observation.
 ///
 /// # Safety
 ///
-/// `user_data` must point to a `BusyHandlerState` previously installed via
-/// `install` and not yet reclaimed. SQLite guarantees the pointer is exactly
-/// what we passed to `sqlite3_busy_handler`.
-unsafe extern "C" fn busy_handler_callback(user_data: *mut c_void, count: c_int) -> c_int {
-    // SAFETY: `user_data` is the Box<BusyHandlerState> pointer we leaked in
-    // `install`. It remains valid until `uninstall` (or connection Drop)
-    // clears the SQLite-side handler pointer *before* freeing the box.
-    let state = unsafe { &*(user_data as *const BusyHandlerState) };
+/// `user_data` must point to a `BusySlotState` previously installed and
+/// not yet reclaimed. SQLite guarantees the pointer is exactly what we
+/// passed to `sqlite3_busy_handler`, and the connection Mutex (held by
+/// the stepping caller) excludes concurrent mutation.
+unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_int {
+    // SAFETY: `user_data` is the Box<BusySlotState> pointer we leaked on
+    // install; mutators hold the same connection Mutex as the caller
+    // driving this callback, so the pointee cannot be reclaimed mid-read.
+    let state = unsafe { &*(user_data as *const BusySlotState) };
 
     let retries = count as u32;
     let elapsed_ms = state.start.elapsed().as_millis() as u64;
 
-    // SAFETY: see `send_busy_to_pid`. All data is copied into a fresh
-    // msg_env; we never retain references across the call.
-    unsafe {
-        send_busy_to_pid(&state.pid, retries, elapsed_ms);
+    for (_handle, pid) in &state.observers {
+        // SAFETY: see `send_busy_to_pid`. All data is copied into a fresh
+        // msg_env; we never retain references across the call.
+        unsafe {
+            send_busy_to_pid(pid, retries, elapsed_ms);
+        }
     }
 
-    if retries >= state.max_retries || elapsed_ms >= state.max_elapsed_ms {
-        return 0; // surface SQLITE_BUSY to the caller
-    }
+    match &state.policy {
+        None => 0,
+        Some(policy) => {
+            if retries >= policy.max_retries || elapsed_ms >= policy.max_elapsed_ms {
+                return 0; // surface SQLITE_BUSY to the caller
+            }
 
-    if state.sleep_ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(state.sleep_ms));
-    }
+            if policy.sleep_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(policy.sleep_ms));
+            }
 
-    1 // retry
+            1 // retry
+        }
+    }
 }
 
 /// Send `{:xqlite_busy, retries, elapsed_ms}` to `pid`. Fire-and-forget.
@@ -92,75 +114,125 @@ unsafe fn send_busy_to_pid(pid: &LocalPid, retries: u32, elapsed_ms: u64) {
     }
 }
 
-/// Install a busy handler on the given connection.
-///
-/// Atomically swaps the stored state pointer, reclaiming any previously-
-/// installed state. Fails without leaking if SQLite refuses the handler.
-///
-/// Callers must hold the connection Mutex (via `with_conn`) for the
-/// duration of this call — the FFI `sqlite3_busy_handler` mutates
-/// connection state.
-pub(crate) fn install(
+/// Set (or replace) the retry policy. Installs the callback if the slot
+/// was empty. Callers must hold the connection Mutex.
+pub(crate) fn set_policy(
     conn: &Connection,
-    slot: &AtomicPtr<BusyHandlerState>,
-    state: BusyHandlerState,
+    slot: &AtomicPtr<BusySlotState>,
+    policy: BusyPolicy,
 ) -> Result<(), XqliteError> {
-    hook_util::install_hook(slot, state, |new_ptr| {
-        // SAFETY: caller holds the connection Mutex; `conn.handle()`
-        // yields the raw db pointer for that locked connection.
-        let rc = unsafe {
-            ffi::sqlite3_busy_handler(
-                conn.handle(),
-                Some(busy_handler_callback),
-                new_ptr as *mut c_void,
-            )
-        };
-        if rc != ffi::SQLITE_OK {
-            return Err(ffi_rc_to_error(conn, rc));
-        }
-        Ok(())
-    })
+    let mut next = snapshot(slot);
+    next.policy = Some(policy);
+    swap_in(conn, slot, next)
 }
 
-/// Remove the busy handler from the given connection.
-///
-/// Safe to call when no handler is installed — it becomes a no-op on
-/// the FFI side and a null-check on the slot side.
-///
+/// Remove the retry policy, keeping any observers. Empties and removes
+/// the callback when no observers remain. Safe to call with no policy
+/// installed. Callers must hold the connection Mutex.
+pub(crate) fn remove_policy(
+    conn: &Connection,
+    slot: &AtomicPtr<BusySlotState>,
+) -> Result<(), XqliteError> {
+    let mut next = snapshot(slot);
+    next.policy = None;
+    swap_in(conn, slot, next)
+}
+
+/// Register an observer pid; returns its unregistration handle.
+/// Installs the callback if the slot was empty. Callers must hold the
+/// connection Mutex.
+pub(crate) fn register_observer(
+    conn: &Connection,
+    slot: &AtomicPtr<BusySlotState>,
+    pid: LocalPid,
+) -> Result<u64, XqliteError> {
+    let mut next = snapshot(slot);
+    let handle = next.next_handle;
+    next.next_handle += 1;
+    next.observers.push((handle, pid));
+    swap_in(conn, slot, next)?;
+    Ok(handle)
+}
+
+/// Unregister an observer by handle. Idempotent — an unknown handle is a
+/// no-op. Empties and removes the callback when nothing remains.
 /// Callers must hold the connection Mutex.
-pub(crate) fn uninstall(
+pub(crate) fn unregister_observer(
     conn: &Connection,
-    slot: &AtomicPtr<BusyHandlerState>,
+    slot: &AtomicPtr<BusySlotState>,
+    handle: u64,
 ) -> Result<(), XqliteError> {
-    hook_util::uninstall_hook(slot, || {
-        // SAFETY: caller holds the connection Mutex. Passing None+null
-        // clears any registered handler; calling with no handler
-        // installed is valid.
-        let rc =
-            unsafe { ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut()) };
-        if rc != ffi::SQLITE_OK {
-            return Err(ffi_rc_to_error(conn, rc));
-        }
-        Ok(())
-    })
+    let mut next = snapshot(slot);
+    next.observers.retain(|(h, _pid)| *h != handle);
+    swap_in(conn, slot, next)
 }
 
-// --- NIF-facing constructor -------------------------------------------------
+/// Clone the current slot contents (or a fresh empty state), preserving
+/// the install-time `start` instant and handle counter across mutations.
+///
+/// Callers must hold the connection Mutex — that is what makes the raw
+/// read of the current pointee sound (no concurrent reclaim, no
+/// concurrent callback).
+fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
+    let current = slot.load(Ordering::Acquire);
 
-impl BusyHandlerState {
-    pub(crate) fn new(
-        pid: LocalPid,
-        max_retries: u32,
-        max_elapsed_ms: u64,
-        sleep_ms: u64,
-    ) -> Self {
-        Self {
-            pid,
-            max_retries,
-            max_elapsed_ms,
-            sleep_ms,
+    if current.is_null() {
+        BusySlotState {
+            policy: None,
+            observers: Vec::new(),
+            next_handle: 0,
             start: Instant::now(),
         }
+    } else {
+        // SAFETY: non-null slot pointers always point to a live
+        // BusySlotState; the connection Mutex excludes reclamation.
+        let state = unsafe { &*current };
+        BusySlotState {
+            policy: state.policy.clone(),
+            observers: state.observers.clone(),
+            next_handle: state.next_handle,
+            start: state.start,
+        }
+    }
+}
+
+/// Swap the derived state in: empty states clear the C callback and the
+/// slot; non-empty states (re-)register the callback pointing at the new
+/// allocation. Both paths reclaim the previous allocation.
+fn swap_in(
+    conn: &Connection,
+    slot: &AtomicPtr<BusySlotState>,
+    next: BusySlotState,
+) -> Result<(), XqliteError> {
+    if next.policy.is_none() && next.observers.is_empty() {
+        hook_util::uninstall_hook(slot, || {
+            // SAFETY: caller holds the connection Mutex. Passing None+null
+            // clears any registered handler; calling with no handler
+            // installed is valid.
+            let rc = unsafe {
+                ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut())
+            };
+            if rc != ffi::SQLITE_OK {
+                return Err(ffi_rc_to_error(conn, rc));
+            }
+            Ok(())
+        })
+    } else {
+        hook_util::install_hook(slot, next, |new_ptr| {
+            // SAFETY: caller holds the connection Mutex; `conn.handle()`
+            // yields the raw db pointer for that locked connection.
+            let rc = unsafe {
+                ffi::sqlite3_busy_handler(
+                    conn.handle(),
+                    Some(busy_callback),
+                    new_ptr as *mut c_void,
+                )
+            };
+            if rc != ffi::SQLITE_OK {
+                return Err(ffi_rc_to_error(conn, rc));
+            }
+            Ok(())
+        })
     }
 }
 

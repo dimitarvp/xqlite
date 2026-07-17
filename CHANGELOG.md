@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The busy handler is split into policy and observers.**
+  `set_busy_handler/3` (pid + options) is gone; the retry decision
+  and the observation are now independent halves of one busy slot:
+  `Xqlite.set_busy_policy/2` / `remove_busy_policy/1` own the
+  single-slot retry policy (a policy cannot compose), and any number
+  of `Xqlite.register_busy_observer/2` subscribers receive
+  `{:xqlite_busy, retries, elapsed_ms}` per contention callback —
+  with or without a policy installed. `remove_busy_handler/1` is
+  replaced by `remove_busy_policy/1` (observers survive it);
+  `busy_timeout/2` now clears the policy and documents that the raw
+  PRAGMA also silences observers.
+
 ### Added
+
+- **Busy observation joins the telemetry bridge.**
+  `Xqlite.Telemetry.bridge/2` accepts `:busy` (included in the
+  default `:all`), re-emitting contention deliveries as
+  `[:xqlite, :hook, :busy]` with `retries` and nanosecond `elapsed`
+  measurements.
 
 - **`Xqlite.close/1` and `Xqlite.db_path/1`.** Connection close gets
   its ergonomic wrapper (idempotent — `:ok` even when already

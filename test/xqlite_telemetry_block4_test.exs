@@ -188,7 +188,7 @@ defmodule Xqlite.XqliteTelemetryBlock4Test do
     test ":all expands to every per-conn hook", %{conn: conn} do
       {:ok, bridge} = Xqlite.Telemetry.bridge(conn, hooks: :all)
 
-      assert length(bridge.hook_handles) == 5
+      assert length(bridge.hook_handles) == 6
       assert Enum.all?(bridge.hook_handles, fn {h, _} -> is_atom(h) end)
 
       :ok = Xqlite.Telemetry.unbridge(bridge)

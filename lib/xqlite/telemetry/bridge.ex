@@ -45,19 +45,14 @@ defmodule Xqlite.Telemetry.Bridge do
       {:ok, log_bridge} = Xqlite.Telemetry.bridge_log()
       :ok = Xqlite.Telemetry.unbridge(log_bridge)
 
-  ## What about busy_handler?
+  ## Busy events
 
-  `busy_handler` is single-subscriber by design (its callback returns
-  a policy decision; multi-subscriber composition is ill-defined).
-  It is NOT included in the bridge. If you want busy events as
-  telemetry, register your own busy handler with a forwarder pid:
-
-      forwarder = spawn_link(fn -> ... emit telemetry on receive ... end)
-      :ok = Xqlite.set_busy_handler(conn, forwarder, max_retries: 50)
-
-  A future split (see `project_busy_handler_observer_split` memory)
-  will make the observation half multi-subscriber and bring it into
-  the bridge then.
+  Busy observation is multi-subscriber
+  (`Xqlite.register_busy_observer/2`) and included in the bridge: pass
+  `hooks: [:busy]` (or the default `:all`) and every contention
+  callback re-emits as `[:xqlite, :hook, :busy]`. The retry POLICY
+  half (`Xqlite.set_busy_policy/2`) stays single-slot — a retry
+  decision cannot compose — and is independent of observation.
   """
 
   use GenServer
@@ -100,7 +95,7 @@ defmodule Xqlite.Telemetry.Bridge do
   @telemetry_enabled Xqlite.Telemetry.enabled?()
 
   if @telemetry_enabled do
-    @per_conn_hooks [:wal, :commit, :rollback, :update, :progress]
+    @per_conn_hooks [:wal, :commit, :rollback, :update, :progress, :busy]
     @valid_per_conn_hooks @per_conn_hooks ++ [:all]
 
     @doc false
@@ -185,6 +180,9 @@ defmodule Xqlite.Telemetry.Bridge do
     defp register_per_conn_hook(pid, conn, :update, _opts),
       do: NIF.register_update_hook(conn, pid)
 
+    defp register_per_conn_hook(pid, conn, :busy, _opts),
+      do: NIF.register_busy_observer(conn, pid)
+
     defp register_per_conn_hook(pid, conn, :progress, opts) do
       every_n = Keyword.get(opts, :every_n, 1000)
       tag = Keyword.get(opts, :tag)
@@ -233,6 +231,9 @@ defmodule Xqlite.Telemetry.Bridge do
 
   defp unregister_hook({:conn, conn}, :update, handle),
     do: NIF.unregister_update_hook(conn, handle)
+
+  defp unregister_hook({:conn, conn}, :busy, handle),
+    do: NIF.unregister_busy_observer(conn, handle)
 
   defp unregister_hook({:conn, conn}, :progress, handle),
     do: NIF.unregister_progress_hook(conn, handle)
@@ -299,6 +300,18 @@ defmodule Xqlite.Telemetry.Bridge do
         elapsed: elapsed_ms * 1_000_000
       },
       Map.put(scope_metadata(state), :hook_tag, hook_tag)
+    )
+  end
+
+  defp handle_hook_message({:xqlite_busy, retries, elapsed_ms}, state) do
+    Xqlite.Telemetry.emit(
+      [:xqlite, :hook, :busy],
+      %{
+        monotonic_time: Xqlite.Telemetry.monotonic_time(),
+        retries: retries,
+        elapsed: elapsed_ms * 1_000_000
+      },
+      scope_metadata(state)
     )
   end
 

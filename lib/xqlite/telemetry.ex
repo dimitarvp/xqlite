@@ -248,6 +248,10 @@ defmodule Xqlite.Telemetry do
         measurements: %{count, elapsed}
         metadata:     %{conn, hook_tag, tag}
 
+      [:xqlite, :hook, :busy]
+        measurements: %{monotonic_time, retries, elapsed}
+        metadata:     %{conn, tag}
+
       [:xqlite, :hook, :log]
         measurements: %{}
         metadata:     %{code, base_code, message}

@@ -1,7 +1,7 @@
 use crate::atoms;
 use crate::authorizer;
 use crate::blob::{self, XqliteBlob};
-use crate::busy_handler::{self, BusyHandlerState};
+use crate::busy_handler;
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{self, XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
@@ -280,25 +280,55 @@ fn txn_state<'a>(
 // ---------------------------------------------------------------------------
 
 #[rustler::nif]
-fn set_busy_handler(
+fn set_busy_policy(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
-    pid: rustler::LocalPid,
     max_retries: u32,
     max_elapsed_ms: u64,
     sleep_ms: u64,
 ) -> Term<'_> {
-    let state = BusyHandlerState::new(pid, max_retries, max_elapsed_ms, sleep_ms);
+    let policy = busy_handler::BusyPolicy {
+        max_retries,
+        max_elapsed_ms,
+        sleep_ms,
+    };
     let result = connection::with_conn(&handle, |conn| {
-        busy_handler::install(conn, &handle.busy_handler, state)
+        busy_handler::set_policy(conn, &handle.busy_handler, policy)
     });
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif]
-fn remove_busy_handler(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+fn remove_busy_policy(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
     let result = connection::with_conn(&handle, |conn| {
-        busy_handler::uninstall(conn, &handle.busy_handler)
+        busy_handler::remove_policy(conn, &handle.busy_handler)
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif]
+fn register_busy_observer(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    pid: rustler::LocalPid,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| {
+        busy_handler::register_observer(conn, &handle.busy_handler, pid)
+    });
+    match result {
+        Ok(id) => (ok(), id).encode(env),
+        Err(err) => (error(), err).encode(env),
+    }
+}
+
+#[rustler::nif]
+fn unregister_busy_observer(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    observer_handle: u64,
+) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| {
+        busy_handler::unregister_observer(conn, &handle.busy_handler, observer_handle)
     });
     singular_ok_or_error_tuple(env, result)
 }

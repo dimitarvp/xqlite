@@ -1,5 +1,5 @@
 use crate::atoms;
-use crate::busy_handler::BusyHandlerState;
+use crate::busy_handler::BusySlotState;
 use crate::commit_hook::{self, CommitSubscriber};
 use crate::error::XqliteError;
 use crate::hook_util::{self, HookList};
@@ -19,10 +19,10 @@ pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
     pub(crate) extensions_enabled: AtomicBool,
 
-    // The remaining single-subscriber FFI hook (busy_handler) — its
-    // callback returns a policy decision so multi-subscriber
-    // composition is ill-defined; see project_busy_handler_observer_split.
-    pub(crate) busy_handler: AtomicPtr<BusyHandlerState>,
+    // The busy slot: a single-slot retry POLICY (a policy cannot
+    // compose) plus any number of observer subscribers, one C callback
+    // serving both halves. Installed lazily, removed when both empty.
+    pub(crate) busy_handler: AtomicPtr<BusySlotState>,
 
     // Multi-subscriber per-connection hook lists. Each holds N
     // `HookEntry<T>`s, one per registered subscriber. A master closure
