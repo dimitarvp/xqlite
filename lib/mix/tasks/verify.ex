@@ -28,13 +28,6 @@ defmodule Mix.Tasks.Verify do
 
   @cargo_dir "native/xqlitenif"
 
-  # GHSA-rhv4-8758-jx7v: decimal < 3.0 unbounded-exponent DoS. decimal 3.x
-  # is unreachable while jason 1.4 constrains it to `~> 1.0 or ~> 2.0`;
-  # xqlite's Decimal type extension is encode-only (decode is :skip), so
-  # the vulnerable parse path never sees database input. Remove when jason
-  # allows decimal 3 (or the JSON extension moves to core JSON).
-  @ignored_advisories "GHSA-rhv4-8758-jx7v"
-
   @steps [
     {"Elixir formatting", &__MODULE__.check_elixir_format/0},
     {"Rust formatting", &__MODULE__.check_rust_format/0},
@@ -89,7 +82,7 @@ defmodule Mix.Tasks.Verify do
   end
 
   def check_deps_audit do
-    run_cmd("mix", ["deps.audit", "--ignore-advisory-ids", @ignored_advisories])
+    run_cmd("mix", ["deps.audit"])
   end
 
   def check_sobelow do
