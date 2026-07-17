@@ -159,16 +159,38 @@ per-axis dryness state. Nothing found is ever silently dropped.
   (S0). The ONLY S0 panic surface is resource destructors — which is
   exactly where M9 lives. xqlite defines no `down`/`dyncall`.
 
+### Fixes landed (2026-07-17)
+
+- **M4 / M8 / M9 → `2d100bf`.** backup `send_backup_progress` frees
+  `msg_env` unconditionally; `DefaultValue::Blob` encoder degrades to an
+  `InternalEncodingError` term instead of `.expect()`; stream/statement
+  destructors use `writeln!` (panic-proof) instead of `eprintln!`.
+- **M1 / M2-session / M3 / M5 → `61cf771`** (owner-steered
+  2026-07-17: leak-on-explicit-close over a children refcount; plain
+  `Mutex` for the log callback). blob & session ops + `Drop` +
+  explicit close/delete all funnel through the connection Mutex via
+  `with_blob`/`with_session`/`close`, proving the connection open and
+  running teardown under the lock (session close-order leaks the small
+  session object rather than delete a freed db). The log callback takes
+  `MASTER_LOCK`, serialising its read against the writers that free the
+  list. Regression tests: op-on-connection-closed-after-open + safe
+  teardown for both blob and session.
+- **M2-blob (S2 connection leak) — ACCEPTED, not fixed.** Closing a
+  connection with a live blob leaks that one `sqlite3*` (its internal
+  Vdbe makes `sqlite3_close` return BUSY; no owner remains to retry).
+  Fixing it needs the connection-owns-children refcount the owner
+  declined (2026-07-17). Documented as misuse; not a crash.
+
 ### Disposition & dryness
 
-- S0/S1/S2 (M1, M2-session, M3, M4, M5, M8, M9, M2-blob-leak) BLOCK the
-  adapter first publish + announcement per the ratified bar — fix set
-  pending owner steer on the locking-model reshape (M1 fix = apply the
-  established `take_and_finalize_raw` conn-Mutex pattern to blob/session
-  ops + their Drop; M3 fix = distinct, needs global-list reclamation
-  strategy). S3 (M6, M7, M10/M11) → BACKLOG.md + committed pass.
-- Dryness: A1 — one covering run, 0 new S0 CONFIRMED beyond the
-  destructor-eprintln residual (poison chain HELD); needs one more
-  covering run to go DRY. A2 — WET and PRODUCTIVE (M1/M2/M3/M5); the
-  blob/session/log seam re-wets A2, A6 (lifecycle), A11 (feature
-  islands). Re-run A2 after the fix lands.
+- All S0/S1 CONFIRMED findings FIXED (`2d100bf`, `61cf771`); M2-blob S2
+  leak accepted as documented misuse. The publish/announcement blocker
+  from this run is CLEARED pending the A2 re-run below. S3 (M6, M7,
+  M10/M11) → BACKLOG.md + committed post-burn-down pass.
+- Dryness: A1 — one covering run, 0 live S0 (poison chain HELD; the
+  destructor-eprintln residual is fixed); needs one more covering run
+  to go DRY. A2 — the blob/session/log fix CHURNS this scope, so it
+  re-wets: a follow-up covering run over `61cf771` (blob/session
+  locking + log callback) is owed before A2 can approach DRY, and it
+  should also cover A6 (lifecycle) and A11 (feature islands), which the
+  same seam touched.
