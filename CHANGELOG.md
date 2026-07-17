@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Xqlite.Telemetry.OpenTelemetry`.** A pure, dependency-free
+  mapping from xqlite's telemetry events to OpenTelemetry's stable
+  database semantic-convention attributes (`db.system.name`,
+  `db.query.text`, `db.operation.name`, `db.namespace`,
+  `error.type`) plus a `span_name/2` suggestion — the vocabulary
+  database-aware observability backends key off. Every mapped name
+  is cited to its spec page in the module docs.
+
 - **Two new hexdocs guides.** "Full-text search with FTS5" (virtual
   tables, external-content triggers, bm25 ranking,
   highlight/snippet, adapter usage) and the doc-first "Spatial data

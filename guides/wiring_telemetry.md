@@ -123,6 +123,25 @@ want busy events as telemetry.
 )
 ```
 
+### Properly-named database attributes (semantic conventions)
+
+Database-aware backend features (Datadog DB monitoring, latency-by-
+statement views) key off OpenTelemetry's [stable database
+semantic-convention names](https://opentelemetry.io/docs/specs/semconv/database/database-spans/)
+— `db.system.name`, `db.query.text`, `db.operation.name`,
+`db.namespace`, `error.type`. `Xqlite.Telemetry.OpenTelemetry` is the
+pure mapping from xqlite's events to exactly that vocabulary — no
+OpenTelemetry dependency; you call it from your own handler:
+
+```elixir
+def handle_event([:xqlite | _] = event, measurements, metadata, _cfg) do
+  attrs = Xqlite.Telemetry.OpenTelemetry.attributes(event, measurements, metadata)
+  # set `attrs` on the span you create; span_name/2 suggests the span name
+end
+```
+
+Every mapped name is cited to its spec page in that module's docs.
+
 ### Honeycomb / OpenTelemetry
 
 Use `:opentelemetry_telemetry` — it's the standard bridge. xqlite
