@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for in-memory and temporary databases), with a matching raw
   `XqliteNIF.db_path/1` stub.
 
+### Fixed
+
+- **Connection open spans actually fire.** The telemetry docs have
+  promised `[:xqlite, :open, :start | :stop]` since 0.7.0, but no
+  open wrapper ever emitted them. `Xqlite.open/2`,
+  `open_in_memory/1`, and `open_in_memory_readonly/1` now emit the
+  span with the documented `%{path, mode, result_class,
+  error_reason}` metadata.
+
 ## [0.8.0] - 2026-07-14
 
 ### Added

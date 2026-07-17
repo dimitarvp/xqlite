@@ -201,10 +201,17 @@ defmodule Xqlite do
   """
   @spec open(String.t(), keyword()) :: {:ok, conn()} | error()
   def open(path, opts \\ []) do
-    with {:ok, validated} <- validate_open_opts(opts),
-         {:ok, conn} <- XqliteNIF.open(path),
-         :ok <- apply_pragmas(conn, validated) do
-      {:ok, conn}
+    start_md = %{path: path, mode: :file}
+
+    span_with_stop_metadata [:xqlite, :open], start_md do
+      result =
+        with {:ok, validated} <- validate_open_opts(opts),
+             {:ok, conn} <- XqliteNIF.open(path),
+             :ok <- apply_pragmas(conn, validated) do
+          {:ok, conn}
+        end
+
+      {result, open_stop_metadata(start_md, result)}
     end
   end
 
@@ -215,10 +222,17 @@ defmodule Xqlite do
   """
   @spec open_in_memory(keyword()) :: {:ok, conn()} | error()
   def open_in_memory(opts \\ []) do
-    with {:ok, validated} <- validate_open_opts(opts),
-         {:ok, conn} <- XqliteNIF.open_in_memory(":memory:"),
-         :ok <- apply_pragmas(conn, validated) do
-      {:ok, conn}
+    start_md = %{path: ":memory:", mode: :memory}
+
+    span_with_stop_metadata [:xqlite, :open], start_md do
+      result =
+        with {:ok, validated} <- validate_open_opts(opts),
+             {:ok, conn} <- XqliteNIF.open_in_memory(":memory:"),
+             :ok <- apply_pragmas(conn, validated) do
+          {:ok, conn}
+        end
+
+      {result, open_stop_metadata(start_md, result)}
     end
   end
 
@@ -233,8 +247,19 @@ defmodule Xqlite do
   """
   @spec open_in_memory_readonly(String.t()) :: {:ok, conn()} | error()
   def open_in_memory_readonly(uri \\ ":memory:") when is_binary(uri) do
-    XqliteNIF.open_in_memory_readonly(uri)
+    start_md = %{path: uri, mode: :memory_readonly}
+
+    span_with_stop_metadata [:xqlite, :open], start_md do
+      result = XqliteNIF.open_in_memory_readonly(uri)
+      {result, open_stop_metadata(start_md, result)}
+    end
   end
+
+  defp open_stop_metadata(start_md, {:ok, _conn}),
+    do: Map.merge(start_md, %{result_class: :ok, error_reason: nil})
+
+  defp open_stop_metadata(start_md, {:error, reason}),
+    do: Map.merge(start_md, %{result_class: :error, error_reason: reason})
 
   @doc """
   Closes the connection, releasing the underlying SQLite handle.

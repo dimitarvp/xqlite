@@ -315,6 +315,62 @@ defmodule Xqlite.XqliteTelemetryTest do
     end
   end
 
+  describe "Xqlite.open telemetry" do
+    test "open_in_memory/1 fires :start and :stop with mode and result metadata" do
+      handler_id =
+        attach_capture([
+          [:xqlite, :open, :start],
+          [:xqlite, :open, :stop]
+        ])
+
+      assert {:ok, conn} = Xqlite.open_in_memory()
+      on_exit(fn -> XqliteNIF.close(conn) end)
+
+      assert_receive {:telemetry_event, [:xqlite, :open, :start], start_measurements,
+                      start_metadata}
+
+      assert is_integer(start_measurements.monotonic_time)
+      assert start_metadata.path == ":memory:"
+      assert start_metadata.mode == :memory
+
+      assert_receive {:telemetry_event, [:xqlite, :open, :stop], stop_measurements,
+                      stop_metadata}
+
+      assert is_integer(stop_measurements.duration)
+      assert stop_metadata.result_class == :ok
+      assert stop_metadata.error_reason == nil
+
+      detach(handler_id)
+    end
+
+    test "a failed open fires :stop with result_class :error" do
+      handler_id = attach_capture([[:xqlite, :open, :stop]])
+
+      assert {:error, {:invalid_open_option, %{key: :bogus_key}}} =
+               Xqlite.open_in_memory(bogus_key: 1)
+
+      assert_receive {:telemetry_event, [:xqlite, :open, :stop], _measurements, metadata}
+      assert metadata.mode == :memory
+      assert metadata.result_class == :error
+      assert {:invalid_open_option, %{key: :bogus_key}} = metadata.error_reason
+
+      detach(handler_id)
+    end
+
+    test "open_in_memory_readonly/1 reports mode :memory_readonly" do
+      handler_id = attach_capture([[:xqlite, :open, :stop]])
+
+      assert {:ok, conn} = Xqlite.open_in_memory_readonly()
+      on_exit(fn -> XqliteNIF.close(conn) end)
+
+      assert_receive {:telemetry_event, [:xqlite, :open, :stop], _measurements, metadata}
+      assert metadata.mode == :memory_readonly
+      assert metadata.result_class == :ok
+
+      detach(handler_id)
+    end
+  end
+
   describe "Xqlite.close/1 telemetry" do
     test "fires :start and :stop with conn and path metadata", %{conn: conn} do
       handler_id =
