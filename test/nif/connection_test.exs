@@ -169,6 +169,22 @@ defmodule Xqlite.NIF.ConnectionTest do
     end
   end
 
+  describe "WAL cleanup on close" do
+    test "the -wal sidecar is checkpointed and removed by the last close" do
+      path = Xqlite.TestUtil.tmp_db_path("wal_close")
+      assert {:ok, conn} = NIF.open(path)
+      assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "WAL")
+      assert {:ok, 0} = NIF.execute(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY)", [])
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1)", [])
+      assert File.exists?(path <> "-wal")
+
+      assert :ok = Xqlite.close(conn)
+
+      refute File.exists?(path <> "-wal")
+      assert File.exists?(path)
+    end
+  end
+
   describe "shared memory DB" do
     setup do
       assert {:ok, conn1} = NIF.open(@shared_mem_db_uri)
