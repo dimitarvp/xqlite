@@ -22,6 +22,22 @@ burn-down.
   the announcement. (wave-1)
 - [S3] FTS5 guide is linear-executable — wire it up as an executed
   test so the guide can't rot. (A11 seed)
+- [S3] M6 (Run 1): wal/progress/busy C callbacks are raw-FFI-registered
+  with NO `catch_unwind` (unlike rusqlite's guarded trampolines) —
+  panic-free today only by construction. Add our own unwind guard so a
+  future edit can't turn a callback panic into VM death.
+- [S3] M7 (Run 1): `busy_callback` `thread::sleep` + `wal_hook_callback`
+  checkpoint I/O run on the C stack holding the conn Mutex. By-design
+  (busy retry / autocheckpoint emulation) but owes a docs/scheduler
+  note so users know a busy-sleep policy pins the connection.
+- [S3] M10/M11 (Run 1): `explain_analyze.rs:380-490` (`map_put().unwrap()`
+  ×24) and `nif.rs:2057` (`OwnedBinary::new(0).unwrap()`) use `unwrap`
+  where the crate's graceful `map_err`/`ok_or_else` convention applies.
+  Latent-only; consistency fix.
+- [probe] M5 sub-issue (Run 1): `enif_send(NULL,…)` from a NORMAL
+  scheduler (session_changeset/patchset path) vs the repo's dirty-only
+  note — the busy_handler comment claims "any thread (OTP 26.1+)".
+  Reconcile the comments and confirm against an assertion-enabled ERTS.
 
 ## Closed
 
