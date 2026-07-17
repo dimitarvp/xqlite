@@ -103,7 +103,7 @@ defmodule Xqlite.NIF.ExplainAnalyzeTest do
         assert {:ok, report} =
                  NIF.explain_analyze(conn, "SELECT id FROM t WHERE name = ?", ["b"])
 
-        joined = report.query_plan |> Enum.map(& &1.detail) |> Enum.join(" | ")
+        joined = report.query_plan |> Enum.map_join(" | ", & &1.detail)
         assert joined =~ "SEARCH"
         assert joined =~ "t_name_idx"
       end

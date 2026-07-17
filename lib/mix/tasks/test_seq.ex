@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Test.Seq do
+  @shortdoc "Run tests sequentially, one file at a time"
+
   @moduledoc """
   Runs all test files sequentially, each in its own OS process.
 
@@ -13,8 +15,6 @@ defmodule Mix.Tasks.Test.Seq do
 
   use Mix.Task
 
-  @shortdoc "Run tests sequentially, one file at a time"
-
   def run(args) do
     test_files = find_test_files()
 
@@ -23,11 +23,11 @@ defmodule Mix.Tasks.Test.Seq do
 
     failed_files = run_test_files(test_files, args, [])
 
-    if failed_files != [] do
+    if failed_files == [] do
+      IO.puts("\n✓ All tests passed!")
+    else
       IO.puts("\nFailed files: #{Enum.join(failed_files, ", ")}")
       Mix.raise("#{length(failed_files)} test file(s) failed")
-    else
-      IO.puts("\n✓ All tests passed!")
     end
   end
 

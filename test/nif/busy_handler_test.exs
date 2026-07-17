@@ -160,7 +160,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
 
-    assert length(get_collected(new_listener)) > 0
+    refute Enum.empty?(get_collected(new_listener))
     assert get_collected(old_listener) == []
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])

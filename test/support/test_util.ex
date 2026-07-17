@@ -38,14 +38,14 @@ defmodule Xqlite.TestUtil do
     end
   end
 
-  def open_in_memory(), do: open_and_configure({NIF, :open_in_memory, [":memory:"]})
-  def open_temporary(), do: open_and_configure({NIF, :open_temporary, []})
+  def open_in_memory, do: open_and_configure({NIF, :open_in_memory, [":memory:"]})
+  def open_temporary, do: open_and_configure({NIF, :open_temporary, []})
 
   @doc """
   Returns a list of connection opener strategies for test generation.
   Each element is `{ex_unit_tag, description_prefix, opener_mfa}`.
   """
-  def connection_openers(), do: @connection_openers
+  def connection_openers, do: @connection_openers
 
   @doc """
   Finds the opener MFA tuple based on the tag present in the ExUnit context map.
@@ -58,7 +58,7 @@ defmodule Xqlite.TestUtil do
     found_tag = Enum.find(Map.keys(@tag_to_mfa_map), fn tag -> Map.has_key?(context, tag) end)
 
     # Raise an error if no known tag is found in the context
-    unless found_tag do
+    if !found_tag do
       raise """
       Could not determine current test tag from context needed to find opener MFA.
       Expected one of #{inspect(Map.keys(@tag_to_mfa_map))} to be a key in context map.

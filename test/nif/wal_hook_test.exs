@@ -81,8 +81,8 @@ defmodule Xqlite.NIF.WalHookTest do
 
     msgs_a = get_collected(listener_a)
     msgs_b = get_collected(listener_b)
-    assert length(msgs_a) > 0
-    assert length(msgs_b) > 0
+    refute Enum.empty?(msgs_a)
+    refute Enum.empty?(msgs_b)
     # Both should see the same number of events (each commit fans out to both).
     assert length(msgs_a) == length(msgs_b)
 
@@ -103,7 +103,7 @@ defmodule Xqlite.NIF.WalHookTest do
     {:ok, 1} = NIF.execute(conn, "INSERT INTO t DEFAULT VALUES", [])
     Process.sleep(20)
 
-    assert length(get_collected(listener_kept)) > 0
+    refute Enum.empty?(get_collected(listener_kept))
     assert get_collected(listener_removed) == []
 
     :ok = NIF.unregister_wal_hook(conn, h_kept)
@@ -126,7 +126,7 @@ defmodule Xqlite.NIF.WalHookTest do
 
     # Live subscriber must still receive its messages despite the dead
     # one in the same fan-out list.
-    assert length(get_collected(live)) > 0
+    refute Enum.empty?(get_collected(live))
 
     :ok = NIF.unregister_wal_hook(conn, h_dead)
     :ok = NIF.unregister_wal_hook(conn, h_live)

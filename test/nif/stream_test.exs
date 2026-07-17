@@ -2,6 +2,7 @@ defmodule Xqlite.NIF.StreamTest do
   use ExUnit.Case, async: true
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+
   alias XqliteNIF, as: NIF
 
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do

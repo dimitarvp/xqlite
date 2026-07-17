@@ -122,7 +122,7 @@ defmodule Xqlite.NIF.BackupTest do
         assert {:ok, %{rows: [[fk_table, fk_to]]}} =
                  NIF.query(
                    verify_conn,
-                   "SELECT \"table\", \"to\" FROM pragma_foreign_key_list('bk_child')",
+                   ~s{SELECT "table", "to" FROM pragma_foreign_key_list('bk_child')},
                    []
                  )
 

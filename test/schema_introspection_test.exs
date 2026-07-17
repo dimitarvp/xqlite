@@ -2,8 +2,9 @@ defmodule Xqlite.SchemaIntrospectionTest do
   use ExUnit.Case, async: true
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
-  alias XqliteNIF, as: NIF
+
   alias Xqlite.Schema
+  alias XqliteNIF, as: NIF
 
   @schema_ddl ~S"""
   CREATE TABLE categories ( cat_id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT );

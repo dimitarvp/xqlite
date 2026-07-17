@@ -2,7 +2,6 @@ defmodule Xqlite.NIF.BuiltinFts5Test do
   use ExUnit.Case, async: true
 
   import Xqlite.ConnCase
-
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
   alias XqliteNIF, as: NIF
@@ -33,7 +32,7 @@ defmodule Xqlite.NIF.BuiltinFts5Test do
       values = Enum.map(rows, &hd/1)
       assert "the quick brown fox" in values
       assert "quick rabbit runs" in values
-      assert "lazy dog sleeps" not in values
+      refute "lazy dog sleeps" in values
     end
 
     test "match returns no results for absent term", %{conn: conn} do

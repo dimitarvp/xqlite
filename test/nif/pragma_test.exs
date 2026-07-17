@@ -2,6 +2,7 @@ defmodule Xqlite.NIF.PragmaTest do
   use ExUnit.Case, async: true
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+
   alias XqliteNIF, as: NIF
 
   # --- Shared test code (generated via `for` loop) ---

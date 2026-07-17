@@ -1,11 +1,12 @@
 defmodule XqlitePragmaTest do
   use ExUnit.Case, async: true
-  doctest Xqlite.Pragma
-
-  alias XqliteNIF, as: NIF
-  alias Xqlite.Pragma, as: P
 
   import Xqlite.TestUtil
+
+  alias Xqlite.Pragma, as: P
+  alias XqliteNIF, as: NIF
+
+  doctest Xqlite.Pragma
 
   @write_test_cases [
     # Simple set/get with representative values
@@ -217,7 +218,7 @@ defmodule XqlitePragmaTest do
 
       assert {:ok, rows} = P.get(db, :table_info, "dbname_test", db_name: "main")
       assert is_list(rows)
-      assert length(rows) > 0
+      refute Enum.empty?(rows)
     end
   end
 
@@ -250,7 +251,7 @@ defmodule XqlitePragmaTest do
     IO.puts("pragma_get_result: unknown response: `#{inspect(other)}`")
   end
 
-  defp clean_db() do
+  defp clean_db do
     {:ok, db} = NIF.open_in_memory(":memory:")
     ExUnit.Callbacks.on_exit(fn -> NIF.close(db) end)
     db

@@ -428,8 +428,7 @@ defmodule Xqlite do
 
   defp reject_violations([]), do: :ok
 
-  defp reject_violations(violations),
-    do: {:error, {:strict_violations, violations}}
+  defp reject_violations(violations), do: {:error, {:strict_violations, violations}}
 
   defp get_create_sql(conn, table) do
     sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
@@ -943,8 +942,7 @@ defmodule Xqlite do
   """
   @spec multi_step_cancellable(stmt(), pos_integer(), reference() | [reference()]) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
-  def multi_step_cancellable(stmt, batch_size, token_or_tokens)
-      when is_integer(batch_size) do
+  def multi_step_cancellable(stmt, batch_size, token_or_tokens) when is_integer(batch_size) do
     XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, List.wrap(token_or_tokens))
   end
 
@@ -1297,8 +1295,7 @@ defmodule Xqlite do
   > `busy_timeout/2`.
   """
   @spec set_busy_handler(conn(), pid(), keyword()) :: :ok | error()
-  def set_busy_handler(conn, pid, opts \\ [])
-      when is_pid(pid) and is_list(opts) do
+  def set_busy_handler(conn, pid, opts \\ []) when is_pid(pid) and is_list(opts) do
     max_retries = Keyword.get(opts, :max_retries, 50)
     max_elapsed_ms = Keyword.get(opts, :max_elapsed_ms, 5_000)
     sleep_ms = Keyword.get(opts, :sleep_ms, 10)
@@ -1453,10 +1450,9 @@ defmodule Xqlite do
   """
   @spec register_progress_hook(conn(), pid(), keyword()) ::
           {:ok, non_neg_integer()} | error()
-  def register_progress_hook(conn, pid, opts \\ [])
-      when is_pid(pid) and is_list(opts) do
+  def register_progress_hook(conn, pid, opts \\ []) when is_pid(pid) and is_list(opts) do
     every_n = Keyword.get(opts, :every_n, 1000)
-    tag_atom = Keyword.get(opts, :tag, nil)
+    tag_atom = Keyword.get(opts, :tag)
 
     tag =
       case tag_atom do

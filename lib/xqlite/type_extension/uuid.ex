@@ -51,8 +51,7 @@ defmodule Xqlite.TypeExtension.UUID do
 
     hyphenated =
       [a, b, c, d, e]
-      |> Enum.map(fn part -> Base.encode16(part, case: :lower) end)
-      |> Enum.join("-")
+      |> Enum.map_join("-", fn part -> Base.encode16(part, case: :lower) end)
 
     {:ok, hyphenated}
   end

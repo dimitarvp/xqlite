@@ -2,7 +2,6 @@ defmodule Xqlite.NIF.BuiltinSoundexTest do
   use ExUnit.Case, async: true
 
   import Xqlite.ConnCase
-
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
   alias XqliteNIF, as: NIF
@@ -104,7 +103,7 @@ defmodule Xqlite.NIF.BuiltinSoundexTest do
       assert "Smith" in names
       assert "Smyth" in names
       assert "Smithe" in names
-      assert "Johnson" not in names
+      refute "Johnson" in names
     end
   end
 end

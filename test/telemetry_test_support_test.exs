@@ -6,6 +6,7 @@ defmodule Xqlite.Telemetry.TestSupportTest do
   """
 
   use ExUnit.Case, async: true
+
   import Xqlite.Telemetry.TestSupport
 
   setup do

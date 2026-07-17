@@ -4,8 +4,9 @@ defmodule Xqlite.StreamResourceCallbacks do
   # Callbacks for implementing Xqlite.stream/4 via Stream.resource/3.
   # This module is not intended for direct use.
 
-  alias XqliteNIF, as: NIF
   import Xqlite.Telemetry, only: [emit: 3]
+
+  alias XqliteNIF, as: NIF
 
   require Logger
 

@@ -422,49 +422,49 @@ defmodule Xqlite.Pragma do
   structs describing each PRAGMA's capabilities.
   """
   @spec schema() :: %{atom() => PragmaSpec.t()}
-  def schema(), do: @schema
+  def schema, do: @schema
 
   @doc ~S"""
   Returns a map of writable PRAGMAs to their allowed value specs.
   """
   @spec valid_write_arg_values() :: %{atom() => Range.t() | list()}
-  def valid_write_arg_values(), do: @valid_write_arg_values
+  def valid_write_arg_values, do: @valid_write_arg_values
 
   @doc "Returns the names of all PRAGMAs supported by this library."
   @spec all() :: [atom()]
-  def all(), do: @all
+  def all, do: @all
 
   @doc "Returns the names of all readable PRAGMAs that don't require an argument."
   @spec readable_with_zero_args() :: [atom()]
-  def readable_with_zero_args(), do: @readable_with_zero_args
+  def readable_with_zero_args, do: @readable_with_zero_args
 
   @doc "Returns the names of all readable PRAGMAs that require one argument."
   @spec readable_with_one_arg() :: [atom()]
-  def readable_with_one_arg(), do: @readable_with_one_arg
+  def readable_with_one_arg, do: @readable_with_one_arg
 
   @doc "Returns the names of all writable PRAGMAs."
   @spec writable() :: [atom()]
-  def writable(), do: @writable
+  def writable, do: @writable
 
   @doc "Returns the names of all pragmas that return a boolean."
   @spec returning_boolean() :: [atom()]
-  def returning_boolean(), do: @returning_boolean
+  def returning_boolean, do: @returning_boolean
 
   @doc "Returns the names of all pragmas that return an integer."
   @spec returning_int() :: [atom()]
-  def returning_int(), do: @returning_int
+  def returning_int, do: @returning_int
 
   @doc "Returns the names of all pragmas that return text."
   @spec returning_text() :: [atom()]
-  def returning_text(), do: @returning_text
+  def returning_text, do: @returning_text
 
   @doc "Returns the names of all pragmas that return a list."
   @spec returning_list() :: [atom()]
-  def returning_list(), do: @returning_list
+  def returning_list, do: @returning_list
 
   @doc "Returns the names of all pragmas that return nothing."
   @spec returning_nothing() :: [atom()]
-  def returning_nothing(), do: @returning_nothing
+  def returning_nothing, do: @returning_nothing
 
   @doc ~S"""
   A convenience wrapper to extract the `:rows` from a successful `XqliteNIF.query/3` call.
@@ -517,8 +517,7 @@ defmodule Xqlite.Pragma do
 
   # int_mapping takes priority (these pragmas have return_type: :int but
   # their raw integer result gets mapped to a descriptive atom).
-  defp dispatch_get(db, key, %PragmaSpec{int_mapping: mapping}, opts)
-       when is_map(mapping) do
+  defp dispatch_get(db, key, %PragmaSpec{int_mapping: mapping}, opts) when is_map(mapping) do
     with {:ok, value} <- do_pragma_read(db, key, opts) do
       case Map.get(mapping, value) do
         nil -> {:error, {:unexpected_value, value}}

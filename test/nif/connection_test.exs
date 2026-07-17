@@ -3,8 +3,8 @@ defmodule Xqlite.NIF.ConnectionTest do
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
-  alias XqliteNIF, as: NIF
   alias Xqlite.Schema
+  alias XqliteNIF, as: NIF
 
   @shared_mem_db_uri "file:shared_mem_conn_test_specific?mode=memory&cache=shared"
   @invalid_db_path "file:./non_existent_dir_for_sure/read_only_db?mode=ro"

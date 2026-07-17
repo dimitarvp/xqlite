@@ -1,9 +1,10 @@
 defmodule XqliteTest do
   use ExUnit.Case, async: true
-  doctest Xqlite
 
   alias Xqlite.TestUtil
   alias XqliteNIF, as: NIF
+
+  doctest Xqlite
 
   @record_count 20
 

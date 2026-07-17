@@ -186,8 +186,8 @@ defmodule Xqlite.NIF.ProgressHookTest do
         msgs_a = get_collected(listener_a)
         msgs_b = get_collected(listener_b)
 
-        assert length(msgs_a) > 0
-        assert length(msgs_b) > 0
+        refute Enum.empty?(msgs_a)
+        refute Enum.empty?(msgs_b)
         # Each listener must only see its own tag.
         assert Enum.all?(msgs_a, fn {tag, _, _} -> tag == :a end)
         assert Enum.all?(msgs_b, fn {tag, _, _} -> tag == :b end)
@@ -221,7 +221,7 @@ defmodule Xqlite.NIF.ProgressHookTest do
         Process.sleep(50)
 
         msgs = get_collected(live)
-        assert length(msgs) > 0
+        refute Enum.empty?(msgs)
         # Live sibling sees only its own tag.
         assert Enum.all?(msgs, fn {tag, _, _} -> tag == :live_tag end)
 

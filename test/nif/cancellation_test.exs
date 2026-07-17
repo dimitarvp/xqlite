@@ -1,8 +1,9 @@
 defmodule Xqlite.NIF.CancellationTest do
   use ExUnit.Case, async: true
 
-  alias XqliteNIF, as: NIF
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+
+  alias XqliteNIF, as: NIF
 
   # Use a CPU-intensive, low-memory query for predictable "slowness".
   @cpu_intensive_limit 5_000_000

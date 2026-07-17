@@ -14,7 +14,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     {:open_readonly_nif, "open_readonly/1 NIF", :open_readonly_via_nif}
   ]
 
-  defp create_temp_db_file() do
+  defp create_temp_db_file do
     temp_db_path = tmp_db_path("read_only")
 
     {:ok, conn_rw} = NIF.open(temp_db_path)

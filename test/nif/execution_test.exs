@@ -357,20 +357,17 @@ defmodule Xqlite.NIF.ExecutionTest do
       test "INSERT with 120 positional parameters succeeds", %{conn: conn} do
         col_defs =
           1..120
-          |> Enum.map(fn i -> "c#{i} INTEGER" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn i -> "c#{i} INTEGER" end)
 
         :ok = NIF.execute_batch(conn, "CREATE TABLE big_t (#{col_defs});")
 
         placeholders =
           1..120
-          |> Enum.map(fn i -> "?#{i}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn i -> "?#{i}" end)
 
         col_names =
           1..120
-          |> Enum.map(fn i -> "c#{i}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn i -> "c#{i}" end)
 
         params = Enum.to_list(1..120)
         sql = "INSERT INTO big_t (#{col_names}) VALUES (#{placeholders})"

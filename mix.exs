@@ -63,12 +63,13 @@ defmodule Xqlite.MixProject do
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:ex_doc, "~> 0.20", only: :dev, runtime: false},
       {:excoveralls, "~> 0.11", only: :test},
+      {:quokka, "~> 2.13", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.1", only: [:dev, :test]},
       {:jason, "~> 1.4"}
     ]
   end
 
-  defp docs() do
+  defp docs do
     [
       main: "readme",
       name: "Xqlite",
@@ -105,9 +106,9 @@ defmodule Xqlite.MixProject do
     ]
   end
 
-  defp description(), do: "An Elixir SQLite database library utilising the rusqlite Rust crate"
+  defp description, do: "An Elixir SQLite database library utilising the rusqlite Rust crate"
 
-  defp package() do
+  defp package do
     [
       licenses: ["MIT"],
       links: %{

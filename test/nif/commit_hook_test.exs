@@ -99,8 +99,8 @@ defmodule Xqlite.NIF.CommitHookTest do
 
         msgs_a = get_collected(listener_a)
         msgs_b = get_collected(listener_b)
-        assert length(msgs_a) > 0
-        assert length(msgs_b) > 0
+        refute Enum.empty?(msgs_a)
+        refute Enum.empty?(msgs_b)
         assert length(msgs_a) == length(msgs_b)
 
         :ok = NIF.unregister_commit_hook(conn, h_a)
@@ -119,7 +119,7 @@ defmodule Xqlite.NIF.CommitHookTest do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
         Process.sleep(20)
 
-        assert length(get_collected(listener_kept)) > 0
+        refute Enum.empty?(get_collected(listener_kept))
         assert get_collected(listener_removed) == []
 
         :ok = NIF.unregister_commit_hook(conn, h_kept)
@@ -138,7 +138,7 @@ defmodule Xqlite.NIF.CommitHookTest do
         :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
         Process.sleep(20)
 
-        assert length(get_collected(live)) > 0
+        refute Enum.empty?(get_collected(live))
 
         :ok = NIF.unregister_commit_hook(conn, h_dead)
         :ok = NIF.unregister_commit_hook(conn, h_live)

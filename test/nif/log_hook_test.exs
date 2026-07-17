@@ -99,8 +99,8 @@ defmodule Xqlite.NIF.LogHookTest do
 
         msgs_a = get_collected_messages(listener_a)
         msgs_b = get_collected_messages(listener_b)
-        assert length(msgs_a) > 0
-        assert length(msgs_b) > 0
+        refute Enum.empty?(msgs_a)
+        refute Enum.empty?(msgs_b)
 
         :ok = NIF.unregister_log_hook(h_a)
         :ok = NIF.unregister_log_hook(h_b)
@@ -119,7 +119,7 @@ defmodule Xqlite.NIF.LogHookTest do
 
         kept = get_collected_messages(listener_kept)
         removed = get_collected_messages(listener_removed)
-        assert length(kept) > 0
+        refute Enum.empty?(kept)
         assert removed == []
 
         :ok = NIF.unregister_log_hook(h_kept)
@@ -137,7 +137,7 @@ defmodule Xqlite.NIF.LogHookTest do
 
         trigger_autoindex_warning(conn)
 
-        assert length(get_collected_messages(live)) > 0
+        refute Enum.empty?(get_collected_messages(live))
 
         :ok = NIF.unregister_log_hook(h_dead)
         :ok = NIF.unregister_log_hook(h_live)

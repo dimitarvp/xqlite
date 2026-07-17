@@ -109,7 +109,7 @@ defmodule Xqlite.Telemetry.TestSupport do
           for {k, v} <- expected do
             actual = Map.get(actual_measurements, k)
 
-            unless actual == v do
+            if actual != v do
               ExUnit.Assertions.flunk(
                 "Expected event #{inspect(event)} measurement #{inspect(k)} to be #{inspect(v)}, " <>
                   "got #{inspect(actual)} (full measurements: #{inspect(actual_measurements)})"
@@ -126,7 +126,7 @@ defmodule Xqlite.Telemetry.TestSupport do
           for {k, v} <- expected do
             actual = Map.get(actual_metadata, k)
 
-            unless actual == v do
+            if actual != v do
               ExUnit.Assertions.flunk(
                 "Expected event #{inspect(event)} metadata #{inspect(k)} to be #{inspect(v)}, " <>
                   "got #{inspect(actual)} (full metadata: #{inspect(actual_metadata)})"

@@ -12,7 +12,7 @@ sqlite_header_dir =
   |> Enum.sort()
   |> List.last()
 
-unless sqlite_header_dir do
+if !sqlite_header_dir do
   raise "Cannot find sqlite3ext.h in Cargo registry under #{cargo_home}"
 end
 
@@ -34,7 +34,7 @@ end
 
 out_file = "#{test_ext_out}.#{ext_suffix}"
 
-unless File.exists?(out_file) && File.stat!(out_file).mtime >= File.stat!(test_ext_src).mtime do
+if !(File.exists?(out_file) && File.stat!(out_file).mtime >= File.stat!(test_ext_src).mtime) do
   [cmd | [args]] = compiler_args.(test_ext_src, out_file, sqlite_header_dir)
 
   case System.cmd(cmd, args, stderr_to_stdout: true) do

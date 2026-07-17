@@ -73,6 +73,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 
 ## Elixir Code Style
 
+- Formatting is Quokka-enforced (`plugins: [Quokka]` in `.formatter.exs`): `mix format` rewrites style (directive order, pipe idioms, default-arg elision), not just layout. Credo-rule rewrite recipes are deliberately NOT wired up yet.
 - No early returns. Flow control via `case`, `with`, pattern matching.
 - `:ok`/`:error` tuples only. No raise/throw. No `rescue`. No implicit crashes either — anonymous function clause patterns (`fn {k, v} -> ...`) MUST have a fallthrough clause or the caller must guarantee the shape. A `MatchError` from a destructuring `fn` is an implicit raise.
 - `with <- ` right-hand side: no complex expressions. Extract to private functions.

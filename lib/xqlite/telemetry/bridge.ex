@@ -61,8 +61,10 @@ defmodule Xqlite.Telemetry.Bridge do
   """
 
   use GenServer
-  require Xqlite.Telemetry
+
   alias XqliteNIF, as: NIF
+
+  require Xqlite.Telemetry
 
   defstruct [:pid, :scope, :tag, :hook_handles]
 
@@ -104,7 +106,7 @@ defmodule Xqlite.Telemetry.Bridge do
     @doc false
     def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts) do
       hooks = expand_hooks(Keyword.get(opts, :hooks, :all))
-      tag = Keyword.get(opts, :tag, nil)
+      tag = Keyword.get(opts, :tag)
       progress_opts = Keyword.get(opts, :progress, [])
 
       with :ok <- validate_hooks(hooks),
@@ -124,7 +126,7 @@ defmodule Xqlite.Telemetry.Bridge do
 
     @doc false
     def bridge_log_global(opts) when is_list(opts) do
-      tag = Keyword.get(opts, :tag, nil)
+      tag = Keyword.get(opts, :tag)
 
       with {:ok, pid} <- start_link(:log, tag),
            {:ok, handle} <- NIF.register_log_hook(pid) do
@@ -185,7 +187,7 @@ defmodule Xqlite.Telemetry.Bridge do
 
     defp register_per_conn_hook(pid, conn, :progress, opts) do
       every_n = Keyword.get(opts, :every_n, 1000)
-      tag = Keyword.get(opts, :tag, nil)
+      tag = Keyword.get(opts, :tag)
 
       tag_str =
         case tag do
@@ -201,8 +203,7 @@ defmodule Xqlite.Telemetry.Bridge do
       do: {:error, :telemetry_disabled}
 
     @doc false
-    def bridge_log_global(opts) when is_list(opts),
-      do: {:error, :telemetry_disabled}
+    def bridge_log_global(opts) when is_list(opts), do: {:error, :telemetry_disabled}
   end
 
   # --- Teardown --------------------------------------------------------------
@@ -244,7 +245,7 @@ defmodule Xqlite.Telemetry.Bridge do
     Xqlite.Telemetry.emit(
       [:xqlite, :hook, :wal],
       %{monotonic_time: Xqlite.Telemetry.monotonic_time(), pages: pages},
-      Map.merge(scope_metadata(state), %{db_name: db_name})
+      Map.put(scope_metadata(state), :db_name, db_name)
     )
   end
 
@@ -285,7 +286,7 @@ defmodule Xqlite.Telemetry.Bridge do
         count: count,
         elapsed: elapsed_ms * 1_000_000
       },
-      Map.merge(scope_metadata(state), %{hook_tag: nil})
+      Map.put(scope_metadata(state), :hook_tag, nil)
     )
   end
 
@@ -297,7 +298,7 @@ defmodule Xqlite.Telemetry.Bridge do
         count: count,
         elapsed: elapsed_ms * 1_000_000
       },
-      Map.merge(scope_metadata(state), %{hook_tag: hook_tag})
+      Map.put(scope_metadata(state), :hook_tag, hook_tag)
     )
   end
 

@@ -1,4 +1,6 @@
 defmodule Mix.Tasks.Verify do
+  @shortdoc "Run all CI checks locally before committing"
+
   @moduledoc """
   Runs all checks that CI will enforce, in fast-to-slow order.
 
@@ -21,8 +23,6 @@ defmodule Mix.Tasks.Verify do
   """
 
   use Mix.Task
-
-  @shortdoc "Run all CI checks locally before committing"
 
   @cargo_dir "native/xqlitenif"
 
