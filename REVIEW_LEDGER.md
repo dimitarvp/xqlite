@@ -325,3 +325,101 @@ per-axis dryness state. Nothing found is ever silently dropped.
   eliminated (no wrapper, no borrow-flag read in `Drop`), so the blob path no
   longer re-implicates the rustler-0.38 no-catch_unwind destructor seed. No axis
   reaches DRY this run.
+
+---
+
+## Run 3 — 2026-07-18 — A8 durability crash-harness (crown jewel)
+
+- Commit at scan: `3893256` (HEAD). Scope: durability + integrity of the
+  commit path through the xqlite public API under a hard SIGKILL of the writer
+  OS process mid-write, across both journal modes. Composition: single Opus
+  pass (this agent) — harness authored, run, and classified; no fleet (A8 is a
+  build-and-measure axis, not an adversarial read). Artifact checked in under
+  `durability/`, isolated from `mix test.seq`/CI: not under `test/`, not in
+  `elixirc_paths` (never compiled by `mix compile`), and the formatter `inputs`
+  glob (`{config,lib,test}/**`) does not match it — `mix verify` is untouched.
+
+### Harness (`durability/`, invoke `bash durability/run.sh`)
+
+- `run.sh` — orchestrator. Per iteration: spawns `writer.exs` as a child OS
+  process, waits until it is actually committing (>=1 ack line), SIGKILLs it
+  BY ITS EXACT PID (captured shell `$!`, cross-checked against the writer's own
+  `System.pid/0` — abort on mismatch; never a name/pattern kill) at a random
+  moment in the active-write window, reaps it, then reopens the DB in a FRESH
+  process (`verify.exs`) under an OS-level `timeout` and classifies the reopen.
+- `writer.exs` — opens a file-backed DB via `Xqlite.open/2` (real open flags +
+  pragma defaults) and inserts rows in per-row `IMMEDIATE` transactions
+  (`begin`/`execute`/`commit`), each an increasing id + payload + CRC32. After
+  `commit/1` RETURNS it appends the id to a raw (unbuffered) ack file — a
+  SIGKILL-surviving record of a durably-committed row (the watermark).
+- `verify.exs` — reopens (runs WAL/rollback recovery), `PRAGMA
+  integrity_check`, reads all rows; classifies CORRUPTION (integrity fail / bad
+  checksum / DB unopenable) · LOSTWRITE (an ack'd id absent, or a gap in the
+  1..max prefix) · PASS. Verifier timeout → HANG (A7, counted separately,
+  never conflated with corruption).
+
+### Methodology / scope honesty
+
+- A process SIGKILL kills the BEAM but NOT the OS: every byte already
+  `write()`n (WAL frames, rollback journal, DB pages) stays in the OS page
+  cache and reaches disk, so a reopen sees a consistent view. This harness
+  therefore validates **crash-atomicity + crash-recovery under process death**
+  — the real scenario for a BEAM app whose VM is OOM-killed / `kill -9`'d /
+  crashes mid-write. It does NOT validate **power-loss / OS-crash** durability
+  (that turns on fsync/`synchronous` and needs a block-device fault injector or
+  a VM power-cut, unavailable here). Configs are xqlite's real defaults: WAL +
+  synchronous=normal, and DELETE + synchronous=normal.
+
+### Negative control — the harness HAS TEETH (proven before any PASS trusted)
+
+- **Deterministic injections (hard gate; the run aborts if either fails to
+  trip).** On a real post-crash DB that first verifies PASS: (1) a mid-file
+  byte-smash (16 KB of 0xFF) → **CORRUPTION** (vcode 3), and (2) deleting one
+  ack'd committed id → **LOSTWRITE** (vcode 4). Both tripped. This proves the
+  SAME verifier that green-lights the safe runs fails on a corrupt DB and on a
+  lost committed write.
+- **Realistic unsafe config (corroborating).** `journal_mode=off`,
+  `synchronous=off`, 4 MB transactions, 100 iterations → **15 CORRUPTION / 85
+  PASS** (the 85 pass because a process-kill can't lose OS-cached bytes unless
+  a torn multi-page write lands). The corruption surfaces as
+  `{:open_failed, {:cannot_execute_pragma, "PRAGMA journal_mode = off;",
+  "database disk image is malformed"}}` — the DB is unopenable.
+
+### Crash-lands-mid-write evidence
+
+- Every kill (100% of iterations across all tags, `alive_at_kill=yes`) landed
+  with the writer actively committing — readiness-gated (the delay timer starts
+  only after row 1 commits) and the writer loops on a 5 M-row budget it never
+  exhausts, so k is never "max". Rows committed-at-kill (k) varied widely and
+  was never 0: **WAL k ∈ 469..15051 (mean 7547)**, **DELETE k ∈ 288..4626
+  (mean 2300)**, unsafe (4 MB txns) k ∈ 2..16 (mean 9). k neither always 0 nor
+  always max — kills sample the real active-write window.
+
+### Results (exact tallies, 500 reopens total)
+
+- **WAL** (journal_mode=wal, synchronous=normal), **200** iterations:
+  PASS=200, CORRUPTION=0, LOSTWRITE=0, HANG=0, ERROR=0, SKIP_BOOT=0.
+- **DELETE** (journal_mode=delete, synchronous=normal), **200** iterations:
+  PASS=200, CORRUPTION=0, LOSTWRITE=0, HANG=0, ERROR=0, SKIP_BOOT=0.
+- unsafe neg-control (journal=off, sync=off), **100** iterations: PASS=85,
+  CORRUPTION=15, LOSTWRITE=0, HANG=0, ERROR=0, SKIP_BOOT=0.
+
+### Verdict — PASS
+
+- Per this harness, xqlite upholds SQLite's crash-atomicity / durability
+  guarantee through a SIGKILL of the writer VM mid-commit, on its default WAL
+  config and on rollback-journal DELETE: **0 CORRUPTION, 0 LOSTWRITE, 0 HANG
+  across 400 safe-mode reopens.** Every externally-acknowledged commit
+  survived; present ids were always a valid contiguous, checksum-clean prefix;
+  `integrity_check` == ok every time. Caveat, stated plainly: process-kill ≠
+  power-loss — the `synchronous` level was NOT tested against true power loss.
+  This PASS is only as strong as the negative control that backs it, and the
+  control (deterministic hard-gate + realistic config) tripped.
+
+### Disposition & dryness
+
+- No finding — nothing to fix, nothing backlogged. **A8: NONE → one covering
+  run** (harness built + green on defaults, teeth proven). Per the
+  two-consecutive-covering-runs rule A8 is NOT yet DRY; one more covering run
+  (or a power-loss-class extension via a real fault injector) is owed, and
+  churn in the commit/open path re-wets it.

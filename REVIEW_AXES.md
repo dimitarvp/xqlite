@@ -114,7 +114,12 @@ upstream) at our versions. Coverage: single-writer tests only.
 Probes: writer → `kill -9` the VM at random points → reopen →
 `PRAGMA integrity_check` + row-count/checksum invariants → repeat
 hundreds of times × {WAL, rollback journal}. Automate; distinguish
-churn-deadlock (A7) from corruption. Coverage: NONE — to build.
+churn-deadlock (A7) from corruption. Coverage: harness built
+(`durability/run.sh`) + one covering run (Run 3) — {WAL, DELETE}×200 on
+xqlite defaults + deterministic & realistic-unsafe negative controls; 0
+corruption/lost-write/hang, teeth proven. NOT yet DRY (one covering run);
+process-kill ≠ power-loss (fsync/`synchronous` untested vs true power
+loss); commit/open-path churn re-wets.
 
 ### A9. Type/value edges
 Probes: Elixir bignums beyond i64 (error or truncation?); NaN/
