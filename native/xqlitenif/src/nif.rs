@@ -1805,11 +1805,10 @@ unsafe fn send_backup_progress(
         let elements = [tag, remaining_term, pagecount_term];
         let tuple = enif_make_tuple_from_array(msg_env, elements.as_ptr(), 3);
 
-        let sent = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, tuple);
-
-        if sent == 0 {
-            enif_free_env(msg_env);
-        }
+        // enif_send never takes ownership of msg_env; free it
+        // unconditionally, like the crate's other four senders.
+        let _ = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, tuple);
+        enif_free_env(msg_env);
     }
 }
 

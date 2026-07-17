@@ -4,6 +4,7 @@ use crate::util::sqlite_row_to_elixir_terms;
 use rusqlite::ffi;
 use rusqlite::types::Value;
 use rustler::{Env, Resource, ResourceArc, Term};
+use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -73,10 +74,14 @@ impl Drop for XqliteStream {
         // Call the helper method to take and finalize the statement.
         // `&mut self` allows access to `&self.atomic_raw_stmt` and `&self.conn_resource_arc`.
         if let Err(e) = self.take_and_finalize_atomic_stmt() {
-            // Errors from Drop cannot be propagated. Log to stderr.
-            // This indicates a problem during cleanup, potentially a resource leak
-            // if SQLite itself failed to finalize properly.
-            eprintln!(
+            // Errors from Drop cannot be propagated. Log to stderr —
+            // writeln!, never eprintln!: eprintln! panics on a broken
+            // stderr (EPIPE), and rustler 0.38 resource destructors have
+            // no catch_unwind, so a panic here would unwind into C and
+            // kill the VM. A failed finalize here is a potential resource
+            // leak if SQLite itself failed to finalize.
+            let _ = writeln!(
+                std::io::stderr(),
                 "[xqlite] Error finalizing SQLite statement during stream resource drop: {e:?}"
             );
         }

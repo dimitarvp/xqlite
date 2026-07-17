@@ -3,6 +3,7 @@ use crate::error::XqliteError;
 use crate::stream::take_and_finalize_raw;
 use rusqlite::ffi;
 use rustler::{Resource, ResourceArc};
+use std::io::Write;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// A manually managed prepared statement: prepare → (bind → step /
@@ -67,8 +68,13 @@ impl XqliteStatement {
 impl Drop for XqliteStatement {
     fn drop(&mut self) {
         if let Err(e) = self.take_and_finalize() {
-            // Errors from Drop cannot be propagated. Log to stderr.
-            eprintln!(
+            // Errors from Drop cannot be propagated. Log to stderr —
+            // writeln!, never eprintln!: eprintln! panics on a broken
+            // stderr, and rustler 0.38 resource destructors have no
+            // catch_unwind, so a panic here would unwind into C and kill
+            // the VM.
+            let _ = writeln!(
+                std::io::stderr(),
                 "[xqlite] Error finalizing SQLite statement during statement resource drop: {e:?}"
             );
         }

@@ -52,12 +52,21 @@ impl Encoder for DefaultValue {
             DefaultValue::LiteralInt(i) => (atoms::literal(), i).encode(env),
             DefaultValue::LiteralFloat(f) => (atoms::literal(), f).encode(env),
             DefaultValue::LiteralText(s) => (atoms::literal(), s.as_str()).encode(env),
-            DefaultValue::Blob(bytes) => {
-                let mut bin = OwnedBinary::new(bytes.len())
-                    .expect("blob default allocation cannot fail for schema-sized data");
-                bin.as_mut_slice().copy_from_slice(bytes);
-                (atoms::blob(), Term::from(bin.release(env))).encode(env)
-            }
+            DefaultValue::Blob(bytes) => match OwnedBinary::new(bytes.len()) {
+                Some(mut bin) => {
+                    bin.as_mut_slice().copy_from_slice(bytes);
+                    (atoms::blob(), Term::from(bin.release(env))).encode(env)
+                }
+                None => {
+                    let err = XqliteError::InternalEncodingError {
+                        context: format!(
+                            "failed to allocate {}-byte OwnedBinary for blob default",
+                            bytes.len()
+                        ),
+                    };
+                    (atoms::error(), err).encode(env)
+                }
+            },
             DefaultValue::Current(kind) => {
                 let k = match kind {
                     CurrentKind::Time => atoms::time(),
