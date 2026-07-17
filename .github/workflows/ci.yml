@@ -69,6 +69,12 @@ jobs:
       - name: Elixir compilation (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      - name: Dependency audit
+        run: mix deps.audit --ignore-advisory-ids GHSA-rhv4-8758-jx7v
+
+      - name: Sobelow static analysis
+        run: mix sobelow --exit low
+
       - name: Rust clippy
         working-directory: native/xqlitenif
         run: cargo clippy -- -D warnings

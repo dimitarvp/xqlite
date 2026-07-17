@@ -63,7 +63,9 @@ defmodule Xqlite.MixProject do
       {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:ex_doc, "~> 0.20", only: :dev, runtime: false},
       {:excoveralls, "~> 0.11", only: :test},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:quokka, "~> 2.13", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.1", only: [:dev, :test]},
       {:jason, "~> 1.4"}
     ]

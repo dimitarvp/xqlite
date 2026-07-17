@@ -12,10 +12,12 @@ defmodule Mix.Tasks.Verify do
   1. Elixir formatting (`mix format --check-formatted`)
   2. Rust formatting (`cargo fmt --check`)
   3. Elixir compilation with warnings as errors
-  4. Rust clippy with denied warnings
-  5. Rust unit tests (`cargo test`)
-  6. Dialyzer type checks
-  7. Full Elixir test suite (`mix test.seq`)
+  4. Dependency vulnerability audit (`mix deps.audit`)
+  5. Sobelow static security analysis (`mix sobelow`)
+  6. Rust clippy with denied warnings
+  7. Rust unit tests (`cargo test`)
+  8. Dialyzer type checks
+  9. Full Elixir test suite (`mix test.seq`)
 
   ## Usage
 
@@ -26,10 +28,19 @@ defmodule Mix.Tasks.Verify do
 
   @cargo_dir "native/xqlitenif"
 
+  # GHSA-rhv4-8758-jx7v: decimal < 3.0 unbounded-exponent DoS. decimal 3.x
+  # is unreachable while jason 1.4 constrains it to `~> 1.0 or ~> 2.0`;
+  # xqlite's Decimal type extension is encode-only (decode is :skip), so
+  # the vulnerable parse path never sees database input. Remove when jason
+  # allows decimal 3 (or the JSON extension moves to core JSON).
+  @ignored_advisories "GHSA-rhv4-8758-jx7v"
+
   @steps [
     {"Elixir formatting", &__MODULE__.check_elixir_format/0},
     {"Rust formatting", &__MODULE__.check_rust_format/0},
     {"Elixir compilation (warnings as errors)", &__MODULE__.check_elixir_compile/0},
+    {"Dependency audit", &__MODULE__.check_deps_audit/0},
+    {"Sobelow static analysis", &__MODULE__.check_sobelow/0},
     {"Rust clippy", &__MODULE__.check_rust_clippy/0},
     {"Rust tests", &__MODULE__.check_rust_tests/0},
     {"Dialyzer", &__MODULE__.check_dialyzer/0},
@@ -75,6 +86,14 @@ defmodule Mix.Tasks.Verify do
 
   def check_elixir_compile do
     run_cmd("mix", ["compile", "--warnings-as-errors"])
+  end
+
+  def check_deps_audit do
+    run_cmd("mix", ["deps.audit", "--ignore-advisory-ids", @ignored_advisories])
+  end
+
+  def check_sobelow do
+    run_cmd("mix", ["sobelow", "--exit", "low"])
   end
 
   def check_rust_clippy do
