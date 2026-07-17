@@ -194,3 +194,128 @@ per-axis dryness state. Nothing found is ever silently dropped.
   locking + log callback) is owed before A2 can approach DRY, and it
   should also cover A6 (lifecycle) and A11 (feature islands), which the
   same seam touched.
+
+---
+
+## Run 2 — 2026-07-17 — wave-2 chunk-1 adversarial re-run (A2/A6/A11 over `61cf771`)
+
+- Commit at scan: `dca9232` (HEAD; targets under attack = `61cf771` +
+  `2d100bf`). Scope: the blob/session/log memory-safety fix — `blob.rs`,
+  `session.rs`, `log_hook.rs`, the blob/session NIF sites in `nif.rs`, and the
+  `connection.rs`/`stream.rs`/`statement.rs` teardown seam. Fleet: 3 opus
+  prosecutors (UB/close-order, deadlock/interleaving, resource-lifecycle) +
+  opus synthesis-orchestrator re-verification (all-opus; Fable's guardrails
+  forced delegation of the adversary stances). READ-ONLY, structured findings;
+  orchestrator mechanism-dedup + independent source-level re-verification
+  against the BUNDLED SQLite (libsqlite3-sys 0.38.1, amalgamation 3.53.2) and
+  rusqlite 0.40.1 / rustler 0.38.0 sources. 2 raw findings (one mechanism,
+  found by 2 of 3 prosecutors; the 3rd returned a clean deadlock/lock-order
+  sweep) → 1 mechanism after dedup.
+
+### CONFIRMED (fixed this run)
+
+- **B1 — S0 — blob teardown dereferenced the moved-out rusqlite `Connection`
+  wrapper (use-after-move / UB).** `blob::close`'s Ok arm ran `drop(blob)` with
+  NO `conn_guard.is_some()` gate — unlike `session::close` (session.rs:58).
+  After `close_connection` `conn_guard.take()`s and drops the `Connection`
+  (connection.rs:176), the ResourceArc's `Option<Connection>` slot is `None`,
+  yet the blob's `Blob<'static>.conn` (a real `&Connection`, rusqlite
+  blob/mod.rs:202, set by the old blob_open's `transmute`) still pointed at that
+  slot. `drop(blob)` → `Blob::drop` → `close_()` (blob/mod.rs:400,302) →
+  `self.conn.decode_result(rc)` (blob/mod.rs:305) → `self.db.borrow()`
+  (lib.rs) + raw db read (inner_connection.rs:135), reading a `Connection`
+  through a reference after it was moved out and dropped. The C object is fine
+  (an open blob's Vdbe `pBlob->pStmt` (sqlite3VdbeCreate → `db->pVdbe`) makes
+  `connectionIsBusy` return 1, so `sqlite3_close` v1 returns SQLITE_BUSY and
+  leaks the live `sqlite3*`; rusqlite `InnerConnection::drop` discards that
+  result — `#[expect(unused_must_use)]`) — but the RUST-wrapper deref is not.
+  **The exact gap Run 1's M2(blob) refutation missed**: it proved the *C db* is
+  not freed and stopped there, never noticing rusqlite's `Blob` independently
+  holds and derefs a `&Connection`. Session is immune — `PhantomData<&Connection>`,
+  Drop touches only `self.s`. Reachable from the shipped public path
+  (blob_test.exs "blob ops on a connection closed after open…") AND from GC-drop
+  of a live `XqliteBlob` after its connection is closed.
+
+### REFUTED (prosecutor attacks that HELD — no code change)
+
+- **M2(session) close-order UAF** — `session::close` gates delete on
+  `conn_guard.is_some()` and `mem::forget`s otherwise; rusqlite `Session` is
+  `PhantomData<&Connection>`, Drop touches only `self.s`. take() and the gate
+  both run under the conn Mutex — no TOCTOU. Sound; this is the guard blob
+  structurally lacked, now made moot by the raw-pointer refactor.
+- **M3 log-hook Vec-free race** — `log_callback` takes `MASTER_LOCK` before its
+  snapshot read; register/unregister take the same lock across the free.
+  `MASTER_LOCK` is a leaf (callback only calls `enif_*`) → serialized, no cycle.
+  Sound.
+- **New deadlock / lock-order inversion** — every blob/session site acquires the
+  conn Mutex first, then the per-resource guard; single total order
+  L_conn→L_resource, MASTER_LOCK a disjoint leaf, callbacks under L_conn
+  lock-free. No reverse edge. Sound.
+- **M5 progress-list UAF via session stepping** — session_changeset/patchset run
+  under `with_session_mut` (conn Mutex held), so `xProgress` fires under the
+  conn Mutex, serialized against `register_progress_hook`/`query_cancellable`.
+  Sound.
+- **Self-deadlock: construct-under-lock Drop re-locks L_conn** — the ResourceArc
+  is the `with_conn` closure's return value, moved out, never dropped under
+  L_conn. Sound.
+
+### RED repro — level achieved: Miri-pattern-model + written proof
+
+- **Miri over an isolated pure-Rust model** (`native/xqlitenif/miri/`): a `&T`
+  into an `Option<T>` slot, `.take()` so the `T` is dropped, then a `Drop` that
+  derefs the stale `&T` — the exact unsound shape of the old blob teardown.
+  `cargo +nightly miri run` flags it deterministically (exit 1: "reading memory
+  … but memory is uninitialized", at the `RefCell` borrow-flag read inside
+  `Blob::drop` → `close_()` → `Conn::decode_result`). The native build exits 0
+  — the moved-from bytes read benignly on the current layout, proving the UB is
+  latent and layout-dependent (a niche/borrow-flag collision would panic-in-drop
+  → unwind into C → BEAM crash, since rustler-0.38 destructors have no
+  catch_unwind).
+- **A crashing end-to-end NIF repro is infeasible** under the available
+  toolchain and is honestly reported as such: Miri cannot execute the bundled C
+  SQLite (no real FFI); no sanitizer-instrumented sqlite build is available for
+  ASan; and the live `Option<Connection>` layout reads benignly, so the crash
+  cannot be forced deterministically. The Miri pattern-model + the source-level
+  deref-chain proof (verified file:line across rusqlite + xqlite, above) are the
+  strongest achievable evidence.
+
+### FIX — Refactor B (`b1c60b4`)
+
+- `XqliteBlob` no longer stores a rusqlite `Blob` wrapper anywhere. It now owns
+  a raw `AtomicPtr<ffi::sqlite3_blob>` (null == closed) plus the conn
+  `ResourceArc`, mirroring `XqliteStream`/`XqliteStatement`. All ops
+  (`open`/`read`/`write`/`size`/`reopen`/`close`) are reimplemented in raw FFI
+  (`sqlite3_blob_open`/`_read`/`_write`/`_bytes`/`_reopen`/`_close`), each
+  holding the connection Mutex for the whole call via `with_live_blob` (mirrors
+  `with_live_stmt`) or `close` (mirrors `take_and_finalize_raw`). **No
+  `&Connection` is dereferenced on any blob teardown path** — `Drop` and
+  `blob_close` just `sqlite3_blob_close` the raw pointer, sound even after the
+  connection is closed (the open blob keeps the db alive at SQLITE_BUSY;
+  source-confirmed against the amalgamation). The two `unsafe impl Send/Sync`
+  are gone (the raw-pointer struct is auto `Send + Sync`, like stream/statement).
+  Public behavior preserved exactly: offset/length clamping, empty-binary on
+  out-of-range offset, `BlobSizeError`→`{:cannot_execute, …}` on oversized
+  write, `{:read_only_database, …}` on read-only write, idempotent close.
+- Tests: existing regression tests pass; the two closed-state tests tightened
+  from `{:error, _}` to `{:error, :connection_closed}`; added a GC-drop
+  regression (a blob abandoned by a dying process after its connection is closed
+  is torn down crash-free). `cargo fmt`/`clippy --all-targets -D warnings` clean;
+  `mix verify` green.
+- Not touched (out of scope, unchanged): the accepted M2(blob) S2
+  connection-leak decision (still documented misuse) and the S3 backlog items.
+
+### Disposition & dryness
+
+- B1 was the sole publish/announcement blocker from this run; FIXED (`b1c60b4`).
+  It was NOT a re-litigation of the accepted M2(blob) S2 leak — that leak stands
+  as documented misuse; B1 was a distinct, coexisting Rust-level UB on the same
+  teardown that Run 1 did not surface.
+- Dryness: **A2** — the locking law HELD on the re-run (M1/M5 fix verified
+  sound, deadlock-free) and the B1 refactor keeps every `sqlite3_blob_*` under
+  the conn Mutex; this run is one clean covering pass over the new blob
+  teardown, one more owed to reach DRY. **A6** (resource lifecycle) and **A11**
+  (blob I/O feature island) — one clean covering run each with the refactor +
+  GC-drop test; one more owed. **A1** — B1's panic-in-drop manifestation is
+  eliminated (no wrapper, no borrow-flag read in `Drop`), so the blob path no
+  longer re-implicates the rustler-0.38 no-catch_unwind destructor seed. No axis
+  reaches DRY this run.
