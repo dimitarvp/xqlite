@@ -1,7 +1,7 @@
 # Full-text search with FTS5
 
 FTS5 is compiled into xqlite's bundled SQLite (`ENABLE_FTS5` — check
-`XqliteNIF.compile_options/1` if you doubt it). It is SQLite's answer to
+`Xqlite.compile_options/1` if you doubt it). It is SQLite's answer to
 "I want a GIN index and `tsquery`": an inverted index over your text
 columns, queried with a small match language, ranked with BM25. No
 extension loading, no extra process — it's already there.

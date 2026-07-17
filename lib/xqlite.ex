@@ -486,7 +486,7 @@ defmodule Xqlite do
   def enable_strict_table(conn, table) when is_binary(table) do
     with {:ok, violations} <- check_strict_violations(conn, table),
          :ok <- reject_violations(violations),
-         {:ok, create_sql} <- get_create_sql(conn, table) do
+         {:ok, create_sql} <- table_create_sql(conn, table) do
       rebuild_as_strict(conn, table, create_sql)
     end
   end
@@ -495,7 +495,7 @@ defmodule Xqlite do
 
   defp reject_violations(violations), do: {:error, {:strict_violations, violations}}
 
-  defp get_create_sql(conn, table) do
+  defp table_create_sql(conn, table) do
     sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
 
     case XqliteNIF.query(conn, sql, [table]) do
@@ -1968,6 +1968,196 @@ defmodule Xqlite do
         err
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Transaction state
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns whether the connection is currently inside a transaction.
+
+  `{:ok, true}` after `begin/2` and before `commit/1` or
+  `rollback/1`, `{:ok, false}` in autocommit mode. Wraps
+  `XqliteNIF.transaction_status/1`. No telemetry is emitted.
+  """
+  @spec transaction_status(conn()) :: {:ok, boolean()} | error()
+  def transaction_status(conn), do: XqliteNIF.transaction_status(conn)
+
+  @doc """
+  Returns `{:ok, true}` when the connection is in auto-commit mode
+  (no active transaction), `{:ok, false}` otherwise.
+
+  The inverse view of `transaction_status/1`, matching SQLite's
+  `sqlite3_get_autocommit`. Wraps `XqliteNIF.autocommit/1`. No
+  telemetry is emitted.
+  """
+  @spec autocommit(conn()) :: {:ok, boolean()} | error()
+  def autocommit(conn), do: XqliteNIF.autocommit(conn)
+
+  @doc """
+  Returns the transaction state of a schema: `:none`, `:read`,
+  `:write`, or `:unknown` (a future SQLite state not mapped yet).
+
+  `schema` defaults to `nil`, meaning `"main"`. Wraps
+  `XqliteNIF.txn_state/2` (see it for why there is no full five-state
+  lock ladder). No telemetry is emitted.
+  """
+  @spec txn_state(conn(), String.t() | nil) ::
+          {:ok, :none | :read | :write | :unknown} | error()
+  def txn_state(conn, schema \\ nil) when is_binary(schema) or is_nil(schema),
+    do: XqliteNIF.txn_state(conn, schema)
+
+  # ---------------------------------------------------------------------------
+  # Connection introspection
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Returns the rowid of the most recent successful `INSERT` on this
+  connection.
+
+  Connection-specific and only updated by successful `INSERT`s. Does
+  not work for `WITHOUT ROWID` tables — use `INSERT ... RETURNING`
+  there. Wraps `XqliteNIF.last_insert_rowid/1`. No telemetry is
+  emitted.
+  """
+  @spec last_insert_rowid(conn()) :: {:ok, integer()} | error()
+  def last_insert_rowid(conn), do: XqliteNIF.last_insert_rowid(conn)
+
+  @doc """
+  Returns the number of rows changed by the most recently completed
+  `INSERT`, `UPDATE`, or `DELETE` on this connection.
+
+  The counter is sticky: non-DML statements (`SELECT`, DDL, PRAGMA)
+  leave it untouched, so it reports the last DML's count rather than
+  resetting to `0`. For an atomically captured count prefer `query/4`
+  or `execute/4`, whose `t:Xqlite.Result.t/0` carries `changes` taken
+  inside the connection lock. Wraps `XqliteNIF.changes/1`. No
+  telemetry is emitted.
+  """
+  @spec changes(conn()) :: {:ok, non_neg_integer()} | error()
+  def changes(conn), do: XqliteNIF.changes(conn)
+
+  @doc """
+  Returns the total number of rows changed by all `INSERT`, `UPDATE`,
+  and `DELETE` statements since the connection was opened, including
+  changes made by triggers. Wraps `XqliteNIF.total_changes/1`. No
+  telemetry is emitted.
+  """
+  @spec total_changes(conn()) :: {:ok, non_neg_integer()} | error()
+  def total_changes(conn), do: XqliteNIF.total_changes(conn)
+
+  @doc """
+  Returns a snapshot of the connection's `sqlite3_db_status` counters
+  (lookaside, pager cache, schema and statement memory, cache
+  hit/miss/spill, deferred foreign keys).
+
+  See `XqliteNIF.connection_stats/1` for the full key list. Call
+  repeatedly for time-series monitoring. No telemetry is emitted.
+  """
+  @spec connection_stats(conn()) :: {:ok, map()} | error()
+  def connection_stats(conn), do: XqliteNIF.connection_stats(conn)
+
+  @doc """
+  Returns the compile-time options the linked SQLite library was
+  built with, as a list of strings (`PRAGMA compile_options`).
+
+  Useful to confirm features such as `ENABLE_FTS5` are present. Wraps
+  `XqliteNIF.compile_options/1`. No telemetry is emitted.
+  """
+  @spec compile_options(conn()) :: {:ok, [String.t()]} | error()
+  def compile_options(conn), do: XqliteNIF.compile_options(conn)
+
+  @doc """
+  Returns the version string of the linked SQLite C library.
+
+  Needs no connection. Wraps `XqliteNIF.sqlite_version/0`. No
+  telemetry is emitted.
+  """
+  @spec sqlite_version() :: {:ok, String.t()} | error()
+  def sqlite_version, do: XqliteNIF.sqlite_version()
+
+  # ---------------------------------------------------------------------------
+  # Schema introspection
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Lists all databases attached to the connection as
+  `Xqlite.Schema.DatabaseInfo` structs (`PRAGMA database_list`).
+
+  Wraps `XqliteNIF.schema_databases/1`. No telemetry is emitted.
+  """
+  @spec schema_databases(conn()) :: {:ok, [Xqlite.Schema.DatabaseInfo.t()]} | error()
+  def schema_databases(conn), do: XqliteNIF.schema_databases(conn)
+
+  @doc """
+  Lists tables, views, and virtual tables as
+  `Xqlite.Schema.SchemaObjectInfo` structs (`PRAGMA table_list`).
+
+  `schema` defaults to `nil`; pass `"main"`, `"temp"`, or an attached
+  database name for predictable results. Wraps
+  `XqliteNIF.schema_list_objects/2`. No telemetry is emitted.
+  """
+  @spec schema_list_objects(conn(), String.t() | nil) ::
+          {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | error()
+  def schema_list_objects(conn, schema \\ nil) when is_binary(schema) or is_nil(schema),
+    do: XqliteNIF.schema_list_objects(conn, schema)
+
+  @doc """
+  Returns column details for a table or view as
+  `Xqlite.Schema.ColumnInfo` structs (`PRAGMA table_xinfo`), or
+  `{:ok, []}` when the table does not exist.
+
+  Wraps `XqliteNIF.schema_columns/2`. No telemetry is emitted.
+  """
+  @spec schema_columns(conn(), String.t()) ::
+          {:ok, [Xqlite.Schema.ColumnInfo.t()]} | error()
+  def schema_columns(conn, table_name) when is_binary(table_name),
+    do: XqliteNIF.schema_columns(conn, table_name)
+
+  @doc """
+  Returns the foreign keys defined on a table as
+  `Xqlite.Schema.ForeignKeyInfo` structs (`PRAGMA foreign_key_list`).
+
+  Wraps `XqliteNIF.schema_foreign_keys/2`. No telemetry is emitted.
+  """
+  @spec schema_foreign_keys(conn(), String.t()) ::
+          {:ok, [Xqlite.Schema.ForeignKeyInfo.t()]} | error()
+  def schema_foreign_keys(conn, table_name) when is_binary(table_name),
+    do: XqliteNIF.schema_foreign_keys(conn, table_name)
+
+  @doc """
+  Returns all indexes on a table as `Xqlite.Schema.IndexInfo` structs
+  (`PRAGMA index_list`), including those backing `PRIMARY KEY` and
+  `UNIQUE` constraints.
+
+  Wraps `XqliteNIF.schema_indexes/2`. No telemetry is emitted.
+  """
+  @spec schema_indexes(conn(), String.t()) ::
+          {:ok, [Xqlite.Schema.IndexInfo.t()]} | error()
+  def schema_indexes(conn, table_name) when is_binary(table_name),
+    do: XqliteNIF.schema_indexes(conn, table_name)
+
+  @doc """
+  Returns the columns of an index as `Xqlite.Schema.IndexColumnInfo`
+  structs (`PRAGMA index_xinfo`), ordered by position in the index.
+
+  Wraps `XqliteNIF.schema_index_columns/2`. No telemetry is emitted.
+  """
+  @spec schema_index_columns(conn(), String.t()) ::
+          {:ok, [Xqlite.Schema.IndexColumnInfo.t()]} | error()
+  def schema_index_columns(conn, index_name) when is_binary(index_name),
+    do: XqliteNIF.schema_index_columns(conn, index_name)
+
+  @doc """
+  Returns the `CREATE ...` SQL for a schema object as recorded in
+  `sqlite_schema`, or `{:ok, nil}` when no object with that name
+  exists.
+
+  Wraps `XqliteNIF.get_create_sql/2`. No telemetry is emitted.
+  """
+  @spec get_create_sql(conn(), String.t()) :: {:ok, String.t() | nil} | error()
+  def get_create_sql(conn, object_name) when is_binary(object_name),
+    do: XqliteNIF.get_create_sql(conn, object_name)
 
   # ---------------------------------------------------------------------------
   # Internal helpers

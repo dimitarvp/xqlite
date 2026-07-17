@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every raw introspection NIF now has an `Xqlite` wrapper.** The
+  ergonomic surface gains transaction-state readers
+  (`transaction_status/1`, `autocommit/1`, `txn_state/2`), counters
+  (`last_insert_rowid/1`, `changes/1`, `total_changes/1`,
+  `connection_stats/1`), build info (`compile_options/1`,
+  `sqlite_version/0`), and the schema family (`schema_databases/1`,
+  `schema_list_objects/2`, `schema_columns/2`,
+  `schema_foreign_keys/2`, `schema_indexes/2`,
+  `schema_index_columns/2`, `get_create_sql/2`) — all thin,
+  telemetry-free delegations. Hooks, sessions, and blob I/O remain
+  deliberately raw `XqliteNIF` APIs.
+
 - **`Xqlite.Telemetry.OpenTelemetry`.** A pure, dependency-free
   mapping from xqlite's telemetry events to OpenTelemetry's stable
   database semantic-convention attributes (`db.system.name`,
