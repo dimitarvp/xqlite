@@ -278,6 +278,12 @@ per-axis dryness state. Nothing found is ever silently dropped.
   cannot be forced deterministically. The Miri pattern-model + the source-level
   deref-chain proof (verified file:line across rusqlite + xqlite, above) are the
   strongest achievable evidence.
+- **Interim artifacts removed (cleanup).** The `native/xqlitenif/miri/`
+  pattern-model crate was intentionally deleted after serving its purpose; its
+  finding now lives permanently in the `XqliteBlob` struct doc comment
+  (`native/xqlitenif/src/blob.rs`) and in this ledger entry (together the
+  complete record). The nightly toolchain + `miri` component installed only to
+  run it were uninstalled too; `mise`/`.tool-versions` untouched.
 
 ### FIX — Refactor B (`b1c60b4`)
 

@@ -9,14 +9,47 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// An open incremental-BLOB handle, owned as a RAW `*mut sqlite3_blob`.
 ///
-/// This resource deliberately stores NO rusqlite `Blob` wrapper. A rusqlite
-/// `Blob<'conn>` holds a real `&Connection`, and its `Drop` dereferences that
-/// reference (`Blob::drop` -> `close_()` -> `self.conn.decode_result()` ->
-/// `self.db.borrow()`). If the connection has been explicitly closed first, its
-/// `Connection` was moved out of `Mutex<Option<Connection>>` and dropped, so
-/// that deref reads a moved-from value — a use-after-move (BEAM-crash-capable,
-/// layout-dependent). We sidestep the whole class of bug by owning only the raw
-/// pointer and calling the `sqlite3_blob_*` C functions directly.
+/// This resource deliberately stores NO rusqlite `Blob` wrapper, and no future
+/// maintainer may reintroduce one (see the WARNING below): doing so reopens a
+/// CONFIRMED S0 use-after-move (`REVIEW_LEDGER.md` "Run 2", fixed in `b1c60b4`).
+/// The rusqlite file:line citations below are from 0.40.1.
+///
+/// A rusqlite `Blob<'conn>` holds a real `&Connection` (`blob/mod.rs:202`) and
+/// dereferences it on `Drop`: `Blob::drop` (`blob/mod.rs:399`) -> `close_()`
+/// (`:302`) -> `self.conn.decode_result(rc)` (`:305`) ->
+/// `Connection::decode_result` -> `self.db.borrow()` (`lib.rs:1033`) ->
+/// `InnerConnection::decode_result` reads the raw db (`inner_connection.rs:135`,
+/// `:131`). The old `blob_open` `transmute`d that borrow to `Blob<'static>` and
+/// stored it here. When `close_connection` does `conn_guard.take()` (our
+/// `connection.rs:176`), the inner `Connection` is moved out of
+/// `Mutex<Option<Connection>>` and dropped, so the deref chain above reads a
+/// moved-from value — a use-after-move reachable from the shipped `blob_close`
+/// path AND from GC-drop of a live blob whose connection was already closed. The
+/// native build hid it because the moved-from bytes read benignly on the
+/// `SQLITE_OK` path; a different `Option` layout would instead panic in `Drop`,
+/// and rustler 0.38 resource destructors have no `catch_unwind`, so that panic
+/// unwinds into C and crashes the BEAM.
+///
+/// The C `sqlite3*` itself never dangles: an open blob registers an internal
+/// Vdbe (`pBlob->pStmt`), so `sqlite3_close` (v1) sees `connectionIsBusy`,
+/// returns `SQLITE_BUSY`, and leaves the db alive (SQLite amalgamation fact; see
+/// `close`). ONLY the Rust `&Connection` wrapper was ever left dangling.
+///
+/// This was CONFIRMED as UB by a Miri pattern-model: a `&T` into an `Option<T>`
+/// slot, `.take()` drops the `T`, then a `Drop` derefs the stale `&T` — Miri
+/// reports "reading uninitialized memory". That interim repro crate has since
+/// been removed after serving its purpose; the permanent record is
+/// `REVIEW_LEDGER.md` "Run 2".
+///
+/// MAINTAINER WARNING: never store a rusqlite `Blob` — or a `Session`, or ANY
+/// lifetime-erased wrapper whose `Drop` dereferences an `&Connection` — in a
+/// resource that can outlive an explicit connection close. Always own the raw C
+/// handle and call the `sqlite3_*` C functions directly under the connection
+/// `Mutex`. `session.rs` stores a `Session<'static>` safely ONLY because
+/// rusqlite `Session` holds `PhantomData<&Connection>` (`session.rs:26`), so its
+/// `Drop` touches only the raw `self.s` (`session.rs:207`) and never derefs the
+/// connection. That is a fragile distinction — do NOT "unify" the two resources
+/// by giving `XqliteSession` a real wrapper.
 ///
 /// The pointer lives in an `AtomicPtr` (null == closed/finalized), mirroring
 /// `XqliteStream`/`XqliteStatement`. Every `sqlite3_blob_*` call holds the

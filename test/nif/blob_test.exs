@@ -446,7 +446,8 @@ defmodule Xqlite.NIF.BlobTest do
   # closed, and the blob is abandoned by a dying process so its Rust `Drop`
   # (`blob::close`) runs while the connection slot is already `None`. Pre-fix
   # this dereferenced a moved-from `&Connection` inside the rusqlite `Blob`
-  # wrapper (a use-after-move; see native/xqlitenif/miri/). Post-fix the blob
+  # wrapper (a use-after-move; see the `XqliteBlob` doc comment in
+  # native/xqlitenif/src/blob.rs and REVIEW_LEDGER.md "Run 2"). Post-fix the blob
   # owns only a raw `sqlite3_blob*` and closing it is sound (the open blob kept
   # the db alive via SQLITE_BUSY). The assertion is survival: the VM must still
   # be running afterward.
