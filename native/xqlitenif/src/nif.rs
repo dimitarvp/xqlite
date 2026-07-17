@@ -2012,24 +2012,7 @@ fn blob_open<'a>(
     row_id: i64,
     read_only: bool,
 ) -> Term<'a> {
-    let result = connection::with_conn(&handle, |conn| {
-        let b = conn.blob_open(
-            db.as_str(),
-            table.as_str(),
-            column.as_str(),
-            row_id,
-            read_only,
-        )?;
-        // SAFETY: We erase the connection lifetime. This is safe because
-        // conn_resource_arc (stored in XqliteBlob) prevents the connection
-        // from being dropped while the blob handle exists.
-        let static_blob: rusqlite::blob::Blob<'static> = unsafe { std::mem::transmute(b) };
-        Ok(ResourceArc::new(XqliteBlob {
-            blob: std::sync::Mutex::new(Some(static_blob)),
-            conn_resource_arc: handle.clone(),
-        }))
-    });
-    match result {
+    match blob::open(&handle, &db, &table, &column, row_id, read_only) {
         Ok(resource) => (ok(), resource).encode(env),
         Err(err) => (error(), err).encode(env),
     }
@@ -2042,17 +2025,7 @@ fn blob_read<'a>(
     offset: usize,
     length: usize,
 ) -> Term<'a> {
-    let result = blob::with_blob(&blob_handle, |b| {
-        let blob_size = b.len();
-        if offset >= blob_size {
-            return Ok(rustler::OwnedBinary::new(0).unwrap());
-        }
-        let actual_len = std::cmp::min(length, blob_size - offset);
-        let mut buf = vec![0u8; actual_len];
-        b.read_at_exact(&mut buf, offset)?;
-        session::to_owned_binary(&buf, "blob read")
-    });
-    match result {
+    match blob::read(&blob_handle, offset, length) {
         Ok(binary) => (ok(), binary.release(env)).encode(env),
         Err(err) => (error(), err).encode(env),
     }
@@ -2065,16 +2038,12 @@ fn blob_write<'a>(
     offset: usize,
     data: rustler::Binary<'a>,
 ) -> Term<'a> {
-    let result = blob::with_blob_mut(&blob_handle, |b| {
-        b.write_all_at(data.as_slice(), offset)?;
-        Ok(())
-    });
-    singular_ok_or_error_tuple(env, result)
+    singular_ok_or_error_tuple(env, blob::write(&blob_handle, offset, data.as_slice()))
 }
 
 #[rustler::nif]
 fn blob_size(blob_handle: ResourceArc<XqliteBlob>) -> Result<usize, XqliteError> {
-    blob::with_blob(&blob_handle, |b| Ok(b.len()))
+    blob::size(&blob_handle)
 }
 
 #[rustler::nif]
@@ -2083,11 +2052,7 @@ fn blob_reopen<'a>(
     blob_handle: ResourceArc<XqliteBlob>,
     row_id: i64,
 ) -> Term<'a> {
-    let result = blob::with_blob_mut(&blob_handle, |b| {
-        b.reopen(row_id)?;
-        Ok(())
-    });
-    singular_ok_or_error_tuple(env, result)
+    singular_ok_or_error_tuple(env, blob::reopen(&blob_handle, row_id))
 }
 
 #[rustler::nif]

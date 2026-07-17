@@ -1,124 +1,281 @@
-use crate::connection::XqliteConn;
+use crate::connection::{self, XqliteConn};
 use crate::error::XqliteError;
-use rusqlite::blob::Blob;
+use crate::session::to_owned_binary;
+use rusqlite::ffi;
 use rustler::{Resource, ResourceArc, resource_impl};
-use std::sync::Mutex;
+use std::io::Write;
+use std::os::raw::c_int;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
+/// An open incremental-BLOB handle, owned as a RAW `*mut sqlite3_blob`.
+///
+/// This resource deliberately stores NO rusqlite `Blob` wrapper. A rusqlite
+/// `Blob<'conn>` holds a real `&Connection`, and its `Drop` dereferences that
+/// reference (`Blob::drop` -> `close_()` -> `self.conn.decode_result()` ->
+/// `self.db.borrow()`). If the connection has been explicitly closed first, its
+/// `Connection` was moved out of `Mutex<Option<Connection>>` and dropped, so
+/// that deref reads a moved-from value — a use-after-move (BEAM-crash-capable,
+/// layout-dependent). We sidestep the whole class of bug by owning only the raw
+/// pointer and calling the `sqlite3_blob_*` C functions directly.
+///
+/// The pointer lives in an `AtomicPtr` (null == closed/finalized), mirroring
+/// `XqliteStream`/`XqliteStatement`. Every `sqlite3_blob_*` call holds the
+/// connection `Mutex` for its whole duration (the raw-handle locking rule) via
+/// `with_live_blob`/`close`; `conn_resource_arc` keeps the `XqliteConn`
+/// *resource* alive so the Mutex is always lockable, even after the inner
+/// `Connection` is gone.
 pub(crate) struct XqliteBlob {
-    // SAFETY: the `Blob<'static>` is sound because `conn_resource_arc` keeps
-    // the `XqliteConn` *resource* alive for at least as long as this handle.
-    //
-    // Lifetime is NOT the same as exclusion. Every `sqlite3_blob_*` call goes
-    // through `with_blob`/`with_blob_mut`/`close`, which hold the *connection*
-    // Mutex for the whole duration of the raw call — that is what serialises
-    // against concurrent use of the same NOMUTEX connection (the raw-handle
-    // locking rule). The per-blob Mutex only provides interior mutability and
-    // guards the `Option` for explicit close.
-    pub(crate) blob: Mutex<Option<Blob<'static>>>,
+    pub(crate) blob: AtomicPtr<ffi::sqlite3_blob>,
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
 }
-
-// SAFETY: Blob is protected by a Mutex. The connection is protected by its
-// own Mutex. Access is serialized.
-unsafe impl Send for XqliteBlob {}
-unsafe impl Sync for XqliteBlob {}
 
 #[resource_impl]
 impl Resource for XqliteBlob {}
 
 impl Drop for XqliteBlob {
     fn drop(&mut self) {
-        let _ = close(self);
+        if let Err(e) = close(self) {
+            // Errors from Drop cannot be propagated. Log to stderr — writeln!,
+            // never eprintln!: eprintln! panics on a broken stderr (EPIPE), and
+            // rustler 0.38 resource destructors have no catch_unwind, so a panic
+            // here would unwind into C and kill the VM.
+            let _ = writeln!(
+                std::io::stderr(),
+                "[xqlite] Error closing SQLite blob during resource drop: {e:?}"
+            );
+        }
     }
 }
 
-/// Finalize the `sqlite3_blob` under the connection Mutex. Shared by the
-/// `blob_close` NIF and `Drop`; idempotent (a second call is a no-op).
+/// Open a blob and wrap its raw pointer. Runs entirely under the connection
+/// Mutex (via `with_conn`), proving the connection open before the raw
+/// `sqlite3_blob_open`.
+pub(crate) fn open(
+    handle: &ResourceArc<XqliteConn>,
+    db: &str,
+    table: &str,
+    column: &str,
+    row_id: i64,
+    read_only: bool,
+) -> Result<ResourceArc<XqliteBlob>, XqliteError> {
+    connection::with_conn(handle, |conn| {
+        let c_db = std::ffi::CString::new(db).map_err(|_| XqliteError::NulErrorInString)?;
+        let c_table =
+            std::ffi::CString::new(table).map_err(|_| XqliteError::NulErrorInString)?;
+        let c_column =
+            std::ffi::CString::new(column).map_err(|_| XqliteError::NulErrorInString)?;
+
+        // SAFETY: `with_conn` holds the connection Mutex, so `conn.handle()`
+        // yields the live `sqlite3*`. `sqlite3_blob_open` writes `blob_ptr`
+        // only on SQLITE_OK; the C string pointers are valid for the call.
+        let raw_db = unsafe { conn.handle() };
+        let mut blob_ptr: *mut ffi::sqlite3_blob = std::ptr::null_mut();
+        let rc = unsafe {
+            ffi::sqlite3_blob_open(
+                raw_db,
+                c_db.as_ptr(),
+                c_table.as_ptr(),
+                c_column.as_ptr(),
+                row_id,
+                c_int::from(!read_only),
+                &mut blob_ptr,
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            // SAFETY: raw_db is valid while the connection Mutex is held.
+            return Err(unsafe { blob_error(raw_db, rc) });
+        }
+        Ok(ResourceArc::new(XqliteBlob {
+            blob: AtomicPtr::new(blob_ptr),
+            conn_resource_arc: handle.clone(),
+        }))
+    })
+}
+
+/// Read up to `length` bytes at `offset`. Clamps to the bytes available and
+/// returns an empty binary when `offset` is at or past the end (preserving the
+/// original rusqlite `read_at_exact`-based behavior).
+pub(crate) fn read(
+    blob_handle: &ResourceArc<XqliteBlob>,
+    offset: usize,
+    length: usize,
+) -> Result<rustler::OwnedBinary, XqliteError> {
+    with_live_blob(blob_handle, |ptr, db| {
+        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex.
+        let size = unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize;
+        let actual_len = if offset >= size {
+            0
+        } else {
+            std::cmp::min(length, size - offset)
+        };
+        if actual_len == 0 {
+            // Nothing in range: return an empty binary WITHOUT touching SQLite,
+            // exactly as rusqlite's `raw_read_at` short-circuits `read_len == 0`.
+            return to_owned_binary(&[], "blob read");
+        }
+        // `0 <= offset < size` and `offset + actual_len <= size`, and `size`
+        // came from an i32, so both casts are lossless.
+        let c_offset = offset as c_int;
+        let c_len = actual_len as c_int;
+        let mut buf = vec![0u8; actual_len];
+        // SAFETY: `buf` holds `actual_len` bytes; `[offset, offset + actual_len)`
+        // is in bounds (checked above); `ptr`/`db` are valid under the Mutex.
+        let rc =
+            unsafe { ffi::sqlite3_blob_read(ptr, buf.as_mut_ptr().cast(), c_len, c_offset) };
+        if rc != ffi::SQLITE_OK {
+            // SAFETY: `db` is valid while the connection Mutex is held.
+            return Err(unsafe { blob_error(db, rc) });
+        }
+        to_owned_binary(&buf, "blob read")
+    })
+}
+
+/// Write `data` at `offset`. A write that would extend past the end of the blob
+/// is an error and writes nothing (matching rusqlite `Blob::write_at`).
+pub(crate) fn write(
+    blob_handle: &ResourceArc<XqliteBlob>,
+    offset: usize,
+    data: &[u8],
+) -> Result<(), XqliteError> {
+    with_live_blob(blob_handle, |ptr, db| {
+        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex.
+        let size = unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize;
+        if data.len().saturating_add(offset) > size {
+            return Err(XqliteError::from(rusqlite::Error::BlobSizeError));
+        }
+        // Bounds above prove `offset` and `data.len()` each fit in the i32
+        // `size`, so both casts are lossless.
+        let c_offset = offset as c_int;
+        let c_len = data.len() as c_int;
+        // SAFETY: `[offset, offset + data.len())` is in bounds (checked above);
+        // SQLite copies from `data` during the call; `ptr`/`db` valid under the
+        // Mutex.
+        let rc =
+            unsafe { ffi::sqlite3_blob_write(ptr, data.as_ptr().cast(), c_len, c_offset) };
+        if rc != ffi::SQLITE_OK {
+            // SAFETY: `db` is valid while the connection Mutex is held.
+            return Err(unsafe { blob_error(db, rc) });
+        }
+        Ok(())
+    })
+}
+
+/// Current size of the blob in bytes.
+pub(crate) fn size(blob_handle: &ResourceArc<XqliteBlob>) -> Result<usize, XqliteError> {
+    with_live_blob(blob_handle, |ptr, _db| {
+        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex;
+        // `sqlite3_blob_bytes` returns the cached, non-negative byte count.
+        Ok(unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize)
+    })
+}
+
+/// Move this blob handle to a different row of the same table/column.
+pub(crate) fn reopen(
+    blob_handle: &ResourceArc<XqliteBlob>,
+    row_id: i64,
+) -> Result<(), XqliteError> {
+    with_live_blob(blob_handle, |ptr, db| {
+        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex.
+        let rc = unsafe { ffi::sqlite3_blob_reopen(ptr, row_id) };
+        if rc != ffi::SQLITE_OK {
+            // SAFETY: `db` is valid while the connection Mutex is held.
+            return Err(unsafe { blob_error(db, rc) });
+        }
+        Ok(())
+    })
+}
+
+/// Close the `sqlite3_blob` under the connection Mutex. Shared by the
+/// `blob_close` NIF and `Drop`; idempotent (a null pointer means already
+/// closed).
 ///
-/// Lock order — connection Mutex, then the per-blob guard — matches
-/// `with_blob`. A live blob keeps the db alive (`sqlite3_close` returns
-/// `SQLITE_BUSY` while an internal blob cursor exists), so `sqlite3_blob_close`
-/// is safe whenever we hold the connection lock cleanly, even after an
-/// explicit `close/1`. On a poisoned connection lock we must not touch SQLite
-/// state, so we leak the blob instead (mirrors `take_and_finalize_raw`).
+/// Mirrors `stream::take_and_finalize_raw`: atomically swap the pointer to null
+/// (exclusive ownership, no racing close), then close under the connection
+/// Mutex so no concurrent `sqlite3_*` runs on the same NOMUTEX connection.
+///
+/// Closing is sound even after the connection was explicitly closed. An open
+/// blob registers an internal Vdbe (`pBlob->pStmt`, on `db->pVdbe`), so
+/// `connectionIsBusy` is true and `sqlite3_close` (v1) returns `SQLITE_BUSY`
+/// without freeing `db` — rusqlite's `Connection` Drop discards that result, so
+/// the `sqlite3*` is leaked-but-alive. `sqlite3_blob_close` therefore operates
+/// on a valid db either way, unlike the old rusqlite-`Blob` teardown that
+/// dereferenced a possibly moved-from `&Connection`. On a poisoned connection
+/// lock we must not touch SQLite state, so we leak the blob instead.
 pub(crate) fn close(blob_handle: &XqliteBlob) -> Result<(), XqliteError> {
-    let conn_lock = blob_handle.conn_resource_arc.conn.lock();
-    // Recover the per-blob guard even if poisoned: the blob MUST be torn down
-    // here (leak-or-close), never left for the field's default `Drop` to close
-    // without the connection lock.
-    let mut blob_guard = match blob_handle.blob.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    let Some(blob) = blob_guard.take() else {
-        return Ok(());
-    };
-    match conn_lock {
-        Ok(_conn_guard) => {
-            // `sqlite3_blob_close` runs under the held connection Mutex.
-            drop(blob);
-            Ok(())
-        }
-        Err(_) => {
-            std::mem::forget(blob);
-            Err(XqliteError::LockError(
-                "connection Mutex poisoned during blob close".to_string(),
-            ))
-        }
+    let old_ptr = blob_handle
+        .blob
+        .swap(std::ptr::null_mut(), Ordering::AcqRel);
+    if !old_ptr.is_null() {
+        let _conn_guard = blob_handle
+            .conn_resource_arc
+            .conn
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        // SAFETY: `old_ptr` came from the atomic swap, so we exclusively own it
+        // and no other close can race it. The connection Mutex is held, so no
+        // concurrent `sqlite3_*` runs on this db, and the open blob kept the db
+        // alive (see the doc comment). `sqlite3_blob_close`'s flush result is
+        // discarded — the blob is destroyed regardless, per SQLite.
+        let _ = unsafe { ffi::sqlite3_blob_close(old_ptr) };
     }
+    Ok(())
 }
 
+/// Runs `f` with the connection Mutex held, the connection proven open, and the
+/// raw blob pointer proven live. Passes the raw `sqlite3_blob*` plus the owning
+/// `sqlite3*` (for error reporting). Mirrors
+/// `XqliteStatement::with_live_stmt`.
+///
+/// Lock-then-load makes this sound against a concurrent close: a closer may
+/// swap the pointer to null at any moment, but it cannot call
+/// `sqlite3_blob_close` without this same Mutex — so a pointer loaded non-null
+/// *under the lock* stays valid until the guard drops.
 #[inline]
-pub(crate) fn with_blob<F, R>(
-    blob_handle: &ResourceArc<XqliteBlob>,
-    func: F,
-) -> Result<R, XqliteError>
+fn with_live_blob<F, R>(blob_handle: &ResourceArc<XqliteBlob>, f: F) -> Result<R, XqliteError>
 where
-    F: FnOnce(&Blob<'static>) -> Result<R, XqliteError>,
+    F: FnOnce(*mut ffi::sqlite3_blob, *mut ffi::sqlite3) -> Result<R, XqliteError>,
 {
-    // Raw-handle locking rule: every `sqlite3_blob_*` call must hold the
-    // connection Mutex. Acquire it first (order conn -> blob, matching
-    // `close`), prove the connection open, then take the per-blob guard.
-    let conn_guard = blob_handle
-        .conn_resource_arc
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    if conn_guard.is_none() {
-        return Err(XqliteError::ConnectionClosed);
-    }
     let guard = blob_handle
-        .blob
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    match guard.as_ref() {
-        Some(blob) => func(blob),
-        None => Err(XqliteError::ConnectionClosed),
-    }
-}
-
-#[inline]
-pub(crate) fn with_blob_mut<F, R>(
-    blob_handle: &ResourceArc<XqliteBlob>,
-    func: F,
-) -> Result<R, XqliteError>
-where
-    F: FnOnce(&mut Blob<'static>) -> Result<R, XqliteError>,
-{
-    let conn_guard = blob_handle
         .conn_resource_arc
         .conn
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    if conn_guard.is_none() {
+    let conn = guard.as_ref().ok_or(XqliteError::ConnectionClosed)?;
+
+    let ptr = blob_handle.blob.load(Ordering::Acquire);
+    if ptr.is_null() {
         return Err(XqliteError::ConnectionClosed);
     }
-    let mut guard = blob_handle
-        .blob
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    match guard.as_mut() {
-        Some(blob) => func(blob),
-        None => Err(XqliteError::ConnectionClosed),
-    }
+    // SAFETY: `handle()` only extracts the raw `sqlite3*`; `guard` keeps the
+    // Connection alive (and exclusively ours) for the whole duration of `f`.
+    let db = unsafe { conn.handle() };
+    f(ptr, db)
+}
+
+/// Builds an `XqliteError` from a non-OK blob result code, classified exactly as
+/// rusqlite's `decode_result` would: read `sqlite3_errmsg` off the db handle,
+/// then route through `XqliteError::from`.
+///
+/// # Safety
+///
+/// `db` must be the valid `sqlite3*` owning the blob, held under the connection
+/// Mutex for the duration of this call.
+#[inline]
+unsafe fn blob_error(db: *mut ffi::sqlite3, rc: c_int) -> XqliteError {
+    // SAFETY: `db` is valid under the connection Mutex; `sqlite3_errmsg` returns
+    // an internal buffer valid until the next API call, and we copy immediately.
+    let message = unsafe {
+        let err_msg_ptr = ffi::sqlite3_errmsg(db);
+        if err_msg_ptr.is_null() {
+            format!("SQLite blob operation failed (code {rc})")
+        } else {
+            std::ffi::CStr::from_ptr(err_msg_ptr)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    XqliteError::from(rusqlite::Error::SqliteFailure(
+        ffi::Error::new(rc),
+        Some(message),
+    ))
 }

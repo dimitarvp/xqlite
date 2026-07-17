@@ -1,0 +1,15 @@
+# Standalone repro crate — deliberately NOT a member of any workspace, so it is
+# invisible to the xqlitenif build, `cargo test`, `mix test.seq`, and CI. See
+# src/main.rs for what it proves and how to run it under Miri.
+[package]
+name = "blob_uaf_model"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "blob_uaf_model"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "unwind"

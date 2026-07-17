@@ -398,10 +398,10 @@ defmodule Xqlite.NIF.BlobTest do
       {:ok, blob} = NIF.blob_open(conn, "main", "bl_closed", "data", 1, false)
       NIF.blob_close(blob)
 
-      assert {:error, _} = NIF.blob_read(blob, 0, 10)
-      assert {:error, _} = NIF.blob_write(blob, 0, <<1>>)
-      assert {:error, _} = NIF.blob_size(blob)
-      assert {:error, _} = NIF.blob_reopen(blob, 1)
+      assert {:error, :connection_closed} = NIF.blob_read(blob, 0, 10)
+      assert {:error, :connection_closed} = NIF.blob_write(blob, 0, <<1>>)
+      assert {:error, :connection_closed} = NIF.blob_size(blob)
+      assert {:error, :connection_closed} = NIF.blob_reopen(blob, 1)
     end
   end
 
@@ -434,11 +434,44 @@ defmodule Xqlite.NIF.BlobTest do
     {:ok, blob} = NIF.blob_open(conn, "main", "bl_cc", "data", 1, false)
     :ok = NIF.close(conn)
 
-    assert {:error, _} = NIF.blob_read(blob, 0, 16)
-    assert {:error, _} = NIF.blob_write(blob, 0, <<1>>)
-    assert {:error, _} = NIF.blob_size(blob)
-    assert {:error, _} = NIF.blob_reopen(blob, 1)
+    assert {:error, :connection_closed} = NIF.blob_read(blob, 0, 16)
+    assert {:error, :connection_closed} = NIF.blob_write(blob, 0, <<1>>)
+    assert {:error, :connection_closed} = NIF.blob_size(blob)
+    assert {:error, :connection_closed} = NIF.blob_reopen(blob, 1)
 
     assert :ok = NIF.blob_close(blob)
+  end
+
+  # Regression: the destructor path. A blob is opened, its *connection* is then
+  # closed, and the blob is abandoned by a dying process so its Rust `Drop`
+  # (`blob::close`) runs while the connection slot is already `None`. Pre-fix
+  # this dereferenced a moved-from `&Connection` inside the rusqlite `Blob`
+  # wrapper (a use-after-move; see native/xqlitenif/miri/). Post-fix the blob
+  # owns only a raw `sqlite3_blob*` and closing it is sound (the open blob kept
+  # the db alive via SQLITE_BUSY). The assertion is survival: the VM must still
+  # be running afterward.
+  test "a blob abandoned after its connection is closed is torn down crash-free" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+
+    :ok =
+      NIF.execute_batch(conn, """
+      CREATE TABLE bl_gc (id INTEGER PRIMARY KEY, data BLOB);
+      INSERT INTO bl_gc VALUES (1, zeroblob(16));
+      """)
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        {:ok, _blob} = NIF.blob_open(conn, "main", "bl_gc", "data", 1, false)
+        :ok = NIF.close(conn)
+        :ok
+      end)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 2_000
+
+    :erlang.garbage_collect()
+    Process.sleep(50)
+
+    {:ok, conn2} = NIF.open_in_memory(":memory:")
+    assert {:ok, %{rows: [[1]]}} = NIF.query(conn2, "SELECT 1", [])
   end
 end
