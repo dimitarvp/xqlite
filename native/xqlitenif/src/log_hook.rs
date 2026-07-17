@@ -40,8 +40,22 @@ static MASTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// SQLite log callback. Fan-out to all registered subscribers.
 fn log_callback(err_code: c_int, msg: &str) {
-    // SAFETY: LOG_SUBSCRIBERS is 'static; snapshot iteration is
-    // wait-free. The HookList outlives every callback.
+    // Hold MASTER_LOCK while reading the subscriber list. This hook is
+    // PROCESS-GLOBAL (installed via sqlite3_config) and fires from any thread
+    // with no connection Mutex held, so — unlike the per-connection hooks —
+    // nothing else serialises this read against register/unregister, which
+    // free the old subscriber Vec under this same lock. Without it the
+    // lock-free read races the free: use-after-free. A plain Mutex (not
+    // RwLock) is deliberate — log events are rare, so serialising them costs
+    // nothing that matters, and a caller that floods registrations only slows
+    // its own log delivery. Ordering is safe: register/unregister take only
+    // MASTER_LOCK, so no thread holds it and then waits on a connection Mutex.
+    let _guard = match MASTER_LOCK.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // SAFETY: LOG_SUBSCRIBERS is 'static; MASTER_LOCK now serialises this
+    // snapshot read against the writers that free the list.
     unsafe {
         LOG_SUBSCRIBERS.for_each_snapshot(|entry| {
             send_log_to_pid(&entry.state.pid, err_code, msg);

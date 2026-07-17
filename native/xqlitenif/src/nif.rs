@@ -1922,15 +1922,7 @@ fn session_is_empty(session_handle: ResourceArc<XqliteSession>) -> Result<bool, 
 
 #[rustler::nif]
 fn session_delete<'a>(env: Env<'a>, session_handle: ResourceArc<XqliteSession>) -> Term<'a> {
-    let result = (|| -> Result<(), XqliteError> {
-        let mut guard = session_handle
-            .session
-            .lock()
-            .map_err(|e| XqliteError::LockError(e.to_string()))?;
-        guard.take();
-        Ok(())
-    })();
-    singular_ok_or_error_tuple(env, result)
+    singular_ok_or_error_tuple(env, session::close(&session_handle))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -2100,14 +2092,5 @@ fn blob_reopen<'a>(
 
 #[rustler::nif]
 fn blob_close<'a>(env: Env<'a>, blob_handle: ResourceArc<XqliteBlob>) -> Term<'a> {
-    let result = (|| -> Result<(), XqliteError> {
-        let mut guard = blob_handle
-            .blob
-            .lock()
-            .map_err(|e| XqliteError::LockError(e.to_string()))?;
-        // Drop the blob (its Drop impl calls sqlite3_blob_close)
-        guard.take();
-        Ok(())
-    })();
-    singular_ok_or_error_tuple(env, result)
+    singular_ok_or_error_tuple(env, blob::close(&blob_handle))
 }

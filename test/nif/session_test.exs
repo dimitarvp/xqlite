@@ -625,4 +625,23 @@ defmodule Xqlite.NIF.SessionTest do
 
     assert {:error, _} = NIF.changeset_apply(conn, <<>>, :omit)
   end
+
+  # Regression: a session whose *connection* is closed while the session is
+  # still live. Ops must hold the connection Mutex, see it closed, and fail
+  # cleanly. Explicit delete after the fact must not crash the VM: a session
+  # registers no internal Vdbe, so sqlite3_close already freed the db —
+  # session_delete must detect the closed connection and leak the session
+  # object rather than call sqlite3session_delete on freed memory. Guards the
+  # A2 close-order use-after-free fix.
+  test "session ops on a connection closed after open fail cleanly and delete is safe" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+    {:ok, session} = NIF.session_new(conn)
+    :ok = NIF.close(conn)
+
+    assert {:error, _} = NIF.session_attach(session, nil)
+    assert {:error, _} = NIF.session_changeset(session)
+    assert {:error, _} = NIF.session_patchset(session)
+
+    assert :ok = NIF.session_delete(session)
+  end
 end

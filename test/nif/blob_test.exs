@@ -415,4 +415,30 @@ defmodule Xqlite.NIF.BlobTest do
 
     assert {:error, _} = NIF.blob_open(conn, "main", "t", "c", 1, true)
   end
+
+  # Regression: a blob handle whose *connection* is closed while the blob is
+  # still live. Every op must hold the connection Mutex, see it closed, and
+  # fail cleanly rather than touch the torn-down connection; explicit close
+  # after the fact must not crash the VM (the open blob kept the db alive via
+  # SQLITE_BUSY, so sqlite3_blob_close finalizes it safely). Guards the A2
+  # locking-law fix for blob I/O.
+  test "blob ops on a connection closed after open fail cleanly and teardown is safe" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+
+    :ok =
+      NIF.execute_batch(conn, """
+      CREATE TABLE bl_cc (id INTEGER PRIMARY KEY, data BLOB);
+      INSERT INTO bl_cc VALUES (1, zeroblob(16));
+      """)
+
+    {:ok, blob} = NIF.blob_open(conn, "main", "bl_cc", "data", 1, false)
+    :ok = NIF.close(conn)
+
+    assert {:error, _} = NIF.blob_read(blob, 0, 16)
+    assert {:error, _} = NIF.blob_write(blob, 0, <<1>>)
+    assert {:error, _} = NIF.blob_size(blob)
+    assert {:error, _} = NIF.blob_reopen(blob, 1)
+
+    assert :ok = NIF.blob_close(blob)
+  end
 end
