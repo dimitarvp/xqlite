@@ -357,6 +357,20 @@ defmodule Xqlite.XqliteTelemetryTest do
       detach(handler_id)
     end
 
+    test "open_temporary/0 reports mode :temp with a nil path" do
+      handler_id = attach_capture([[:xqlite, :open, :stop]])
+
+      assert {:ok, conn} = Xqlite.open_temporary()
+      on_exit(fn -> XqliteNIF.close(conn) end)
+
+      assert_receive {:telemetry_event, [:xqlite, :open, :stop], _measurements, metadata}
+      assert metadata.mode == :temp
+      assert metadata.path == nil
+      assert metadata.result_class == :ok
+
+      detach(handler_id)
+    end
+
     test "open_in_memory_readonly/1 reports mode :memory_readonly" do
       handler_id = attach_capture([[:xqlite, :open, :stop]])
 

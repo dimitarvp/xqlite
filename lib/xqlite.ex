@@ -262,6 +262,46 @@ defmodule Xqlite do
     do: Map.merge(start_md, %{result_class: :error, error_reason: reason})
 
   @doc """
+  Opens a read-only connection to an existing database file.
+
+  Fails with a structured error if the file does not exist — read-only
+  opens never create. No PRAGMAs are applied; read-only databases
+  can't persist most settings. Writes fail with
+  `{:error, {:read_only_database, message}}`.
+
+  Emits `[:xqlite, :open, :start | :stop]` telemetry with mode
+  `:readonly`.
+  """
+  @spec open_readonly(String.t()) :: {:ok, conn()} | error()
+  def open_readonly(path) when is_binary(path) do
+    start_md = %{path: path, mode: :readonly}
+
+    span_with_stop_metadata [:xqlite, :open], start_md do
+      result = XqliteNIF.open_readonly(path)
+      {result, open_stop_metadata(start_md, result)}
+    end
+  end
+
+  @doc """
+  Opens a connection to a private temporary on-disk database.
+
+  SQLite backs it with an anonymous file it removes on close; the
+  database has no path — `db_path/1` returns `{:ok, nil}`.
+
+  Emits `[:xqlite, :open, :start | :stop]` telemetry with mode
+  `:temp` and `path: nil`.
+  """
+  @spec open_temporary() :: {:ok, conn()} | error()
+  def open_temporary do
+    start_md = %{path: nil, mode: :temp}
+
+    span_with_stop_metadata [:xqlite, :open], start_md do
+      result = XqliteNIF.open_temporary()
+      {result, open_stop_metadata(start_md, result)}
+    end
+  end
+
+  @doc """
   Closes the connection, releasing the underlying SQLite handle.
 
   Idempotent: closing an already-closed connection returns `:ok`. Any

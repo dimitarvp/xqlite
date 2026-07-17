@@ -169,6 +169,30 @@ defmodule Xqlite.NIF.ConnectionTest do
     end
   end
 
+  describe "Xqlite.open_readonly/1 and open_temporary/0 wrappers" do
+    test "open_readonly opens an existing file read-only" do
+      path = Xqlite.TestUtil.tmp_db_path("ro_wrap")
+      assert {:ok, rw} = NIF.open(path)
+      assert {:ok, 0} = NIF.execute(rw, "CREATE TABLE t (id INTEGER PRIMARY KEY)", [])
+      assert :ok = Xqlite.close(rw)
+
+      assert {:ok, ro} = Xqlite.open_readonly(path)
+      assert {:ok, %{num_rows: 0}} = NIF.query(ro, "SELECT * FROM t", [])
+
+      assert {:error, {:read_only_database, _}} =
+               NIF.execute(ro, "INSERT INTO t VALUES (1)", [])
+
+      assert :ok = Xqlite.close(ro)
+    end
+
+    test "open_temporary yields a pathless usable connection" do
+      assert {:ok, conn} = Xqlite.open_temporary()
+      assert {:ok, nil} = NIF.db_path(conn)
+      assert {:ok, 0} = NIF.execute(conn, "CREATE TABLE t (id INTEGER)", [])
+      assert :ok = Xqlite.close(conn)
+    end
+  end
+
   describe "WAL cleanup on close" do
     test "the -wal sidecar is checkpointed and removed by the last close" do
       path = Xqlite.TestUtil.tmp_db_path("wal_close")

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for in-memory and temporary databases), with a matching raw
   `XqliteNIF.db_path/1` stub.
 
+- **`Xqlite.open_readonly/1` and `Xqlite.open_temporary/0`.** The
+  last two raw-only opens get their ergonomic wrappers, emitting the
+  `[:xqlite, :open]` span with modes `:readonly` / `:temp`.
+
 ### Fixed
 
 - **Connection open spans actually fire.** The telemetry docs have
