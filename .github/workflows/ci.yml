@@ -187,3 +187,52 @@ jobs:
 
       - name: Run tests
         run: mix test.seq
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: format_and_lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Elixir
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.DEFAULT_ELIXIR }}
+          otp-version: ${{ env.DEFAULT_OTP }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Restore Elixir dependencies cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            deps
+            _build
+            priv/native
+          key: v0-elixir-coverage-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            v0-elixir-coverage-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-mix-
+
+      - name: Restore Rust (Cargo) cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/xqlitenif
+          prefix-key: "v0-rust-coverage-${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}"
+
+      - name: Install Elixir dependencies
+        run: mix deps.get
+
+      - name: Run tests sequentially with coverage export
+        run: mix test.seq --cover
+
+      - name: Push merged coverage to Coveralls
+        run: mix coveralls.github --import-cover cover test/xqlite_test.exs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

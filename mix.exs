@@ -44,6 +44,7 @@ defmodule Xqlite.MixProject do
         "coveralls.post": :test,
         "coveralls.html": :test,
         "coveralls.circle": :test,
+        "coveralls.github": :test,
         "test.seq": :test
       ]
     ]

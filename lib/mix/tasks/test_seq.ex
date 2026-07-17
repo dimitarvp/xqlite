@@ -11,6 +11,12 @@ defmodule Mix.Tasks.Test.Seq do
 
       mix test.seq
       mix test.seq --trace
+      mix test.seq --cover   # per-file .coverdata exports under cover/
+
+  With `--cover`, each file's OS process exports a distinctly named
+  `.coverdata` (derived from the file path), so runs don't overwrite
+  each other. Merge and publish afterwards, e.g.
+  `mix coveralls.github --import-cover cover test/xqlite_test.exs`.
   """
 
   use Mix.Task
@@ -36,7 +42,9 @@ defmodule Mix.Tasks.Test.Seq do
   defp run_test_files([file | rest], args, failed_files) do
     IO.puts("\n=== Running #{file} ===")
 
-    case System.cmd("mix", ["test", file] ++ args, into: IO.stream()) do
+    case System.cmd("mix", ["test", file] ++ args ++ coverage_args(args, file),
+           into: IO.stream()
+         ) do
       {_, 0} ->
         IO.puts("✓ #{file} passed")
         run_test_files(rest, args, failed_files)
@@ -44,6 +52,16 @@ defmodule Mix.Tasks.Test.Seq do
       {_, exit_code} ->
         IO.puts("✗ #{file} failed (exit code: #{exit_code})")
         run_test_files(rest, args, [file | failed_files])
+    end
+  end
+
+  # Distinct export names per file (full-path-derived — bare basenames
+  # collide, e.g. test/pragma_test.exs vs test/nif/pragma_test.exs).
+  defp coverage_args(args, file) do
+    if "--cover" in args do
+      ["--export-coverage", String.replace(Path.rootname(file), ["/", "\\"], "_")]
+    else
+      []
     end
   end
 

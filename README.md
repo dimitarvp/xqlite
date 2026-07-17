@@ -5,6 +5,7 @@
 [![Downloads](https://img.shields.io/hexpm/dt/xqlite.svg)](https://hex.pm/packages/xqlite)
 [![SQLite](https://img.shields.io/badge/SQLite-3.53.2-003B57?logo=sqlite&logoColor=white)](https://sqlite.org/releaselog/3_53_2.html)
 [![Build Status](https://github.com/dimitarvp/xqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/dimitarvp/xqlite/actions)
+[![Coverage](https://coveralls.io/repos/github/dimitarvp/xqlite/badge.svg?branch=main)](https://coveralls.io/github/dimitarvp/xqlite?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Low-level, fast, panic-free NIF bindings to SQLite 3 for Elixir. Will never crash the BEAM VM. Powered by Rust with [rusqlite](https://crates.io/crates/rusqlite) and [rustler](https://github.com/rusterlium/rustler). Bundled SQLite 3.53.2 -- no need to have SQLite already installed on your machine.
