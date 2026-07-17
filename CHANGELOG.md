@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two new hexdocs guides.** "Full-text search with FTS5" (virtual
+  tables, external-content triggers, bm25 ranking,
+  highlight/snippet, adapter usage) and the doc-first "Spatial data
+  with SpatiaLite" (per-platform install, gated extension loading,
+  geometry columns, spatial index pattern, honest caveats).
+
 - **Busy observation joins the telemetry bridge.**
   `Xqlite.Telemetry.bridge/2` accepts `:busy` (included in the
   default `:all`), re-emitting contention deliveries as

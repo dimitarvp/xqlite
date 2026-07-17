@@ -83,7 +83,9 @@ defmodule Xqlite.MixProject do
         "README.md",
         "CHANGELOG.md",
         "LICENSE.md",
-        "guides/wiring_telemetry.md"
+        "guides/wiring_telemetry.md",
+        "guides/full_text_search.md",
+        "guides/spatialite.md"
       ],
       groups_for_modules: [
         "High-Level API": [
