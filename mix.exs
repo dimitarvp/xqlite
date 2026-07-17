@@ -90,7 +90,26 @@ defmodule Xqlite.MixProject do
       groups_for_modules: [
         "High-Level API": [
           Xqlite,
-          Xqlite.Pragma
+          Xqlite.Pragma,
+          Xqlite.Result,
+          Xqlite.ExplainAnalyze
+        ],
+        "Type Extensions": [
+          Xqlite.TypeExtension,
+          Xqlite.TypeExtension.Date,
+          Xqlite.TypeExtension.DateTime,
+          Xqlite.TypeExtension.Decimal,
+          Xqlite.TypeExtension.Duration,
+          Xqlite.TypeExtension.Instant,
+          Xqlite.TypeExtension.JSON,
+          Xqlite.TypeExtension.NaiveDateTime,
+          Xqlite.TypeExtension.Time,
+          Xqlite.TypeExtension.UUID
+        ],
+        Telemetry: [
+          Xqlite.Telemetry,
+          Xqlite.Telemetry.Bridge,
+          Xqlite.Telemetry.OpenTelemetry
         ],
         "Schema Structs": [
           Xqlite.Schema.ColumnInfo,

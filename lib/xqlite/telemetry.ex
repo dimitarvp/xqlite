@@ -361,7 +361,12 @@ defmodule Xqlite.Telemetry do
     # switch to a per-callsite `if Xqlite.Telemetry.enabled?() do`
     # pattern. For now, this keeps call sites clean and reads nicely.
 
-    @doc false
+    @doc """
+    Emit a single telemetry event.
+
+    Wraps `:telemetry.execute/3`. When telemetry is compiled out,
+    expands to a no-op (the arguments are not evaluated).
+    """
     defmacro emit(event_name, measurements, metadata) do
       quote do
         _ = unquote(event_name)
@@ -371,7 +376,18 @@ defmodule Xqlite.Telemetry do
       end
     end
 
-    @doc false
+    @doc """
+    Run `block` inside a `:telemetry.span/3`.
+
+    The block must evaluate to a value; that value is returned. Both
+    the `:start` and `:stop` events carry the supplied `metadata`.
+    If the block raises or throws, an `:exception` event fires
+    instead of `:stop`, with `kind`, `reason`, and `stacktrace` added
+    to the metadata, and the exception re-raises.
+
+    When telemetry is compiled out, the block evaluates directly with
+    no telemetry calls.
+    """
     defmacro span(event_name, metadata, do: block) do
       quote do
         _ = unquote(event_name)
@@ -380,7 +396,11 @@ defmodule Xqlite.Telemetry do
       end
     end
 
-    @doc false
+    @doc """
+    Like `span/3` but lets the block return `{value, extra_metadata}`
+    so the `:stop` event can carry per-operation metadata that wasn't
+    known at `:start`.
+    """
     defmacro span_with_stop_metadata(event_name, start_metadata, do: block) do
       quote do
         _ = unquote(event_name)

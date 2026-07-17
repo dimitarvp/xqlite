@@ -1,6 +1,6 @@
 # xqlite
 
-Low-level Elixir NIF library for SQLite3 via Rust (rusqlite 0.38 + Rustler 0.37). Bundled SQLite — no native install required.
+Low-level Elixir NIF library for SQLite3 via Rust (rusqlite 0.40 + Rustler 0.38). Bundled SQLite — no native install required.
 
 ## Build & Test
 
@@ -30,16 +30,20 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 
 ## Project Structure
 
-- `lib/xqlite.ex` — high-level API (stream, strict mode, FK enforcement)
-- `lib/xqlite/xqlitenif.ex` — NIF function declarations (connection, query, execute, pragma, stream, transaction, schema, cancel)
-- `lib/xqlite/pragma.ex` — typed PRAGMA schema + getters/setters
-- `lib/xqlite/stream_resource_callbacks.ex` — Stream.resource/3 callbacks
+- `lib/xqlite.ex` — high-level API: every ergonomic wrapper (open/close, query/execute, transactions + state readers, statements, schema introspection, busy policy/observers, backup/serialize, strict mode, FK enforcement)
+- `lib/xqlite/xqlitenif.ex` — raw NIF stub declarations (96 stubs, body always `err()`)
+- `lib/xqlite/pragma.ex` + `pragma_spec.ex` — typed PRAGMA schema + getters/setters
+- `lib/xqlite/telemetry.ex`, `telemetry/bridge.ex`, `telemetry/open_telemetry.ex` — compile-time-gated telemetry macros, hook→telemetry bridge GenServer, OTel semantic-convention attribute mapping
+- `lib/xqlite/type_extension.ex` + `type_extension/*.ex` — bidirectional type-extension behaviour + 9 built-ins
+- `lib/xqlite/result.ex`, `explain_analyze.ex` — result structs (`Result` implements `Table.Reader`)
+- `lib/xqlite/stream_resource_callbacks.ex` — Stream.resource/3 callbacks (internal)
 - `lib/xqlite/schema/` — struct modules (ColumnInfo, DatabaseInfo, etc.)
-- `lib/mix/tasks/test_seq.ex` — sequential test runner task
-- `native/xqlitenif/src/` — Rust NIF code:
-  - `lib.rs` (atoms, module declarations), `nif.rs` (core NIFs, ~1000 lines),
-  - `error.rs` (error classification), `cancel.rs` (progress-handler cancellation),
-  - `stream.rs` (AtomicPtr-based streaming), `schema.rs` (PRAGMA introspection), `util.rs` (param conversion, row processing)
+- `lib/mix/tasks/` — `verify` (the pre-commit gate) + `test_seq` (sequential test runner)
+- `native/xqlitenif/src/` — Rust NIF crate (25 files, ~7.7k lines):
+  - `nif.rs` (ALL 96 `#[rustler::nif]` functions, ~2100 lines), `lib.rs` (atoms, module declarations)
+  - resources: `connection.rs`, `statement.rs`, `stream.rs`, `blob.rs`, `session.rs`, `cancel.rs`
+  - hooks & callbacks: `hook_util.rs`, `update_hook.rs`, `wal_hook.rs`, `commit_hook.rs`, `rollback_hook.rs`, `log_hook.rs`, `progress_dispatch.rs`, `busy_handler.rs`, `authorizer.rs`
+  - `error.rs` + `constraint_parse.rs` (error classification), `schema.rs` (introspection + default-value classifier), `explain_analyze.rs`, `query.rs`, `pragma.rs`, `transaction.rs`, `util.rs` (param conversion, row processing)
 - `scripts/release.sh` — semi-manual version bump script (amends commits, force-updates tags)
 
 ## Architecture
@@ -64,12 +68,13 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 9. **Checksum generation requires `--no-config`.** `mix rustler_precompiled.download XqliteNIF --all --print --no-config` — without `--no-config`, compilation triggers the `use RustlerPrecompiled` macro which fails if the checksum file doesn't exist yet.
 10. **Local source builds via `.envrc`.** `.envrc` sets `XQLITE_BUILD=true` so `rustler_precompiled` always compiles from Rust source locally. The `.envrc` is gitignored. Version strings in `mix.exs` and `Cargo.toml` stay at the released version — only bump them on release day (see Release Checklist).
 11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
-12. **NIF version features in `Cargo.toml`.** Rustler 0.37 requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
+12. **NIF version features in `Cargo.toml`.** Rustler (since 0.37) requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
 13. **Delete old checksum file before regenerating.** `mix rustler_precompiled.download --all` won't overwrite stale entries from a prior version. Always `rm -f checksum-Elixir.XqliteNIF.exs` first. If `mix hex.publish` still fails with a checksum mismatch, `--only-local` can add just the local platform's entry.
 14. **rusqlite upgrades touch `error.rs` first.** Historical example: PR #1819 changed `Error::Utf8Error(err)` → `Error::Utf8Error(col, err)` and replaced `From<ValueRef> for Value` with `TryFrom` (absorbed in our 0.39 upgrade). When bumping rusqlite, expect the `From<RusqliteError>` match in `error.rs` to be the breakage point; `row.get::<_, Value>()?` call sites usually survive untouched.
 15. **Windows paths in Elixir.** `CARGO_HOME` and other env vars on Windows use backslashes. `Path.join` appends with forward slashes, producing mixed-separator paths that `Path.wildcard` cannot match. Always normalize with `String.replace("\\", "/")` before globbing. This bit us in `test_helper.exs`.
 16. **C compiler on Windows GHA runners.** `cl.exe` (MSVC) is NOT on PATH — it needs `ilammy/msvc-dev-cmd@v1` or manual `vcvarsall.bat` setup. MinGW `gcc` IS on PATH (gcc 14.2.0 at `C:\mingw64\bin`). Use `gcc -shared` for compiling SQLite extensions on Windows — proven by sqlean project. SQLite extensions use a function-pointer ABI so MinGW vs MSVC is irrelevant.
 17. **`mix clean` before checksum download after version bump.** After bumping the version in `mix.exs` and `Cargo.toml`, stale build artifacts retain the old version. `mix rustler_precompiled.download --no-config` reads the version from the compiled beam, not the source. Always run `mix clean && mix compile` before `mix rustler_precompiled.download` on release day.
+18. **Hex 2.5+ publishes need account-level 2FA.** `mix hex.user auth` is an OAuth device flow now; without TOTP 2FA enabled on the hex.pm account the granted token is silently READ-ONLY and `mix hex.publish` fails with a permissions error. Toolchain (mise) bumps reinstall hex and orphan the old credential format ("no credentials" on a machine that had them) — expect a fresh device-flow auth on the first publish after any Elixir bump. CLI key management (`mix hex.user key ...`) is gone; web dashboard + `HEX_API_KEY` is the fallback.
 
 ## Elixir Code Style
 
@@ -134,9 +139,9 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 
 ## Current State (July 2026)
 
-- v0.8.0 released on Hex (2026-07-14). Elixir `~> 1.15`, OTP 26/27/28.
+- v0.9.0 released on Hex (2026-07-17). Elixir `~> 1.15`, OTP 26–29.
 - Rust edition 2024. Rustler 0.38, rusqlite 0.40 (bundled SQLite 3.53.2).
 - `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
-- CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.16–1.19 × OTP 26–28). Uses `XQLITE_BUILD=true` to force source compilation.
+- CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.17–1.20 × OTP 26–29), Coveralls coverage job. Uses `XQLITE_BUILD=true` to force source compilation.
 - Windows support: best-effort, untested locally, relies on community reports.

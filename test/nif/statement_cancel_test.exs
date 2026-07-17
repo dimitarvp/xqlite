@@ -8,6 +8,11 @@ defmodule Xqlite.NIF.StatementCancelTest do
   # billion first (a 1M bound DID lose that race on macOS runners). If
   # cancellation ever breaks, the test fails loudly via ExUnit timeout
   # rather than silently completing.
+  #
+  # Deliberately a single hardcoded in-memory connection instead of the
+  # connection_openers/0 loop: cancellation is timing-sensitive and
+  # connection-mode-agnostic — multiplying opener modes would only
+  # multiply the flake surface this file was deflaked to remove.
   @slow_sql "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT count(*) FROM n"
 
   setup do
