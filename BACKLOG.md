@@ -7,26 +7,6 @@ burn-down.
 
 ## Open
 
-- [S1 — needs Dimi ruling] (Run 7, A9) Reading a non-finite (±Inf)
-  REAL raises `ArgumentError "argument error"` on EVERY read path
-  (`query`/`stream`/`step`; computed `SELECT 9e999` AND stored). Root:
-  rustler `f64::encode` → `enif_make_double` has no finiteness guard
-  (`primitive.rs:61`), called at `util.rs:26` (`encode_val`) and in
-  `sqlite_row_to_elixir_terms`'s `SQLITE_FLOAT` arm. Not `{:ok|:error}`,
-  not a value; conn stays usable (recoverable, no wedge). Inconsistent
-  with `schema.rs:302` which DOES guard non-finite. Announcement-blocker
-  pending a semantics decision: raise vs `{:error, :non_finite_float}`
-  vs sentinel atom vs lossless float. Repro: `bash type_edges/run.sh`
-  (F1 pins). Not fixed speculatively (design choice).
-- [S1 — needs Dimi ruling] (Run 7, A9) The stream path swallows a
-  mid-stream fetch error into `Logger.error` and silently truncates
-  the result (`stream_resource_callbacks.ex:89-102` — deliberate per
-  its own comment). A 4-row table with invalid-UTF-8 in row 3, streamed
-  `batch_size:1`, yields only rows 1-2 with no error to the consumer;
-  `query`/`step` return `{:error, {:utf8_error,…}}`. Success-on-failed-
-  read / silent truncation, user-undocumented. Decide: propagate (raise
-  / terminal error element / `on_error:` opt) vs keep + document. Repro:
-  `bash type_edges/run.sh` (F2 pins). Not fixed speculatively.
 - [decision-debt — needs Dimi ruling] (Run 7, A9) Offset-preserving
   `DateTime` stored as ISO 8601 TEXT sorts LEXICALLY, not
   chronologically, under `ORDER BY` when rows carry different UTC
@@ -74,6 +54,16 @@ burn-down.
 
 ## Closed
 
+- 2026-07-19 (Run 7, A9) F1: reading a non-finite (±Inf) REAL raised
+  `ArgumentError`; the row-value encoders now map ±Inf to the sentinel
+  atoms `:positive_infinity`/`:negative_infinity` and NaN to `nil` at
+  both float sites (`encode_val` + `sqlite_row_to_elixir_terms`),
+  consistent with the `schema.rs` guard → `16ca65d`.
+- 2026-07-19 (Run 7, A9) F2: `Xqlite.stream/4` gained an `on_error`
+  option — `:raise` (default, raises `Xqlite.StreamError`), `:halt`
+  (opt-in lossy), `:emit_error` (tagged `{:ok, row}` / terminal
+  `{:error, reason}`); the old silent-truncate default is gone →
+  `16ca65d`.
 - 2026-07-19 M6 (Run 1): own `catch_unwind` guard on the three raw-FFI
   callbacks (progress/wal/busy) so a future callback panic degrades to a
   safe fallback instead of unwinding into SQLite and killing the VM →

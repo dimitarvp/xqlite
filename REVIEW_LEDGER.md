@@ -1073,3 +1073,24 @@ per-axis dryness state. Nothing found is ever silently dropped.
   F1/F2 fix will CHURN the `util.rs` encode paths / `stream_resource_callbacks.ex`
   and re-wet it). Churn in the `util.rs` value encoders, the stream fetch loop, or
   any type_extension encoder re-wets A9.
+
+### Resolution — F1 + F2 ruled and fixed → `16ca65d`
+
+- **F1 fixed.** Non-finite REAL reads now map to sentinel atoms —
+  `+Inf → :positive_infinity`, `-Inf → :negative_infinity`, `NaN → nil` — via
+  `util.rs` `encode_f64`, applied at BOTH float-encode sites (`encode_val`
+  query path + the `SQLITE_FLOAT` arm of `sqlite_row_to_elixir_terms`
+  stream/step path); atoms added in `lib.rs`. Consistent with the
+  `schema.rs` finiteness guard. Tests: query/stream/step read `±Inf` →
+  sentinels, computed NaN → nil, conn stays usable, finite + NULL round-trip.
+- **F2 fixed.** `Xqlite.stream/4` gains a ruled `on_error` option threaded
+  through `stream_resource_callbacks.ex`: `:raise` (DEFAULT — raises
+  `Xqlite.StreamError`, structured reason preserved), `:halt` (opt-in,
+  documented LOSSY), `:emit_error` (uniform `{:ok, row}` / terminal
+  `{:error, reason}`). Invalid value → `{:error, {:invalid_on_error, v}}` at
+  stream open. Default flips silent-halt → raise (CHANGELOG noted). Tests
+  per mode (happy-path element shape + mid-fetch error behavior).
+- D1 + D2 remain open decision-debt (untouched). A9 dryness: this fix
+  CHURNED the `util.rs` encoders + `stream_resource_callbacks.ex` as
+  predicted — the owed covering re-run should re-pin the new sentinel /
+  `on_error` behavior. `mix verify` GREEN at `16ca65d`.
