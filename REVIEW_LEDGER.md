@@ -734,3 +734,199 @@ per-axis dryness state. Nothing found is ever silently dropped.
   drop-matrix pass. Per the two-consecutive-covering-runs rule A6 is NOT yet
   DRY; one more covering run is owed. Churn in any resource `Drop` / `AtomicPtr`
   swap / conn field-drop order / hook-registration seam re-wets it.
+
+---
+
+## Run 6 — 2026-07-19 — A5 cancellation semantics
+
+- Commit at scan: `4253b26` (HEAD). Scope: the whole cancellation surface — the
+  `XqliteCancelToken(Arc<AtomicBool>)` lock-free store, the `ProgressHandlerGuard`
+  register/unregister lifecycle on `ProgressDispatch.cancels`, the every-8-VM-op
+  `progress_dispatch_callback` interrupt, the interrupt→`OperationCancelled`
+  error mapping, and all cancellable NIFs (`query`/`query_with_changes`/`execute`/
+  `execute_batch` cancellable variants, `stmt_multi_step_cancellable`,
+  `backup_with_progress`'s own token loop). Composition: single Opus pass (this
+  agent) — adversarial static audit of five race windows + a build-and-run probe
+  harness (A5 is build-and-measure like A7/A8/A6, not a fleet read). Went DEEPER
+  than A7's W3 (which settled cancel-vs-teardown at a high level) with a
+  teardown storm. Did NOT re-litigate settled findings; looked only for NEW
+  cancellation-specific defects.
+
+### The mechanism (verified in source)
+
+- `cancel()` is a lock-free `store(true, Ordering::Release)` (`cancel.rs:17-19`)
+  on an `Arc<AtomicBool>` created `false` (`cancel.rs:13-15`). Any process can
+  cancel without the conn handle — the store deliberately takes no Mutex.
+- `ProgressHandlerGuard::new` registers one `CancelSubscriber` per token on the
+  connection's `progress_dispatch.cancels` `HookList`, holding its OWN Arc CLONE
+  (`t.0.clone()` at the NIF boundary: `nif.rs:159,187,204,220,927`) for the
+  guard's lifetime (`cancel.rs:49-62`). Built AND dropped INSIDE
+  `with_conn`/`with_live_stmt` — i.e. under the conn Mutex
+  (`nif.rs:161-171,189-193,206-210,222-226,960-982`).
+- `progress_dispatch_callback` fires every `PROGRESS_NUM_OPS=8` VM steps
+  (`progress_dispatch.rs:51,175`), inside `sqlite3_step`, which runs only while
+  the conn Mutex is held; it walks the FULL cancels snapshot and returns 1 if
+  ANY flag is set (`progress_dispatch.rs:192-205`). SQLite aborts the statement
+  with `SQLITE_INTERRUPT`.
+
+### Static review — every window HOLDS (guard cited)
+
+- **W1 cancel-vs-completion race — HOLDS, well-defined + crash-free on every
+  ordering.** The interrupt return maps to the caller at `error.rs:668`
+  (`SQLITE_INTERRUPT => OperationCancelled`) and `error.rs:786-788` (rusqlite
+  "interrupted" fallback), encoded as `:operation_cancelled` (`error.rs:464`).
+  Orderings: (a) store lands before the last progress fire → `SQLITE_INTERRUPT`
+  → `{:error, :operation_cancelled}`; (b) store lands after the query already
+  finished stepping → normal `{:ok, …}`, the never-fired-again check is moot;
+  (c) never torn/partial — `process_rows` DROPS its results Vec on any `Err`
+  (`util.rs:112`), `process_single_step` maps the interrupt code to `Err`
+  (`stream.rs:121-138`), and `stmt_multi_step_impl` discards the batch `rows` on
+  `Err` (`nif.rs:984-1000`). The flag memory is always live (Arc held by both the
+  token resource and the guard clone), so the store never targets freed memory
+  regardless of ordering.
+- **W2 token reuse / stale cancel — HOLDS mechanically; SINGLE-USE by design
+  (footgun, S3 doc-clarity).** The flag is set-once-true and NEVER reset — grep
+  of the whole crate finds only `AtomicBool::new(false)` (`cancel.rs:14`) and
+  `store(true)` (`cancel.rs:18`), no reset path. So a signalled token reused on
+  the NEXT op aborts it immediately (the callback sees `flag==true` on its first
+  fire, ≤8 VM ops in; backup's `any()` sees it on loop entry). This is CORRECT +
+  already TESTED as intended (`statement_cancel_test.exs:38` "an already-signalled
+  token cancels before any stepping"), and the recovery test reruns with an EMPTY
+  token list (`:57-78`), tacitly confirming a signalled token can't be reused.
+  Semantics = single-use; only `XqliteNIF.cancel_operation/1` hints it ("the
+  cancellation signal remains active for the token", `xqlitenif.ex:1063`), while
+  the user-facing `create_cancel_token/0`/`cancel_operation/1` docs don't say
+  "single-use — create a fresh token per op". Doc gap → BACKLOG [S3]; NOT a
+  crash/wrong-result (returning `:operation_cancelled` for a spent token is the
+  defined behavior).
+- **W3 cancel racing teardown — HOLDS (deeper than A7's W3).** The raw
+  `*const AtomicBool` in `CancelSubscriber` can never dangle: (1) the guard holds
+  its own Arc clone, so the pointee outlives even a GC'd token resource; (2)
+  `ProgressHandlerGuard::drop` (`cancel.rs:65-73`) unregisters the subscriber
+  FIRST, releasing the Arc only after, so while the subscriber is reachable from
+  `dispatch.cancels` the pointer is valid; (3) register/unregister AND the
+  callback read all happen under the conn Mutex (guard scoped inside
+  `with_conn`/`with_live_stmt`; callback fires inside `sqlite3_step`), so
+  reader/writer are serialised; (4) `close_connection` locks the SAME conn Mutex
+  before `conn_guard.take()` (`connection.rs:170-176`), so an in-flight
+  cancellable op (holding the Mutex) makes close wait, or a not-yet-started op
+  sees `ConnectionClosed`; (5) the guard's `&'d ProgressDispatch` borrows into
+  the `XqliteConn` ResourceArc that `with_conn` keeps alive for the whole closure.
+- **W4 token lifecycle under process death — HOLDS.** A cancellable op runs on a
+  dirty scheduler holding the conn Mutex + guard (with its Arc clone). If the
+  process holding the token dies, its token-resource ref drops but the guard
+  clone keeps the flag alive until the op finishes/interrupts, then the guard
+  releases it — refcount decrements cleanly, no leak/wedge. Process death does
+  not auto-cancel (only an explicit `cancel()` sets the flag); the op simply
+  completes normally.
+- **W5 multi-token OR + double-cancel idempotency — HOLDS.** The callback ORs
+  across the full subscriber list (`progress_dispatch.rs:192-205`); backup uses
+  `cancel_tokens.iter().any(...)` (`nif.rs:1749`). Each token is a separate
+  subscriber (guard registers one per token, unregisters each on drop). Double
+  `store(true)` is idempotent; empty token list = no-op guard (`cancel.rs:49`).
+
+### Probes — harness `cancellation/` (invoke `bash cancellation/run.sh`)
+
+- CI-isolated exactly like `durability/`/`concurrency/`/`lifecycle/`: not under
+  `test/`, not in `elixirc_paths` (`["lib"]`), and the formatter `inputs` glob
+  (`{config,lib,test}/**`) matches ZERO `cancellation/` files (verified via
+  `Path.wildcard`) — `mix verify` untouched (re-run GREEN at HEAD with the harness
+  present). Every child is a `mix run --no-compile --no-start` subprocess under
+  an OS `timeout`; in-memory DBs only; no SIGKILL, no pkill/name-match; scratch
+  in a private `mktemp` dir removed on exit.
+
+- **TEETH (hard gate — all four TRIPPED before any PASS was trusted):**
+  (a) a forced `System.halt(134)` control → **CRASH** (rc=134), proving the
+  teardown crash oracle detects an abnormal exit (a real cancel-vs-teardown UAF
+  aborts the same way); (b) a sleep-forever control → **HANG** (rc=124), proving
+  the timeout leg fires; (c) the "unbounded" slow query run with NO cancel and no
+  internal timeout → killed by the OS timeout (rc=124), proving it never
+  self-completes so a fast cancelled return is CAUSED by the cancel; (d) the race
+  probe with `TEETH=torn` injecting one synthetic undefined outcome →
+  **RACE_TORN** (rc=3), proving the `:torn` classifier is not rubber-stamping.
+
+- **Probe 1 — cancel latency (40 trials).** Settle 40 ms into an unbounded
+  recursive-CTE query, then cancel and time to the NIF returning
+  `:operation_cancelled`. All 40 cancelled; end-to-end wall latency **median
+  55 µs**, p95 0.11 ms, p99/max 5.59 ms (one scheduler-wakeup outlier), min
+  0.04 ms. This is an UPPER bound on the pure progress-handler detection latency
+  (includes dirty-scheduler wakeup + message delivery); the theoretical floor is
+  ≤8 VM ops after the store is observed. **Bounded and sub-millisecond.**
+- **Probe 2 — cancel-vs-completion race (300 iters).** Query bound calibrated to
+  ~79 ms natural runtime; cancel fired at jitter uniform(0, 2×natural) so cancels
+  land clearly-before and clearly-after completion. Every result classified
+  `{completed | cancelled}`; anything else = `:torn` (S0). **156 cancelled /
+  144 completed / 0 torn** — BOTH classes exercised (the window is real), zero
+  torn/undefined/partial outcomes, no crash.
+- **Probe 3 — token reuse (deterministic).** Observed & documented:
+  `single_use=true`, `auto_reset=false`, `stale_poisons_next=true`,
+  `multi_token_or=true`. Teeth: a FRESH token completes the same query
+  (`fresh_completes`) and three-tokens-none-signalled completes
+  (`none_signalled_completes`) — proving the immediate-cancel of a reused token
+  is the stale flag, not a broken path. S5 (3 tokens, only the middle signalled)
+  → cancels (OR-semantics, probe-backed).
+- **Probe 4 — never-cancelled overhead (INFORMATIONAL; T4.7).** Marginal cost of
+  a `query_cancellable` (one live never-signalled token: guard reg/unreg +
+  per-8-op Acquire flag load) vs plain `query` (empty cancels list, callback a
+  null-check no-op). Tiny queries (50k × `SELECT 1`): **−6.27%** (within noise —
+  cancellable measured slightly faster). Heavy queries (20 × 3M-row CTE,
+  ~375k progress fires each): **+0.84%**. So the marginal cost of one registered
+  cancel token is **≈0–1.5%, noise-level on tiny calls**. NOT a perf concern.
+  Honest gap: the ABSOLUTE always-on progress-handler cost (vs a no-handler
+  build) is not Elixir-measurable — it needs a recompile.
+- **Probe 5 — cancel racing teardown (400 iters).** Each iter: a fresh
+  in-memory conn + slow stmt + token; an in-flight `multi_step_cancellable`
+  racing 2 cancel-storm tasks (200 cancels each) and a teardown action
+  (close/finalize, rotated); plus cancel-after-teardown storms (store to a live
+  Arc, conn gone); plus a GC-drop-under-cancel leg every 7th iter (~57×: a holder
+  process runs a step, a sibling cancels the shared token, the holder is killed
+  mid-op → conn/stmt/token destructors run while a cancel is live); plus 3
+  churned+abandoned tokens/iter so token destructors overlap the next iter.
+  **266 cancelled / 93 conn_closed / 41 stmt_finalized / 0 torn / 0 crash /
+  0 hang** — all three teardown-race outcomes observed, zero undefined results.
+  Reaching RESULT is the no-crash proof (a UAF/double-free/unwind-into-C aborts
+  the VM → run.sh CRASH; a wedge → OS-timeout HANG).
+
+### Findings
+
+- **CLEAN — zero S0/S1/S2 NEW.** Every cancellation window holds at the source
+  level and survived teeth-backed stress: latency bounded (median 55 µs), the
+  cancel-vs-completion race produced only well-defined outcomes across 300 hits
+  (0 torn), and the teardown storm ran 400 iters + ~57 GC-drop legs crash-free.
+- **S3 (BACKLOG, doc-clarity only):** cancel tokens are single-use (set-once
+  `Arc<AtomicBool>`, no reset); a reused signalled token silently aborts the
+  next op. Correct + tested behavior, under-documented at the user-facing API.
+  Filed in `BACKLOG.md`. Not a crash/wrong-result; never blocks.
+
+### Verdict — A5 HOLDS
+
+- The lock-free-store + guard-holds-Arc-clone + unregister-before-release +
+  conn-Mutex-serialised-callback model is sound against completion races, token
+  reuse, teardown, and process death; cancellation is prompt (sub-ms median) and
+  its never-cancelled overhead is negligible. Only as strong as the teeth — all
+  four (CRASH, HANG, latency-validity, TORN) tripped on known-bad input.
+
+### Honest gaps
+
+- The teardown oracle is a crash/hang exit-code oracle (like A6/A7/A8), NOT a
+  happens-before race detector. A live-NIF UAF cannot be injected from Elixir
+  (safety is compiled in) and no ASan/TSan-instrumented SQLite build is available
+  (Runs 2/4/5 established Miri can't run the bundled C SQLite); the forced-134 +
+  sleep-forever controls prove the oracle detects crash/hang exits, and the
+  source-level W3 proof + `THREADSAFE=1` bound the residual.
+- Cancel latency is end-to-end wall time (store → dirty-scheduler wakeup →
+  detect → interrupt → return → message), an upper bound on the pure
+  progress-handler latency; the ≤8-VM-op floor is reasoned, not instrumented at
+  the C level.
+- The always-on progress-handler ABSOLUTE cost is not measured (needs a
+  no-handler recompile); only the marginal cancellable-vs-plain delta is.
+
+### Disposition & dryness
+
+- Nothing to fix (the one S3 is doc-clarity, backlogged). **A5:
+  cancellation-suites-only → one covering adversarial+probe run, 0 S0/S1/S2, teeth
+  proven.** Existing tests covered the deflaked mid-flight + already-signalled +
+  reset-and-rerun cases; this is the first dedicated latency/race/reuse/teardown/
+  overhead matrix. Per the two-consecutive-covering-runs rule A5 is NOT yet DRY;
+  one more covering run is owed. Churn in `cancel.rs` / `progress_dispatch.rs` /
+  the `ProgressHandlerGuard` scoping in any cancellable NIF re-wets it.

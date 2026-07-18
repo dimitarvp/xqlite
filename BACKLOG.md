@@ -30,6 +30,16 @@ burn-down.
   scheduler (session_changeset/patchset path) vs the repo's dirty-only
   note — the busy_handler comment claims "any thread (OTP 26.1+)".
   Reconcile the comments and confirm against an assertion-enabled ERTS.
+- [S3] Cancel token single-use footgun (Run 6, A5): the cancel flag is
+  a set-once `Arc<AtomicBool>` with no reset path, so a signalled token
+  reused on a later op aborts it immediately (`{:error,
+  :operation_cancelled}`). Correct + tested behavior
+  (`statement_cancel_test.exs:38`), but the user-facing
+  `create_cancel_token/0` / `cancel_operation/1` docs (`lib/xqlite.ex`)
+  never say "a signalled token is single-use — create a fresh token per
+  operation"; only `XqliteNIF.cancel_operation/1` hints it ("the
+  cancellation signal remains active for the token", `xqlitenif.ex:1063`).
+  Doc-clarity only; no code change. Well-defined, not a crash/wrong-result.
 
 ## Closed
 

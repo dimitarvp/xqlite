@@ -91,9 +91,25 @@ in code, unaudited.
 bounds; cancel-vs-completion race (what does the caller see?);
 token reuse + stale-cancel-vs-next-operation; token lifecycle under
 process death; overhead when never cancelled; cancel racing
-connection teardown (sibling drivers shipped this). Coverage:
-cancellation suites exist incl. the deflaked mid-flight case; no
-latency/reuse matrix.
+connection teardown (sibling drivers shipped this). Coverage: Run 6 —
+one covering adversarial+probe pass (`cancellation/run.sh`,
+CI-isolated). All five windows HOLD (W1 cancel-vs-completion:
+interrupt→`OperationCancelled` at `error.rs:668`, results Vec dropped
+on Err so never torn; W2 token reuse: set-once `Arc<AtomicBool>`, no
+reset path → SINGLE-USE footgun, S3 doc backlog; W3 cancel-vs-teardown,
+DEEPER than A7: guard holds its own Arc clone + unregisters-before-
+release under the conn Mutex, `close_connection` locks the same Mutex
+`connection.rs:170-176`; W4 process death: guard clone keeps the flag
+alive, clean refcount; W5 multi-token OR + double-cancel idempotent).
+5 probes (latency / race / reuse / overhead / teardown) all PASS with
+four teeth (CRASH-134, HANG-124, latency-validity-124, TORN-3) proven
+to trip. Cancel latency median 55 µs (≤8-VM-op floor); race 300 hits
+156 cancelled/144 completed/0 torn; teardown 400 iters + ~57 GC-drop
+legs, 0 crash/hang/torn; never-cancelled marginal overhead ≈0–1.5%
+(INFORMATIONAL, T4.7). 0 S0/S1/S2; one S3 doc-clarity (token
+single-use). NOT yet DRY (first dedicated latency/race/reuse/teardown
+matrix; one more owed; cancel.rs / progress_dispatch.rs / guard-scoping
+churn re-wets).
 
 ### A6. Resource lifecycle
 Probes: hostile drop orders (statement outliving conn; conn closed
