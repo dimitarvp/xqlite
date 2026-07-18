@@ -196,8 +196,33 @@ find the exceptions); extended result codes surfaced everywhere
 (enum-vs-C-constant gotcha #2 is the cautionary tale); changes()
 stickiness on every path; error-shape structural contracts
 (Exception.message always binary; no shape a `with` can't match).
-Coverage: strong by design (30+ variants, no-text-assertion rule);
-no adversarial audit yet.
+Coverage: Run 8 — one covering adversarial+probe pass, SURFACE-ONLY
+(`error_contract/run.sh`, CI-isolated). All four sub-areas HOLD with
+gaps: (1) text-parse census — `constraint_parse.rs` sanctioned, but
+`error.rs:689-704` (no-such-table/index, table/index-exists via
+message-substring) + `error.rs:786` (`== "interrupted"`) are the
+exceptions (F-A10-1); (2) extended codes — rusqlite UNCONDITIONALLY
+enables EXRESCODE (source-verified `inner_connection.rs:81`), every
+raw-FFI builder + safe API converge on `classify_sqlite_error` with
+the extended code intact, C-constant `& 0xFF` matching (gotcha #2
+correct), but the semantic variants drop the code (F-A10-2); (3)
+`changes()` — `query_with_changes` zeroes non-DML by empty-columns
+(correct), `changes/1` sticky by design, but RETURNING DML is
+misdetected → `changes:0` (F-A10-3); (4) shapes — every variant →
+bare atom or `{atom,…}` tuple, all `with`-matchable, `Exception.message`
+(StreamError) always binary; gaps F-A10-4 (`:unsupported_atom` drops
+its atom), F-A10-5 (`error_reason/0` omits `{:invalid_open_option,_}`),
+F-A10-6 (latent doubled-`:error` fallback). Probe: 16 conditions
+(unique/not-null/check/PK/FK/datatype constraints, syntax, bind
+conversion, TOOBIG, conn-closed, stmt-finalized, execute-returned-
+results, read-only, SQLITE_BUSY via real 2-conn contention, StreamError,
+RETURNING changes), ~60 assertions all HELD, 11-control teeth gate
+(the wrong-kind tooth caught a real oracle bug pre-run). Specific
+constraint-kind atoms (unique=2067, PK=1555, …) are the extended-code
+proof. 0 S0/S1/S2, 6 S3 (F-A10-1…6) — surface-only, filed to BACKLOG,
+NOT fixed. NOT yet DRY (first covering A10 run; one more owed; churn in
+`error.rs` classify/Encoder/From, the raw-FFI builders, or the
+`error_reason/0` typespec re-wets).
 
 ### A11. Feature islands
 Session/changesets, blob I/O, backup+progress, serialize,

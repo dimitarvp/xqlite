@@ -7,6 +7,64 @@ burn-down.
 
 ## Open
 
+- [S3] F-A10-1 (Run 8): error classification by English message-substring.
+  `error.rs:689-704` classifies `NoSuchTable` / `NoSuchIndex` / `TableExists`
+  / `IndexExists` via `lower_msg.starts_with("no such table")` /
+  `starts_with("no such index")` / `starts_with("table") && contains("already
+  exists")` / `starts_with("index") && contains("already exists")`, and
+  `error.rs:786` classifies `OperationCancelled` via `message_string ==
+  "interrupted"`. All four table/index cases are primary `SQLITE_ERROR` (1)
+  with no distinguishing extended code, so message text is the only signal —
+  but this is (a) undocumented as a sanctioned exception (unlike
+  `constraint_parse.rs`, whose module header justifies it) and (b) coupled to
+  SQLite's English wording: a reword/localization silently downgrades all four
+  to `{:sqlite_failure, 1, 1, msg}`. Fix options: document these as a
+  sanctioned exception like `constraint_parse`, or accept the downgrade
+  explicitly. Repro: `Xqlite.query(c, "SELECT * FROM nope", [])` →
+  `{:error, {:no_such_table, "no such table: nope"}}` today.
+- [S3] F-A10-2 (Run 8): semantic error variants drop the extended result
+  code. `DatabaseBusyOrLocked` / `ReadOnlyDatabase` / `SchemaChanged` /
+  `AuthorizationDenied` / `NoSuchTable` / `NoSuchIndex` / `TableExists` /
+  `IndexExists` (`error.rs`) carry only `message: String`, so a caller cannot
+  distinguish `SQLITE_BUSY` (5) from `SQLITE_LOCKED` (6) — both →
+  `:database_busy_or_locked` — nor the `READONLY_*` / `BUSY_SNAPSHOT`
+  sub-codes, without parsing text (forbidden by the house rule). The generic
+  `SqliteFailure` fallback carries BOTH codes; the "nicer" variants carry
+  less. Consider adding an `extended_code` field to these variants (or at
+  least splitting busy vs locked). Repro (from `error_contract/`): busy →
+  `{:database_busy_or_locked, "database is locked"}`, readonly →
+  `{:read_only_database, "attempt to write a readonly database"}` — no code.
+- [S3] F-A10-3 (Run 8): `INSERT/UPDATE/DELETE … RETURNING` reports
+  `changes: 0`. `query_with_changes` (`nif.rs:137,165`) detects non-DML by
+  `qr.columns.is_empty()` and zeroes the sticky counter; a RETURNING DML
+  returns columns, so it is misdetected and `changes` is zeroed despite
+  modifying rows. `Xqlite.query/4`'s doc ("`changes` is the number of affected
+  rows" for DML) is then wrong for RETURNING. No data loss (rows come back,
+  `num_rows` is correct). Repro: `Xqlite.query(c, "INSERT INTO t(x)
+  VALUES(4) RETURNING x", [])` → `%{changes: 0, num_rows: 1, rows: [[4]]}`.
+  Fix options: detect DML by statement keyword rather than empty-columns, or
+  document the RETURNING caveat.
+- [S3] F-A10-4 (Run 8): `:unsupported_atom` discards the offending atom.
+  `error.rs:447` `UnsupportedAtom { atom_value: _ } => atoms::unsupported_atom()`
+  encodes a BARE atom, so the Elixir error never names which atom was rejected,
+  even though the variant carries `atom_value` (and `Display` uses it).
+  Inconsistent with `UnsupportedDataType`, which encodes its `term_type`.
+  Encode it as `(atoms::unsupported_atom(), atom_value)` and add the tuple form
+  to `error_reason/0`. Latent-ish (needs a bad atom param to trigger).
+- [S3] F-A10-5 (Run 8): `error_reason/0` typespec omits
+  `{:invalid_open_option, map}`. `validate_open_opts` returns it
+  (`lib/xqlite.ex:357,367`) but the `@type error_reason` union (`:136-179`)
+  lists only `:invalid_on_error`, so `Xqlite.open/2` + `open_in_memory/1`'s
+  `@spec {:ok, conn()} | error()` is inaccurate (dialyzer contract gap). Add
+  `{:invalid_open_option, map()}` (two shapes: `%{key, reason: :unknown_key,
+  allowed, value}` and `%{key, reason: :invalid_value, value, message}`).
+- [S3] F-A10-6 (Run 8, latent): doubled-`:error` fallback shape. The
+  map-build-failure arms of the encoders (`error.rs:513/579/626`,
+  `connection.rs:95`) encode `(atoms::error(), err)`, i.e. `{:error, {:error,
+  {:internal_encoding_error, …}}}`, violating the "leading classification
+  atom, never `:error`" shape. Practically unreachable (BEAM `map_new`/
+  `map_put` don't fail) but a latent wart — either prove it dead and drop the
+  arm, or emit a plain `{:internal_encoding_error, ctx}`.
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)

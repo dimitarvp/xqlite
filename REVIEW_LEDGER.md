@@ -1094,3 +1094,169 @@ per-axis dryness state. Nothing found is ever silently dropped.
   CHURNED the `util.rs` encoders + `stream_resource_callbacks.ex` as
   predicted — the owed covering re-run should re-pin the new sentinel /
   `on_error` behavior. `mix verify` GREEN at `16ca65d`.
+
+## Run 8 — 2026-07-19 — A10 structured-error contract (SURFACE-ONLY)
+
+- Commit at scan: `56315c2` (HEAD). Scope: the structured-error contract from the
+  NIF boundary to the Elixir caller — the `From<RusqliteError>` + raw-FFI error
+  builders (`error.rs`, `stream.rs`, `nif.rs`, `connection.rs`), the constraint
+  message parser (`constraint_parse.rs`), the `XqliteError` enum + its `Display`
+  and `Encoder` (`error.rs`), the Elixir `error_reason/0` union + `Xqlite.StreamError`,
+  and `changes()` handling. Composition: single Opus pass (this agent) — a static
+  census + a build-and-measure contract probe. **Budget-constrained SURFACE-ONLY
+  pass: findings are recorded + filed to `BACKLOG.md`, NOT fixed** (the maintainer
+  schedules fixes next session). Zero code fixes committed.
+
+### Audit — the four sub-areas
+
+1. **Text-parsing census → FINDING (F-A10-1, S3).** Enumerated EVERY error
+   classification that keys off message text (`rg` over `native/**/*.rs`):
+   (i) `constraint_parse.rs` — the SANCTIONED exception, documented in the module
+   header (SQLite exposes constraint metadata — columns/index/constraint names —
+   only as `sqlite3_errmsg` text; parsed ONCE at the lowest layer, keyed by the
+   extended code, so structured fields flow up). (ii) `error.rs:689-704`
+   `classify_sqlite_error` — `NoSuchTable` / `NoSuchIndex` / `TableExists` /
+   `IndexExists` classified by `lower_msg.starts_with("no such table")` /
+   `starts_with("no such index")` / `starts_with("table") && contains("already
+   exists")` / `starts_with("index") && contains("already exists")`. (iii)
+   `error.rs:786` — `message_string == "interrupted"` → `OperationCancelled` in the
+   `From` catch-all. (i) is by-design; (ii)+(iii) are the exceptions the A10 seed
+   predicted — see F-A10-1. `schema.rs` text-parsing (default-value literal grammar
+   + the `contains("INT")` affinity algorithm) is NOT error classification (schema
+   introspection / the documented SQLite affinity rules) — out of A10 scope.
+2. **Extended result codes → HOLDS (+ completeness gap F-A10-2, S3).** Source-verified
+   that rusqlite 0.40.1 UNCONDITIONALLY enables extended codes on every connection:
+   `inner_connection.rs:81-86` ORs in `SQLITE_OPEN_EXRESCODE` for SQLite ≥ 3.37.0
+   (ours is 3.53.2) regardless of caller flags, with a `sqlite3_extended_result_codes(db,1)`
+   fallback (`:115`) for older libs. So every raw code IS extended. Every error path
+   converges on `classify_sqlite_error` with the extended code intact: the rusqlite
+   safe API (`From<RusqliteError>`), and ALL raw-FFI builders — stream step
+   (`stream.rs:133`), stream bind (`stream.rs:195`), manual `prepare` ×2
+   (`nif.rs:797`, `nif.rs:1122`), `wal_checkpoint_v2` (`nif.rs:456`) — all build
+   `ffi::Error::new(rc)` where `ffi::Error::new` sets `extended_code = rc`
+   (libsqlite3-sys `error.rs:98`). Classification matches `extended_code & 0xFF`
+   against C constants (`ffi::SQLITE_BUSY` etc.) and the full extended code against
+   `ffi::SQLITE_CONSTRAINT_UNIQUE` etc. — gotcha #2 (enum 3 vs C-constant 5) handled
+   correctly everywhere; NO path uses the `ErrorCode` enum for matching. Open path
+   preserves `ffi_err.extended_code` (`connection.rs:156`) with a `-1` sentinel for
+   non-`SqliteFailure` opens. GAP (F-A10-2): the SEMANTIC variants
+   (`DatabaseBusyOrLocked` / `ReadOnlyDatabase` / `SchemaChanged` /
+   `AuthorizationDenied` / `NoSuchTable` / `NoSuchIndex` / `TableExists` /
+   `IndexExists`) carry ONLY `message` — they DROP the extended code the generic
+   `SqliteFailure` fallback keeps.
+3. **`changes()` stickiness → HOLDS (+ RETURNING edge F-A10-3, S3).**
+   `query_with_changes` (`nif.rs:137`, `:165`) zeroes the sticky counter for
+   non-DML by `qr.columns.is_empty()` — correct for SELECT/DDL/PRAGMA; probe
+   negative-control confirmed a SELECT-after-DML reports `changes=0`. `changes/1`
+   (`nif.rs:736`) returns the raw sticky counter BY DESIGN (documented in CLAUDE.md).
+   `execute` reads rusqlite's immediate DML count (`nif.rs:106`, DML-only — a SELECT
+   returns `:execute_returned_results`). EDGE (F-A10-3): a DML with `RETURNING`
+   returns columns, so the empty-columns heuristic misdetects it as non-DML and
+   zeroes `changes`.
+4. **Error-shape structural contracts → HOLDS (+ F-A10-4/5/6, all S3).** Every one
+   of the ~40 `XqliteError` variants encodes to a bare classification atom or a
+   `{atom, …}` tuple (maps ONLY ever nested inside a tuple: `{:sql_input_error, map}`,
+   `{:constraint_violation, kind, map}`, `{:invalid_parameter_count, map}`) — all
+   `with {:error, reason}`-destructurable, no top-level map, no bare `:error`
+   reaching the caller in practice. `Exception.message` is a binary on the ONLY
+   raising surface (`Xqlite.StreamError`, `stream_error.ex:22`, interpolated). Three
+   gaps: F-A10-4 (`UnsupportedAtom` drops its `atom_value` on encode), F-A10-5
+   (`error_reason/0` omits `{:invalid_open_option, map}`), F-A10-6 (latent
+   doubled-`:error` fallback in the map-build-failure arms).
+
+### Probe (`error_contract/`, invoke `bash error_contract/run.sh`)
+
+- `probe.exs` drives 16 REAL error conditions through the ACTUAL public API and
+  asserts the contract on each returned `{:error, reason}`: (a) STRUCTURED atom
+  classification (never a bare binary, never bare `:error`), (b) EXTENDED code
+  present+correct, (c) `Exception.message` binary, (d) shape destructured by a real
+  `with`. CI-isolated exactly like `type_edges/` etc.: not under `test/`, not in
+  `elixirc_paths` (`["lib"]`), and the formatter `inputs` glob (`{config,lib,test}/**`)
+  matches ZERO `error_contract/` files (verified via `Path.wildcard` → `[]`) — `mix
+  verify` untouched (re-run GREEN at HEAD with the harness present). `mix run
+  --no-compile --no-start` children under an OS `timeout`; the BUSY + read-only
+  conditions use real files in a private `mktemp -d` removed by an EXIT trap; no
+  SIGKILL, no pkill, no ~1GB allocation (TOOBIG uses `zeroblob`, rejected before
+  allocating).
+- **TEETH (hard gate — 11 controls, run.sh ABORTS rc 2 otherwise).** The contract
+  oracle MUST reject: a text-only error (bare binary), a bare `:error`, a number
+  reason, a WRONG constraint kind (UNIQUE claimed as `:constraint_check`), a
+  non-binary message, and an unmatchable shape; and must NOT false-positive 5
+  correct structured reasons. **The wrong-kind tooth EARNED its keep**: the first
+  oracle draft compared the leading atom (always `:constraint_violation`) instead of
+  the kind (2nd element); the selftest FAILED and forced the fix
+  (`constraint_kind/1`) before any real assertion ran.
+- **Per-condition contract results (all HELD):** UNIQUE / NOT NULL / CHECK / PRIMARY
+  KEY / FOREIGN KEY / DATATYPE constraint violations each classified with the
+  SPECIFIC kind atom — `:constraint_unique` (ext 2067), `:constraint_not_null`,
+  `:constraint_check`, `:constraint_primary_key` (ext 1555), `:constraint_foreign_key`,
+  `:constraint_datatype` — which is itself the extended-code-preservation proof (a
+  primary-only path would collapse all to the generic `:constraint_violation` kind);
+  DATATYPE additionally carried typed `source_type`/`target_type` atoms. Syntax
+  error → `{:sql_input_error, %{code, message, sql, offset}}` (typed map, integer
+  offset). Bind bignum > i64 → `{:cannot_convert_to_sqlite_value, <bin>, <bin>}`.
+  `zeroblob(1000000001)` → `{:sqlite_failure, 18, 18, <bin>}` (extended code present
+  + correct — negative-tooth `not {:sqlite_failure, 0, …}` also asserted).
+  Connection-closed → `:connection_closed`; finalized-step → `:statement_finalized`;
+  `execute` a SELECT → `:execute_returned_results`. Read-only write →
+  `{:read_only_database, "attempt to write a readonly database"}`. **SQLITE_BUSY
+  reproduced via real 2-connection write contention** (busy_timeout 0, c1 `BEGIN
+  IMMEDIATE`, c2 write) → `{:database_busy_or_locked, "database is locked"}`.
+  `Xqlite.StreamError` on a mid-stream UTF-8 fault → `Exception.message` binary,
+  structured reason preserved. ~60 assertions, all OK; `RESULT PASS_WITH_FINDINGS`.
+
+### CONFIRMED findings — ALL S3, SURFACE-ONLY (filed to BACKLOG, NOT fixed)
+
+- **F-A10-1 — S3 — error classification via English message-substring matching.**
+  `error.rs:689-704` (`NoSuchTable`/`NoSuchIndex`/`TableExists`/`IndexExists`) +
+  `error.rs:786` (`== "interrupted"`). These four are all primary `SQLITE_ERROR`
+  (1) with NO distinguishing extended code, so message text is the ONLY signal
+  SQLite gives — but (a) unlike `constraint_parse.rs` this is NOT documented as a
+  sanctioned exception, and (b) it is coupled to SQLite's English message wording:
+  a reword/localization silently downgrades all four to `{:sqlite_failure, 1, 1,
+  msg}` (graceful — no wrong-result, no crash). Fragility/consistency, not a live
+  misclassification.
+- **F-A10-2 — S3 — semantic error variants drop the extended result code.** The
+  `message`-only variants can't tell a caller BUSY(5) from LOCKED(6) (both →
+  `:database_busy_or_locked`), nor the `READONLY_*` / `BUSY_SNAPSHOT` sub-codes,
+  without parsing text — which the house rule forbids. The "nicer" atoms carry LESS
+  structured info than the generic `SqliteFailure` fallback. Confirmed empirically
+  (busy + readonly reasons carry only a message).
+- **F-A10-3 — S3 — `INSERT/UPDATE/DELETE … RETURNING` reports `changes: 0`.**
+  `query_with_changes`' empty-columns heuristic misdetects RETURNING DML (which
+  returns columns) as non-DML and zeroes the count. Confirmed: `INSERT … RETURNING
+  x` → `changes=0, num_rows=1, rows=[[4]]`. `Xqlite.query/4`'s doc ("changes = the
+  number of affected rows" for DML) is violated for RETURNING. No data loss (rows
+  are returned; `num_rows` is right).
+- **F-A10-4 — S3 — `:unsupported_atom` throws away the offending atom.**
+  `error.rs:447` `UnsupportedAtom { atom_value: _ } => atoms::unsupported_atom()`
+  encodes a BARE atom, so the Elixir error never names the rejected atom, though the
+  variant CARRIES `atom_value` and `Display` uses it. Inconsistent with
+  `UnsupportedDataType` (which encodes its `term_type`). Lossy structured error vs
+  the "most specific info" rule.
+- **F-A10-5 — S3 — `error_reason/0` typespec omits `{:invalid_open_option, map}`.**
+  `validate_open_opts` returns it (`lib/xqlite.ex:357,367`) but the union
+  (`:136-179`) lists only `:invalid_on_error`, so `Xqlite.open/2` +
+  `open_in_memory/1`'s `@spec … | error()` is inaccurate — a dialyzer contract gap.
+- **F-A10-6 — S3 (latent) — doubled-`:error` fallback shape.** The map-build-failure
+  arms (`error.rs:513/579/626`, `connection.rs:95`) encode `(atoms::error(), err)`,
+  i.e. `{:error, {:error, {:internal_encoding_error, …}}}` — violating the
+  "leading classification atom, never `:error`" shape. Practically unreachable
+  (BEAM `map_new`/`map_put` don't fail), but a latent wart.
+
+### Disposition & dryness
+
+- **0 S0 / 0 S1 / 0 S2.** The structured-error contract is STRONG: structured-atom
+  classification held on every one of the 16 driven conditions, extended codes
+  surface wherever SQLite provides them (constraint kinds + TOOBIG proven), messages
+  are always binary, and every reason shape is `with`-matchable. The 6 findings are
+  all S3 completeness / precision / fragility items — none blocks per the ratified
+  bar. Per the SURFACE-ONLY mandate NONE were fixed; all six filed to `BACKLOG.md`
+  with minimal repros (F-A10-2/3 additionally reproduced by the committed probe).
+  `mix verify` GREEN with the harness present.
+- **A10: strong-by-design → one covering adversarial+probe run, 0 S0/S1/S2, 6 S3,
+  teeth proven.** Per the two-consecutive-covering-runs rule A10 is NOT yet DRY; one
+  more covering run is owed. Churn in `error.rs` (`classify_sqlite_error` /
+  `Encoder` / `From`), the raw-FFI error builders (`stream.rs` / `nif.rs` /
+  `connection.rs`), `constraint_parse.rs`, the `query_with_changes` columns
+  heuristic, or the `error_reason/0` typespec re-wets A10.
