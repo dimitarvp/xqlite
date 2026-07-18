@@ -102,7 +102,22 @@ destructor thread context vs SQLite thread-affinity; open/close
 ×10⁵ under RSS; double-finalize windows; cross-handle immunity
 (XqliteStatement embeds its conn ResourceArc — verify structurally);
 owning/non-owning aliasing census (any `from_handle`-style views?).
-Coverage: close-path tests exist; no leak loops, no census.
+Coverage: Run 5 — one covering adversarial+probe pass
+(`lifecycle/run.sh`, CI-isolated). Static audit of every lifecycle
+window HOLDS (drop-once swap/take, raw-handle locking on every
+SQLite-touching Drop, child-embeds-conn-ResourceArc immunity,
+STRUCTURAL cross-handle immunity, aliasing census [blob raw-ptr,
+session `PhantomData` Drop], `THREADSAFE=1` destructor context, conn
+field-drop order). 6 leak loops (conn mem ×10⁵ / file ×30k, stmt /
+stream / blob / session ×10⁵) all PASS RSS-steady & fd-stable;
+hostile drop-order matrix (child-op-after-close, close-with-live-
+child GC-drop, stream-abandoned-mid-iter, double-close,
+drop-after-close, child-GC-while-open) PASS no-crash; 3 teeth
+(conn / stmt / blob retain) proven to trip LEAK (>10× separation).
+Documented conn-close-with-live-child leak quantified = one
+`sqlite3*`/occurrence (~77 KB, bounded). 0 findings. NOT yet DRY
+(first dedicated A6 covering run; one more owed; any resource-Drop /
+AtomicPtr / conn-field-order / hook-registration churn re-wets).
 
 ### A7. Concurrency / interleaving
 Probes: N-process hammering one handle; owner-process death mid-txn;

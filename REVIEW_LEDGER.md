@@ -583,3 +583,154 @@ per-axis dryness state. Nothing found is ever silently dropped.
   two-consecutive-covering-runs rule A7 is NOT yet DRY; one more covering run is
   owed. Churn in the AtomicPtr/close/open-path or the hook-registration seam
   re-wets it.
+
+---
+
+## Run 5 — 2026-07-19 — A6 resource lifecycle
+
+- Commit at scan: `51bbcb6` (HEAD). Scope: the full lifecycle of every resource
+  — `XqliteConn`, `XqliteStatement`, `XqliteStream`, `XqliteBlob` (raw
+  `*mut sqlite3_blob`), `XqliteSession`, `XqliteCancelToken`, and the
+  `HookList`/dispatch hook state — under hostile drop orders, cross-handle
+  immunity, an owning/non-owning aliasing census, destructor thread context, and
+  open/use/close leak loops. Composition: single Opus pass (this agent) —
+  adversarial static lifecycle audit + a build-and-run probe harness (A6 is
+  build-and-measure like A7/A8, not a fleet read). Did NOT re-litigate the
+  settled blob/session/log memory-safety findings (Runs 1–2, blob raw-pointer
+  refactor `b1c60b4`); looked only for NEW distinct lifecycle defects.
+
+### Static audit — every lifecycle window HOLDS (guard cited)
+
+- **Drop-once discipline (all resources).** Teardown swaps the raw pointer to
+  null (or `Option::take`s) BEFORE touching SQLite, so a resource tears down at
+  most once: stmt/stream `take_and_finalize_raw` swap-then-finalize
+  (`stream.rs:45-66`), blob `close` swap-then-`sqlite3_blob_close`
+  (`blob.rs:237-255`), session `close` `guard.take()` then drop/forget
+  (`session.rs:45-70`), conn `close_connection` `conn_guard.take()`
+  (`connection.rs:169-178`) + `Drop` reclaiming the busy_handler box
+  (`connection.rs:57-66`). A second close/finalize/delete gets null/None → no-op.
+- **Raw-handle locking rule on every SQLite-touching Drop.** stmt/stream
+  finalize under the conn Mutex (`stream.rs:52-66`), blob close under it
+  (`blob.rs:242-253`), session delete only while the conn is still open and
+  under its Mutex (`session.rs:57-62`). Cancel token / `ProgressHandlerGuard`
+  Drops touch no SQLite (`cancel.rs:65-74`).
+- **Child-outlives-conn immunity.** Every child embeds
+  `conn_resource_arc: ResourceArc<XqliteConn>` (`statement.rs:21`,
+  `stream.rs:17`, `blob.rs:62`, `session.rs:19`), so the `XqliteConn` *resource*
+  — hence its `Mutex` — always outlives the child; teardown can always lock even
+  after `close/1` `take()`d the inner `Connection`. Ops on a closed conn return
+  `ConnectionClosed` (`statement.rs:53`, `blob.rs:276`, `nif.rs:1317-1320`,
+  `session.rs:88`), verified by probe (scenario A).
+- **Cross-handle immunity — STRUCTURAL.** Every statement/stream/blob/session
+  NIF takes ONLY its child handle and drives that child's embedded conn (grep of
+  all `nif.rs` resource signatures); NO NIF pairs a conn with a foreign child.
+  Constructors clone the conn INTO the child (`stmt_prepare` `nif.rs:758,846`,
+  `stream_open` `nif.rs:1085,1202`, `session_new` `nif.rs:1864`, blob `open`
+  `blob.rs:123`). `changeset_apply` (`nif.rs:1929`) takes a conn + a raw
+  changeset *binary* (self-describing replication data, not a handle to
+  validate) — the one place a conn meets foreign data, and correctly so.
+- **Aliasing census.** Blob owns a raw `*mut sqlite3_blob`, no rusqlite wrapper
+  (the Run-2 fix, doc-locked with a maintainer warning at `blob.rs:10-59`).
+  Session stores `Session<'static>` soundly ONLY because rusqlite `Session` is
+  `PhantomData<&Connection>`, so its `Drop` touches raw `self.s` and never
+  derefs the conn (`session.rs:7-25`). stmt/stream own raw `*mut sqlite3_stmt`.
+  No lifetime-erased view can outlive its owner.
+- **Destructor thread context.** Bundled SQLite is `THREADSAFE=1` (Run 4
+  runtime-verified) → no thread-affinity; every Drop that calls `sqlite3_*`
+  holds the conn Mutex, so a GC/scheduler-thread destructor is serialised
+  against any in-flight step. Panic-proofing intact: all three destructors log
+  via `writeln!` not `eprintln!` (`stream.rs:83`, `statement.rs:76`,
+  `blob.rs:75`) — rustler 0.38 destructors have no `catch_unwind` — and no
+  `unwrap`/`expect`/index sits on a Drop path (lock poison → `LockError`;
+  session recovers a poisoned guard via `into_inner`).
+- **Conn field-drop order.** Fields drop in declaration order after the
+  `Drop::drop` body, so `conn` (the `Connection`) drops before the hook lists
+  (`connection.rs:59-64`) — no callback can fire while subscriber state is
+  reclaimed. NOTE (latent no-op, not a defect): the custom `Drop` frees the
+  busy_handler box BEFORE the `conn` field closes, briefly leaving SQLite's C
+  busy-handler pointer dangling; sound because a resource `Drop` runs only at
+  refcount 0 (no other thread holds the handle to step it) and `sqlite3_close`
+  never invokes the busy handler.
+
+### Probes — harness `lifecycle/` (invoke `bash lifecycle/run.sh`)
+
+- CI-isolated exactly like `durability/` and `concurrency/`: not under `test/`,
+  not in `elixirc_paths` (`["lib"]`), and the formatter `inputs` glob
+  (`{config,lib,test}/**`) does not match `lifecycle/**` — `mix verify` is
+  untouched (re-run GREEN at HEAD with the harness present; the passing
+  `mix format --check-formatted` leg independently confirms the isolation).
+  Every child is a `mix run` subprocess under `timeout`; no SIGKILL, no
+  pkill/name-match; file DBs in a private `mktemp` dir, removed on exit.
+
+- **TEETH (hard gate — all three TRIPPED LEAK before any PASS was trusted).**
+  Retain variants plant a REAL leak (resources opened, never closed/GC'd). The
+  classifier keys on **back-half RSS growth** — a bounded loop plateaus, a leak
+  keeps climbing — threshold 24 MB. conn-retain → **+407 MB** back-half
+  (79,088 B/occurrence = one `sqlite3*`); stmt-retain → **+64 MB** (3,108 B/stmt);
+  blob-retain → **+42 MB** (2,060 B/blob). Real probes sit at ±4 MB back-half →
+  a >10× separation from the teeth floor.
+
+- **Leak loops (all PASS — RSS steady-state, fd stable 19→19).** All ×10^5
+  except the file conn (×30,000):
+  - conn open/use/close, **in-memory ×100,000** → back-half **−3.83 MB** (RSS
+    DROPS; allocator returns memory).
+  - conn open/use/close, **file WAL ×30,000** → back-half **−0.01 MB**, fd stable
+    (no descriptor leak on the VFS/`sqlite3_close` path).
+  - statement prepare/step/reset/finalize **×100,000** (persistent conn) →
+    back-half **+0.07 MB**.
+  - stream open/fetch/close **×100,000** → back-half **−1.55 MB**.
+  - blob open/read/write/close **×100,000** → back-half **0.0 MB**.
+  - session new/attach/changeset/delete **×100,000** → back-half **0.0 MB**.
+
+- **Hostile drop-order matrix (PASS — 0 unexpected, no crash; reaching RESULT is
+  the proof, since a double-free/UAF/unwind-into-C would exit 134/139).**
+  (A) all four child ops after `close/1` return `{:error, :connection_closed}`;
+  (B) conn closed with a LIVE child then the child GC-dropped (all four types) —
+  crash-free; (C) stream abandoned MID-iteration then GC'd — crash-free;
+  (D) double-close / close-then-drop / drop-after-close for every resource — all
+  idempotent (`:ok` ×10); (E) child GC'd while the conn stays open, conn still
+  usable; (F) the DOCUMENTED conn-close-with-live-child leak QUANTIFIED — 2000
+  occurrences → **77,928 B/occurrence**, matching the conn-retain teeth (one
+  leaked `sqlite3*`), bounded-per-occurrence, no crash, no unbounded-per-op.
+
+### Findings
+
+- **CLEAN — zero S0/S1/S2/S3 NEW.** Every lifecycle window holds at the source
+  level and survived teeth-backed 10^5-iteration stress. The only leak observed
+  is the pre-existing, ACCEPTED, DOCUMENTED conn-close-with-live-child behavior
+  (ledger Run 1 M2-blob; `lib/xqlite.ex` `prepare/2` docs cover the stmt/stream
+  case). Probe F confirms it is **exactly one `sqlite3*` per occurrence**
+  (~77 KB, bounded, no crash) — not a new or worse defect, not re-litigated.
+
+### Verdict — A6 HOLDS
+
+- The `Mutex`-per-handle + swap/`take`-to-null-then-teardown + child-embeds-conn-
+  `ResourceArc` model is sound against every hostile drop order, structurally
+  immune to cross-handle misuse, and free of aliasing that outlives its owner.
+  10^5-iteration leak loops leave RSS flat-or-shrinking with fds stable. This is
+  only as strong as the teeth — all three tripped LEAK on planted leaks.
+
+### Honest gaps
+
+- The leak instrument is OS RSS + BEAM `:erlang.memory` + fd count, not a
+  resource-count BIF (rustler exposes none). A leak smaller than back-half noise
+  (~±4 MB over the measured window) could hide; the teeth calibrate the floor
+  (the lightest, blob at ~2 KB/unit, cleared 24 MB by ~12k retained). The 10^5
+  real loops sit far below that floor (flat/shrinking).
+- No TSan/Miri on the live NIF (Run 2 established Miri cannot run the bundled C
+  SQLite; no TSan-instrumented SQLite build available) — the oracle is
+  crash/exit-code + RSS/fd trend, not a happens-before detector; `THREADSAFE=1`
+  + single-`Mutex` source analysis bounds it.
+- GC-forced teardown is driven by throwaway-process death + `:erlang.
+  garbage_collect` sweeps; a resource whose `Reference` lingered in another live
+  process's heap would not be reclaimed, but the probes hold no such
+  cross-references (handles are created and abandoned within the dying process).
+
+### Disposition & dryness
+
+- Nothing to fix, nothing backlogged. **A6: close-path-tests-only → one covering
+  adversarial+probe run, 0 findings, teeth proven.** Runs 1–2 touched the
+  blob/session lifecycle seam, but this is the first dedicated A6 leak-loop +
+  drop-matrix pass. Per the two-consecutive-covering-runs rule A6 is NOT yet
+  DRY; one more covering run is owed. Churn in any resource `Drop` / `AtomicPtr`
+  swap / conn field-drop order / hook-registration seam re-wets it.
