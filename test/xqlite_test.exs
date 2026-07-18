@@ -1,6 +1,8 @@
 defmodule XqliteTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias Xqlite.TestUtil
   alias XqliteNIF, as: NIF
 
@@ -110,6 +112,83 @@ defmodule XqliteTest do
       test "stream created with empty SQL results in an empty stream", %{conn: conn} do
         stream = Xqlite.stream(conn, "")
         assert Enum.to_list(stream) == []
+      end
+
+      # --- on_error option: happy-path element shape follows the mode ---
+
+      test "on_error: :raise (default) yields raw row maps on the happy path", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users WHERE id <= 2 ORDER BY id;"
+        stream = Xqlite.stream(conn, sql, [], on_error: :raise)
+
+        assert Enum.to_list(stream) == [%{"id" => 1}, %{"id" => 2}]
+      end
+
+      test "on_error: :halt yields raw row maps on the happy path", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users WHERE id <= 2 ORDER BY id;"
+        stream = Xqlite.stream(conn, sql, [], on_error: :halt)
+
+        assert Enum.to_list(stream) == [%{"id" => 1}, %{"id" => 2}]
+      end
+
+      test "on_error: :emit_error tags each row as {:ok, row} on the happy path", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users WHERE id <= 2 ORDER BY id;"
+        stream = Xqlite.stream(conn, sql, [], on_error: :emit_error)
+
+        assert Enum.to_list(stream) == [{:ok, %{"id" => 1}}, {:ok, %{"id" => 2}}]
+      end
+
+      # --- on_error option: mid-fetch error behavior follows the mode ---
+
+      test "on_error: :raise raises Xqlite.StreamError carrying the structured reason", %{
+        conn: conn
+      } do
+        seed_utf8_error_table(conn)
+
+        stream =
+          Xqlite.stream(conn, "SELECT v FROM bad_utf8 ORDER BY id;", [],
+            on_error: :raise,
+            batch_size: 1
+          )
+
+        error = assert_raise(Xqlite.StreamError, fn -> Enum.to_list(stream) end)
+        assert {:utf8_error, 0, detail} = error.reason
+        assert is_binary(detail)
+        assert is_binary(error.message)
+      end
+
+      test "on_error: :halt truncates at the error and does not raise (lossy)", %{conn: conn} do
+        seed_utf8_error_table(conn)
+
+        stream =
+          Xqlite.stream(conn, "SELECT v FROM bad_utf8 ORDER BY id;", [],
+            on_error: :halt,
+            batch_size: 1
+          )
+
+        {rows, _log} = with_log(fn -> Enum.to_list(stream) end)
+        assert rows == [%{"v" => "g1"}, %{"v" => "g2"}]
+      end
+
+      test "on_error: :emit_error yields {:ok, row} then a terminal {:error, reason}", %{
+        conn: conn
+      } do
+        seed_utf8_error_table(conn)
+
+        stream =
+          Xqlite.stream(conn, "SELECT v FROM bad_utf8 ORDER BY id;", [],
+            on_error: :emit_error,
+            batch_size: 1
+          )
+
+        assert [{:ok, %{"v" => "g1"}}, {:ok, %{"v" => "g2"}}, {:error, reason}] =
+                 Enum.to_list(stream)
+
+        assert {:utf8_error, 0, _detail} = reason
+      end
+
+      test "stream/4 rejects an unsupported :on_error mode at open", %{conn: conn} do
+        assert {:error, {:invalid_on_error, :bogus}} =
+                 Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], on_error: :bogus)
       end
     end
   end
@@ -259,5 +338,21 @@ defmodule XqliteTest do
       assert {:ok, %{rows: [["hello"]]}} =
                NIF.query(conn, "SELECT n FROM coerce", [])
     end
+  end
+
+  # Seeds a table whose 3rd row (by id) holds an invalid-UTF-8 TEXT value, so a
+  # stream reading it row-by-row errors mid-fetch after two good rows.
+  defp seed_utf8_error_table(conn) do
+    :ok =
+      NIF.execute_batch(conn, "CREATE TABLE bad_utf8 (id INTEGER PRIMARY KEY, v TEXT);")
+
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO bad_utf8 (id, v) VALUES (1, 'g1');", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO bad_utf8 (id, v) VALUES (2, 'g2');", [])
+
+    {:ok, 1} =
+      NIF.execute(conn, "INSERT INTO bad_utf8 (id, v) VALUES (3, CAST(X'FF41' AS TEXT));", [])
+
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO bad_utf8 (id, v) VALUES (4, 'g4');", [])
+    :ok
   end
 end

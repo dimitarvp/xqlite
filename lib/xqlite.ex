@@ -159,6 +159,7 @@ defmodule Xqlite do
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
+          | {:invalid_on_error, term()}
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
@@ -178,6 +179,12 @@ defmodule Xqlite do
           | {:utf8_error, String.t()}
 
   @type error :: {:error, error_reason()}
+
+  @typedoc """
+  Controls how `stream/4` reacts to a mid-fetch error; see its `:on_error`
+  option for the per-mode element shapes.
+  """
+  @type stream_on_error :: :raise | :halt | :emit_error
 
   # ---------------------------------------------------------------------------
   # Connection opening with validated options
@@ -855,6 +862,20 @@ defmodule Xqlite do
       implementing the `Xqlite.TypeExtension` behaviour. Parameters are encoded
       before binding, and result values are decoded as rows are fetched.
       Extensions are applied in list order; the first match wins.
+    * `:on_error` (`:raise` | `:halt` | `:emit_error`, default: `:raise`) -
+      How a mid-fetch error (e.g. an invalid-UTF-8 TEXT value) is surfaced.
+      The stream's element shape FOLLOWS the mode:
+        * `:raise` (default) - happy path yields raw row maps; a mid-fetch
+          error raises `Xqlite.StreamError`, whose `:reason` field holds the
+          structured error term. A failed read can never masquerade as a
+          completed stream.
+        * `:halt` - happy path yields raw row maps; a mid-fetch error is
+          logged and the stream stops. LOSSY: the result set is silently
+          truncated and the consumer receives no error signal.
+        * `:emit_error` - yields a uniformly tagged stream: `{:ok, row}` for
+          each row, followed by a terminal `{:error, reason}` on failure.
+      An unsupported value returns `{:error, {:invalid_on_error, value}}` at
+      stream open.
 
   ## Examples
 
@@ -869,8 +890,9 @@ defmodule Xqlite do
   as returning a stream that silently errors on first consume would hide
   setup failures (e.g., invalid SQL, closed connection).
 
-  Errors that occur *during* stream consumption (e.g., database connection lost
-  mid-stream) will be logged and will cause the stream to halt.
+  Errors that occur *during* stream consumption (e.g. an invalid-UTF-8 value,
+  or the connection being lost mid-stream) are surfaced according to the
+  `:on_error` option above — by default they raise `Xqlite.StreamError`.
   """
   @spec stream(conn(), String.t(), list() | keyword(), keyword()) ::
           Enumerable.t() | error()

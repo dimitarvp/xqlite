@@ -22,7 +22,7 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
     match val {
         Value::Null => nil().encode(env),
         Value::Integer(i) => i.encode(env),
-        Value::Real(f) => f.encode(env),
+        Value::Real(f) => encode_f64(env, f),
         Value::Text(s) => s.encode(env),
         Value::Blob(owned_vec) => {
             // Zero-copy: wrap the owned Vec<u8> in a resource and let the BEAM
@@ -34,6 +34,24 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
                 .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
                 .encode(env)
         }
+    }
+}
+
+/// Encodes an `f64` column value, mapping the non-finite cases that rustler's
+/// `enif_make_double` rejects with a return-time `badarg` onto sentinel terms:
+/// `+Inf`/`-Inf` become `:positive_infinity`/`:negative_infinity`, and `NaN`
+/// becomes `nil` (SQLite already surfaces NaN through the NULL storage class,
+/// so the NaN arm is defensive). Mirrors the schema layer's finiteness guard.
+#[inline]
+fn encode_f64(env: Env<'_>, f: f64) -> Term<'_> {
+    if f.is_finite() {
+        f.encode(env)
+    } else if f == f64::INFINITY {
+        atoms::positive_infinity().encode(env)
+    } else if f == f64::NEG_INFINITY {
+        atoms::negative_infinity().encode(env)
+    } else {
+        nil().encode(env)
     }
 }
 
@@ -293,7 +311,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                 }
                 ffi::SQLITE_FLOAT => {
                     let val = ffi::sqlite3_column_double(stmt_ptr, col_idx);
-                    val.encode(env)
+                    encode_f64(env, val)
                 }
                 ffi::SQLITE_TEXT => {
                     let s_ptr = ffi::sqlite3_column_text(stmt_ptr, col_idx);

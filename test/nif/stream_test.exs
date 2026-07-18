@@ -249,6 +249,15 @@ defmodule Xqlite.NIF.StreamTest do
         assert :done == NIF.stream_fetch(stream_handle, 1)
         assert :ok == NIF.stream_close(stream_handle)
       end
+
+      test "stream_fetch/2 reads non-finite floats as sentinel atoms", %{conn: conn} do
+        {:ok, handle} = NIF.stream_open(conn, "SELECT 1e308 * 10.0, -1e308 * 10.0;", [], [])
+
+        assert {:ok, %{rows: [[:positive_infinity, :negative_infinity]]}} =
+                 NIF.stream_fetch(handle, 10)
+
+        assert :ok == NIF.stream_close(handle)
+      end
     end
   end
 

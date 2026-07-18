@@ -50,6 +50,30 @@ defmodule Xqlite.NIF.QueryTest do
 
       # --- Shared test cases applicable to all DB types follow ---
 
+      test "query/3 reads non-finite floats as sentinel atoms and stays usable", %{conn: conn} do
+        # Non-finite floats only ever arise SQL-side (the BEAM cannot bind one):
+        # overflow to +/-Inf maps to sentinel atoms; computed NaN arrives as nil.
+        assert {:ok, %{rows: [[:positive_infinity]]}} =
+                 NIF.query(conn, "SELECT 1e308 * 10.0;", [])
+
+        assert {:ok, %{rows: [[:negative_infinity]]}} =
+                 NIF.query(conn, "SELECT -1e308 * 10.0;", [])
+
+        assert {:ok, %{rows: [[nil]]}} =
+                 NIF.query(conn, "SELECT 1e308 * 10.0 - 1e308 * 10.0;", [])
+
+        # Stored +Inf round-trips to the same sentinel (CREATE TABLE inherits the
+        # setup's sticky changes count, so only match the :ok shape there).
+        assert {:ok, _} = NIF.execute(conn, "CREATE TABLE inf_t (x REAL);", [])
+        assert {:ok, 1} = NIF.execute(conn, "INSERT INTO inf_t (x) VALUES (1e308 * 10.0);", [])
+
+        assert {:ok, %{rows: [[:positive_infinity]]}} =
+                 NIF.query(conn, "SELECT x FROM inf_t;", [])
+
+        # Connection stays usable; finite floats and NULL still round-trip.
+        assert {:ok, %{rows: [[95.5, nil]]}} = NIF.query(conn, "SELECT 95.5, NULL;", [])
+      end
+
       test "query/3 fetches all records correctly, including blobs and nulls", %{conn: conn} do
         expected_rows = [
           [1, "Alice", 30, 95.5, 1, "First row", <<255, 0, 255>>],

@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`Xqlite.stream/4` no longer silently truncates on a mid-fetch
+  error.** A new `:on_error` option chooses how a mid-stream failure
+  (e.g. an invalid-UTF-8 TEXT value) is surfaced, and the stream's
+  element shape follows the mode: `:raise` (the new default) raises
+  `Xqlite.StreamError` carrying the structured reason; `:halt` keeps
+  the previous stop-and-log behavior, now opt-in and documented as
+  lossy; `:emit_error` yields a uniformly tagged stream of
+  `{:ok, row}` elements followed by a terminal `{:error, reason}`.
+  The old default silently dropped the remaining rows with no signal
+  to the consumer, so a truncated read could not be told apart from a
+  completed one.
+
 ### Fixed
+
+- **Non-finite floats no longer raise when read.** A stored or
+  computed `±Inf` REAL now reads back as the sentinel atom
+  `:positive_infinity` / `:negative_infinity` — and a `NaN`, which
+  SQLite already stores as NULL, as `nil` — on every read path
+  (`query`, `stream`, prepared `step`). Previously rustler's `f64`
+  encoder posted a return-time `ArgumentError`, breaking the
+  `{:ok, _}` / `{:error, _}` contract; the row-value encoders now
+  guard finiteness the way the schema layer already did.
 
 - **Hexdocs stability and navigation.** `Xqlite.Telemetry`'s macro
   docs no longer depend on which compile-time telemetry flag was

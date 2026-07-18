@@ -39,6 +39,13 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(select)
     end
 
+    test "step reads non-finite floats as sentinel atoms", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT 1e308 * 10.0, -1e308 * 10.0")
+      assert {:row, [:positive_infinity, :negative_infinity]} = Xqlite.step(stmt)
+      assert :done = Xqlite.step(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
     # -------------------------------------------------------------------
     # multi_step batching
     # -------------------------------------------------------------------
