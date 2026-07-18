@@ -1,6 +1,6 @@
 //! Shared helpers for SQLite hook modules.
 //!
-//! Three orthogonal concerns live here:
+//! Four orthogonal concerns live here:
 //!
 //! * Term construction for messages sent back to Elixir (`make_atom`,
 //!   `make_binary`) — used by every hook that forwards events as
@@ -15,6 +15,11 @@
 //!   subscribers can register independently; each gets a unique
 //!   handle for unregistration; the C callback walks a snapshot
 //!   without locks.
+//! * Raw-FFI callback unwind guard (`guard_ffi_callback`) — wraps the
+//!   body of the three callbacks we register directly through
+//!   `ffi::sqlite3_*` (progress / wal / busy) in `catch_unwind`, so a
+//!   panic can never unwind across `extern "C"` into SQLite's C stack
+//!   and crash the BEAM.
 //!
 //! Both slot styles share the same release-acquire ordering and the
 //! same "caller holds connection Mutex during writes" invariant. The
@@ -24,6 +29,8 @@
 
 use crate::error::XqliteError;
 use rustler::sys::{ERL_NIF_TERM, ErlNifEnv, enif_make_atom_len, enif_make_new_binary};
+use std::io::Write;
+use std::os::raw::c_int;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 #[inline]
@@ -42,6 +49,62 @@ pub(crate) unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TE
         std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
         term
     }
+}
+
+// ---------------------------------------------------------------------------
+// Raw-FFI callback unwind guard
+// ---------------------------------------------------------------------------
+
+/// Run the body of a raw-FFI-registered SQLite C callback under
+/// `catch_unwind`, returning `fallback` if it panics.
+///
+/// xqlite registers three callbacks directly through `ffi::sqlite3_*`
+/// (`progress_dispatch_callback`, `wal_hook_callback`, `busy_callback`)
+/// instead of rusqlite's safe wrappers. rusqlite guards its OWN
+/// callbacks with `catch_unwind` trampolines; a raw registration has no
+/// such guard, so a panic escaping the body would unwind across the
+/// `extern "C"` boundary into SQLite's C stack — undefined behavior that
+/// crashes the BEAM. These callbacks are panic-free by construction
+/// today; this guard is future-proofing so a later edit that introduces
+/// a panic degrades to a defined return value instead of tearing down
+/// the VM.
+///
+/// `fallback` must be the callback's safe-on-panic return: a value that
+/// neither changes normal behavior nor corrupts SQLite state (0 for the
+/// progress and busy handlers, `SQLITE_OK` for the WAL hook).
+#[inline]
+pub(crate) fn guard_ffi_callback<F>(what: &str, fallback: c_int, body: F) -> c_int
+where
+    F: FnOnce() -> c_int,
+{
+    // AssertUnwindSafe is sound here: on a caught panic we never observe
+    // the captured state again — we log and hand `fallback` straight back
+    // to SQLite, so no possibly-broken invariant is ever witnessed.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(rc) => rc,
+        Err(payload) => {
+            // writeln!, never eprintln!: eprintln! panics on a broken
+            // stderr (EPIPE), and panicking again while already handling a
+            // panic at the C boundary is exactly what must not happen. This
+            // mirrors the resource-destructor logging in blob.rs /
+            // statement.rs / stream.rs.
+            let _ = writeln!(
+                std::io::stderr(),
+                "[xqlite] panic caught in {what} at the SQLite FFI boundary ({}); returning {fallback}",
+                panic_message(&*payload)
+            );
+            fallback
+        }
+    }
+}
+
+/// Best-effort extraction of a panic payload's message, for logging only.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 /// Install a hook whose state lives in a `Box<T>` tracked by an

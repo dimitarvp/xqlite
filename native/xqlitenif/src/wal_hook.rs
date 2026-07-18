@@ -77,48 +77,56 @@ unsafe extern "C" fn wal_hook_callback(
     db_name: *const c_char,
     pages: c_int,
 ) -> c_int {
-    // SAFETY: see the doc comment above.
-    let dispatch = unsafe { &*(user_data as *const WalDispatch) };
+    // Guard the body against a future panic: this callback is registered
+    // via raw `ffi::sqlite3_wal_hook`, so no rusqlite trampoline catches a
+    // panic before it unwinds into SQLite's C stack. Fallback SQLITE_OK is
+    // the neutral "commit proceeds" value (matching rusqlite's own wal
+    // trampoline); the worst effect is skipping one autocheckpoint, which
+    // the next commit re-evaluates.
+    hook_util::guard_ffi_callback("wal_hook_callback", ffi::SQLITE_OK, move || {
+        // SAFETY: see the doc comment above.
+        let dispatch = unsafe { &*(user_data as *const WalDispatch) };
 
-    let db_name_str = if db_name.is_null() {
-        ""
-    } else {
-        // SAFETY: SQLite passes a valid null-terminated C string.
-        unsafe { CStr::from_ptr(db_name) }.to_str().unwrap_or("")
-    };
+        let db_name_str = if db_name.is_null() {
+            ""
+        } else {
+            // SAFETY: SQLite passes a valid null-terminated C string.
+            unsafe { CStr::from_ptr(db_name) }.to_str().unwrap_or("")
+        };
 
-    // SAFETY: snapshot borrow is valid while the callback runs (the conn
-    // mutex is held; no concurrent unregister can free the snapshot).
-    unsafe {
-        dispatch.list.for_each_snapshot(|entry| {
-            send_wal_to_pid(&entry.state.pid, db_name_str, pages);
-        });
-    }
-
-    // Emulate SQLite's built-in autocheckpoint (sqlite3WalDefaultHook):
-    // holding the wal_hook slot disables it, so we own the behavior.
-    // Like SQLite's own hook, the checkpoint result is ignored —
-    // SQLITE_BUSY is routine for a passive checkpoint under readers.
-    let threshold = dispatch.autocheckpoint_pages.load(Ordering::Relaxed);
-    if threshold > 0 && pages >= threshold {
-        // SAFETY: SQLite invokes this hook on the thread that is mid-
-        // commit on `db`, i.e. the thread already holding the connection
-        // Mutex — the raw-handle locking rule is satisfied. `db` and
-        // `db_name` are the live pointers SQLite handed us. A PASSIVE
-        // checkpoint never invokes the busy handler and does not commit,
-        // so it cannot re-enter this hook.
+        // SAFETY: snapshot borrow is valid while the callback runs (the conn
+        // mutex is held; no concurrent unregister can free the snapshot).
         unsafe {
-            ffi::sqlite3_wal_checkpoint_v2(
-                db,
-                db_name,
-                ffi::SQLITE_CHECKPOINT_PASSIVE,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            dispatch.list.for_each_snapshot(|entry| {
+                send_wal_to_pid(&entry.state.pid, db_name_str, pages);
+            });
         }
-    }
 
-    ffi::SQLITE_OK
+        // Emulate SQLite's built-in autocheckpoint (sqlite3WalDefaultHook):
+        // holding the wal_hook slot disables it, so we own the behavior.
+        // Like SQLite's own hook, the checkpoint result is ignored —
+        // SQLITE_BUSY is routine for a passive checkpoint under readers.
+        let threshold = dispatch.autocheckpoint_pages.load(Ordering::Relaxed);
+        if threshold > 0 && pages >= threshold {
+            // SAFETY: SQLite invokes this hook on the thread that is mid-
+            // commit on `db`, i.e. the thread already holding the connection
+            // Mutex — the raw-handle locking rule is satisfied. `db` and
+            // `db_name` are the live pointers SQLite handed us. A PASSIVE
+            // checkpoint never invokes the busy handler and does not commit,
+            // so it cannot re-enter this hook.
+            unsafe {
+                ffi::sqlite3_wal_checkpoint_v2(
+                    db,
+                    db_name,
+                    ffi::SQLITE_CHECKPOINT_PASSIVE,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+
+        ffi::SQLITE_OK
+    })
 }
 
 /// Send `{:xqlite_wal, db_name, pages}` to `pid`. Fire-and-forget.

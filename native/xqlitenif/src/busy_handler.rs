@@ -57,36 +57,43 @@ impl std::fmt::Debug for BusySlotState {
 /// passed to `sqlite3_busy_handler`, and the connection Mutex (held by
 /// the stepping caller) excludes concurrent mutation.
 unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_int {
-    // SAFETY: `user_data` is the Box<BusySlotState> pointer we leaked on
-    // install; mutators hold the same connection Mutex as the caller
-    // driving this callback, so the pointee cannot be reclaimed mid-read.
-    let state = unsafe { &*(user_data as *const BusySlotState) };
+    // Guard the body against a future panic: this callback is registered
+    // via raw `ffi::sqlite3_busy_handler`, so — unlike rusqlite's own busy
+    // trampoline — nothing catches a panic before it unwinds into SQLite's
+    // C stack. Fallback 0 stops retrying and surfaces SQLITE_BUSY: a clean,
+    // defined outcome, and never an unbounded retry loop.
+    hook_util::guard_ffi_callback("busy_callback", 0, move || {
+        // SAFETY: `user_data` is the Box<BusySlotState> pointer we leaked on
+        // install; mutators hold the same connection Mutex as the caller
+        // driving this callback, so the pointee cannot be reclaimed mid-read.
+        let state = unsafe { &*(user_data as *const BusySlotState) };
 
-    let retries = count as u32;
-    let elapsed_ms = state.start.elapsed().as_millis() as u64;
+        let retries = count as u32;
+        let elapsed_ms = state.start.elapsed().as_millis() as u64;
 
-    for (_handle, pid) in &state.observers {
-        // SAFETY: see `send_busy_to_pid`. All data is copied into a fresh
-        // msg_env; we never retain references across the call.
-        unsafe {
-            send_busy_to_pid(pid, retries, elapsed_ms);
-        }
-    }
-
-    match &state.policy {
-        None => 0,
-        Some(policy) => {
-            if retries >= policy.max_retries || elapsed_ms >= policy.max_elapsed_ms {
-                return 0; // surface SQLITE_BUSY to the caller
+        for (_handle, pid) in &state.observers {
+            // SAFETY: see `send_busy_to_pid`. All data is copied into a fresh
+            // msg_env; we never retain references across the call.
+            unsafe {
+                send_busy_to_pid(pid, retries, elapsed_ms);
             }
-
-            if policy.sleep_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(policy.sleep_ms));
-            }
-
-            1 // retry
         }
-    }
+
+        match &state.policy {
+            None => 0,
+            Some(policy) => {
+                if retries >= policy.max_retries || elapsed_ms >= policy.max_elapsed_ms {
+                    return 0; // surface SQLITE_BUSY to the caller
+                }
+
+                if policy.sleep_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(policy.sleep_ms));
+                }
+
+                1 // retry
+            }
+        }
+    })
 }
 
 /// Send `{:xqlite_busy, retries, elapsed_ms}` to `pid`. Fire-and-forget.

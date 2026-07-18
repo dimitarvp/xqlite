@@ -38,6 +38,15 @@ without the other would be a data race. Read concurrency is meant to come
 from a pool of independent handles (as the Ecto adapter does), not from
 sharing one handle across schedulers.
 
+Two by-design operations hold this mutex across a blocking call, pinning
+the connection for that call's duration. A busy retry policy's `sleep_ms`
+(`Xqlite.set_busy_policy/2`) sleeps on the mutex-holding thread between
+attempts; and in WAL mode xqlite runs the emulated autocheckpoint — a
+passive checkpoint, i.e. real file I/O — inside its WAL hook on the
+committing thread while the mutex is held. Neither is a bug (it is simply
+where SQLite invokes the callback), but both make other operations on the
+*same* connection wait. Other connections are never affected.
+
 One rule the mutex cannot enforce for you: **a raw handle must not
 outlive the connection it came from.** Prepared statements, streams, and
 incremental-blob handles all hold a pointer into their connection's

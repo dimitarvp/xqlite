@@ -173,50 +173,60 @@ pub(crate) unsafe fn install_callback(
 /// Invoked by SQLite while the conn Mutex is held; `user_data` is the
 /// `*const ProgressDispatch` we passed to `install_callback`.
 unsafe extern "C" fn progress_dispatch_callback(user_data: *mut c_void) -> c_int {
-    // SAFETY: user_data is the dispatch pointer we registered;
-    // guaranteed alive while a step is in flight.
-    let dispatch = unsafe { &*(user_data as *const ProgressDispatch) };
+    // Guard the body against a future panic: this callback is registered
+    // via raw `ffi::sqlite3_progress_handler`, so no rusqlite trampoline
+    // catches a panic before it unwinds into SQLite's C stack. Fallback 0
+    // is the callback's normal-path "do not interrupt" value — a panic
+    // must never spuriously abort a user query, and 0 leaves SQLite state
+    // untouched (a missed cancel is re-checked on the next fire, 8 VM ops
+    // later).
+    hook_util::guard_ffi_callback("progress_dispatch_callback", 0, move || {
+        // SAFETY: user_data is the dispatch pointer we registered;
+        // guaranteed alive while a step is in flight.
+        let dispatch = unsafe { &*(user_data as *const ProgressDispatch) };
 
-    // Cancel pass first: any signalled token interrupts the query.
-    // Use a flag rather than `?`-style early return so we still walk
-    // the full list (cheap; lets every cancel-checker pay the same
-    // cost regardless of order).
-    let mut should_interrupt = false;
-    // SAFETY: dispatch outlives the snapshot borrow (module invariants).
-    unsafe {
-        dispatch.cancels.for_each_snapshot(|entry| {
-            // SAFETY: CancelSubscriber::flag invariant.
-            let flag = &*entry.state.flag;
-            if flag.load(Ordering::Acquire) {
-                should_interrupt = true;
-            }
-        });
-    }
-    if should_interrupt {
-        return 1;
-    }
-
-    // Tick pass second: only if there are tick subscribers AT ALL.
-    if !dispatch.ticks.is_empty() {
-        // SAFETY: see above.
+        // Cancel pass first: any signalled token interrupts the query.
+        // Use a flag rather than `?`-style early return so we still walk
+        // the full list (cheap; lets every cancel-checker pay the same
+        // cost regardless of order).
+        let mut should_interrupt = false;
+        // SAFETY: dispatch outlives the snapshot borrow (module invariants).
         unsafe {
-            dispatch.ticks.for_each_snapshot(|entry| {
-                let n = entry.state.count.fetch_add(1, Ordering::Relaxed);
-                if n.is_multiple_of(entry.state.every_n as u64) {
-                    let elapsed_ms = entry.state.install_instant.elapsed().as_millis() as u64;
-                    // SAFETY: send_tick_to_pid uses a fresh msg_env.
-                    send_tick_to_pid(
-                        &entry.state.pid,
-                        entry.state.tag_bytes.as_deref(),
-                        n,
-                        elapsed_ms,
-                    );
+            dispatch.cancels.for_each_snapshot(|entry| {
+                // SAFETY: CancelSubscriber::flag invariant.
+                let flag = &*entry.state.flag;
+                if flag.load(Ordering::Acquire) {
+                    should_interrupt = true;
                 }
             });
         }
-    }
+        if should_interrupt {
+            return 1;
+        }
 
-    0
+        // Tick pass second: only if there are tick subscribers AT ALL.
+        if !dispatch.ticks.is_empty() {
+            // SAFETY: see above.
+            unsafe {
+                dispatch.ticks.for_each_snapshot(|entry| {
+                    let n = entry.state.count.fetch_add(1, Ordering::Relaxed);
+                    if n.is_multiple_of(entry.state.every_n as u64) {
+                        let elapsed_ms =
+                            entry.state.install_instant.elapsed().as_millis() as u64;
+                        // SAFETY: send_tick_to_pid uses a fresh msg_env.
+                        send_tick_to_pid(
+                            &entry.state.pid,
+                            entry.state.tag_bytes.as_deref(),
+                            n,
+                            elapsed_ms,
+                        );
+                    }
+                });
+            }
+        }
+
+        0
+    })
 }
 
 /// Send `{:xqlite_progress, tag, count, elapsed_ms}` (or

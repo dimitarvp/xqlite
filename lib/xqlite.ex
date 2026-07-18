@@ -1342,6 +1342,14 @@ defmodule Xqlite do
 
   Replacing an existing policy is atomic; observers are unaffected.
 
+  > #### Note — a busy sleep pins the connection {: .info}
+  >
+  > `sleep_ms` sleeps on the thread holding the connection mutex, so while
+  > a retry waits, that connection is pinned: other operations on the
+  > *same* connection block until the sleep-and-retry resolves. Different
+  > connections are unaffected. Budget `sleep_ms` × `max_retries`
+  > accordingly.
+
   > #### Warning — PRAGMA busy_timeout silently replaces the callback {: .warning}
   >
   > Running `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
