@@ -146,6 +146,10 @@ per-axis dryness state. Nothing found is ever silently dropped.
   and `nif.rs:2057` (`OwnedBinary::new(0).unwrap()`) use `unwrap` where
   the crate's graceful `map_err`/`ok_or_else` convention applies.
   Latent (never Errs in practice); consistency fix.
+- **M6 & M7 → closed `7e575f7` (2026-07-19)** — own `catch_unwind` guard
+  on the three raw-FFI callbacks (M6); busy-sleep / wal-checkpoint
+  mutex-pinning documented in `set_busy_policy/2` + security guide (M7).
+  M10/M11 remain open.
 
 ### Key positive results (defensive posture that HELD)
 

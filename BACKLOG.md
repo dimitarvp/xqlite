@@ -22,14 +22,6 @@ burn-down.
   the announcement. (wave-1)
 - [S3] FTS5 guide is linear-executable — wire it up as an executed
   test so the guide can't rot. (A11 seed)
-- [S3] M6 (Run 1): wal/progress/busy C callbacks are raw-FFI-registered
-  with NO `catch_unwind` (unlike rusqlite's guarded trampolines) —
-  panic-free today only by construction. Add our own unwind guard so a
-  future edit can't turn a callback panic into VM death.
-- [S3] M7 (Run 1): `busy_callback` `thread::sleep` + `wal_hook_callback`
-  checkpoint I/O run on the C stack holding the conn Mutex. By-design
-  (busy retry / autocheckpoint emulation) but owes a docs/scheduler
-  note so users know a busy-sleep policy pins the connection.
 - [S3] M10/M11 (Run 1): `explain_analyze.rs:380-490` (`map_put().unwrap()`
   ×24) and `nif.rs:2057` (`OwnedBinary::new(0).unwrap()`) use `unwrap`
   where the crate's graceful `map_err`/`ok_or_else` convention applies.
@@ -41,6 +33,13 @@ burn-down.
 
 ## Closed
 
+- 2026-07-19 M6 (Run 1): own `catch_unwind` guard on the three raw-FFI
+  callbacks (progress/wal/busy) so a future callback panic degrades to a
+  safe fallback instead of unwinding into SQLite and killing the VM →
+  `7e575f7`.
+- 2026-07-19 M7 (Run 1): documented the busy-sleep + wal-checkpoint
+  connection-Mutex pinning in `set_busy_policy/2` and the security
+  guide's thread-safety section → `7e575f7`.
 - 2026-07-17 CLAUDE.md drift cluster (intro versions, structure map,
   current state, Hex-2.5 2FA gotcha) → `51d1a17`.
 - 2026-07-17 hexdocs grouping + flag-stable telemetry macro docs →
