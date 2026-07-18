@@ -84,6 +84,7 @@ defmodule Xqlite.MixProject do
         "CHANGELOG.md",
         "LICENSE.md",
         "guides/security.md",
+        "guides/gotchas.md",
         "guides/wiring_telemetry.md",
         "guides/full_text_search.md",
         "guides/spatialite.md"

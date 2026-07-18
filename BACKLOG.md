@@ -7,17 +7,6 @@ burn-down.
 
 ## Open
 
-- [decision-debt — needs Dimi ruling] (Run 7, A9) Offset-preserving
-  `DateTime` stored as ISO 8601 TEXT sorts LEXICALLY, not
-  chronologically, under `ORDER BY` when rows carry different UTC
-  offsets (demonstrated: a `+02:00` row that is chronologically earlier
-  sorts AFTER a `Z` row). Value round-trips exactly; only the SQL sort
-  is wrong. Keep + document the caveat, or store a sort-stable form
-  (UTC-normalized ISO 8601 / `Instant` int64)?
-- [S3 doc] (Run 7, A9) Stored NaN silently becomes NULL
-  (`INSERT … VALUES(9e999-9e999)` → `typeof`=null). Documented SQLite
-  behavior, not surfaced in xqlite's value docs — document alongside the
-  F1 Inf policy.
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)
@@ -51,9 +40,33 @@ burn-down.
   operation"; only `XqliteNIF.cancel_operation/1` hints it ("the
   cancellation signal remains active for the token", `xqlitenif.ex:1063`).
   Doc-clarity only; no code change. Well-defined, not a crash/wrong-result.
+  NOW documented user-facing in `guides/gotchas.md` ("Cancel tokens are
+  single-use" — spells out "create a fresh token per cancellable
+  operation"); the only residual is repeating the line in the inline
+  `lib/xqlite.ex` docstrings.
 
 ## Closed
 
+- 2026-07-19 (Run 7, A9) D1 — offset-preserving `DateTime` (ISO 8601
+  TEXT) sorting LEXICALLY, not chronologically, under `ORDER BY` across
+  mixed UTC offsets: RULED keep-and-document. The behavior is
+  intentional (the value round-trips exactly; only the SQL sort reads
+  oddly), and the caveat plus the two sort-stable escape hatches
+  (UTC-normalized storage, `Instant` int64 ns) are now documented
+  user-facing in `guides/gotchas.md`.
+- 2026-07-19 (Run 7, A9) D2 — stored NaN silently becomes NULL (SQLite
+  has no NaN storage class): RULED document. Now surfaced in
+  `guides/gotchas.md` alongside the non-finite-float read policy
+  (±Inf → `:positive_infinity`/`:negative_infinity`, NaN → `nil`).
+- 2026-07-19 new `guides/gotchas.md` ("Gotchas and sharp edges")
+  catalogues the remaining user-facing DX quirks so they are publicly
+  documented, not just ledger findings: non-finite float reads,
+  NaN→NULL, `length()` interior-NUL truncation, offset-preserving
+  `DateTime` sort, streaming `on_error` modes, cancel-token single-use,
+  close-children-before-connection leak (defers to the security guide),
+  `PRAGMA busy_timeout` callback replacement, and busy-sleep / WAL
+  autocheckpoint connection pinning. Wired into `mix.exs` docs extras;
+  cross-links `guides/security.md` both ways.
 - 2026-07-19 (Run 7, A9) F1: reading a non-finite (±Inf) REAL raised
   `ArgumentError`; the row-value encoders now map ±Inf to the sentinel
   atoms `:positive_infinity`/`:negative_infinity` and NaN to `nil` at
