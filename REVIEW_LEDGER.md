@@ -930,3 +930,146 @@ per-axis dryness state. Nothing found is ever silently dropped.
   overhead matrix. Per the two-consecutive-covering-runs rule A5 is NOT yet DRY;
   one more covering run is owed. Churn in `cancel.rs` / `progress_dispatch.rs` /
   the `ProgressHandlerGuard` scoping in any cancellable NIF re-wets it.
+
+---
+
+## Run 7 — 2026-07-19 — A9 type/value edges
+
+- Commit at scan: `d5507c6` (HEAD). Scope: end-to-end value round-trips through
+  the ACTUAL public API (`Xqlite.open_in_memory` → bind/insert → read back), across
+  ALL read paths — `query`/`execute` (rusqlite `process_rows`, `query.rs:50`),
+  `stream` and prepared `step`/`multi_step` (raw-FFI `sqlite_row_to_elixir_terms`,
+  `util.rs:277` via `process_single_step`), and incremental `blob_read`
+  (`nif.rs:2022`) — plus the bind path (`util.rs` `elixir_term_to_rusqlite_value`)
+  and the type-extension encoders. Composition: single Opus pass (this agent) —
+  a build-and-measure edge matrix (A9 is a drive-real-values axis, not a fleet
+  read), each edge PINNED against a KNOWN input with a byte-exact equality oracle
+  that has proven teeth. Did NOT re-litigate settled findings.
+
+### Harness (`type_edges/`, invoke `bash type_edges/run.sh`)
+
+- `probe.exs` drives 7 edges; `run.sh` gates on an oracle self-test first.
+  CI-isolated exactly like `durability/`/`concurrency/`/`lifecycle/`/`cancellation/`:
+  not under `test/`, not in `elixirc_paths` (`["lib"]`), and the formatter `inputs`
+  glob (`{config,lib,test}/**`) matches ZERO `type_edges/` files (verified via
+  `Path.wildcard`: `matched_by_formatter_glob: false`) — `mix verify` untouched
+  (re-run GREEN at HEAD with the harness present). One `mix run --no-compile
+  --no-start` child under an OS `timeout`; in-memory DBs only; no files, no SIGKILL,
+  no pkill/name-match. The MAX_LENGTH probe uses `zeroblob(1000000001)`, which
+  SQLite rejects with SQLITE_TOOBIG BEFORE any allocation (source-verified:
+  `sqlite3_result_zeroblob64` checks `n > db->aLimit[SQLITE_LIMIT_LENGTH]` first,
+  libsqlite3-sys-0.38.1 amalgamation), so the box is never asked for ~1GB.
+
+### TEETH (hard gate — the equality oracle self-test must pass first)
+
+- `probe.exs selftest` plants 4 corruptions the oracle MUST flag (truncate-at-NUL
+  `<<1>>`≠`<<1,0,2>>`, int wrap `-2^63`≠`2^63`, int-vs-float `1`≠`1.0`, NUL-text
+  truncation `"a"`≠`"a\0b"`) and 2 correct values it must NOT false-positive. All 6
+  behave; run.sh ABORTS (rc 2) otherwise. The same `===` oracle green-lights every
+  real round-trip, so a truncated/wrapped/type-drifted read would FAIL the probe.
+
+### Per-edge PINNED behavior (observed vs expected)
+
+- **Bignum beyond i64 — CLEAN (expected).** i64 max/min round-trip byte-exact;
+  `+2^63` and `-2^63-1` → `{:error, {:cannot_convert_to_sqlite_value, "<decimal>",
+  "{error, badarg}"}}` with NOTHING stored (rustler `i64` decode rejects the bignum
+  at the bind boundary; `util.rs` Integer arm). No silent wrap/truncate. Instant
+  type-extension on a year-2300 `DateTime` (ns = 1.04e19 > i64) → same clean error.
+- **NaN / ±Infinity — TWO behaviors, one a finding.** (a) Non-finite floats CANNOT
+  be materialized as BEAM floats (`binary_to_term` of a non-finite `NEW_FLOAT_EXT`
+  raises), so the BIND path can never receive one — the only non-finite exposure is
+  READ-side. (b) **Reading a ±Inf REAL raises `ArgumentError "argument error"` on
+  EVERY read path** (F1 below). (c) NaN stored → NULL (`typeof`=null); computed NaN
+  (`SELECT 9e999-9e999`) → `nil` too — consistent, SQLite converts NaN→NULL at the
+  value layer, so NaN never reaches the float encoder (D2 doc below).
+- **Interior-NUL round-trips — CLEAN (expected), READ PATHS PROVEN.** TEXT
+  `"a\0b\0c"` (5 B) and BLOB `<<1,0,255,0,2>>` (5 B) both read back BYTE-EXACT via
+  query, stream, prepared step, AND incremental blob_read — no truncation on any
+  read path (both decoders length-bind via `sqlite3_column_bytes`; the write-path
+  fix `a7dc84e` completes the trip). NOTE: SQL `length()` on the NUL-TEXT returns
+  1 (SQLite C-string-length quirk) though the value is the full 5 bytes — a SQLite
+  behavior, not an xqlite data issue.
+- **Invalid-UTF-8 TEXT read-back — CLEAN on query/step, SWALLOWED on stream.**
+  `CAST(X'ff41' AS TEXT)` (TEXT storage class, invalid bytes). query & step → clean
+  structured `{:error, {:utf8_error, 0, "invalid utf-8 sequence of 1 bytes from
+  index 0"}}` (query path: rusqlite `TryFrom<ValueRef>` `from_utf8?` `value_ref.rs:159`
+  → `row.rs:295` → `error.rs:752`; raw-FFI path: `from_utf8` in `util.rs` →
+  `XqliteError::Utf8Error`). No lossy replacement, no raw bytes. The stream path is
+  the exception → F2 below.
+- **SQLITE_MAX_LENGTH / MAX_VARIABLE_NUMBER — CLEAN (expected).** 40 000 binds →
+  `{:error, {:sql_input_error, %{code: 1, message: "…too many SQL variables", …}}}`
+  at prepare (limit 32766); 100 binds OK. `zeroblob(1000000001)` →
+  `{:error, {:sqlite_failure, 18, 18, "string or blob too big"}}` (SQLITE_TOOBIG,
+  zero allocation); 1000-byte zeroblob OK.
+- **Offset-preserving DateTime TEXT vs ORDER BY — DECISION-DEBT (D1 below).**
+- **Encode-only Instant read-back — CLEAN (expected).** Reads back the raw int64 ns
+  byte-exact (`Instant.decode` is always `:skip`, documented "no decode").
+
+### CONFIRMED findings (reported for maintainer ruling — NOT fixed speculatively)
+
+- **F1 — S1 — reading a non-finite (±Inf) REAL raises `ArgumentError "argument
+  error"` on every read path.** `SELECT 9e999` / `SELECT -9e999` (computed) AND
+  `INSERT INTO f VALUES(9e999); SELECT x FROM f` (stored) both raise via `query`,
+  `stream`, and prepared `step`. Root: rustler `f64::encode` → `enif_make_double`
+  with NO finiteness guard (`rustler-0.38.0/src/types/primitive.rs:61`), called at
+  `util.rs:26` (`encode_val` `Value::Real(f) => f.encode(env)`, query/process_rows
+  path) and in `sqlite_row_to_elixir_terms`'s `SQLITE_FLOAT` arm
+  (`sqlite3_column_double` → `val.encode(env)`, stream/step path). `enif_make_double`
+  on a non-finite double posts a return-time `badarg`, so the caller gets an
+  `ArgumentError` — NOT the library's `{:ok|:error}` contract, and NOT a value. NOT
+  S0: it is loud (a raise, not a silent wrong value), no UB, no VM crash, and the
+  connection is STILL USABLE afterward (`inf_raise_conn_still_usable` = OK — the
+  conn Mutex drops cleanly before the return-time raise). INCONSISTENT with the
+  schema layer, which DELIBERATELY guards non-finite floats
+  (`schema.rs:302` `f.is_finite()` → `{:expr,…}`; documented `column_info.ex:28`) —
+  the row-value read path has no equivalent guard, and this is undocumented at the
+  `query`/`stream` API. Reachable: `SELECT 1e309`, float-overflow arithmetic/
+  aggregates, `INSERT … VALUES(1e400)` then read. **MAINTAINER QUESTION (yes/no):**
+  should reading a non-finite float raise, or return a structured
+  `{:error, :non_finite_float}` / a sentinel atom (`:infinity`/`:"-infinity"`) /
+  the float via a lossless encoding? Pick a policy and document it.
+- **F2 — S1 — the stream path SWALLOWS a mid-stream fetch error into `Logger.error`
+  and silently truncates the result set.** `stream_resource_callbacks.ex:89-102`
+  (`next_fun` `{:error, reason}` arm: `Logger.error(…)` then `{:halt, acc}`; the code
+  comment ITSELF notes "Stream.resource/3 does not propagate this error to the
+  consumer … logging is safer for now"). Demonstrated: a 4-row table with invalid
+  UTF-8 in row 3, streamed `batch_size: 1`, yields ONLY `["g1","g2"]` — row 3 AND the
+  trailing good row 4 are silently dropped, no error to the caller, only a log line;
+  `query`/`step` on the SAME data return `{:error, {:utf8_error, 0, …}}`. A consumer's
+  `Enum.to_list` cannot distinguish a complete stream from one aborted mid-flight
+  (success-on-failed-read / silent result truncation). Deliberate but user-
+  undocumented. **MAINTAINER QUESTION (yes/no):** should the stream propagate fetch
+  errors (raise, or emit a terminal `{:error, …}` element, or take an `on_error:`
+  option) instead of silently truncating?
+
+### DECISION-DEBT (pinned; maintainer yes/no)
+
+- **D1 — offset-preserving `DateTime` stored as ISO 8601 TEXT sorts LEXICALLY, not
+  chronologically, under `ORDER BY`, when rows carry different UTC offsets.**
+  Demonstrated: `dtA = 2024-06-01T23:00:00+00:00` (unix 1717282800) and
+  `dtB = 2024-06-02T00:00:00+02:00` (unix 1717279200, EARLIER); `ORDER BY ts ASC`
+  returns `["A","B"]` but chronological order is `["B","A"]`. The VALUE round-trips
+  EXACTLY (`decode(B) == dtB`) — storage is not corrupt; only the SQL sort is wrong.
+  `Xqlite.TypeExtension.DateTime` encodes via `DateTime.to_iso8601/1`, which keeps
+  the offset. **MAINTAINER QUESTION (yes/no):** acceptable as-is (document the
+  caveat), or should `DateTime` store a sort-stable form (UTC-normalized ISO 8601,
+  or the `Instant` int64 ns) so `ORDER BY` is chronological?
+- **D2 — S3 doc — stored NaN silently becomes NULL.** `INSERT … VALUES(9e999-9e999)`
+  → `typeof` = null, value `nil`. Documented SQLite behavior (no NaN storage class),
+  but not surfaced in xqlite's value-handling docs. **MAINTAINER QUESTION (yes/no):**
+  document the NaN→NULL policy alongside the F1 Inf policy?
+
+### Disposition & dryness
+
+- F1 + F2 are CONFIRMED S1 and — per the ratified bar — announcement-blockers
+  pending Dimi's ruling (both hinge on a desired-semantics DESIGN choice, so NOT
+  fixed speculatively; captured with minimal repros above + in the reusable probe).
+  D1 + D2 pinned as decision-debt. All FOUR filed in `BACKLOG.md`. Every byte-exact
+  round-trip HELD (bignum, interior-NUL ×4 paths, blob, DateTime value, Instant) —
+  zero S0 silent value corruption. `mix verify` GREEN with the harness present.
+- **A9: type-extension-suites-only → one covering value-edge run, 0 S0, 2 S1
+  (F1/F2) + 2 decision-debt (D1/D2), teeth proven.** Per the two-consecutive-
+  covering-runs rule A9 is NOT yet DRY; one more covering run is owed (and any
+  F1/F2 fix will CHURN the `util.rs` encode paths / `stream_resource_callbacks.ex`
+  and re-wet it). Churn in the `util.rs` value encoders, the stream fetch loop, or
+  any type_extension encoder re-wets A9.

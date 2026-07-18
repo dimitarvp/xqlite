@@ -170,8 +170,25 @@ paths); invalid-UTF-8 read-back end-to-end (rusqlite fixed 0.39 —
 pin OUR behavior); SQLITE_MAX_LENGTH / MAX_VARIABLE_NUMBER edges;
 offset-preserving DateTime TEXT vs ORDER BY (mixed offsets don't
 sort chronologically — wrong-results class + decision-debt);
-encode-only types' read-back story. Coverage: type-extension suites
-(49+ tests); no edge matrix.
+encode-only types' read-back story. Coverage: Run 7 — one covering
+value-edge run (`type_edges/run.sh`, CI-isolated), byte-exact oracle
+with proven teeth. Every round-trip HELD (bignum i64-boundary/over →
+clean error nothing-stored; interior-NUL TEXT+BLOB byte-exact via
+query/stream/step/blob_read; invalid-UTF-8 → structured
+`{:utf8_error,…}` on query+step; MAX_VARIABLE_NUMBER + MAX_LENGTH →
+clean `sql_input_error`/`SQLITE_TOOBIG`; Instant encode-only → raw
+int64). TWO S1 findings: F1 reading ±Inf raises `ArgumentError` on
+every read path (`enif_make_double` has no finiteness guard at
+`util.rs:26`/`sqlite_row_to_elixir_terms`; conn stays usable; schema
+layer DOES guard non-finite at `schema.rs:302` — inconsistent), F2
+stream swallows a mid-fetch error into `Logger` + silent truncation
+(`stream_resource_callbacks.ex:89-102`; query/step surface it). TWO
+decision-debt: D1 offset-preserving DateTime TEXT sorts lexically not
+chronologically under ORDER BY (value round-trips; only the sort is
+wrong), D2 stored NaN→NULL (SQLite behavior, undocumented). 0 S0.
+NOT yet DRY (first value-edge run; one more owed; F1/F2 fixes or any
+`util.rs` encoder / stream-fetch / type_extension-encoder churn
+re-wets). Findings → BACKLOG + ledger Run 7.
 
 ### A10. Structured-error contract
 Probes: audit remaining text-parsing paths ("mostly succeeded" —
