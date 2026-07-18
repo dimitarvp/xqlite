@@ -108,7 +108,17 @@ Coverage: close-path tests exist; no leak loops, no census.
 Probes: N-process hammering one handle; owner-process death mid-txn;
 busy policy/observer split under real write contention; attempt to
 reproduce rusqlite#1860 (open/close-churn VFS deadlock, OPEN
-upstream) at our versions. Coverage: single-writer tests only.
+upstream) at our versions. Coverage: Run 4 — one covering
+adversarial+probe pass (`concurrency/run.sh`, CI-isolated). Static
+audit of all five interleaving windows HOLDS (swap-then-lock /
+lock-then-load, conn-Mutex-serialised hook COW, lock-free cancel
+store, N-handles, owner-death); 5 probes (hammer / owner-death /
+orphan-txn / busy / churn) all PASS, with five teeth (byte-smash,
+payload-tamper, hammer-drop, busy-drop, sleep-forever) proven to
+trip. Substrate: bundled SQLite THREADSAFE=1 + MUTEX_PTHREADS
+(runtime-verified) → globals mutex-protected; #1860 does NOT
+reproduce at 3.53.2. 0 findings. NOT yet DRY (one covering run; one
+more owed; AtomicPtr/close/open or hook-registration churn re-wets).
 
 ### A8. Durability crash-harness — crown jewel
 Probes: writer → `kill -9` the VM at random points → reopen →

@@ -423,3 +423,159 @@ per-axis dryness state. Nothing found is ever silently dropped.
   two-consecutive-covering-runs rule A8 is NOT yet DRY; one more covering run
   (or a power-loss-class extension via a real fault injector) is owed, and
   churn in the commit/open path re-wets it.
+
+---
+
+## Run 4 — 2026-07-18 — A7 concurrency / interleaving
+
+- Commit at scan: `46c215c` (HEAD). Scope: the whole concurrency surface — the
+  `AtomicPtr` swap/finalize discipline in `stream.rs`/`statement.rs`/`blob.rs`
+  under concurrent step/finalize/close; hook-dispatch register/unregister racing
+  a firing C callback (update/commit/rollback/wal/progress/busy + the global
+  log); cancel-vs-close and cancel-vs-Drop; N BEAM processes sharing ONE handle;
+  and owner-process death mid-transaction. Composition: single Opus pass (this
+  agent) — adversarial static interleaving audit + a build-and-run probe harness
+  (A7 is build-and-measure like A8, not a fleet read). Did NOT re-litigate the
+  already-fixed blob/session/log findings (Runs 1–2); looked only for NEW
+  distinct defects.
+
+### Substrate fact (runtime-verified — the reason the model is sound)
+
+- The bundled SQLite is compiled **`THREADSAFE=1`** (SERIALIZED) with
+  **`MUTEX_PTHREADS`** — confirmed at runtime via `PRAGMA compile_options`
+  (`["THREADSAFE=1"]`, `["MUTEX_PTHREADS"]`) and in `libsqlite3-sys` `build.rs:139`
+  (`-DSQLITE_THREADSAFE=1`). So SQLite's process-global structures (allocator,
+  VFS, pcache) are internally mutex-protected; NOMUTEX connections are
+  single-threaded via OUR `Mutex<Connection>`, and independent handles used
+  concurrently across dirty-scheduler OS threads do not corrupt global C state.
+  This puts gotcha #1 / A14 in the CONTENTION/robustness bucket, not hard-UB:
+  `sqlite3_threadsafe() != 0`, so `rusqlite::ensure_safe_sqlite_threading_mode`
+  (`inner_connection.rs:415`) would reject any non-threadsafe build at open —
+  and opens succeed.
+
+### Static interleaving audit — every window HOLDS (guard cited)
+
+- **W1 AtomicPtr swap/finalize.** Finalizers use swap-then-lock
+  (`take_and_finalize_raw` `stream.rs:45-66`, `blob::close` `blob.rs:237-255`);
+  users use lock-then-load (`with_live_stmt` `statement.rs:44-65`,
+  `with_live_blob` `blob.rs:266-286`, `stream_fetch` `nif.rs:1295-1340`). The
+  swap is atomic so only one caller ever gets the non-null pointer → no
+  double-finalize; and `sqlite3_finalize`/`_blob_close` can only run under the
+  conn `Mutex`, so a pointer loaded non-null *under the lock* cannot be
+  finalized until the guard drops. Finalize and use are mutually excluded by the
+  one `Mutex`; a concurrent swap-to-null between a user's load and use is
+  harmless (it does not free — freeing needs the lock the user holds). Airtight
+  in both orders.
+- **W2 hook dispatch vs register/unregister.** All per-connection lists
+  (`update`/`commit`/`rollback`/`wal`/`progress.ticks`/`progress.cancels`/`busy`)
+  fire their C callback only inside `sqlite3_step`/commit, i.e. while the conn
+  `Mutex` is held; every register/unregister NIF wraps the `HookList`
+  COW mutation in `with_conn` (`nif.rs:283-334,1461-1608`) or `with_live_stmt`,
+  so the reader and the writer that frees the old `Vec` are serialised by that
+  same `Mutex` — the COW reclaim can never race a snapshot walk. The
+  process-global log hook has no conn `Mutex`, so its callback and
+  register/unregister share `MASTER_LOCK` (`log_hook.rs:53,89,109`). HOLDS.
+- **W3 cancel-vs-close / cancel-vs-Drop.** `cancel()` is a lock-free
+  `AtomicBool` store (`cancel.rs:17-19`) to an `Arc<AtomicBool>` kept alive by
+  BOTH the `XqliteCancelToken` resource and the `ProgressHandlerGuard`
+  (`cancel.rs:39,49-62`), so the store always targets live memory even if the
+  token is GC'd or the connection closed concurrently. The `cancels` HookList
+  register/unregister run under the conn `Mutex` (the guard is constructed and
+  dropped INSIDE `with_conn`/`with_live_stmt`: `nif.rs:161-193,206-226,960-982`),
+  serialised against the progress callback. Close just `take()`s the
+  `Connection` under the `Mutex`; an in-flight cancellable query holds that
+  `Mutex`, so close waits, or the query sees `ConnectionClosed`. HOLDS.
+- **W4 N handles / one connection.** Every raw path funnels through the single
+  `Mutex<Option<Connection>>`; the two disciplines above are its only readers of
+  the raw pointers. Serialised by construction — verified by probe.
+- **W5 owner death mid-txn.** The connection is a `ResourceArc`; a dead owner
+  drops one ref but survivors keep it alive. A half-open transaction is left in
+  SQLite's `:write` state and is recoverable — verified by probes 2 + 2b.
+
+### Probes — harness `concurrency/` (invoke `bash concurrency/run.sh`)
+
+- CI-isolated exactly like `durability/`: not under `test/`, not in
+  `elixirc_paths` (`["lib"]` / `["lib","test/support"]`), and the formatter
+  `inputs` glob (`{config,lib,test}/**`) does not match `concurrency/**` — `mix
+  verify` is untouched (re-run green at HEAD). Every child is a `mix run`
+  subprocess under `timeout`; Probe 2's SIGKILL targets the exact captured `$!`,
+  cross-checked against the holder's self-reported `System.pid()` (abort on
+  mismatch); DBs in a private `mktemp` dir, removed on exit.
+
+- **TEETH (hard gate — all five TRIPPED before any PASS was trusted):** a
+  mid-page byte-smash → CORRUPTION (`integrity_check` "database disk image is
+  malformed"); a payload-tamper → CORRUPTION (per-row checksum leg); hammer with
+  one acked row deleted → WRONGRESULT (set-diff oracle); busy with one committed
+  row deleted → WRONGRESULT (lost-update oracle); a sleep-forever control →
+  HANG (the OS `timeout` fires, rc=124). The same oracles green-light the real
+  runs, so a real corruption/lost-write/hang would have been caught.
+
+- **Probe 1 — hammer (N BEAM procs, ONE shared handle).** 8 writers + 6 readers
+  + 4 prepared-statement workers × 400 ops on a single shared connection, PLUS a
+  finalize-vs-step race (6 steppers vs 1 finalizer on ONE shared statement, ×20
+  rounds). Oracle = `integrity_check` + acked-vs-actual row-set equality +
+  per-row checksum. **PASS 4800/4800**; stable **5/5** reruns (3600/3600 each).
+  No crash, no torn/lost/phantom row, integrity clean.
+- **Probe 2 — owner death mid-txn (separate OS processes, shared file).** Holder
+  opens, `BEGIN IMMEDIATE`, inserts an uncommitted row, is SIGKILLed by exact
+  PID. Control (holder still alive) → verifier write **RECOVERED_BUSY** (lock
+  genuinely held — the teeth for "not wedged"); test (holder killed) → verifier
+  **RECOVERED_WROTE**, uncommitted row rolled back, integrity clean. The
+  contrast proves death released the lock and recovery is clean.
+- **Probe 2b — orphan txn (BEAM owner dies, SHARED handle, one VM).** A BEAM
+  process does `BEGIN IMMEDIATE` + uncommitted insert on a shared handle then is
+  `Process.exit(:kill)`ed mid-transaction. Survivor observes `txn_state ==
+  {:ok, :write}` (not wedged), `ROLLBACK` recovers the handle, the orphaned row
+  is gone, integrity clean. **PASS.** No UB from the owner vanishing mid-call.
+- **Probe 3 — busy contention + observer (two conns, shared file).** Two
+  connections run contended `BEGIN IMMEDIATE`/INSERT/COMMIT loops over disjoint
+  bands under a retry policy + observer. **PASS 300/300** rows, `busy_events`
+  observed (≥1; 4 in the full run) proving the policy retried and observers
+  received `{:xqlite_busy,…}`, zero lost updates, no deadlock (completed well
+  under the bounded timeout).
+- **Probe 4 — open/close churn (rusqlite#1860).** 8–12 workers × 120–150
+  concurrent `open`+op+`close` cycles on ONE WAL file (real dirty-scheduler OS
+  threads sharing the process-global VFS — the faithful model for a library-VFS
+  thread deadlock, which separate OS processes would NOT reproduce). **PASS**,
+  1200–1440 opens in ~1s, **5/5** reruns, integrity clean. **#1860 does NOT
+  reproduce at bundled SQLite 3.53.2 / THREADSAFE=1.**
+
+### Findings
+
+- **CLEAN — zero S0/S1/S2/S3.** No new distinct concurrency defect. The five
+  interleaving windows hold at the source level and survived teeth-backed
+  stress. (One noted non-defect, S3-adjacent at most: sharing ONE connection
+  handle across BEAM processes shares that connection's transaction — a survivor
+  can join or roll back another process's open txn. This is documented SQLite
+  connection semantics, serialised with zero UB by the `Mutex`, not a bug; the
+  Ecto-layer model is a pool of independent handles.)
+
+### Verdict — A7 HOLDS
+
+- The Mutex-per-handle + swap-then-lock/lock-then-load + conn-Mutex-serialised
+  hook COW model is sound against interleaving, and the probes reproduce clean
+  behavior with proven teeth. This is only as strong as those teeth — all five
+  tripped on known-bad input.
+
+### Honest gaps
+
+- No TSan/Miri on the LIVE NIF: Miri cannot execute the bundled C SQLite (Run 2
+  established this) and no TSan-instrumented SQLite build is available. The
+  probes' UB oracle is `integrity_check` + row invariants + crash/exit-code
+  detection, not a happens-before race detector — a benign data race that never
+  perturbs observable state within the run window could go unseen; the
+  THREADSAFE=1 + single-Mutex source analysis is what bounds that.
+- Cross-OS-process sharing of ONE handle is impossible by construction (a
+  `ResourceArc` lives in one VM); "N processes / one handle" was exercised with
+  N BEAM processes = genuine OS-thread concurrency via dirty schedulers.
+- Contention in Probe 3 is real but modest (the fast retry policy resolves it);
+  no pathological sustained-contention or DEFERRED-upgrade livelock case was
+  engineered.
+
+### Disposition & dryness
+
+- Nothing to fix, nothing backlogged. **A7: single-writer-tests-only → one
+  covering adversarial+probe run, 0 findings, teeth proven.** Per the
+  two-consecutive-covering-runs rule A7 is NOT yet DRY; one more covering run is
+  owed. Churn in the AtomicPtr/close/open-path or the hook-registration seam
+  re-wets it.
