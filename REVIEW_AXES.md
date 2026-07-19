@@ -83,8 +83,32 @@ sanitizer suite runs; clippy pedantic triage once. Coverage: none.
 ### A4. Scheduler discipline
 NIFs must be <1ms proven or Dirty (CPU vs IO correctly chosen).
 Probes: per-NIF classification table; `erlang:system_monitor`
-long_schedule gate over the full suite. Coverage: dirty flags exist
-in code, unaudited.
+long_schedule gate over the full suite. Coverage: Run 10 — first
+dedicated covering measure+gate run (`scheduler/run.sh`, CI-isolated).
+All 96 NIFs classified (census CONFIRMED 62/34 pre-fix → 71/25 post-fix,
+0 DirtyCpu). Mechanism runtime-established: `long_schedule` fires for a
+long NORMAL-scheduler NIF, NEVER for a Dirty one (1570 ms Dirty query →
+0 events; 135 ms normal `blob_read` → 1) — so the gate is a valid A4
+detector and a flip-to-DirtyIo is a real move, not a blind spot; PID
+attribution (NIF schedule-in MFA is `:undefined`); fix-independent
+`term_to_binary/[:compressed]` teeth control delivered 35 events every
+run. ONE S2 mechanism CONFIRMED + FIXED (RED→GREEN): 9 session/blob/
+changeset NIFs (`blob_open`/`blob_read`/`blob_write`/`blob_reopen`,
+`session_changeset`/`session_patchset`/`session_delete`,
+`changeset_invert`/`changeset_concat`) ran unbounded / DB-file work on
+the normal scheduler (RED 28–248 ms, 1 hit each; the 6 unbounded ones
+measured, `session_delete` 14.9 ms wall, `blob_open`/`reopen` coherence)
+→ `schedule = "DirtyIo"`, all now 0 hits. ONE S3 (F-A4-1): the 20
+conn-`Mutex` trivial normal readers block a normal scheduler for a
+concurrent slow op's whole duration ONLY under cross-process handle
+SHARING (measured ~1.45–1.49 s; against the documented single-owner
+design) → BACKLOG + `guides/gotchas.md`. Blanket-DirtyIo (0 DirtyCpu)
+RULED correct (every Dirty NIF blocks on I/O-class waits; DirtyCpu is
+the wrong pool). The 25 normal NIFs are all PROVEN-FAST (LAT ≤ 60 µs
+uncontended / O(1)-bounded). NOT yet DRY (first covering run; one more
+owed). Churn re-wets: any new `#[rustler::nif]`, any `schedule=` change,
+any new blocking work / lock a normal NIF does under the conn `Mutex`, or
+a `with_conn`/`with_session`/`with_live_blob`/`with_live_stmt` restructure.
 
 ### A5. Cancellation semantics
 8-VM-step progress-handler cadence, un-tuned. Probes: cancel latency

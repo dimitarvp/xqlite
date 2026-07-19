@@ -1476,3 +1476,243 @@ per-axis dryness state. Nothing found is ever silently dropped.
   + the three `core_*`), `lib.rs` (atom), and `error_reason/0` — plus any
   session/blob/backup/serialize/authorizer/hook code or any guide edit re-wets
   A11.
+
+## Run 10 — 2026-07-19 — A4 scheduler discipline
+
+- Commit at scan: `2afa44e` (HEAD). Scope: the scheduler classification of ALL
+  96 `#[rustler::nif]` functions — normal (<1ms-proven) vs Dirty (CPU vs IO
+  chosen right) — plus the adversarial angle the axis names: a normal-scheduler
+  NIF that acquires the connection `Mutex` (or any blocking resource) can occupy
+  a normal scheduler for the FULL duration of a concurrent slow operation.
+  Composition: single Opus pass (this agent) — full census + a build-and-measure
+  probe under `erlang:system_monitor`'s `long_schedule` gate (A4 is a
+  drive-and-measure axis, not a fleet read). Did NOT re-litigate settled
+  findings; the M5 (Run 1) note "`session_changeset`/`patchset` step an internal
+  SELECT on the normal scheduler" was flagged then for the progress-list UAF
+  (fixed), never as a scheduling defect — this run owns the scheduling angle.
+
+### Census (VERIFIED against the prior 62/34 claim)
+
+- **Pre-run: 62 DirtyIo / 34 normal / 0 DirtyCpu** — the 62/34 census claim is
+  CONFIRMED exact. **Post-fix: 71 DirtyIo / 25 normal / 0 DirtyCpu** (9 flips,
+  below). Zero DirtyCpu either way (blanket-DirtyIo — RULED correct, below).
+
+### The mechanism (established this session, runtime-verified — the reason the
+### monitor gate is a valid A4 detector)
+
+- `erlang:system_monitor(pid, [{long_schedule, T}])` delivers `{:monitor, Pid,
+  :long_schedule, [timeout: Ms, in: _, out: _]}` when a process runs on a NORMAL
+  scheduler > T ms without yielding. A NIF has no yield points, so a
+  normal-scheduler NIF running > T trips it; the schedule-in MFA is reported
+  `:undefined` for NIF frames (ERTS limitation), so attribution is by the
+  offending process's **pid** (each workload runs in a dedicated single-call
+  process). **A Dirty-scheduler NIF NEVER trips it** — proven this session: a
+  1570 ms Dirty `query` and 7.7 s Dirty CTE both delivered **0** events, while a
+  135 ms normal `blob_read` delivered 1. So flipping a hog to DirtyIo silences
+  the gate not by hiding but by moving the blocking off the normal schedulers,
+  which is the fix. `:erlang.md5/1` traps (0 events); `:erlang.term_to_binary/2`
+  with `[:compressed]` does NOT — it is the fix-INDEPENDENT teeth control.
+
+### Full 96-NIF classification table
+
+**normal scheduler — 25 NIFs, ALL PROVEN-FAST (LAT-measured µs, or O(1)/
+O(bounded) by inspection). Worst-case argument | conn-Mutex? :**
+
+| NIF | worst-case work | conn Mutex |
+|---|---|---|
+| `db_path` | `conn.path()` cached filename, O(1); LAT max 16 µs | yes (`with_conn`) |
+| `autocommit` | `sqlite3_get_autocommit` flag, O(1); 12 µs | yes |
+| `txn_state` | `sqlite3_txn_state`, O(1); 6 µs | yes |
+| `changes` | `sqlite3_changes64`, O(1); 17 µs | yes |
+| `total_changes` | `sqlite3_total_changes64`, O(1) | yes |
+| `set_busy_policy` | install busy slot, O(1) | yes |
+| `remove_busy_policy` | clear busy slot, O(1) | yes |
+| `register_busy_observer` | COW-append, O(observers) | yes |
+| `unregister_busy_observer` | COW-remove, O(observers) | yes |
+| `set_authorizer` | `parse_denied` O(list) pre-lock + install O(1) | yes |
+| `remove_authorizer` | clear authorizer, O(1) | yes |
+| `register_progress_hook` | COW-append tick sub, O(subs) | yes |
+| `unregister_progress_hook` | COW-remove, O(subs) | yes |
+| `enable_load_extension` | `sqlite3_db_config` flag, O(1) | yes |
+| `session_new` | `sqlite3session_create` alloc, O(1) | yes |
+| `session_attach` | record table name, O(1) | yes (`with_session_mut`) |
+| `session_is_empty` | `sqlite3session_isempty`, O(1); 1 µs | yes (`with_session`) |
+| `blob_size` | `sqlite3_blob_bytes` cached `nByte`, O(1); 10 µs | yes (`with_live_blob`) |
+| `blob_close` | swap-null + `sqlite3_blob_close` (free Vdbe), O(1) | yes (teardown) |
+| `stmt_column_names` | loop `sqlite3_column_count` ≤ 2000, O(cols); 60 µs | yes (`with_live_stmt`) |
+| `create_cancel_token` | `Arc<AtomicBool>` alloc, O(1); 79 µs | **no** |
+| `cancel_operation` | lock-free `store(true)`, O(1) | **no** (deliberate) |
+| `sqlite_version` | `sqlite3_libversion` static ptr, O(1) | **no** |
+| `register_log_hook` | COW-append, O(subs) | **no** (`MASTER_LOCK`) |
+| `unregister_log_hook` | COW-remove, O(subs) | **no** (`MASTER_LOCK`) |
+
+- The 20 conn-Mutex normal readers are intrinsically <1ms (LAT proves the
+  representative set at ≤60 µs) but are exposed to the Mutex-contention S3 below.
+  The 5 no-conn-Mutex NIFs (`create_cancel_token`, `cancel_operation`,
+  `sqlite_version`, `register/unregister_log_hook`) cannot block on a slow query
+  at all; `cancel_operation` is deliberately lock-free so any process can cancel
+  without the handle (design tradeoff, CLAUDE.md).
+
+**DirtyIo scheduler — 71 NIFs, all correct (every one touches the DB file or
+does unbounded work; DirtyIo absorbs the file-I/O / lock / busy-sleep blocking).
+Grouped, worst-case noted:**
+
+- open/close (6): `open`,`open_in_memory`,`open_readonly`,`open_in_memory_readonly`,
+  `open_temporary`,`close` — VFS open/first-page read / `sqlite3_close`.
+- query/execute (9): `query`,`execute`,`execute_batch`,`query_with_changes`,
+  `query_cancellable`,`query_with_changes_cancellable`,`execute_cancellable`,
+  `execute_batch_cancellable`,`explain_analyze` — unbounded scan/sort/join +
+  busy-sleep + fsync (measured `query` 1570 ms → 0 hits, the Dirty-silence proof).
+- pragma/txn (10): `get_pragma`,`set_pragma`,`begin`,`commit`,`rollback`,
+  `savepoint`,`rollback_to_savepoint`,`release_savepoint`,`transaction_status`,
+  `last_insert_rowid` — checkpoint/commit I/O (`last_insert_rowid` is O(1) but
+  harmlessly over-classified; being Dirty is never a correctness risk).
+- schema (7): `schema_databases`,`schema_list_objects`,`schema_columns`,
+  `schema_foreign_keys`,`schema_indexes`,`schema_index_columns`,`get_create_sql`
+  — `sqlite_schema` scan + PRAGMA introspection, O(schema size).
+- statement (8): `stmt_prepare`,`stmt_bind`,`stmt_step`,`stmt_multi_step`,
+  `stmt_multi_step_cancellable`,`stmt_reset`,`stmt_clear_bindings`,`stmt_finalize`
+  — prepare/step touch pages; reset/finalize over-classified but safe.
+- stream (4): `stream_open`,`stream_get_columns`,`stream_fetch`,`stream_close`.
+- hooks-register (8): `register/unregister_update_hook`, `…_wal_hook`,
+  `…_commit_hook`, `…_rollback_hook` — in-memory COW only (over-classified vs the
+  normal `register_progress_hook`, but Dirty is harmless; NOT flipped — the safe
+  direction).
+- observability (3): `wal_checkpoint`,`connection_stats`,`compile_options`.
+- serialize/backup (5): `serialize`,`deserialize`,`backup`,`restore`,
+  `backup_with_progress` — whole-DB copy, O(db size).
+- extension (1): `load_extension` — dlopen + entry-point run.
+- session/changeset (10): `changeset_apply` (pre-existing) + the **9 flipped**
+  below.
+
+### CONFIRMED finding — F-A4 (S2) — 9 NIFs hogged a NORMAL scheduler → FIXED
+
+- **Nine session/blob/changeset NIFs ran unbounded / DB-file work on the normal
+  scheduler.** Exposed ONLY through the public, documented `XqliteNIF` module (no
+  higher-level wrapper, no size clamp — e.g. `XqliteNIF.blob_read(blob, 0,
+  500_000_000)` reads up to `SQLITE_MAX_LENGTH` bytes on a normal scheduler in a
+  single call), reachable in ordinary SINGLE-OWNER use (no handle sharing, no
+  contention needed — the NIF itself runs long). This is a ≥10×–200× breach of
+  the <1ms normal-scheduler bar → **S2** (scheduler-health / VM-latency cliff;
+  not UB/corruption, so not S0/S1). **RED (pre-fix, threshold 25 ms, this
+  session):** each ran on a normal scheduler and delivered a `long_schedule`
+  event —
+
+  | NIF | worst-case driver | RED wall | RED hits |
+  |---|---|---|---|
+  | `blob_read` | caller-controlled `length` (≤ blob size); 64 MB read | 106.8 ms | 1 |
+  | `blob_write` | caller-controlled binary; 64 MB write | 77.4 ms | 1 |
+  | `session_changeset` | serialize ALL recorded changes (steps internal SELECT); 400k rows → 15.9 MB | 228.0 ms | 1 |
+  | `session_patchset` | same, patchset form | 247.9 ms | 1 |
+  | `changeset_invert` | process caller-supplied changeset binary; 15.9 MB | 28.1 ms | 1 |
+  | `changeset_concat` | process two caller-supplied changesets; 2×15.9 MB | 131.9 ms | 1 |
+  | `session_delete` | free O(session-size) change records; 400k | 14.9 ms | 0* |
+  | `blob_open` | b-tree descent + page I/O (single row) | ~0 ms (warm) | 0* |
+  | `blob_reopen` | b-tree descent to a new row + page I/O | ~0 ms (warm) | 0* |
+
+  *`session_delete` (14.9 ms) exceeds the <1ms bar but not the 25 ms monitor
+  threshold; flipped on the wall-time + scales-with-session-size argument.
+  `blob_open`/`blob_reopen` are fast WARM in-memory (no RED) but do genuine
+  DB-file b-tree I/O that is not provably <1ms on cold/large file-backed storage;
+  flipped for blob-island coherence (every other DB-file op is DirtyIo) — the
+  weakest two of the nine, flipped as the safe direction, not on a measured
+  breach.
+
+- **FIX:** `schedule = "DirtyIo"` on all nine (`native/xqlitenif/src/nif.rs`
+  attribute flips; the 6 unbounded ones are the measured core, `session_delete`
+  the wall-time case, `blob_open`/`blob_reopen` the coherence pair). DirtyIo (not
+  DirtyCpu) chosen: every one can block on file I/O, page-cache misses, or the
+  conn `Mutex`; the pure-CPU pair (`changeset_invert`/`concat`, no conn, no file)
+  would tolerate DirtyCpu but take DirtyIo for crate-wide consistency with
+  `changeset_apply`. **GREEN (post-fix, same probe):** all nine → **0**
+  `long_schedule` hits (same wall time, now off the normal schedulers — e.g.
+  `blob_read` 116 ms/0 hits, `session_changeset` 230 ms/0 hits) while the
+  fix-independent control STILL delivered 35 events (monitor provably live, not
+  dead-silent). `scheduler/run.sh` VERDICT flips FAIL→PASS.
+
+### S3 (BACKLOG, F-A4-1) — Mutex-contention: trivial normal readers block a
+### normal scheduler under cross-process handle SHARING
+
+- The 20 conn-`Mutex` normal readers (`changes`/`db_path`/`txn_state`/… above)
+  are <1ms intrinsically, but `with_conn` blocks on the connection `Mutex`. If a
+  handle is SHARED across processes and one runs a slow Dirty op, a reader on
+  another process blocks on a NORMAL scheduler for the op's whole duration.
+  **Measured (this session):** holder pins the Mutex with a ~1.5 s Dirty query on
+  a shared handle; each victim blocked ~1.45–1.49 s on a normal scheduler with 1
+  `long_schedule` hit — `changes` 1493 ms, `db_path` 1456 ms, `txn_state`
+  1479 ms, `total_changes` 1454 ms. **Graded S3, not S2:** it requires SHARING a
+  connection handle across processes, which the documented architecture forbids
+  (CLAUDE.md: "read concurrency belongs in the Ecto adapter layer — a pool of
+  independent handles"); a single owner is sequential (its own slow op can't race
+  its own reader), and the blocking IS the intentional serialization surfacing on
+  the wrong scheduler. Consequence is latency degradation, not corruption. Filed
+  BACKLOG F-A4-1 (maintainer question: flip the conn-Mutex trivial readers to
+  DirtyIo to keep the block off the normal schedulers, at a per-call
+  dirty-hop cost on hot introspection paths?) + documented user-facing in
+  `guides/gotchas.md`.
+
+### Ruling — blanket DirtyIo (0 DirtyCpu) is CORRECT (first-covering-run ruling)
+
+- Every Dirty NIF touches the DB file and/or can block (file I/O, page-cache
+  miss, lock wait, busy-handler `thread::sleep`, fsync) — all I/O-class waits the
+  DirtyIo pool (10 schedulers here) exists to absorb; DirtyCpu (= cores) is for
+  pure computation and is the wrong pool for blocking work. The lone
+  arguably-pure-CPU pair (`changeset_invert`/`concat`) is bounded by input size
+  and comfortably absorbed by DirtyIo. **No DirtyCpu is warranted; blanket
+  DirtyIo stands.** Not re-litigated further.
+
+### Probe — harness `scheduler/` (invoke `bash scheduler/run.sh`)
+
+- CI-isolated exactly like `durability/`…`error_contract/`: not under `test/`,
+  not in `elixirc_paths` (`["lib"]`), formatter `inputs` glob
+  (`{config,lib,test}/**`) matches ZERO `scheduler/` files (verified via
+  `Path.wildcard` → `[]`) — `mix verify` untouched (re-run GREEN at HEAD with the
+  harness present). One `mix run --no-compile --no-start` child under an OS
+  `timeout`; in-memory DBs except one backup file in a private `mktemp` dir
+  removed by an EXIT trap; no SIGKILL, no pkill/name-match.
+- **TEETH (hard gate; run.sh aborts rc 2 otherwise):** a fix-INDEPENDENT
+  `:erlang.term_to_binary(term, [:compressed])` control MUST deliver > 0
+  `long_schedule` events, else the monitor is not observing and every "0 hits" is
+  meaningless. Delivered **35** events every run (pre- and post-fix) — the
+  silence of the flipped NIFs post-fix is therefore real silence. Second teeth
+  leg: the pre-fix RED itself (9 families delivering events) proves the monitor
+  detects our NIFs; the Dirty-family silence at 1570 ms proves it ignores Dirty
+  schedulers (so the fix is a real move, not a blind spot).
+- Sections: S1 intrinsic discipline (PASS/FAIL — the gate), S2 Mutex-contention
+  (informational, F-A4-1 evidence), LAT micro-latency (all trivial readers
+  ≤ 60 µs uncontended — the <1ms proof).
+
+### Completeness critic
+
+- Every one of the 96 NIFs is classified (table above). NIF families driven under
+  the monitor: open/close, query/execute/explain, stream, prepared step,
+  pragma, schema, serialize, backup, blob (open/read/write/reopen/size/close),
+  session+changeset (new/attach/changeset/patchset/invert/concat/delete),
+  hooks-register, cancel, trivial readers — all covered. NOT covered / honest
+  gaps: (1) `long_schedule` observes NORMAL schedulers only; a Dirty NIF that
+  monopolises the DirtyIo pool (e.g. 11+ concurrent multi-second queries starving
+  the 10 DirtyIo schedulers) is a pool-saturation concern this gate cannot see —
+  bounded by the blanket-DirtyIo ruling + the pool being sized for blocking, not
+  measured here. (2) Worst-case blob/changeset sizes were driven to 64 MB /
+  ~16 MB (enough to breach 25 ms by 4–10×); the true ceiling is
+  `SQLITE_MAX_LENGTH` (~1 GB) — extrapolated, not run at 1 GB (RAM). (3) The
+  Mutex-contention block time equals the concurrent op's duration (unbounded in
+  principle); measured at ~1.5 s, not at pathological multi-minute holds. (4) The
+  monitor threshold is 25 ms (customary 10–50 ms; well above the <1ms bar so any
+  hit is a gross breach); NIFs in the 1–25 ms band pass the gate but the LAT
+  section + wall-time catch them (how `session_delete` was found). (5) No
+  DirtyCpu-vs-DirtyIo pool-latency benchmark — the ruling is by-construction
+  (blocking work → IO pool), not A/B-measured.
+
+### Disposition & dryness
+
+- **1 CONFIRMED S2 mechanism (9 NIFs) FIXED this run** (attribute flips, RED→GREEN
+  proven by the same probe); **1 S3 filed** (F-A4-1 Mutex-contention +
+  `guides/gotchas.md`). 0 S0/S1. `mix verify` GREEN with the harness present.
+- **A4: dirty-flags-existed-unaudited → one covering measure+gate run, 9-NIF S2
+  fixed + 1 S3, teeth proven.** This is the FIRST dedicated A4 covering run. Per
+  the two-consecutive-covering-runs rule A4 is NOT yet DRY; one more covering run
+  is owed. Churn re-wets it: any new `#[rustler::nif]`, any `schedule=` change,
+  any change to what a normal NIF does under the conn `Mutex` (new blocking work,
+  new lock), or a `with_conn`/`with_session`/`with_live_blob`/`with_live_stmt`
+  restructuring.

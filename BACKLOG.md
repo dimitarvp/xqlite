@@ -93,6 +93,31 @@ burn-down.
   non_neg_integer(), String.t()}`. Same class as F-A10-5 (do together). Repro:
   `Xqlite.query(c, "SELECT CAST(X'ff41' AS TEXT)", [])` →
   `{:error, {:utf8_error, 0, "invalid utf-8 sequence of 1 bytes from index 0"}}`.
+- [S3] F-A4-1 (Run 10, A4): the 20 conn-`Mutex` trivial normal-scheduler readers
+  (`changes`/`total_changes`/`db_path`/`autocommit`/`txn_state`/`set_busy_policy`/
+  `remove_busy_policy`/`register_busy_observer`/`unregister_busy_observer`/
+  `set_authorizer`/`remove_authorizer`/`register_progress_hook`/
+  `unregister_progress_hook`/`enable_load_extension`/`session_new`/`session_attach`/
+  `session_is_empty`/`blob_size`/`blob_close`/`stmt_column_names`) are <1ms
+  intrinsically (LAT ≤ 60 µs uncontended) but acquire the connection `Mutex` via
+  `with_conn`/`with_session`/`with_live_blob`/`with_live_stmt`. If a connection
+  handle is SHARED across processes and one runs a slow Dirty op, a reader on
+  another process blocks on a NORMAL scheduler for that op's whole duration →
+  normal-scheduler occupancy (a `long_schedule` hit). Confirmed empirically
+  (`scheduler/run.sh` S2): a ~1.5 s Dirty query on a shared handle blocked
+  `changes` 1493 ms / `db_path` 1456 ms / `txn_state` 1479 ms / `total_changes`
+  1454 ms, 1 long_schedule hit each. **S3, not S2:** it requires sharing a handle
+  across processes, which the documented architecture forbids (CLAUDE.md: read
+  concurrency = a pool of independent handles); a single owner is sequential, and
+  the blocking IS the intentional serialization surfacing on the wrong scheduler.
+  Consequence is latency degradation, not corruption. Now documented user-facing
+  in `guides/gotchas.md`. **Maintainer question:** flip these conn-`Mutex` trivial
+  readers to `DirtyIo` so a contended reader blocks a Dirty (not normal)
+  scheduler — at a per-call dirty-scheduler-hop cost on hot introspection paths
+  (`changes`/`txn_state` are called often) — or keep normal (fast in the intended
+  single-owner model) and rely on the gotcha? Repro: share one handle across two
+  processes, run a slow `query` on one, `changes` on the other → the `changes`
+  call blocks for the query's full duration on a normal scheduler.
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)

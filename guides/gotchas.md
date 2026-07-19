@@ -298,3 +298,28 @@ called out because a long `:sleep_ms` or a large checkpoint can make a *shared*
 connection feel stalled to its other callers. The [Security](security.md)
 guide's "Thread-safety model" section is the canonical home for this — it
 explains the per-connection mutex model that these two cases sit inside.
+
+### Give each process its own connection — sharing one stalls a scheduler
+
+Heavy operations (`query`, `execute`, `stream`, blob read/write, session and
+changeset work, `backup`, `serialize`, …) run on the BEAM's *dirty* schedulers,
+so they never tie up a normal scheduler no matter how long they take. The cheap
+state readers (`changes/1`, `total_changes/1`, `db_path/1`, `autocommit/1`,
+`transaction_state/2`, and the like) run on a *normal* scheduler because they are
+sub-microsecond in the intended usage.
+
+That intended usage is **one connection per process** — a pool of independent
+handles, which is exactly how the Ecto adapter uses xqlite. If you instead
+*share a single connection handle across processes*, every call to it is
+serialized by that connection's mutex (by design). The sharp edge: if one process
+is mid-way through a slow operation on the shared handle, another process calling
+even a trivial reader on the same handle **blocks on a normal scheduler for the
+slow operation's entire duration** — a multi-second reader call is enough to make
+that scheduler unresponsive to unrelated work. Enough of them at once degrades
+the whole VM's latency.
+
+The fix is the design: don't share a connection handle between processes for
+concurrency. Open one connection per process (or use a pool of independent
+handles). If you genuinely must share a handle, treat *every* call on it —
+including the cheap readers — as something that can block for as long as the
+longest operation currently running on that connection.
