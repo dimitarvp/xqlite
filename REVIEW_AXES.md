@@ -60,7 +60,11 @@ unwrap/expect/index/overflow census on NIF-reachable paths; clippy
 `undocumented_unsafe_blocks`. Even a CAUGHT panic surfaces as
 opaque `:nif_panicked` (rustler discards the payload) — for the
 public claim, any reachable panic is a broken promise (≥S1).
-Coverage: none yet — no census run.
+Coverage: none yet — no census run. Touched (S3 fix pass round 1,
+2026-07-19): M10 removed 24 reachable-in-theory `map_put(…).unwrap()` from
+`explain_analyze.rs`'s encoders (→ graceful `InternalEncodingError`), and M11
+was verified already-resolved (`b1c60b4`) — both strictly shrink the panic
+surface, but no census has run.
 
 ### A2. The locking law — PRIORITY 1
 Every `sqlite3_*` call must hold the connection Mutex for its full
@@ -246,7 +250,13 @@ constraint-kind atoms (unique=2067, PK=1555, …) are the extended-code
 proof. 0 S0/S1/S2, 6 S3 (F-A10-1…6) — surface-only, filed to BACKLOG,
 NOT fixed. NOT yet DRY (first covering A10 run; one more owed; churn in
 `error.rs` classify/Encoder/From, the raw-FFI builders, or the
-`error_reason/0` typespec re-wets).
+`error_reason/0` typespec re-wets). RE-WET (S3 fix pass round 1,
+2026-07-19): F-A10-3 replaced the `query_with_changes` changes()-detection
+(empty-columns → `total_changes`-delta) and F-A10-5/F-A11-5 corrected the
+`error_reason/0` union — both squarely in this axis's churn list; two new S3
+union gaps filed (F-A10-7 `:invalid_transaction_mode`, F-A10-8
+`:cannot_convert_atom_to_string`). The owed covering re-run should re-pin the
+RETURNING/DDL/PRAGMA changes() matrix and the corrected specs.
 
 ### A11. Feature islands
 Session/changesets, blob I/O, backup+progress, serialize,
@@ -280,7 +290,9 @@ compile-options verified); every `gotchas.md`/`security.md`/
 the F-A11-3 finding). NOT yet DRY (first covering run; one more owed).
 Churn re-wets: `nif.rs` backup guard / changeset handler, `query.rs`
 `reject_interior_nul` + `core_*`, any session/blob/backup/serialize/
-authorizer/hook code, `busy_handler.rs`, or any guide edit.
+authorizer/hook code, `busy_handler.rs`, or any guide edit. RE-WET (S3 fix
+pass round 1, 2026-07-19): F-A10-3 added `query::core_query_with_changes` (a
+new `query.rs` `core_*`) and rewired the `query_with_changes` NIFs.
 
 ### A12. Binary crossing
 Probes: copy vs refcounted binaries across the boundary; memory

@@ -2133,3 +2133,134 @@ Grouped, worst-case noted:**
   a bundled-SQLite version bump (re-verify THREADSAFE + #1860 non-repro + the
   static-bundle symbols), any `test.seq`/opener change, or a rusqlite/libsqlite3-sys
   bump (re-check the `-DSQLITE_THREADSAFE=1` build flag).
+
+---
+
+## S3 fix pass — round 1 — 2026-07-19 — F-A10-3, F-A10-5, F-A11-5, M10, M11
+
+- Commit at scan: `1e4bafa` (HEAD, clean). A committed post-burn-down S3 pass
+  (not an axis run): the three assigned filed items fixed, `mix verify` green,
+  orchestrator commits. Composition: single Opus pass (this agent). Every runtime
+  claim below was RUN this session against the bundled SQLite 3.53.2 (commands +
+  output captured). Scope held to exactly the three fixes; two newly-surfaced
+  spec gaps were FILED (F-A10-7/8), not fixed.
+
+### Fix 1 — F-A10-3: `… RETURNING` DML reported `changes: 0` (arguably-S2)
+
+- **Mechanism found.** `query_with_changes` / `query_with_changes_cancellable`
+  (`nif.rs`) zeroed the sticky `sqlite3_changes()` whenever `qr.columns.is_empty()`.
+  That heuristic is wrong TWICE: (a) an `INSERT/UPDATE/DELETE … RETURNING` returns
+  columns, so it was misdetected as non-DML and zeroed despite changing rows (the
+  filed F-A10-3); (b) symmetrically, a DDL / read-PRAGMA returns NO columns, hit
+  the `changes()` branch, and LEAKED the stale prior-DML count (a second, unfiled
+  leg of the same defect — DDL-after-DML reported the previous INSERT's count).
+- **Detector chosen: `sqlite3_total_changes()` delta.** Capture
+  `conn.total_changes()` before and after `core_query`; report `conn.changes()`
+  only when the total moved, else 0. `total_changes()` rises iff THIS statement
+  (or its triggers) actually changed rows — exactly "is this a row-changing DML",
+  independent of whether it returns columns. `Statement::readonly()` REJECTED:
+  DDL (CREATE TABLE) is NOT readonly yet must report 0, so a readonly detector
+  would still leak the stale count for DDL-after-DML. Keyword parsing REJECTED
+  (fragile; house rule disfavors SQL text parsing). The RETURNING-timing concern
+  resolves cleanly: `core_query`'s `process_rows` steps to `SQLITE_DONE`, so both
+  `changes()` and `total_changes()` are fully updated by the time the closure
+  reads them.
+- **Runtime justification (bundled SQLite 3.53.2, this session).** Seeded 3 rows
+  (sticky `changes()`=3), then per statement measured Δtotal_changes / changes() /
+  detector-report:
+
+  | statement (after the seed)   | Δtotal_changes | changes() | detector |
+  |------------------------------|----------------|-----------|----------|
+  | plain SELECT                 | 0              | 3 (stale) | **0**    |
+  | PRAGMA user_version          | 0              | 3 (stale) | **0**    |
+  | CREATE TABLE (DDL)           | 0              | 3 (stale) | **0**    |
+  | plain INSERT                 | 1              | 1         | **1**    |
+  | INSERT … RETURNING (2 rows)  | 2              | 2         | **2**    |
+  | UPDATE … RETURNING (2 rows)  | 2              | 2         | **2**    |
+  | DELETE … RETURNING (1 row)   | 1              | 1         | **1**    |
+  | no-op DELETE (0 rows)        | 0              | 0         | **0**    |
+  | SELECT after DML             | 0              | 0         | **0**    |
+
+  Every matrix row holds: RETURNING DML now reports the true count; DDL / PRAGMA /
+  SELECT report 0 with no stale leak.
+- **Fix.** New `query::core_query_with_changes` centralises the detector; both
+  NIFs call it (the duplicated empty-columns heuristic is gone).
+- **RED → green.** Corrected the test matrix (`test/nif/query_with_changes_test.exs`,
+  inside the `connection_openers()` `for`) to the true contract, then ran
+  `mix test.seq` against the UNFIXED NIF: **8 failures** — INSERT/UPDATE/DELETE
+  RETURNING each `changes:0` (expected n) and DDL-after-DML `changes:1` (expected
+  0), ×2 openers. After the Rust fix: `query_with_changes_test.exs` 41 passed,
+  full suite green. Tests added: UPDATE RETURNING, DELETE RETURNING, PRAGMA-read;
+  INSERT-RETURNING + DDL assertions corrected (the DDL test previously asserted
+  the stale `changes:1` as "documented behavior" — that was the bug's second leg,
+  now `changes:0`).
+
+### Fix 2 — F-A10-5 + F-A11-5: `error_reason/0` union corrections
+
+- Runtime shapes (this session): `Xqlite.query(c, "SELECT CAST(X'ff41' AS TEXT)")`
+  → `{:error, {:utf8_error, 0, "invalid utf-8 sequence of 1 bytes from index 0"}}`
+  (3-tuple, confirming F-A11-5); `Xqlite.open_in_memory(bogus_key: 1)` →
+  `{:error, {:invalid_open_option, %{key: :bogus_key, reason: :unknown_key,
+  allowed: [...], value: nil}}}`; `Xqlite.open_in_memory(foreign_keys: :not_a_bool)`
+  → `{:error, {:invalid_open_option, %{key: :foreign_keys, reason: :invalid_value,
+  value: :not_a_bool, message: "…"}}}` (map payload, two shapes, confirming F-A10-5).
+- **Fix.** `{:utf8_error, String.t()}` → `{:utf8_error, non_neg_integer(),
+  String.t()}` (matches `error.rs:545`). Added `{:invalid_open_option, …}` as the
+  precise two-map union (`%{key, reason: :unknown_key, allowed, value: nil}` |
+  `%{key, reason: :invalid_value, value, message}`) matching `validate_open_opts`
+  (`lib/xqlite.ex:352`). `error.rs` has NO `InvalidOpenOption` variant — it is
+  Elixir-generated (NimbleOptions), so the map type was read off the Elixir
+  source + runtime, not the Rust encoder. Dialyzer GREEN.
+
+### Fix 3 — M10 fixed (+ M11 already resolved)
+
+- **M10 — FIXED.** `explain_analyze.rs`'s four `Encoder` impls used 24
+  `map_put(…).unwrap()`. Replaced with a chained `and_then` build + a
+  `map_or_encoding_error` helper that degrades a (practically-unreachable)
+  map-build failure to a structured `InternalEncodingError` term instead of
+  panicking — matching the crate's `ok_or_else`/`map_err` convention (cf.
+  `encode_query_result_with_changes`, `session::to_owned_binary`,
+  `util.rs:346/363`). Success path byte-identical; existing explain_analyze tests
+  green. No RED test is possible (`map_put` never Errs on a real map — OOM-only);
+  the fix removes a panic surface, verified by clippy `-D warnings` + full suite.
+- **M11 — ALREADY RESOLVED (no code change).** The filed site
+  (`nif.rs:2057 OwnedBinary::new(0).unwrap()`) lived in the OLD rusqlite-`Blob`-
+  wrapper `blob_read`; the blob raw-pointer refactor `b1c60b4` (Run 2 / B1)
+  rewrote that module. Verified at HEAD: the empty-binary path is now
+  `blob::read` → `to_owned_binary(&[], …)` → `OwnedBinary::new(…).ok_or_else(…)`
+  (`session.rs:132`), and `rg '\.unwrap\(\)'` over `nif.rs` returns zero hits.
+
+### New filings — audit of `error_reason/0` vs the `error.rs` Encoder (FILED, not fixed)
+
+- **F-A10-7 — S3 — `error_reason/0` omits `:invalid_transaction_mode`.**
+  `error.rs:523` encodes `XqliteError::InvalidTransactionMode` as the bare atom
+  `:invalid_transaction_mode` (`transaction.rs:23`, `TransactionMode::from_atom`
+  on a mode that isn't `:deferred`/`:immediate`/`:exclusive`). `XqliteNIF.begin/2`
+  is `@spec … :: :ok | Xqlite.error()` AND its docstring (`xqlitenif.ex:479`)
+  explicitly promises `{:error, :invalid_transaction_mode}`, but the union omits
+  it — a dialyzer contract gap at the raw-NIF layer (the high-level `Xqlite.begin/2`
+  guards the mode, so it can't reach it). Runtime-confirmed this session:
+  `XqliteNIF.begin(c, :bogus_mode)` → `{:error, :invalid_transaction_mode}`. Same
+  class as F-A10-5/F-A11-5; add `:invalid_transaction_mode` to the union.
+- **F-A10-8 — S3 (latent) — `error_reason/0` omits
+  `{:cannot_convert_atom_to_string, String.t()}`.** `error.rs:491` encodes
+  `(cannot_convert_atom_to_string, reason)`, produced at `util.rs:204`
+  (keyword-param key atom that fails `atom_to_string`) and `util.rs:242`
+  (`format_term_for_pragma` non-nil/true/false atom). Reachable via query/execute
+  keyword params or the PRAGMA-value path, spec'd through `Xqlite.error()`, but
+  omitted from the union. Latent (`atom_to_string` rarely fails). Add
+  `{:cannot_convert_atom_to_string, String.t()}`.
+
+### Disposition & dryness
+
+- 5 filed items closed (F-A10-3, F-A10-5, F-A11-5, M10 fixed; M11 already-
+  resolved-by-`b1c60b4`). 2 new S3 spec gaps FILED (F-A10-7/8). `mix verify`
+  GREEN. This pass CHURNS **A10** (the `query_with_changes` columns heuristic +
+  the `error_reason/0` typespec are both in A10's re-wet list — re-wet, one clean
+  covering run still owed), **A11** (`query.rs core_*` — added
+  `core_query_with_changes`), and **A1** (removed 24 reachable-in-theory
+  `unwrap`s from `explain_analyze.rs`, strictly improving the panic-freedom
+  posture). Axis coverage annotated in `REVIEW_AXES.md`.
+- **Docs note (out of this pass's scope, flagged for the maintainer):** CLAUDE.md's
+  `sqlite3_changes()` architecture note still says non-DML is "detected by empty
+  columns" — now superseded by the total_changes-delta detector.

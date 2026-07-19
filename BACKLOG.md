@@ -34,16 +34,6 @@ burn-down.
   least splitting busy vs locked). Repro (from `error_contract/`): busy →
   `{:database_busy_or_locked, "database is locked"}`, readonly →
   `{:read_only_database, "attempt to write a readonly database"}` — no code.
-- [S3] F-A10-3 (Run 8): `INSERT/UPDATE/DELETE … RETURNING` reports
-  `changes: 0`. `query_with_changes` (`nif.rs:137,165`) detects non-DML by
-  `qr.columns.is_empty()` and zeroes the sticky counter; a RETURNING DML
-  returns columns, so it is misdetected and `changes` is zeroed despite
-  modifying rows. `Xqlite.query/4`'s doc ("`changes` is the number of affected
-  rows" for DML) is then wrong for RETURNING. No data loss (rows come back,
-  `num_rows` is correct). Repro: `Xqlite.query(c, "INSERT INTO t(x)
-  VALUES(4) RETURNING x", [])` → `%{changes: 0, num_rows: 1, rows: [[4]]}`.
-  Fix options: detect DML by statement keyword rather than empty-columns, or
-  document the RETURNING caveat.
 - [S3] F-A10-4 (Run 8): `:unsupported_atom` discards the offending atom.
   `error.rs:447` `UnsupportedAtom { atom_value: _ } => atoms::unsupported_atom()`
   encodes a BARE atom, so the Elixir error never names which atom was rejected,
@@ -51,13 +41,6 @@ burn-down.
   Inconsistent with `UnsupportedDataType`, which encodes its `term_type`.
   Encode it as `(atoms::unsupported_atom(), atom_value)` and add the tuple form
   to `error_reason/0`. Latent-ish (needs a bad atom param to trigger).
-- [S3] F-A10-5 (Run 8): `error_reason/0` typespec omits
-  `{:invalid_open_option, map}`. `validate_open_opts` returns it
-  (`lib/xqlite.ex:357,367`) but the `@type error_reason` union (`:136-179`)
-  lists only `:invalid_on_error`, so `Xqlite.open/2` + `open_in_memory/1`'s
-  `@spec {:ok, conn()} | error()` is inaccurate (dialyzer contract gap). Add
-  `{:invalid_open_option, map()}` (two shapes: `%{key, reason: :unknown_key,
-  allowed, value}` and `%{key, reason: :invalid_value, value, message}`).
 - [S3] F-A10-6 (Run 8, latent): doubled-`:error` fallback shape. The
   map-build-failure arms of the encoders (`error.rs:513/579/626`,
   `connection.rs:95`) encode `(atoms::error(), err)`, i.e. `{:error, {:error,
@@ -65,6 +48,27 @@ burn-down.
   atom, never `:error`" shape. Practically unreachable (BEAM `map_new`/
   `map_put` don't fail) but a latent wart — either prove it dead and drop the
   arm, or emit a plain `{:internal_encoding_error, ctx}`.
+- [S3] F-A10-7 (S3 fix pass round 1, A10): `error_reason/0` typespec omits
+  `:invalid_transaction_mode`. `error.rs:523` encodes
+  `XqliteError::InvalidTransactionMode` as the bare atom `:invalid_transaction_mode`
+  (`transaction.rs:23`, `TransactionMode::from_atom` on a mode that isn't
+  `:deferred`/`:immediate`/`:exclusive`). `XqliteNIF.begin/2` is `@spec … :: :ok |
+  Xqlite.error()` and its docstring (`xqlitenif.ex:479`) explicitly promises
+  `{:error, :invalid_transaction_mode}`, but the `@type error_reason` union omits
+  it — a dialyzer contract gap at the raw-NIF layer (the high-level `Xqlite.begin/2`
+  guards the mode with `when mode in [...]`, so it can't reach it). Same class as
+  F-A10-5/F-A11-5. Fix: add `:invalid_transaction_mode` to the union. Repro
+  (runtime-confirmed): `XqliteNIF.begin(c, :bogus_mode)` →
+  `{:error, :invalid_transaction_mode}`.
+- [S3] F-A10-8 (S3 fix pass round 1, A10, latent): `error_reason/0` typespec omits
+  `{:cannot_convert_atom_to_string, String.t()}`. `error.rs:491` encodes
+  `(cannot_convert_atom_to_string, reason)`, produced at `util.rs:204` (keyword-param
+  key atom whose `atom_to_string` fails, in `decode_exec_keyword_params`) and
+  `util.rs:242` (`format_term_for_pragma` non-`nil`/`true`/`false` atom). Reachable
+  via query/execute keyword params or the PRAGMA-value path — both spec'd through
+  `Xqlite.error()` — but omitted from the union. Latent (`atom_to_string` rarely
+  fails). Same class as F-A10-5/F-A11-5. Fix: add
+  `{:cannot_convert_atom_to_string, String.t()}`.
 - [S3] F-A11-4 (Run 9, A11): `set_busy_policy/2`'s `:max_elapsed_ms` is
   anchored at the busy slot's **first installation**, not at the start of each
   busy event, so it never resets. Once a connection has been alive (with a
@@ -83,16 +87,6 @@ burn-down.
   mutable in `BusySlotState`), or keep-and-document? Repro:
   `set_busy_policy(c, max_retries: 1000, max_elapsed_ms: 400, sleep_ms: 5)`,
   `Process.sleep(600)`, then contend → instant give-up.
-- [S3] F-A11-5 (Run 9, A11): `error_reason/0` typespec understates
-  `:utf8_error`. `error.rs:545` encodes it as the 3-tuple `(atoms::utf8_error(),
-  column, reason)` and the Security guide documents `{:utf8_error, column,
-  reason}` (both correct), but the `@type error_reason` union
-  (`lib/xqlite.ex:180`) lists only `{:utf8_error, String.t()}` (2-tuple). A
-  caller matching the real/guide shape `{:utf8_error, col, reason}` is a dialyzer
-  contract violation against the spec. Fix: change it to `{:utf8_error,
-  non_neg_integer(), String.t()}`. Same class as F-A10-5 (do together). Repro:
-  `Xqlite.query(c, "SELECT CAST(X'ff41' AS TEXT)", [])` →
-  `{:error, {:utf8_error, 0, "invalid utf-8 sequence of 1 bytes from index 0"}}`.
 - [S3] F-A4-1 (Run 10, A4): the 20 conn-`Mutex` trivial normal-scheduler readers
   (`changes`/`total_changes`/`db_path`/`autocommit`/`txn_state`/`set_busy_policy`/
   `remove_busy_policy`/`register_busy_observer`/`unregister_busy_observer`/
@@ -208,10 +202,6 @@ burn-down.
   each precompiled tarball proving SQLite 3.53.2 is statically in
   (feature-unification failure class). Cheap mechanical gate before
   the announcement. (wave-1)
-- [S3] M10/M11 (Run 1): `explain_analyze.rs:380-490` (`map_put().unwrap()`
-  ×24) and `nif.rs:2057` (`OwnedBinary::new(0).unwrap()`) use `unwrap`
-  where the crate's graceful `map_err`/`ok_or_else` convention applies.
-  Latent-only; consistency fix.
 - [probe] M5 sub-issue (Run 1): `enif_send(NULL,…)` from a NORMAL
   scheduler (session_changeset/patchset path) vs the repo's dirty-only
   note — the busy_handler comment claims "any thread (OTP 26.1+)".
@@ -233,6 +223,33 @@ burn-down.
 
 ## Closed
 
+- 2026-07-19 (S3 fix pass round 1, A10) F-A10-3 — `INSERT/UPDATE/DELETE …
+  RETURNING` reporting `changes: 0`: FIXED. The `query_with_changes[_cancellable]`
+  empty-columns heuristic was wrong twice (RETURNING DML has columns → misdetected
+  and zeroed; DDL/read-PRAGMA has none → leaked the stale prior-DML count). Replaced
+  with a `sqlite3_total_changes()`-delta detector in new
+  `query::core_query_with_changes` (both NIFs share it): report `changes()` only
+  when the total moved, else 0. Runtime-verified against bundled SQLite 3.53.2 for
+  the full matrix (ledger table). RED (8 failing assertions ×2 openers) → green;
+  `test/nif/query_with_changes_test.exs` gained UPDATE/DELETE RETURNING + PRAGMA-read
+  and corrected the INSERT-RETURNING + DDL cases.
+- 2026-07-19 (S3 fix pass round 1) F-A10-5 + F-A11-5 — `error_reason/0` typespec
+  gaps: FIXED together. Added `{:invalid_open_option, …}` as the precise two-map
+  union (unknown_key | invalid_value shapes from `validate_open_opts`) and corrected
+  `{:utf8_error, String.t()}` → `{:utf8_error, non_neg_integer(), String.t()}`
+  (matches `error.rs:545`). Both runtime-confirmed this session. Dialyzer GREEN.
+- 2026-07-19 (S3 fix pass round 1, Run 1) M10 — `explain_analyze.rs`'s 24
+  `map_put(…).unwrap()` across four `Encoder` impls: FIXED. Chained `and_then` +
+  a `map_or_encoding_error` helper degrades a (practically-unreachable) map-build
+  failure to a structured `InternalEncodingError` term, matching the crate's
+  `ok_or_else`/`map_err` convention. Success path unchanged; clippy `-D warnings`
+  + full suite green.
+- 2026-07-19 (S3 fix pass round 1, Run 1) M11 — `nif.rs:2057
+  OwnedBinary::new(0).unwrap()`: ALREADY RESOLVED, no code change owed. The site
+  lived in the OLD rusqlite-`Blob`-wrapper `blob_read`; the blob raw-pointer
+  refactor `b1c60b4` (Run 2 / B1) rewrote the module and the empty-binary path now
+  routes through the graceful `to_owned_binary` → `OwnedBinary::new(…).ok_or_else(…)`
+  (`session.rs:132`). Verified at HEAD: zero `.unwrap()` remain in `nif.rs`.
 - 2026-07-19 (Run 9, A11) FTS5 guide is linear-executable — DONE: wired up as
   `test/nif/fts5_guide_test.exs` (executes the guide's CREATE VIRTUAL TABLE /
   trigger / MATCH+bm25 / highlight+snippet / match-language / rebuild /
