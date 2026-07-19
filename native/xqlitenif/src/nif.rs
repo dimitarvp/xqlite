@@ -1897,7 +1897,7 @@ fn session_attach<'a>(
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn session_changeset<'a>(
     env: Env<'a>,
     session_handle: ResourceArc<XqliteSession>,
@@ -1913,7 +1913,7 @@ fn session_changeset<'a>(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn session_patchset<'a>(env: Env<'a>, session_handle: ResourceArc<XqliteSession>) -> Term<'a> {
     let result = session::with_session_mut(&session_handle, |s| {
         let mut output = Vec::new();
@@ -1931,7 +1931,7 @@ fn session_is_empty(session_handle: ResourceArc<XqliteSession>) -> Result<bool, 
     session::with_session(&session_handle, |s| Ok(s.is_empty()))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn session_delete<'a>(env: Env<'a>, session_handle: ResourceArc<XqliteSession>) -> Term<'a> {
     singular_ok_or_error_tuple(env, session::close(&session_handle))
 }
@@ -1987,7 +1987,7 @@ fn changeset_apply<'a>(
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn changeset_invert<'a>(env: Env<'a>, changeset_binary: rustler::Binary<'a>) -> Term<'a> {
     let result = (|| -> Result<rustler::OwnedBinary, XqliteError> {
         let bytes = changeset_binary.as_slice();
@@ -2002,7 +2002,7 @@ fn changeset_invert<'a>(env: Env<'a>, changeset_binary: rustler::Binary<'a>) -> 
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn changeset_concat<'a>(
     env: Env<'a>,
     a_binary: rustler::Binary<'a>,
@@ -2025,7 +2025,7 @@ fn changeset_concat<'a>(
 // Incremental Blob I/O NIFs
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn blob_open<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -2041,7 +2041,7 @@ fn blob_open<'a>(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn blob_read<'a>(
     env: Env<'a>,
     blob_handle: ResourceArc<XqliteBlob>,
@@ -2054,7 +2054,7 @@ fn blob_read<'a>(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn blob_write<'a>(
     env: Env<'a>,
     blob_handle: ResourceArc<XqliteBlob>,
@@ -2069,7 +2069,7 @@ fn blob_size(blob_handle: ResourceArc<XqliteBlob>) -> Result<usize, XqliteError>
     blob::size(&blob_handle)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn blob_reopen<'a>(
     env: Env<'a>,
     blob_handle: ResourceArc<XqliteBlob>,
