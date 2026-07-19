@@ -218,6 +218,20 @@ defmodule Xqlite.NIF.StreamTest do
         assert :ok == NIF.stream_close(stream_handle)
       end
 
+      test "stream_fetch/2 with a huge batch_size does not crash the VM", %{conn: conn} do
+        # A validly-typed but pathological pos_integer batch_size must not abort
+        # the BEAM via an eager pre-allocation — it fetches the actual rows and
+        # stops. Pre-fix this aborted the OS process (handle_alloc_error).
+        sql = "SELECT id FROM stream_items ORDER BY id;"
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+
+        huge = 10_000_000_000_000
+        assert {:ok, %{rows: rows}} = NIF.stream_fetch(stream_handle, huge)
+        assert rows == for(i <- 1..12, do: [i])
+        assert :done == NIF.stream_fetch(stream_handle, huge)
+        assert :ok == NIF.stream_close(stream_handle)
+      end
+
       test "stream_fetch/2 on an empty result set immediately returns :done", %{conn: conn} do
         sql = "SELECT id FROM stream_items WHERE id = 999;"
         {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])

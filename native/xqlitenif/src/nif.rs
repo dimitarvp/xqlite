@@ -1276,7 +1276,11 @@ fn stream_fetch<'a>(
         return atoms::done().encode(env);
     }
 
-    let mut fetched_rows: Vec<Vec<Term<'a>>> = Vec::with_capacity(batch_size);
+    // Do NOT pre-size to `batch_size`: it is an unvalidated user integer, and
+    // `Vec::with_capacity(huge)` aborts the VM via `handle_alloc_error` before a
+    // single row is read (a pathological value requests petabytes up front).
+    // Grow on demand instead, exactly like `stmt_multi_step_impl`.
+    let mut fetched_rows: Vec<Vec<Term<'a>>> = Vec::new();
     let mut an_error_occurred: Option<XqliteError> = None;
     let mut stream_definitively_exhausted = false;
 
