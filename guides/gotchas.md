@@ -360,3 +360,54 @@ measurements), because every blob — however tiny — becomes an off-heap
 reference-counted binary with per-object overhead, whereas the streamed copy of a
 ≤64-byte blob can live cheaply on the process heap. For a handful of blobs, or
 for large blobs, the difference is negligible.
+
+## Deployment and releases
+
+### Hot code upgrades are not supported — restart the node
+
+xqlite is a NIF library, and its native code **cannot be hot-upgraded in place.**
+A release that ships a new version of xqlite (or of any library that embeds it)
+must **restart the BEAM** to pick it up — a full node restart, not a live
+`relup`/`appup` code swap. This is the norm for NIF-heavy deployments, but it is
+worth stating plainly because the failure mode is silent-to-the-uninitiated: an
+in-place upgrade of the xqlite module simply *does not take*.
+
+Here is exactly what the VM does if you try. Attempting to reload the NIF module
+while it is already loaded is **refused, cleanly**:
+
+```elixir
+:code.load_file(XqliteNIF)
+#=> {:error, :on_load_failure}
+
+# and the VM logs, from the module's on_load:
+#   The on_load function for module Elixir.XqliteNIF returned:
+#   {:error, {:upgrade, ~c"Upgrade not supported by this NIF library."}}
+```
+
+The reason is structural. The BEAM will not load a new NIF library into a module
+that already has old code with a loaded NIF library *unless the library provides
+an `upgrade` callback* — and the Rustler version xqlite builds against generates a
+NIF entry whose `upgrade` (and `reload`, and `unload`) callback is absent (NULL).
+So the second load is rejected before it can take effect. There is no back door:
+calling `:erlang.load_nif/2` directly from another module is refused too
+(`{:error, {:bad_lib, ...}}`) — the only load path is the module's own `on_load`,
+which is exactly the path that fails.
+
+The important half is that **it fails safe.** The rejected reload leaves the old
+code — and its loaded NIF — running untouched; it does not crash the VM and it
+does not corrupt anything. Any connections, prepared statements, streams, blobs,
+and sessions you were already holding **keep working normally** across the failed
+attempt. Worst case, an accidental hot-upgrade attempt makes your deploy fail
+loudly (`{:error, :on_load_failure}`) and you restart the node — you never end up
+with two native library instances fighting over the same handles, and you never
+lose data to a half-applied swap.
+
+Practical guidance:
+
+- **Deploy xqlite upgrades with a node restart.** Rolling restarts across a
+  cluster are fine; in-place BEAM code upgrades are not.
+- **Libraries and adapters that wrap xqlite must not assume upgrade-in-place.**
+  Treat a new xqlite version as requiring a fresh VM, and document that for your
+  own users.
+- If your release tooling runs `relup`s, exclude xqlite (and anything statically
+  linking it) from the in-place-upgrade set; let it ride the restart instead.

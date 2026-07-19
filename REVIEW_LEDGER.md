@@ -1912,3 +1912,224 @@ Grouped, worst-case noted:**
   `session.rs` `to_owned_binary`, the `serialize`/`deserialize`/`changeset_*` NIFs,
   the `hook_util.rs` `make_binary` / any hook payload, or a rustler bump (the
   Binary/OwnedBinary/resource-binary semantics are version-locked evidence).
+
+## Run 12 — 2026-07-19 — A13 hot-upgrade posture + A14 test-architecture load-bearer
+
+- Commit at scan: `fc502fb` (HEAD). Two bundled axes in one run. Composition:
+  single Opus pass (this agent) — A13 is a source-verify + empirical-probe axis,
+  A14 a re-derivation + build-and-measure axis; neither is a fleet read. Every
+  runtime claim RUN this session (commands + output captured below) against the
+  BUNDLED SQLite 3.53.2 on OTP 29 (erts-17.0.3) / Elixir 1.20.2, rustler 0.38.0.
+  Did NOT re-litigate settled findings.
+
+### A13 — hot-upgrade posture
+
+- **Source-verified gap.** rustler's init codegen hardcodes the NIF entry's
+  upgrade/reload/unload callbacks to `None`: `rustler_codegen-0.38.0/src/init.rs`
+  (`:63-99`) builds `DEF_NIF_ENTRY { … load: Some(nif_load), reload: None (:92),
+  upgrade: None (:93), unload: None (:94), … }` — only `load` is wired (the sole
+  option the macro extracts, `:17`); a rustler user CANNOT supply an upgrade
+  callback. The FFI struct HAS the fields (`rustler-0.38.0/src/sys/types.rs:62-84`,
+  matching the installed `erl_nif.h:142-145` `enif_entry_t`, NIF major.minor
+  2.18), so the gap is purely that codegen never populates them. Per the erl_nif
+  contract (OTP 29 docs, erlang.org/doc/apps/erts/erl_nif.html): "The library
+  fails to load if upgrade … is NULL" once the module has old code with a loaded
+  NIF; "unload is called when the module instance … is purged as old"; and "The
+  unloading of a library is postponed as long as there exist resource objects
+  with a destructor function in the library." So xqlite, built with rustler 0.38,
+  CANNOT be hot-upgraded, and its resource destructors keep the old library
+  resident until the resources die. This is an OPEN upstream gap (no rustler API
+  to wire upgrade) → F-A13-1 (S3, tracking).
+- **Probe transcript (`hot_upgrade/run.sh`, RUN this session; teeth: a separate
+  `HOTUP_MODE=teeth` child loads the NIF, proves it works, then `System.halt(134)`
+  → run.sh classified CRASH rc=134, so the no-crash results below are trusted).**
+  With a live conn + prepared statement + stream + blob + session held open:
+  - `:code.load_file(XqliteNIF)` → **`{:error, :on_load_failure}`**, and the VM
+    logs the on_load return `{:error, {:upgrade, ~c"Upgrade not supported by this
+    NIF library."}}` — the exact erl_nif NULL-upgrade refusal. The reload is
+    REFUSED, never a silent success (a silent success would mean two library
+    instances — the dangerous case the probe hard-asserts against).
+  - After the failed reload AND after `:code.soft_purge` (→ `true`), EVERY live
+    resource still works: conn `query` `{:ok,…}`, `stmt_step` `{:row,…}`,
+    `stream_fetch` `{:ok,%{rows:…}}`/`:done`, `blob_read` `{:ok,<<…>>}`,
+    `session_is_empty` `{:ok,true}`. The old code + its NIF keep running untouched.
+  - Direct `:erlang.load_nif(path, 0)` from a foreign module → **`{:error,
+    {:bad_lib, "…does not match calling module…"}}`** — no back door; the only
+    load path is the module's own on_load, which is exactly the failing path.
+  - Forced `:code.delete` (→ `true`) + `:code.purge` (→ `false`) with a SECOND
+    live resource set held, then drop-refs + `garbage_collect` → the resource
+    destructors (`sqlite3_close` etc.) run out of a to-be-unloaded library with
+    **no VM abort**; a fresh `open_in_memory` afterward succeeds `{:ok,#Ref}` (once
+    the old code is fully purged there is no old NIF to conflict, so the auto-load
+    takes). Reaching the end IS the no-crash proof (a UAF/unwind-into-C aborts the
+    VM → rc 134/139 → run.sh CRASH). `hot_upgrade/run.sh` RESULT **PASS**.
+- **Grading.** No crash-on-purge was found (the axis's ≥S1 candidate) — every
+  documented OTP hot-code operation on the loaded NIF **fails safe**: refused
+  cleanly, resources intact, VM alive, no data loss. So A13 has NO S0/S1/S2
+  finding; the axis deliverable is the missing POLICY, and the documented policy
+  IS the fix.
+- **Policy (the deliverable).** New `guides/gotchas.md` section "Deployment and
+  releases → Hot code upgrades are not supported — restart the node": states
+  plainly that the xqlite NIF cannot be hot-upgraded in place (full node restart
+  required), shows the exact `{:error, :on_load_failure}` / `{:upgrade, …}` the VM
+  returns, explains the rustler-NULL-upgrade root cause, documents that it FAILS
+  SAFE (old code keeps running, live handles survive, no corruption, no two-
+  instance state), and gives operational guidance (deploy with a node restart;
+  wrapping libraries must not assume upgrade-in-place; exclude xqlite from
+  `relup`s). Placed in gotchas.md (not security.md) because it is a deployment/DX
+  sharp edge, not a threat — gotchas.md is where operational footguns already live.
+
+### A14 — test-architecture load-bearer
+
+- **Re-derivation from first principles (gotcha #1).** `bundled` = statically
+  linked SQLite → confirmed by nm/objdump on the built `.so` (below), so ONE OS
+  process = ONE set of SQLite process-global C structures: the VFS registration
+  list, the memory allocator, the page cache (pcache1), the PRNG, the
+  memstatus counter (`SQLITE_DEFAULT_MEMSTATUS` on — not overridden in
+  `libsqlite3-sys-0.38.1/build.rs`), and the temp-file namespace
+  (`TEMP_STORE=1`). `mix test` runs test files concurrently as async ExUnit
+  processes in ONE OS process → all share that one globals set; `mix test.seq`
+  (`lib/mix/tasks/test_seq.ex`, `System.cmd("mix",["test",file])` per file) gives
+  each file its OWN OS process → its own globals. **Adversarial both ways:**
+  (a) the alternative diagnoses are REFUTED — the two suite openers
+  (`test/support/test_util.ex:6-8`) are `:memory_private` (private in-memory, no
+  shared name) and `:file_temp` (a fresh temp FILE), so there is NO `:memory:`-name
+  collision and NO shared file; DB-level isolation is real, which is exactly why
+  gotcha #1 says "regardless of file isolation" — the shared globals are the ONLY
+  common surface. (b) BUT "corrupt global C state" is itself REFUTED as literal
+  corruption: the bundle is `-DSQLITE_THREADSAFE=1` (`libsqlite3-sys-0.38.1/
+  build.rs:139`) and runtime-verified THIS session `PRAGMA compile_options` →
+  `["THREADSAFE=1"]` + `["MUTEX_PTHREADS"]` (SQLite 3.53.2), so the process-global
+  structures are mutex-protected even though rusqlite opens connections NOMUTEX
+  (SQLite "multi-thread" mode: core mutexes on, per-connection off — xqlite's own
+  `Mutex<Connection>` covers the latter). Mutex-protected globals do not corrupt
+  under concurrent access; the "out of memory" symptom is CONTENTION /
+  resource-exhaustion (spurious `SQLITE_NOMEM`), not UB. Git archaeology: the
+  origin commits (`d250fe6` "make tests sequential in CI" 2025-06-28, `13805b8`
+  "add mix testing task running each file sequentially") carry no evidence body;
+  the rationale lives only in the `test.seq` @moduledoc ("SQLite's global VFS
+  contention that causes spurious 'out of memory' errors when test files run in
+  parallel") and gotcha #1 — i.e. the diagnosis was never independently re-derived
+  until now.
+- **Reproduction attempt (`test_arch/run.sh`, RUN this session; teeth: a
+  byte-smashed file DB → `{:sqlite_failure, 11, 11, "database disk image is
+  malformed"}` (SQLITE_CORRUPT), a clean DB → `integrity_check ["ok"]` — the
+  corruption oracle trips, so a real corruption would be seen).** K concurrent
+  BEAM workers each churn an ISOLATED DB (alternating private `:memory:` + a fresh
+  temp file, `cache_size=-1000` like the suite), 200×1 KB-row transactions +
+  scans + per-file `integrity_check`, vs the SAME total work serialized (control).
+  Plus an open/close-churn leg (the rusqlite#1860 angle). Results: **36×60**
+  workers → parallel **439560 ok / 0 nomem / 0 busy / 0 corruption / 0 crash**,
+  serial control IDENTICAL 439560 ok / 0 anomalies; **48×40 + 48×600 churn** →
+  parallel **390720 ok / 0 nomem / 0 corruption**, 0 churn failures both legs.
+  **The mechanism did NOT reproduce** (no crash, no corruption, no spurious NOMEM)
+  at dev-box scale — consistent with Run 4 (rusqlite#1860 does not repro at 3.53.2
+  / THREADSAFE=1). Honest reading (per the axis): a non-repro does NOT refute the
+  gotcha — the flake is memory-pressure- and environment-sensitive (a 7 GB GHA
+  runner holding many async connections is a far tighter allocator than this box;
+  true C-level concurrency is also capped at ~10 dirty-IO schedulers, which the
+  probe already saturates), and #1860 is a real OPEN upstream issue in the class.
+  A control note: the FIRST probe draft's serial leg reused temp-file paths and
+  self-inflicted 211050 PK violations — fixed to `System.unique_integer` per
+  cycle, restoring a clean control (the tooth: an unclean control would invalidate
+  the comparison).
+- **Precompiled answer (nm/objdump, RUN this session).** The built `.so`
+  (`priv/native/xqlitenif.so`) and the older precompiled artifact
+  (`libxqlitenif-v0.5.2-…-linux-gnu.so`) BOTH: statically bundle SQLite (version
+  string "3.53.2"/"3.51.3" baked in; NO `libsqlite3` in `DT_NEEDED`; zero
+  UNDEFINED `sqlite3_*` in dynsym), and export in their dynamic symbol table
+  EXACTLY two real symbols — `nif_init` + `xqlitenif_nif_init` — and **NO
+  `sqlite3_*` symbols at all**. Two consequences: (1) precompiled consumers get
+  the SAME statically-linked SQLite → the SAME per-OS-process globals, so the
+  test.seq reasoning holds identically for them (not just source builds). (2) The
+  two-bundled-SQLites-in-one-node question (e.g. host app loads xqlite AND
+  exqlite) has the SAFE answer: because neither `.so` exports its `sqlite3_*`
+  symbols, the two statically-linked SQLites are completely PRIVATE to their
+  respective `.so`s — they cannot interpose, dedup, or share globals (the
+  DANGEROUS answer would be shared/deduped globals + a version clash; ruled out by
+  the non-export, and belt-and-suspenders by ERTS's RTLD_LOCAL NIF dlopen). So
+  gotcha #1's "single global VFS/allocator per OS process" is precisely "per
+  loaded NIF library" — for xqlite (one XqliteNIF `.so` per VM) that IS per OS
+  process, and a second bundled SQLite is independent.
+- **Verdict on gotcha #1 — mechanism PLAUSIBLE; test.seq CONFIRMED load-bearing;
+  wording CORRECTED.** The STRUCTURAL claim (one per-OS-process SQLite-globals
+  surface that DB-file isolation cannot remove) is CONFIRMED (static-link symbols
+  + opener isolation + runtime substrate). The literal "corrupt global C state" is
+  REFUTED (THREADSAFE=1 mutex-protects; 0 corruption across ~830k parallel ops).
+  The spurious-NOMEM flake is PLAUSIBLE (not reproduced here, but a real
+  environment-sensitive contention/flake class; #1860 open upstream). `test.seq`
+  stays load-bearing REGARDLESS of which of {contention, a since-fixed SQLite bug,
+  genuine GHA-RAM pressure} the residual is — it deterministically removes the
+  shared-globals surface, so its value does not depend on the flake reproducing.
+  Wording fix landed in `CLAUDE.md` gotcha #1: "corrupt global C state" →
+  "contend on the shared global C state; the symptom is spurious 'out of memory'
+  = contention/resource-exhaustion, not memory corruption (THREADSAFE=1 protects
+  the globals), not UB" — the load-bearing test.seq conclusion preserved. No
+  public-facing guide misstates the mechanism (gotchas.md's runtime-contention
+  section is about the connection Mutex, a different surface; the test-suite
+  angle is dev-facing = CLAUDE.md), so no public correction is owed. Deferred
+  deciding probe → F-A14-1 (S3): re-run `test_arch/` under a cgroup RAM cap
+  mimicking a 7 GB runner to try to force the spurious NOMEM.
+
+### Teeth
+
+- **A13** (evidence bar = exact child-output capture): the crash oracle is proven
+  live — the `HOTUP_MODE=teeth` child (`System.halt(134)` after confirming the NIF
+  works) is classified CRASH (rc 134), so the main probe's crash-free traversal of
+  delete+purge+GC-of-live-resources is real silence, not a dead detector. Every
+  reload/soft_purge/back-door result is captured verbatim above.
+- **A14**: the corruption oracle trips — a byte-smashed file DB →
+  `{:sqlite_failure, 11, 11, …}` (SQLITE_CORRUPT) while a clean DB passes
+  `integrity_check`; and the serialized CONTROL leg is clean and byte-for-byte
+  equal to the parallel leg (439560 ok each), so a parallel-only corruption/NOMEM
+  would have shown as a divergence. run.sh aborts (rc 2) if either oracle fails.
+
+### Completeness critic
+
+- **A13 covered:** the rustler-0.38 init codegen (upgrade/reload/unload = None),
+  the erl_nif NULL-upgrade contract (OTP 29 docs + installed `erl_nif.h`), and the
+  empirical reload / soft_purge / delete+purge+GC / direct-load_nif paths with all
+  five resource types held live. NOT covered / honest gaps: (1) a genuine
+  release-handler `relup`/`appup` in-place upgrade of a running release was not
+  driven end-to-end — the `:code.*` sequence is its mechanism, but a full
+  `release_handler` cycle (with `.appup` instructions) is a heavier apparatus not
+  built here; the on_load-refusal it would hit is the same. (2) Windows/macOS load
+  paths not exercised (Linux only); the codegen gap is platform-independent but
+  the exact VM message text is not re-verified off-Linux. (3) An `upgrade`-capable
+  hand-written entry (adopting resources) is a hypothetical fix not prototyped —
+  out of scope (the deliverable is the policy, not upgrade support).
+- **A14 covered:** the shared-globals enumeration, the THREADSAFE substrate
+  (runtime), the opener-isolation refutation, the parallel-vs-serial corruption/
+  NOMEM stress with teeth, the open/close-churn (#1860) angle, and the
+  static-link + symbol-visibility analysis for both source and precompiled `.so`s.
+  NOT covered / honest gaps: (1) the spurious NOMEM was NOT reproduced — not under
+  a constrained-RAM cgroup (F-A14-1), and true C-concurrency is scheduler-capped
+  at ~10, so the box may simply be too roomy to flake. (2) A literal bare-`mix
+  test` (full async suite) flake-hunt was not run — the synthetic probe stresses
+  the same shared surface far harder, but the exact CI failure mode (many test
+  files' setup pressure at once) is modeled, not replayed. (3) No TSan/Miri on the
+  live NIF (Runs 2/4/5: Miri can't run the bundled C SQLite); the oracle is
+  integrity + crash/exit-code + tallies, bounded by the THREADSAFE=1 source
+  analysis. (4) A two-bundled-SQLites node (xqlite + exqlite loaded together) was
+  reasoned from symbol non-export + RTLD_LOCAL, not physically co-loaded.
+
+### Disposition & dryness
+
+- **A13:** 0 S0/S1/S2 (hot upgrade fails SAFE — no crash-on-purge). Deliverable
+  DONE: policy documented in `guides/gotchas.md`. 1 S3 filed (F-A13-1, upstream
+  rustler-upgrade gap, tracking). `mix verify` GREEN with the harness present.
+  **A13: no-policy → one covering source-verify + empirical-probe run, policy
+  documented, teeth (crash-oracle) proven.** First covering run; NOT yet DRY, one
+  more owed. Churn re-wets: a rustler bump (re-check `init.rs` upgrade wiring), a
+  `RustlerPrecompiled`/on_load change, or a new resource type (re-verify its
+  destructor survives purge).
+- **A14:** 0 S0/S1/S2 (no corruption/crash/wrong-result; test.seq is the working
+  mitigation). CLAUDE.md gotcha #1 wording CORRECTED this run (S3-class doc
+  sharpening, done not backlogged). 1 S3 filed (F-A14-1, deferred constrained-RAM
+  reproduction). **A14: never-independently-re-derived → one covering
+  re-derivation + reproduction + symbol-analysis run, mechanism PLAUSIBLE, gotcha
+  #1 confirmed load-bearing + wording sharpened, teeth (corruption oracle + clean
+  control) proven.** First covering run; NOT yet DRY, one more owed. Churn re-wets:
+  a bundled-SQLite version bump (re-verify THREADSAFE + #1860 non-repro + the
+  static-bundle symbols), any `test.seq`/opener change, or a rusqlite/libsqlite3-sys
+  bump (re-check the `-DSQLITE_THREADSAFE=1` build flag).

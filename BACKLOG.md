@@ -162,6 +162,39 @@ burn-down.
   Cross-refs A1. Maintainer question: reimplement TEXT-value encoding to degrade
   like BLOB, or accept rustler's `str::encode` OOM-panic (caught → `:nif_panicked`)
   as the crate-wide behavior?
+- [S3] F-A13-1 (Run 12, A13): hot code upgrade of the xqlite NIF is unsupported
+  because rustler 0.38's init codegen hardcodes the `ErlNifEntry`
+  `upgrade`/`reload`/`unload` callbacks to `None`
+  (`rustler_codegen-0.38.0/src/init.rs:92-94`; only `load` is wired). Per the
+  erl_nif contract a NULL `upgrade` makes `:erlang.load_nif` FAIL once the module
+  has old code with a loaded NIF, so `:code.load_file(XqliteNIF)` on a running
+  system returns `{:error, :on_load_failure}` (VM: `{:upgrade, "Upgrade not
+  supported by this NIF library."}`). This is an OPEN UPSTREAM gap — there is no
+  rustler API to supply an `upgrade` callback; wiring one would require an upstream
+  rustler change (or a hand-written NIF entry that adopts resources on upgrade).
+  It FAILS SAFE (old code + resources keep running, no crash, no corruption — probed
+  `hot_upgrade/run.sh`), and the documented policy (`guides/gotchas.md` "Hot code
+  upgrades are not supported — restart the node") IS the fix, so this is tracking-
+  only, not a code change owed here. **Maintainer/upstream question:** if hot-
+  upgrade support is ever wanted, carry it to rustler as a feature request (populate
+  `upgrade`/`unload` from the `init!` macro). Repro: on a running node,
+  `:code.load_file(XqliteNIF)` → `{:error, :on_load_failure}`.
+- [S3] F-A14-1 (Run 12, A14): the spurious-"out of memory" flake behind gotcha #1
+  (parallel test files contending on the shared per-OS-process SQLite globals) was
+  NOT reproduced at dev-box scale — `test_arch/run.sh` ran ~830k parallel isolated-DB
+  ops (36×60 and 48×40 + 48×600 open/close churn) with 0 crash / 0 corruption / 0
+  NOMEM, byte-for-byte equal to the serialized control (teeth: byte-smash →
+  SQLITE_CORRUPT caught). The mechanism is graded PLAUSIBLE (not refuted): it is a
+  RAM/environment-sensitive contention/flake class (a 7 GB GHA runner holding many
+  async connections is a far tighter allocator than this box; true C-level
+  concurrency is also scheduler-capped at ~10 dirty-IO schedulers, already
+  saturated), and rusqlite#1860 is a real OPEN upstream issue in the class.
+  `mix test.seq` remains the load-bearing mitigation regardless (it removes the
+  shared-globals surface deterministically). **Deferred deciding probe:** re-run
+  `test_arch/` under a cgroup RAM cap (e.g. `systemd-run --scope -p MemoryMax=1G`)
+  mimicking a constrained runner to try to force the parallel-only NOMEM, which
+  would upgrade the verdict from PLAUSIBLE to CONFIRMED. Repro: `bash
+  test_arch/run.sh` (currently PASS = no repro).
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)

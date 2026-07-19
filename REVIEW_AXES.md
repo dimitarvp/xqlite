@@ -321,14 +321,60 @@ covering run; one more owed). Churn re-wets: `util.rs` `encode_val` /
 ### A13. Hot-upgrade posture
 rustler upgrade support is an open upstream gap; on_load is
 panic-protected. Deliverable: an explicit documented policy, even
-"unsupported — documented". Coverage: no policy stated.
+"unsupported — documented". Coverage: Run 12 — first covering run
+(source-verify + empirical child-process probe, `hot_upgrade/run.sh`,
+CI-isolated). GAP SOURCE-VERIFIED: `rustler_codegen-0.38.0/src/init.rs`
+hardcodes the NIF entry's `upgrade`/`reload`/`unload` = `None` (`:92-94`,
+only `load` wired) — no rustler API to supply them; per the erl_nif
+contract (OTP 29 docs + installed `erl_nif.h`) a NULL `upgrade` makes
+`load_nif` FAIL once the module has old code with a loaded NIF, and
+resource destructors postpone the library unload. PROBED (RUN, teeth =
+crash-oracle child `halt(134)` → CRASH): `:code.load_file(XqliteNIF)` →
+`{:error, :on_load_failure}` + VM `{:upgrade, "Upgrade not supported by
+this NIF library."}`; every live resource (conn/stmt/stream/blob/session)
+survives the failed reload AND soft_purge; direct `:erlang.load_nif` from
+a foreign module → `{:bad_lib,_}` (no back door); forced delete+purge+GC
+of a live set → NO VM abort (destructors run out of the postponed-unload
+library) → fresh open works. It FAILS SAFE — no crash-on-purge. POLICY
+DOCUMENTED: `guides/gotchas.md` "Deployment and releases → Hot code
+upgrades are not supported — restart the node". 0 S0/S1/S2; 1 S3
+(F-A13-1, upstream rustler-upgrade gap, tracking). NOT yet DRY (first
+covering run; one more owed). Churn re-wets: a rustler bump (re-check the
+`init.rs` upgrade wiring), a `RustlerPrecompiled`/on_load change, or a new
+resource type (re-verify its destructor survives purge).
 
 ### A14. Test-architecture load-bearer
 Re-derive gotcha #1 (parallel tests corrupt global C state → VFS/
 allocator sharing → test.seq). rusqlite#1860 now provides upstream
 evidence FOR the mechanism. Probe: does the reasoning hold for
-precompiled artifacts? Coverage: rationale documented; never
-independently re-derived.
+precompiled artifacts? Coverage: Run 12 — first independent re-derivation
+(+ reproduction + symbol analysis, `test_arch/run.sh`, CI-isolated).
+RE-DERIVED: bundled = statically-linked SQLite (nm/objdump: version baked
+in, no `libsqlite3` DT_NEEDED) → one per-OS-process globals set (VFS list,
+allocator, pcache, PRNG, memstatus, temp namespace); the two suite openers
+are DB-isolated (private `:memory:` + temp file) so globals are the ONLY
+shared surface (refutes `:memory:`-name / shared-file alternatives).
+SUBSTRATE runtime-verified THIS session: `THREADSAFE=1` + `MUTEX_PTHREADS`
+(SQLite 3.53.2) → globals mutex-protected → the "out of memory" symptom is
+CONTENTION/resource-exhaustion, NOT corruption/UB (refutes literal "corrupt
+global C state"). REPRODUCTION (RUN, teeth = byte-smash → SQLITE_CORRUPT
+caught + clean serial control equal to parallel): 36×60 and 48×40 +48×600
+churn parallel-vs-serial on isolated DBs → 0 crash / 0 corruption / 0
+NOMEM both legs (~830k ops); #1860 does NOT repro at 3.53.2 (Run 4
+corroborated). Non-repro does NOT refute (flake is RAM/environment-
+sensitive; C-concurrency scheduler-capped ~10). PRECOMPILED ANSWER
+(nm/objdump both source + precompiled `.so`): each exports ONLY
+`nif_init`/`xqlitenif_nif_init`, NO `sqlite3_*` symbols → same per-OS-
+process globals for precompiled consumers, and two bundled SQLites
+(xqlite+exqlite) in one node are INDEPENDENT (private, non-exported → no
+share/dedup — the safe answer). VERDICT: mechanism PLAUSIBLE, test.seq
+CONFIRMED load-bearing (removes the surface regardless of the residual
+cause), gotcha #1 wording CORRECTED in `CLAUDE.md` ("corrupt" → "contend
+on"; not UB). 0 S0/S1/S2; 1 S3 (F-A14-1, deferred constrained-RAM
+reproduction). NOT yet DRY (first covering run; one more owed). Churn
+re-wets: a bundled-SQLite version bump (re-verify THREADSAFE + #1860 +
+static-bundle symbols), a `test.seq`/opener change, or a rusqlite/
+libsqlite3-sys bump (re-check `-DSQLITE_THREADSAFE=1`).
 
 ## Release-readiness axis (RC gate; both repos)
 
