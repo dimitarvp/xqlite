@@ -3794,3 +3794,172 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   `{config,lib,test}/**` matches ZERO `scheduler/`/`hot_upgrade/`/`test_arch/`
   files). Files changed: `REVIEW_LEDGER.md`, `REVIEW_AXES.md` only. No product code
   (`native/`/`lib/`/`test/`), no harness, no `BACKLOG.md` change.
+
+---
+
+## Run 20 — 2026-07-19 — A3 UB tooling (first covering run)
+
+- Commit at scan: `8ba4456` (HEAD, clean tree). Scope: axis A3 — establish and
+  exercise the UB-tooling surface, honestly bounded. Composition: single Opus pass
+  (this agent) — A3 is a tooling/census axis, not a fleet read. Deliverable is a
+  durable statement of WHAT UB tooling can and cannot reach in this crate, run what
+  is reachable, and document the irreducible gap. The template is Run 2's blob
+  Miri PATTERN-MODEL (a standalone FFI-free repro of the aliasing pattern, not
+  Miri-on-the-NIF), here scaled to the crate's full pure-Rust aliasing surface.
+
+### Standing constraint, re-proven THIS session
+
+- **Miri cannot execute the bundled C SQLite.** A throwaway `rusqlite`(bundled,
+  0.40, the lockfile version) test doing `Connection::open_in_memory()` +
+  `SELECT 1` PASSES on the native stable toolchain (control, exit 0) but under
+  `cargo +nightly miri test` ABORTS at the very first C call:
+  `error: unsupported operation: can't call foreign function 'sqlite3_threadsafe'
+  on OS 'linux'` (exit 1). This is Miri-specific (native passes), NOT a crate bug.
+  So A3's job is not "run Miri on the NIF" — it is to model the separable pure-Rust
+  logic and argument-audit the irreducible FFI boundary. (Runs 2/4/5 established
+  this; re-established here with a first-hand command.)
+
+### Unsafe-site separability census (the axis's core question)
+
+- **Surface:** 131 `unsafe` occurrences across 17 `native/xqlitenif/src/` files =
+  **102 `unsafe {}` blocks + 4 `unsafe impl Send/Sync` + ~24 `unsafe fn` decls.**
+  **89 `// SAFETY:` comments** + a `# Safety` doc section on every `pub unsafe fn`
+  (clippy `missing_safety_doc` = **0**). Proportionate for a ~7.7k-line NIF binding
+  (unsafe IS the job); no structural soundness smells (see clippy triage).
+
+- **(a) TOOL-REACHABLE — pure-Rust aliasing/ownership, no SQLite FFI, Miri-modelable:**
+
+  | site | discipline / SAFETY claim | validated how |
+  |---|---|---|
+  | `stream.rs take_and_finalize_raw`, `blob.rs close`, nif.rs stream_fetch (1336/1349) | AtomicPtr swap-to-null → exclusive ownership → free once (finalize/blob_close under conn Mutex) | Miri Model A (swap-exclusive-free) + teeth A (double-free caught) |
+  | `statement.rs with_live_stmt`, `blob.rs with_live_blob` | lock-then-load: free needs the SAME Mutex, so a ptr loaded-non-null-under-lock stays valid through use | Miri Model B + teeth B (off-lock finalize → UAF caught — the historically-shipped `take_and_finalize_atomic_stmt` bug class) |
+  | `cancel.rs ProgressHandlerGuard` + `progress_dispatch CancelSubscriber` | guard holds owning `Arc<AtomicBool>`; subscriber stores raw `Arc::as_ptr`; unregister-BEFORE-Arc-drop | Miri Model C + teeth C (drop Arc before deref → dangling-ref caught) |
+  | `hook_util.rs HookList<T>` register/unregister/for_each_snapshot/drop_all | `Box<Vec>` behind AtomicPtr; clone-swap-reclaim under conn Mutex; wait-free snapshot read (under same Mutex) | Miri Model D + teeth D (free box under live snapshot → COW-UAF caught) |
+  | `hook_util.rs install_hook`/`uninstall_hook`/`drop_hook`, `busy_handler snapshot`/`swap_in` | `Box::into_raw`→slot; swap reclaims predecessor; fail-path reclaims new box (no leak) | Miri Model E + teeth E (forget reclaim → leaked box caught by Miri leak checker) |
+  | `nif.rs:1864 transmute Session<'a>→'static` | lifetime erasure sound because `conn_resource_arc` keeps conn alive + rusqlite `Session` Drop is `PhantomData`-only (touches `self.s`, never derefs conn) | argument (A6 Run 5/17 verified); pure-Rust, no FFI; clippy flags NO transmute lint (lifetime-only, no layout change) |
+  | `session.rs` + `progress_dispatch` `unsafe impl Send/Sync` | raw ptr / `Session<'static>` safe to move across threads because access is serialized under the conn Mutex | argument (the locking law A2); data guarded is pure |
+
+- **(b) FFI-BOUNDARY — the `unsafe` IS the C call; Miri can't cross; audit by
+  argument + harnesses:** every `ffi::sqlite3_*` (finalize/step/column_*/bind_*/
+  errmsg/blob_*/progress_handler/busy_handler/session_*/stmt_status/scanstatus/
+  prepare_v2/reset/clear_bindings/libversion), every `enif_*` (alloc_env/
+  make_atom_len/make_new_binary/make_int64/make_tuple/send/free_env),
+  `conn.handle()` (rusqlite unsafe → raw `sqlite3*`), `CStr::from_ptr`. **≈85 of the
+  102 blocks; ALL of nif.rs's 24 blocks are (b)** (confirmed: nif.rs unsafe callees =
+  `ffi::sqlite3_*`/`enif_*`/`process_single_step`/`conn.handle`/`CStr::from_ptr`/the
+  one transmute — zero pure aliasing). Safety rests on the locking law (A2, Run 16
+  systematic call-site audit) + SQLite's C contract + the concurrency/lifecycle/
+  durability harnesses (Runs 3/4/5/17/18).
+
+- **INSEPARABILITY VERDICT: none.** The ownership/aliasing logic is cleanly
+  separable from the FFI leaf BY CONSTRUCTION — every raw resource is an
+  AtomicPtr/Box/Arc primitive with the `sqlite3_*` call as a leaf under the lock.
+  That separability is precisely why the Run-2 blob model and these five models
+  work. Inseparability-where-separable would be an S3; there is none. This is the
+  positive answer to the axis's core question.
+
+### Clippy pedantic triage (once, as the axis prescribes)
+
+- `cd native/xqlitenif && cargo clippy -- -W clippy::pedantic -W clippy::nursery`
+  → **652 warnings**, triaged. **NO soundness smell:** `cast_ptr_alignment`,
+  `transmute_undefined_repr`, `useless_transmute`, `as_ptr_cast_mut`,
+  `not_unsafe_ptr_arg_deref`, `invalid_null_ptr_usage`, `fn_to_numeric_cast_any` are
+  **ALL ABSENT** — the meaningful signal. The flagged casts are all sound:
+  `cast_possible_truncation usize→i32` at `blob.rs:150/151/198/199` carry EXPLICIT
+  bounds-proof comments (offset/len ≤ the i32 `size`); `cast_sign_loss i32→usize` at
+  `blob.rs:137/192/218` are `.max(0) as usize` (clamped before cast); `u128→u64`
+  (`busy_handler:72`, `explain_analyze:139`) are elapsed ms/ns (2^64 = centuries);
+  `borrow_as_ptr`/`ref_as_ptr` (blob:113, explain_analyze:79/240…296, hook_util:48,
+  nif:397/398/496/768/769) are idiomatic `&mut local as *mut T` C-out-param borrows
+  (aligned, owned stack locals — clippy pedantic merely prefers `&raw mut`);
+  `ptr_as_ptr` (busy:235, explain:240…) are `T* → c_void*` FFI casts. **0 acted on**
+  (fixing pedantic style en masse = huge diff, no soundness gain — per the axis).
+
+### Miri pattern-models (the tool-reachable (a) sites)
+
+- Throwaway FFI-free crate (scratchpad, since removed). GOOD models mirror each (a)
+  discipline faithfully (the C free stands in as `Box<Payload>` so Miri's allocator
+  tracking substitutes for the C free — the ownership logic is identical). Run
+  `cargo +nightly miri test --lib` with `-Zmiri-strict-provenance`:
+  **5 passed, 0 failed (0 UB, 0 leak).** Each teeth (its own test binary,
+  deliberately breaking exactly one discipline) TRIPPED Miri with the precise UB
+  class the discipline prevents — the same config that green-lights the good models:
+  - teeth A → `Undefined Behavior: constructing invalid value of type Box<Payload>:
+    encountered a dangling box (use-after-free)` (double-free).
+  - teeth B → `memory access failed: alloc… has been freed, so this pointer is
+    dangling` (use-after-free — off-lock finalize racing a live user).
+  - teeth C → `constructing invalid value of type &AtomicBool: encountered a dangling
+    reference (use-after-free)` (Arc dropped before raw deref).
+  - teeth D → `in-bounds pointer arithmetic failed: alloc… has been freed…`
+    (COW box reclaimed under a live snapshot borrow).
+  - teeth E → `memory leaked: alloc… (Rust heap, size: 8…)` (predecessor box not
+    reclaimed — Miri leak checker at exit).
+- The five models + Run-2's blob-Drop UAF model = the crate's full pure-Rust
+  aliasing surface, Miri-validated. Models NOT kept (Run-2 precedent): nightly-Miri-
+  only, they'd be dead weight without a Miri CI lane (which the no-persistent-nightly
+  posture forbids), and a model↔code drift could give false confidence. This ledger
+  entry (site table + commands + UB signatures) is the durable record; a future A3
+  run reconstructs them in minutes.
+
+### cargo careful / crate's own Rust tests
+
+- **cargo careful:** NOT installed. Its unique value over Miri is crossing the FFI
+  boundary — but the crate's ONLY Rust unit tests (17, all in `constraint_parse.rs`)
+  are pure string-parsing, FFI-FREE, so careful adds nothing here. Did NOT install
+  it (no persistent tool introduced).
+- **The 17 `constraint_parse` tests under Miri:** ran `cargo +nightly miri test
+  constraint_parse` (`-Zmiri-strict-provenance`) directly on the xqlite crate —
+  **17 passed, 0 UB.** Miri built the crate (the libsqlite3-sys C compile is a host
+  build step) and ran these tests because they never call a C function; the crate's
+  own FFI-free logic is Miri-clean. (Any test that DID call SQLite would abort per
+  the irreducible-gap proof above.)
+
+### Findings
+
+- **F-A3-1 — S3 — 19 `undocumented_unsafe_blocks`; the "`// SAFETY:` on every
+  block" house rule is not lint-enforced.** `mix verify` (`verify.ex:93`) and CI
+  (`ci.yml:80`) both run `cargo clippy -- -D warnings`, but that omits the
+  `restriction`-group `undocumented_unsafe_blocks`; `lib.rs` has no crate-level lint
+  attribute. Explicitly enabling it flags 19 sound blocks (12 in `explain_analyze.rs`
+  inner blocks under `# Safety`-documented `unsafe fn`s; the `send_*_to_pid` bodies
+  in commit/rollback/log; `busy_handler:249` safety-explained-but-unprefixed;
+  blob:105/cancel:57/connection:138 covered-but-non-adjacent). ALL sound — a doc-
+  convention drift, no soundness impact. → BACKLOG (F-A3-1); fix = add
+  `#![warn(clippy::undocumented_unsafe_blocks)]` + the 19 comments in the post-
+  burn-down S3 pass. **0 S0/S1/S2 UB found this run.**
+
+### Verdict — PASS
+
+- The unsafe surface is proportionate, structurally smell-free (clippy soundness
+  lints all absent), (a)-fully-Miri-validated, and (b)-argument-audited against the
+  locking law + the harness fleet. The irreducible Miri-can't-FFI gap is real and
+  bounded: ~85 FFI-boundary blocks are unreachable by Miri and rest on the C
+  contract + Runs 3/4/5/17/18 — proven this session, not assumed. 0 UB defects;
+  1 S3 doc-convention finding. Cleanup: throwaway Miri crate removed; nightly's
+  miri+rust-src components removed (toolchain restored to its as-found 6-component
+  set — NO persistent nightly re-introduced); `git status` CLEAN.
+
+### Disposition & dryness
+
+- **A3 — 0 of 2 consecutive clean covering runs (NOT DRY).** This is A3's first
+  covering run and it surfaced a new CONFIRMED S3 (F-A3-1), so it is not a clean
+  run; two clean covering runs are owed. Re-wet: any new `unsafe` block, any change
+  to the AtomicPtr swap/load / Arc-as-ptr / Box-slot / HookList COW / lifetime-
+  transmute disciplines, a rustler bump, or a libsqlite3-sys/bundled-SQLite bump
+  (re-verify the FFI-boundary set + re-prove the Miri gap).
+- **Completeness critic — what went unchecked:** (1) ASan/TSan were NOT run — a
+  sanitizer-instrumented SQLite build is not available (same infra gap as Run 2's
+  ASan note); the FFI-boundary blocks' runtime UB (if any) is covered only by the
+  argument + harness fleet, never a sanitizer. This is the honest residual — a
+  sanitizer lane (rebuild libsqlite3-sys under `-Zsanitizer=address` on nightly)
+  would be the one net-new modality and is the natural target for A3's SECOND
+  covering run. (2) The Miri models validate the DISCIPLINES, not the literal crate
+  code (Miri can't run the crate's FFI paths) — a model↔code divergence is possible
+  in principle, mitigated by keeping each model a faithful line-by-line reduction and
+  by A2/A6's direct source audits. (3) Tree Borrows (vs the default Stacked Borrows)
+  not run — the models are simple enough that SB is sufficient, but TB is a cheap
+  extra-rigor add for the next run.
+- `mix verify` GREEN (A3 touched no product code, no harness; the throwaway Miri
+  crate lived only in the scratchpad, and the clippy/Miri runs left artifacts only
+  under gitignored `target/`). Files changed: `REVIEW_LEDGER.md`, `REVIEW_AXES.md`,
+  `BACKLOG.md` only. No product code (`native/`/`lib/`/`test/`).

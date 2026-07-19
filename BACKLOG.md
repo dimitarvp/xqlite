@@ -7,6 +7,32 @@ burn-down.
 
 ## Open
 
+- [S3] F-A3-1 (Run 20, A3): the CLAUDE.md house rule "Every `unsafe` block must
+  have a `// SAFETY:` comment" is NOT lint-enforced, and 19 `unsafe` blocks have
+  drifted from it. Both the `mix verify` gate (`lib/mix/tasks/verify.ex:93`) and
+  CI (`.github/workflows/ci.yml:80`) run `cargo clippy -- -D warnings`, but
+  `clippy::undocumented_unsafe_blocks` is a `restriction`-group lint (not in
+  `clippy::all`), so it never fires; `native/xqlitenif/src/lib.rs` carries no
+  crate-level lint attribute either. Explicitly running it this session flags 19
+  blocks: `explain_analyze.rs:131,135,140,141,209,234,254,300,301,326,337,341`
+  (12 — inner blocks of `unsafe fn`s that carry a `# Safety` doc contract but no
+  per-block `// SAFETY:`), `commit_hook.rs:53` / `rollback_hook.rs:48` /
+  `log_hook.rs:70` (the `send_*_to_pid` bodies, same shape), `busy_handler.rs:249`
+  (`ffi_rc_to_error` — a safety EXPLANATION at `:247-248` but not the `// SAFETY:`
+  prefix), and `blob.rs:105` / `cancel.rs:57` / `connection.rs:138` (a `// SAFETY:`
+  comment IS present and covers the block, but an intervening statement breaks
+  clippy's immediate-adjacency check). ALL 19 are SOUND — no soundness impact: the
+  enclosing `unsafe fn`s document the invariant in `# Safety` docs, every block was
+  read this session and holds (explain_analyze runs under the NIF `with_conn`
+  Mutex with a just-prepared non-null stmt; the `send_*_to_pid` helpers copy into a
+  fresh `msg_env`), and the A1 Run-16 census already cleared `explain_analyze.rs`.
+  This is purely a doc-convention drift against the house rule. Fix (deferred, S3):
+  add `#![warn(clippy::undocumented_unsafe_blocks)]` (or `deny`) to
+  `native/xqlitenif/src/lib.rs` so the rule is enforced mechanically, then add the
+  19 missing/misplaced per-block `// SAFETY:` comments (moving the 3 adjacency ones
+  next to their block and re-prefixing the busy_handler one). Repro: `cd
+  native/xqlitenif && cargo clippy -- -W clippy::undocumented_unsafe_blocks 2>&1 |
+  rg 'unsafe block missing'` → 19 hits.
 - [S3] F-A10-9 (Run 13, A10): two direct-NIF error atoms bypass the `error.rs`
   `Encoder` (which the round-1 `error_reason/0` audit was explicitly scoped to) and
   are absent from the `error_reason/0` union AND from all of `lib/`. (1)

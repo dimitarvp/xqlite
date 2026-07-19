@@ -118,7 +118,47 @@ cancel-path/hook-registration change.
 ### A3. UB tooling
 Sources: Miri/ASan/TSan/cargo-careful docs. Probes: separability of
 core logic from the NIF shim (inseparability is itself a finding);
-sanitizer suite runs; clippy pedantic triage once. Coverage: none.
+sanitizer suite runs; clippy pedantic triage once.
+COVERING RUN (Run 20, 2026-07-19): the FIRST covering run. UNSAFE-SITE SEPARABILITY
+CENSUS at HEAD `8ba4456`: 131 `unsafe` occurrences (17 files) = 102 `unsafe {}`
+blocks + 4 `unsafe impl Send/Sync` + ~24 `unsafe fn` decls; 89 `// SAFETY:` + a
+`# Safety` doc on every `pub unsafe fn` (clippy `missing_safety_doc` = 0). Split:
+(a) TOOL-REACHABLE pure-Rust aliasing/ownership (Miri-modelable, no SQLite FFI) —
+five disciplines: AtomicPtr swap-to-null exclusive free (`stream.rs`
+`take_and_finalize_raw`, `blob.rs close`, nif.rs stream_fetch), lock-then-load use
+(`with_live_stmt`/`with_live_blob`), Arc-as-ptr subscriber lifetime (`cancel.rs`
+guard + `progress_dispatch` `CancelSubscriber`), HookList COW reclaim (`hook_util.rs`),
+Box-slot install/reclaim (`install_hook`/`drop_hook`/busy `swap_in`), plus the
+lifetime transmute (`nif.rs:1864 Session<'a>→'static`) and the two `unsafe impl
+Send/Sync`. (b) FFI-BOUNDARY (Miri can't cross; audit by argument + the
+concurrency/lifecycle/durability harnesses) — every `ffi::sqlite3_*` / `enif_*` /
+`conn.handle()` / `CStr::from_ptr` call (≈85 of the 102 blocks, all of nif.rs).
+INSEPARABILITY VERDICT: none — the ownership logic is cleanly separable from the FFI
+leaf by construction (that is WHY the Run-2 blob model + these models work); the
+separability itself is the positive finding. RAN (evidence in ledger): (1) clippy
+pedantic+nursery (652 warnings) triaged — NO soundness smells (`cast_ptr_alignment` /
+`transmute_undefined_repr` / `useless_transmute` / `as_ptr_cast_mut` /
+`not_unsafe_ptr_arg_deref` / `invalid_null_ptr_usage` ALL absent); every flagged cast
+is bounds-proven-lossless (blob offset/len), clamp-before-cast (`i32.max(0) as
+usize`), unbounded-time, or idiomatic C-out-param borrow — 0 acted on. (2) five Miri
+pattern-models of the (a) disciplines under `cargo +nightly miri test`
+(`-Zmiri-strict-provenance`) — all 5 clean (0 UB/0 leak), all 5 teeth tripped (broken
+variants → double-free / use-after-free / dangling-ref / COW-snapshot-UAF /
+leaked-box). (3) the crate's own 17 `constraint_parse` Rust unit tests (FFI-free)
+under Miri — 0 UB. IRREDUCIBLE GAP proven THIS session: a rusqlite `SELECT 1` passes
+NATIVE but Miri aborts at the first C call (`can't call foreign function
+sqlite3_threadsafe`) — Miri-specific, not a crate bug; cargo-careful NOT installed and
+its FFI-crossing value is moot (the only Rust tests are FFI-free). ONE new S3
+(F-A3-1): 19 `undocumented_unsafe_blocks` — the house rule "// SAFETY: on every
+block" is NOT lint-enforced (`-D warnings` omits the restriction group) and 19 sound
+blocks drifted → BACKLOG. 0 S0/S1/S2 UB found; unsafe surface is proportionate,
+structurally smell-free, and (a)-fully-Miri-validated. Throwaway miri project + the
+nightly miri/rust-src components removed (repo + toolchain left as-found; NO
+persistent nightly re-introduced). DRYNESS: a new CONFIRMED (S3) surfaced, so this is
+NOT a clean covering run — A3 stands at **0 of 2 consecutive clean covering runs, NOT
+DRY**; one clean covering run owed. Re-wet: any new `unsafe` block, any AtomicPtr /
+Arc-as-ptr / Box-slot / HookList / transmute change, a rustler bump, or a
+libsqlite3-sys bump (re-verify the FFI-boundary set).
 
 ### A4. Scheduler discipline
 NIFs must be <1ms proven or Dirty (CPU vs IO correctly chosen).
