@@ -100,6 +100,7 @@ pub(crate) mod atoms {
         invalid_column_index,
         invalid_column_name,
         invalid_column_type,
+        invalid_pages_per_step,
         invalid_parameter_count,
         invalid_parameter_name,
         invalid_pragma_name,

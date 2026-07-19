@@ -160,6 +160,7 @@ defmodule Xqlite do
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
           | {:invalid_on_error, term()}
+          | {:invalid_pages_per_step, integer()}
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
@@ -1824,6 +1825,10 @@ defmodule Xqlite do
   Sends `{:xqlite_backup_progress, remaining, pagecount}` to `pid` after
   each `pages_per_step`-page step. Returns `{:error, :operation_cancelled}`
   if any token signals between steps.
+
+  `pages_per_step` must be a positive integer. A non-positive value returns
+  `{:error, {:invalid_pages_per_step, value}}` — passing `0` would otherwise
+  make SQLite copy no pages while reporting "more", spinning forever.
   """
   @spec backup_with_progress(
           conn(),

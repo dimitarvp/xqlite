@@ -1661,7 +1661,10 @@ defmodule XqliteNIF do
 
   `conflict_strategy` determines behavior on conflicts:
   - `:omit` — skip conflicting changes
-  - `:replace` — overwrite with the changeset's values
+  - `:replace` — overwrite with the changeset's values. SQLite only permits
+    replacement for `DATA` and `CONFLICT` conflicts; for a `NOTFOUND`,
+    `CONSTRAINT`, or `FOREIGN_KEY` conflict there is nothing to overwrite, so
+    the apply is aborted (rolled back) instead.
   - `:abort` — abort the entire apply operation
   """
   @spec changeset_apply(

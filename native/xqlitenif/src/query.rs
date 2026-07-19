@@ -8,12 +8,30 @@ use rusqlite::{Connection, ToSql};
 use rustler::types::atom::nil;
 use rustler::{Env, Term, TermType};
 
+/// Reject SQL text containing an interior NUL byte before it reaches SQLite.
+///
+/// rusqlite's `prepare`/`execute_batch` hand SQLite the SQL length-delimited
+/// (`as_ptr` + `len`), and SQLite's tokenizer STOPS at the first NUL — every
+/// byte after it is silently ignored, which can shorten a statement into
+/// something unintended. We refuse with `:null_byte_in_string` instead, so the
+/// contract matches the raw-FFI `prepare`/`stream_open`/`explain_analyze`
+/// paths (which build a `CString` and reject the same way).
+#[inline]
+fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
+    if sql.as_bytes().contains(&0) {
+        Err(XqliteError::NulErrorInString)
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn core_query<'a>(
     env: Env<'a>,
     conn: &Connection,
     sql: &str,
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
+    reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
     let column_names: Vec<String> =
         stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -63,6 +81,7 @@ pub(crate) fn core_execute<'a>(
     sql: &str,
     params_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
+    reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
 
     let affected_rows = match params_term.get_type() {
@@ -99,6 +118,7 @@ pub(crate) fn core_execute_batch(
     conn: &Connection,
     sql_batch: &str,
 ) -> Result<(), XqliteError> {
+    reject_interior_nul(sql_batch)?;
     conn.execute_batch(sql_batch)?;
     Ok(())
 }

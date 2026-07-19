@@ -444,6 +444,81 @@ defmodule Xqlite.NIF.SessionTest do
       NIF.close(conn2)
     end
 
+    # SQLITE_CHANGESET_REPLACE is a legal conflict resolution ONLY for DATA and
+    # CONFLICT conflicts. Returning it for a CONSTRAINT (e.g. a non-PK UNIQUE)
+    # or NOTFOUND conflict is a C-API misuse: sqlite3changeset_apply then fails
+    # with SQLITE_MISUSE (21), an opaque error. xqlite's :replace handler must
+    # instead abort cleanly with SQLITE_ABORT (4), rolling the whole apply back
+    # with no data change — never surface a bare misuse.
+    test "replace on a CONSTRAINT conflict aborts cleanly, not misuse", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(
+          conn,
+          "CREATE TABLE sess_repl_c (id INTEGER PRIMARY KEY, val TEXT UNIQUE);"
+        )
+
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl_c VALUES (1, 'x')", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
+
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
+
+      # A DIFFERENT row already owns val='x', so applying the source INSERT hits
+      # the UNIQUE(val) constraint (not the PK): a CHANGESET_CONSTRAINT conflict.
+      :ok =
+        NIF.execute_batch(conn2, """
+        CREATE TABLE sess_repl_c (id INTEGER PRIMARY KEY, val TEXT UNIQUE);
+        INSERT INTO sess_repl_c VALUES (2, 'x');
+        """)
+
+      assert {:error, {:sqlite_failure, code, _ext, _msg}} =
+               NIF.changeset_apply(conn2, changeset, :replace)
+
+      # SQLITE_ABORT (4), never SQLITE_MISUSE (21).
+      assert code == 4
+      refute code == 21
+
+      # Clean rollback: the target is unchanged, no partial apply.
+      assert {:ok, %{rows: [[2, "x"]], num_rows: 1}} =
+               NIF.query(conn2, "SELECT * FROM sess_repl_c ORDER BY id", [])
+
+      NIF.close(conn2)
+    end
+
+    test "replace on a NOTFOUND conflict aborts cleanly, not misuse", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(
+          conn,
+          "CREATE TABLE sess_repl_nf (id INTEGER PRIMARY KEY, val TEXT);"
+        )
+
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl_nf VALUES (1, 'a')", [])
+      {:ok, session} = NIF.session_new(conn)
+      :ok = NIF.session_attach(session, nil)
+      {:ok, 1} = NIF.execute(conn, "UPDATE sess_repl_nf SET val = 'b' WHERE id = 1", [])
+      {:ok, changeset} = NIF.session_changeset(session)
+      NIF.session_delete(session)
+
+      # The target has no id=1, so the UPDATE finds nothing: CHANGESET_NOTFOUND.
+      {:ok, conn2} = NIF.open_in_memory(":memory:")
+
+      :ok =
+        NIF.execute_batch(
+          conn2,
+          "CREATE TABLE sess_repl_nf (id INTEGER PRIMARY KEY, val TEXT);"
+        )
+
+      assert {:error, {:sqlite_failure, 4, _ext, _msg}} =
+               NIF.changeset_apply(conn2, changeset, :replace)
+
+      assert {:ok, %{rows: [], num_rows: 0}} =
+               NIF.query(conn2, "SELECT * FROM sess_repl_nf", [])
+
+      NIF.close(conn2)
+    end
+
     test "invalid conflict strategy returns error", %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE sess_bad (id INTEGER PRIMARY KEY);")
 

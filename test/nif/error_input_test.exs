@@ -35,6 +35,33 @@ defmodule Xqlite.NIF.ErrorInputTest do
         assert {:error, {:expected_list, _}} = NIF.query(conn, sql, invalid_params)
       end
 
+      # An interior NUL in SQL TEXT must be rejected, not silently truncated.
+      # rusqlite hands SQLite the SQL length-delimited, and SQLite's tokenizer
+      # stops at the first NUL — so "SELECT\0 1" would run as "SELECT" and the
+      # rest is silently dropped. Every SQL-text entry point must refuse with
+      # :null_byte_in_string, matching the Security guide's contract. (A NUL in
+      # a bound VALUE is fine — that path is length-delimited and unaffected.)
+      test "interior NUL in SQL text is rejected on query/execute/execute_batch", %{conn: conn} do
+        assert {:error, :null_byte_in_string} = NIF.query(conn, "SELECT\0 1", [])
+        assert {:error, :null_byte_in_string} = NIF.execute(conn, "SELECT\0 1", [])
+
+        assert {:error, :null_byte_in_string} =
+                 NIF.execute_batch(conn, "CREATE TABLE nul_batch\0 (a);")
+
+        # The prepared-statement and stream entry points reject it too.
+        assert {:error, :null_byte_in_string} = NIF.stmt_prepare(conn, "SELECT\0 1")
+        assert {:error, :null_byte_in_string} = NIF.stream_open(conn, "SELECT\0 1", [], [])
+
+        # A NUL inside a bound value still round-trips byte-exact.
+        assert {:ok, _} =
+                 NIF.execute(conn, "INSERT INTO error_input_test (id, data) VALUES (1, ?1)", [
+                   "a\0b"
+                 ])
+
+        assert {:ok, %{rows: [["a\0b"]]}} =
+                 NIF.query(conn, "SELECT data FROM error_input_test WHERE id = 1", [])
+      end
+
       test "query/3 returns :expected_keyword_list when keyword list expected but invalid list provided",
            %{conn: conn} do
         # This test assumes named params detection requires a non-empty list

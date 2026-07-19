@@ -18,7 +18,7 @@ use crate::transaction;
 use crate::util::singular_ok_or_error_tuple;
 use rusqlite::Connection;
 use rusqlite::ffi;
-use rusqlite::session::ConflictAction;
+use rusqlite::session::{ConflictAction, ConflictType};
 use rustler::{
     Encoder, Env, ResourceArc, Term, TermType,
     types::{
@@ -1739,6 +1739,17 @@ fn backup_with_progress<'a>(
     pages_per_step: i32,
     cancel_tokens: Vec<ResourceArc<XqliteCancelToken>>,
 ) -> Term<'a> {
+    // A non-positive step count is out of the documented `pos_integer()`
+    // contract: `sqlite3_backup_step(0)` copies nothing yet reports "more", so
+    // the loop would spin forever — pinning the connection Mutex and flooding
+    // `pid` with progress messages. Reject it loudly instead of hanging.
+    if pages_per_step < 1 {
+        return (
+            atoms::error(),
+            (atoms::invalid_pages_per_step(), pages_per_step),
+        )
+            .encode(env);
+    }
     let result = connection::with_conn(&handle, |conn| {
         let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
         let backup =
@@ -1949,14 +1960,26 @@ fn changeset_apply<'a>(
         conn.apply_strm(
             &mut cursor,
             None::<fn(&str) -> bool>,
-            move |_conflict_type, _item| match strategy_code {
-                x if x == ConflictAction::SQLITE_CHANGESET_REPLACE as i32 => {
-                    ConflictAction::SQLITE_CHANGESET_REPLACE
-                }
-                x if x == ConflictAction::SQLITE_CHANGESET_ABORT as i32 => {
+            move |conflict_type, _item| {
+                if strategy_code == ConflictAction::SQLITE_CHANGESET_ABORT as i32 {
                     ConflictAction::SQLITE_CHANGESET_ABORT
+                } else if strategy_code == ConflictAction::SQLITE_CHANGESET_REPLACE as i32 {
+                    // SQLITE_CHANGESET_REPLACE is a legal return ONLY for DATA
+                    // and CONFLICT conflicts; returning it for NOTFOUND /
+                    // CONSTRAINT / FOREIGN_KEY makes sqlite3changeset_apply fail
+                    // with SQLITE_MISUSE. A `:replace` request cannot overwrite
+                    // in those cases, so abort the whole apply cleanly (rolled
+                    // back) rather than surface an opaque misuse error.
+                    match conflict_type {
+                        ConflictType::SQLITE_CHANGESET_DATA
+                        | ConflictType::SQLITE_CHANGESET_CONFLICT => {
+                            ConflictAction::SQLITE_CHANGESET_REPLACE
+                        }
+                        _ => ConflictAction::SQLITE_CHANGESET_ABORT,
+                    }
+                } else {
+                    ConflictAction::SQLITE_CHANGESET_OMIT
                 }
-                _ => ConflictAction::SQLITE_CHANGESET_OMIT,
             },
         )?;
         Ok(())

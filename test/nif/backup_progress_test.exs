@@ -311,6 +311,35 @@ defmodule Xqlite.NIF.BackupProgressTest do
         message_count = length(drain_progress_messages())
         assert message_count >= 1 and message_count <= 3
       end
+
+      # A non-positive pages_per_step is out of the `pos_integer()` contract.
+      # `sqlite3_backup_step(0)` copies nothing yet reports "more", so an
+      # unguarded loop would spin forever, pin the connection, and flood the
+      # pid. The NIF must reject it at the boundary with a structured error
+      # BEFORE the loop — not hang. (This test returns instantly; if the guard
+      # regressed, the pages_per_step: 0 call would never return.)
+      test "non-positive pages_per_step is rejected, not spun on", %{
+        conn: conn,
+        backup_path: path
+      } do
+        :ok =
+          NIF.execute_batch(conn, "CREATE TABLE bkp_pps0 (id INTEGER PRIMARY KEY, v TEXT);")
+
+        for i <- 1..50 do
+          {:ok, 1} = NIF.execute(conn, "INSERT INTO bkp_pps0 VALUES (?1, ?2)", [i, "row"])
+        end
+
+        {:ok, token} = NIF.create_cancel_token()
+
+        assert {:error, {:invalid_pages_per_step, 0}} =
+                 NIF.backup_with_progress(conn, "main", path, self(), 0, [token])
+
+        assert {:error, {:invalid_pages_per_step, -1}} =
+                 NIF.backup_with_progress(conn, "main", path, self(), -1, [token])
+
+        # Rejected before any stepping: no progress message was emitted.
+        refute_received {:xqlite_backup_progress, _, _}
+      end
     end
   end
 
