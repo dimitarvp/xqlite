@@ -241,6 +241,20 @@ contention now `long_schedule_hits=0` for all readers (was 1 each — the block 
 query's ~1.32 s but on a DIRTY scheduler, off the normal ones). DirtyIo-pool occupancy under
 heavy reader volume noted. A `schedule=` change on 20 NIFs RE-WETS A4 → back to **0 of 2 clean
 covering runs, NOT DRY**; the owed re-run must re-census the 91/5/0 split and re-run the gate.
+COVERING RE-RUN (Run 21, 2026-07-20): the owed re-run over the maintainer 20-reader DirtyIo flip.
+RE-CENSUS at HEAD `5a05d91`: `rg -c '#\[rustler::nif'` nif.rs = **96**, `schedule = "DirtyIo"` =
+**91**, `DirtyCpu` = **0**, bare normal = **5** — the 5 survivors are EXACTLY the no-conn-Mutex set
+(`create_cancel_token`/`cancel_operation`/`sqlite_version`/`register`+`unregister_log_hook`, bodies
+read: pure alloc / `AtomicBool` store / process-global / `MASTER_LOCK` — none takes the conn Mutex).
+Zero NIFs outside nif.rs; 96 `err()` stubs. The 20 flipped readers each take the conn Mutex (can
+block on a slow query → DirtyIo correct, DirtyCpu wrong) and are O(1)-bodied (no hidden long path).
+RE-RAN `scheduler/run.sh`: VERDICT PASS, teeth 35 control hits; every must-be-dirty family 0 hits
+(`query 1397.7/0`); **S2 shared-handle contention now `long_schedule_hits=0` for changes/db_path/
+txn_state/total_changes (was 1 each at Run 19)** — the ~1.32 s block now lands on a DIRTY scheduler,
+off the normal ones (the changes/1-on-dirty behavior SHOWN at runtime); LAT `changes` mean rose to
+3.25 µs (the DirtyIo hop). CLEAN — zero new CONFIRMED. DRYNESS: Run 19 (1 of 2) → maintainer flip
+RE-WET → Run 21 is the **first clean covering run over it, 1 of 2 consecutive, NOT DRY**, one more
+owed. Re-wet triggers UNCHANGED.
 
 ### A5. Cancellation semantics
 8-VM-step progress-handler cadence, un-tuned. Probes: cancel latency
@@ -568,6 +582,24 @@ aged conn: RED left=600 → GREEN 0). The Run 9 `:replace` open question RULED k
 change; `changeset_apply` docstring enhanced). The `busy_handler.rs` callback/state change
 RE-WETS A11's hook-island scope → still NOT DRY; the owed clean covering run should re-attack the
 busy slot + changeset islands.
+COVERING RE-RUN (Run 21, 2026-07-20): the owed re-run over the busy per-event churn. SOURCE-AUDITED
+the `Cell<Instant>` reset (`busy_handler.rs:79-82` `if retries == 0 { start.set(now) }` — SQLite's
+per-event marker; `:95` `max_retries`/`max_elapsed_ms` OR interplay unchanged) and its soundness:
+the `Cell` is touched only in `busy_callback` + `snapshot`, BOTH under the conn Mutex (the callback
++ its `sleep_ms` run inside `sqlite3_step` under the lock; mutators hold the same lock) → no
+concurrent access, so the `!Sync` `Cell` is sound with NO new `unsafe` (`AtomicPtr` erases the
+pointee auto-traits; same pattern as the `observers` Vec). UPDATED the stale probe oracle
+(`busy_elapsed.exs` + `run.sh` headline rc-0 said "install-anchored reproduced") to assert the
+per-event contract with teeth in both directions; RE-RAN `feature_islands/run.sh`: VERDICT rc 0
+PER-EVENT BUDGET CONFIRMED — `young`/`aged+big SUCCEEDED` (retry works), `starved GAVE_UP 42ms`
+(ceiling 40 < release 400 → budget is a real ceiling), `aged(fix) SUCCEEDED 153ms` (age 800 >
+ceiling 400, fresh event resets), `two_events ev1=ev2=SUCCEEDED` (back-to-back full budget). Oracle
+teeth RE-PROVEN by plant-and-revert: planted install-anchored (removed the reset) → RED rc 1
+REGRESSION (`aged GAVE_UP 0ms`, `two_events ev2 GAVE_UP`) with teeth still holding; reverted
+(`git checkout`, reset present `:79`, rebuilt) → GREEN. Other islands NOT churned (Decision 1
+`:replace` keep-abort is docstring-only; their `test/` regressions green under `mix verify`). CLEAN
+— zero new CONFIRMED. DRYNESS: Run 13 (1 of 2) → maintainer busy change RE-WET → Run 21 is the
+**first clean covering run over it, 1 of 2 consecutive, NOT DRY**, one more owed. Re-wet UNCHANGED.
 
 ### A12. Binary crossing
 Probes: copy vs refcounted binaries across the boundary; memory
@@ -645,6 +677,23 @@ String return TYPES left rustler-auto-encoded (judgment — not the OOM-reachabl
 Touching `util.rs` `encode_val`/`sqlite_row_to_elixir_terms` + a new `connection.rs` encoder RE-WETS
 A12 → back off DRY; the owed re-run should re-audit the outbound copy-vs-refcount map incl. the new
 `encode_text` path.
+COVERING RE-RUN (Run 21, 2026-07-20): the owed re-run over the `encode_text` churn. SOURCE-AUDITED
+the three converted value-return TEXT sites (`encode_val` `Value::Text` `util.rs:29`,
+`sqlite_row_to_elixir_terms` `SQLITE_TEXT` `:391`, `connection::encode_column_names` `:80-86`):
+`encode_text` = `OwnedBinary::new(len).ok_or_else(…)?` + `copy_from_slice` + `release` = the SAME
+allocate/copy/release as rustler's `str::encode`, byte-identical on success, differing only on the
+OOM `None` branch; `copy_from_slice` lengths provably equal (no panic). `rg 'str::encode|\.encode'`
+confirms NO String/&str encode remains on the value path (only a bounded `format!` diagnostic
+`util.rs:147`); all 3 `encode_val` callers propagate the `Result`; the left-unconverted sites are
+bounded-metadata auto-encoded return types. ADDED a byte-exactness edge (E6) to
+`binary_crossing/edges.exs` covering empty/ASCII/multibyte/interior-NUL/~2MB TEXT via query + stream
++ step + column-name + pragma; RE-RAN `binary_crossing/run.sh`: VERDICT PASS, all 6 edges GREEN,
+**S1 TEXT-return numbers BYTE-IDENTICAL to Run 11/15** (query 42.73 MB/448 B/row, stream
+61.04 MB/640 B/row), leak-gate 0.0 both, small-blob backing UNCHANGED (0.0 B/row both, 1.2×). Edge
+teeth RE-PROVEN by plant-and-revert (one-byte XOR in `encode_text` → E6+E4 FAIL byte-mismatch;
+reverted → GREEN). CLEAN — zero new CONFIRMED. DRYNESS: Run 15 (1 of 2) → maintainer `encode_text`
+RE-WET → Run 21 is the **first clean covering run over it, 1 of 2 consecutive, NOT DRY**, one more
+owed. Re-wet UNCHANGED.
 
 ### A13. Hot-upgrade posture
 rustler upgrade support is an open upstream gap; on_load is

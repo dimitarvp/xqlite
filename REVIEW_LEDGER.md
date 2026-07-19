@@ -4224,3 +4224,209 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   `lib/xqlite.ex` (busy docstring), `lib/xqlite/xqlitenif.ex` (changeset_apply docstring),
   `test/nif/busy_handler_test.exs` (new RED→green test), `guides/gotchas.md` (busy + reader
   sections), `BACKLOG.md`, `REVIEW_LEDGER.md`, `REVIEW_AXES.md`.
+
+## Run 21 — 2026-07-20 — A4+A11+A12 dryness covering re-run (maintainer-pass churn)
+
+- Commit at scan: `5a05d91` (HEAD, clean, CI green; xqlite 0.10.0 published). Scope: the
+  three axes the maintainer-decisions pass (`c24383b` code, `5a05d91` record) re-wet —
+  scheduler classification (A4, the 20-reader DirtyIo flip), the busy feature island (A11,
+  the `:max_elapsed_ms` per-event `Cell<Instant>`), and binary crossing (A12, the new
+  `util::encode_text` on the TEXT-return path) — each re-verified at HEAD with the maintainer
+  churn attacked hardest, plus A1/A10 spot-checks folded in (same code). Composition: single
+  Opus pass (this agent); A4 a census + build-and-measure gate, A11 a source-audit +
+  build-and-measure probe (oracle updated + teeth re-proven), A12 a source-audit +
+  build-and-measure probe (new byte-exactness edge + teeth re-proven). Every runtime claim
+  below was RUN this session against a freshly source-built NIF (bundled SQLite 3.53.2);
+  commands + harness RESULT lines captured. Did NOT re-litigate settled findings; the
+  remaining maintainer/upstream/RC-gate S3s stay OPEN (not fixed, not re-filed).
+
+### A4 — re-census + gate over the 20-reader DirtyIo flip
+
+- **Census CONFIRMED 91 DirtyIo / 5 normal / 0 DirtyCpu at HEAD.** `rg -c '#\[rustler::nif'
+  nif.rs` = 96; `rg -c 'schedule = "DirtyIo"' nif.rs` = 91; `DirtyCpu` = 0; 96−91 = 5 bare
+  normal. The 5 normal survivors are EXACTLY the maintainer's claimed no-conn-Mutex set —
+  `rg -A1 '^#\[rustler::nif\]$' nif.rs` yields `create_cancel_token`, `cancel_operation`,
+  `sqlite_version`, `register_log_hook`, `unregister_log_hook` and nothing else. Zero
+  `#[rustler::nif]` outside `nif.rs` (house rule upheld); 96 `err()` stubs in
+  `lib/xqlite/xqlitenif.ex` match the 96 NIF attributes.
+- **The 5 survivors take NO conn Mutex (read the bodies).** `create_cancel_token`
+  (`Ok(ResourceArc::new(XqliteCancelToken::new()))` — pure alloc), `cancel_operation`
+  (`token.cancel()` — an `Arc<AtomicBool>` store, deliberately lock-free per A5),
+  `sqlite_version` (`sqlite3_libversion()` — a process-global static string),
+  `register`/`unregister_log_hook` (`log_hook::register`/`unregister` under `MASTER_LOCK`, not
+  a conn). None can block on a query, so normal is correct; correctly NOT flipped.
+- **The 20 flipped readers are correctly DirtyIo, not DirtyCpu (and no hidden long path).**
+  `git diff 3d9f260..5a05d91 -- nif.rs`: the only attribute changes are 20 bare
+  `#[rustler::nif]` → `schedule = "DirtyIo"` (`db_path`/`autocommit`/`txn_state`/
+  `set`/`remove_busy_policy`/`register`/`unregister_busy_observer`/`set`/`remove_authorizer`/
+  `register`/`unregister_progress_hook`/`enable_load_extension`/`session_new`/`session_attach`/
+  `session_is_empty`/`changes`/`total_changes`/`blob_size`/`blob_close`/`stmt_column_names`),
+  bodies untouched. Each takes the conn Mutex (via `with_conn`/`with_session`/`with_live_blob`)
+  and can therefore BLOCK on a slow query holding it — an I/O-class wait, so DirtyIo (DirtyCpu
+  is for non-blocking CPU work → the wrong pool). The reader bodies themselves are O(1) (a
+  counter/bool/filename read, a slot-pointer swap, a bounded column-name `Vec`); none iterates
+  data → no hidden long-running path.
+- **Harness RESULT (`bash scheduler/run.sh`, RUN this session — VERDICT PASS).**
+  `threshold=25ms schedulers=12 dirty_cpu=12 dirty_io=10 otp=29`; `blob=64MB
+  session_rows=400000 hold_rows=4000000`.
+  - TEETH: `CONTROL_term_to_binary 1879.5ms long_schedule_hits=35 [monitor ARMED +
+    DELIVERING]` — the silence below is real.
+  - S1 INTRINSIC — every must-be-dirty family 0 hits: `query 1397.7ms/0` (the Dirty-silence
+    proof), `execute 113.5/0`, `stream 341.6/0`, `step 0.3/0`, `serialize 10.4/0`,
+    `backup 11.8/0`, `schema_columns 0.1/0`, `get_pragma 0.0/0`, `blob_open 0.0/0`,
+    `blob_read 43.6/0`, `blob_write 104.9/0`, `blob_reopen 0.0/0`, `session_changeset 205.7/0`,
+    `session_patchset 201.3/0`, `changeset_invert 26.8/0`, `changeset_concat 132.4/0`,
+    `session_delete 11.9/0`. `SUMMARY: control_hits=35 intrinsic_fail=false VERDICT: PASS`.
+  - **S2 MUTEX-CONTENTION — the flip confirmation (`changes/1`-on-dirty behavior SHOWN):** a
+    slow Dirty query pins the conn Mutex on a SHARED handle; the trivial readers on another
+    process now show `changes blocked=1327.3ms … long_schedule_hits=0`, `db_path 1304.8/0`,
+    `txn_state 1311.2/0`, `total_changes 1299.4/0` — **was 1 hit each at Run 19.** The block
+    still lasts the query's ~1.32 s (serialization unchanged — that is the single-owner-handle
+    design), but it now lands on a DIRTY scheduler, off the normal ones. F-A4-1's normal-sched
+    hog is gone; the maintainer's `long_schedule_hits=0` claim VERIFIED at runtime.
+  - LAT (uncontended): `changes mean 3.25 µs max 4420 µs` — the DirtyIo hop cost (was sub-µs on
+    normal, matching the maintainer's measured ~+0.85 µs median / fat p99 tail);
+    `create_cancel_token 0.31 µs` (still normal, fastest). All still far under the 1 ms bar.
+- **A4 verdict: CLEAN — zero new CONFIRMED.**
+
+### A11 — busy per-event budget (`Cell<Instant>`) attacked hardest
+
+- **Source audit of the `count == 0` reset (`busy_handler.rs`).** `busy_callback` resets the
+  clock at each fresh busy event: `if retries == 0 { state.start.set(Instant::now()); }` then
+  `let elapsed_ms = state.start.get().elapsed()…` (`:79-82`) — SQLite marks each new locking
+  event with `count == 0`, so a fresh event's budget starts at ~0 regardless of slot age. The
+  `max_retries`/`max_elapsed_ms` interplay is UNCHANGED (`:95` `retries >= max_retries ||
+  elapsed_ms >= max_elapsed_ms`), only `elapsed_ms` is now per-event.
+- **Interior-mutability soundness (no data race) CONFIRMED.** `start` is `Cell<Instant>`
+  (`:40`). The `Cell` is touched only in `busy_callback` (`.set`/`.get`) and in `snapshot`
+  (`.get`, cloning to `Cell::new(state.start.get())`, `:214`). The callback runs INSIDE
+  `sqlite3_step`/friends, which hold the conn Mutex; its `sleep_ms` sleep also runs inside that
+  held lock, so the ENTIRE retry loop is under the Mutex. Every mutator (`set_policy`/
+  `snapshot`/`swap_in`) holds the same conn Mutex. So no two accesses to the `Cell` are ever
+  concurrent — the `!Sync` `Cell` is sound because the Mutex serialises all access (the raw-ptr
+  deref that shares `&BusySlotState` is the same pre-existing pattern as the `observers` Vec;
+  `AtomicPtr<BusySlotState>` erases the pointee's auto-traits, so no `unsafe impl Sync` is
+  needed and none was added). `snapshot` preserving the current instant (`:214`) means a
+  mid-contention mutation keeps that event's clock — but a mutation cannot even interleave a
+  busy event (the stepping thread holds the Mutex throughout), so this is belt-and-braces. No
+  new `unsafe`; the maintainer's "Decision 2's `Cell` is safe" VERIFIED.
+- **Harness RESULT (`bash feature_islands/run.sh`, RUN this session — VERDICT rc 0
+  PER-EVENT BUDGET CONFIRMED).** The probe (`busy_elapsed.exs`) + `run.sh` verdict block were
+  UPDATED this session: the old oracle's headline rc-0 outcome was "FINDING REPRODUCED —
+  install-anchored" (pre-churn behavior), stale after the fix. Reframed to assert the per-event
+  contract with teeth in BOTH directions. RESULT: `young SUCCEEDED 153ms`, `aged+big SUCCEEDED
+  153ms` (retry works), `starved GAVE_UP 42ms` (ceiling 40 < release 400 → the budget is a REAL
+  ceiling, not disabled), `aged(fix) SUCCEEDED 153ms` (age 800 > ceiling 400, a fresh event
+  resets the clock and retries through the 150 ms release), `two_events ev1=SUCCEEDED
+  ev2=SUCCEEDED` (a second event 800 ms after the first also gets a full budget — back-to-back
+  independence).
+- **Oracle teeth RE-PROVEN by plant-and-revert (this session).** Planted the install-anchored
+  regression in `busy_handler.rs` (removed the `if retries == 0 { reset }`, so `elapsed` runs
+  from the slot's install), rebuilt, re-ran → **RED: rc 1 REGRESSION**, `aged GAVE_UP 0ms`,
+  `two_events ev2 GAVE_UP`, while the teeth held (`young`/`aged+big SUCCEEDED`, `starved
+  GAVE_UP 41ms`) — the updated oracle catches the exact footgun the fix removes. Reverted
+  (`git checkout busy_handler.rs`; the `if retries == 0` reset confirmed present at `:79`;
+  rebuilt clean) → GREEN (rc 0) restored. The other A11 islands (session/changeset/blob/backup/
+  serialize/authorizer/hooks) were NOT churned by the maintainer pass — Decision 1 (`:replace`
+  keep-abort) is a docstring-only change (`xqlitenif.ex`), no behavior change, covered by the
+  existing `session_test.exs` replace-on-CONSTRAINT/-NOTFOUND regression; those islands' `test/`
+  regressions run green under `mix verify`.
+- **A11 verdict: CLEAN — zero new CONFIRMED** (the probe RED→GREEN is oracle maintenance +
+  teeth-proof, not a product finding).
+
+### A12 — `encode_text` byte-exactness attacked hardest
+
+- **The three value-return TEXT sites converted, success path byte-identical.** `util::encode_text`
+  (`util.rs:91-101`) is `OwnedBinary::new(bytes.len()).ok_or_else(InternalEncodingError)?` +
+  `copy_from_slice(bytes)` + `release(env).encode(env)` — the identical allocate/copy/release
+  rustler's `str::encode` performs, differing ONLY on the OOM `None` branch (structured error
+  vs `panic!`). Routed through it: `encode_val` `Value::Text(s) => encode_text(env,
+  s.as_bytes())` (`util.rs:29`, now `Result`), `sqlite_row_to_elixir_terms` `SQLITE_TEXT` arm
+  (`util.rs:391`, `s.as_bytes()` == the original `text_slice`), and `XqliteQueryResult` column
+  names via new `connection::encode_column_names` (`connection.rs:80-86`, each name through
+  `encode_text`, collected into a list). `copy_from_slice` lengths are provably equal (dst is
+  the `bytes.len()`-sized OwnedBinary, src is `bytes`) → no panic.
+- **No `str::encode`/`.encode` on a String/&str remains on the value-return path.** `rg
+  'str::encode|\.encode\(env\)' util.rs connection.rs pragma.rs`: the only String encode left is
+  `util.rs:147` — a bounded `format!("Unknown TermType: …")` diagnostic in the type-extension
+  tagger, NOT a row-value payload. All three `encode_val` callers propagate the `Result`
+  (`process_rows` `?` `util.rs:185`, `pragma.rs` get `:38` / set `:60`). The deliberately-left
+  sites are rustler-AUTO-encoded RETURN types carrying bounded metadata, not the ~1 GB payload:
+  `db_path` (`Option<String>`), `get_create_sql`, `stmt_column_names`/`stream_get_columns`
+  (`Vec<String>`), `sqlite_version` (`String`) — genuinely bounded, and the Run-1 return-encode
+  `catch_unwind` still nets any OOM there.
+- **Harness RESULT (`bash binary_crossing/run.sh`, RUN this session — VERDICT PASS, CLEAN).**
+  - Phase 1 — all SIX correctness edges PASS, incl. the NEW **E6 encode_text byte-exact
+    (query/stream/step/column/pragma)**: round-trips the empty string, ASCII, multibyte UTF-8
+    (`héllo · 世界 · 🌍 · Ω≈ç`), interior-NUL (`a\0b\0c`), and a ~2 MB multibyte value byte-exact
+    across the query (`encode_val`), stream + step (`sqlite_row_to_elixir_terms`), a multibyte
+    column alias (`encode_column_names`), and `PRAGMA encoding` (`encode_val` via `pragma.rs`).
+  - Phase 2 — S1 large result (100k × [256B TEXT + 256B BLOB]): `query 42.73 MB / 448.0 B/row`,
+    `stream 61.04 MB / 640.0 B/row` — **BYTE-IDENTICAL to Run 11 / Run 15** (the TEXT-return
+    numbers are UNCHANGED, as the byte-identical success path predicts); leak-gate PASS (0.0 MB
+    residual both, ceiling 12.21 MB). S2 streaming peak 0.62 MB, 68.5× below full
+    materialization. S3 small-blob (100k × 16B): `query 0.0 B/row`, `stream 0.0 B/row`, ratio
+    1.2× (the F-A12-1 size-adaptive backing, UNCHANGED). S4 `1000B → binary allocator, 8B →
+    process heap`. `RESULT: CLEAN (no S0-S2)`.
+- **Edge teeth RE-PROVEN by plant-and-revert (this session).** Planted a one-byte XOR after
+  `copy_from_slice` in `encode_text`, rebuilt, ran the edges phase → **E6 FAIL** (`query TEXT
+  mismatch (byte-inexact)`) AND **E4 FAIL** (the interior-NUL TEXT byte flipped: `97 → 96`) —
+  the corruption is caught cleanly. Reverted (`git checkout util.rs`, rebuilt) → all 6 edges
+  GREEN. (Also fixed a latent shape bug in the new E6 `step_drain` helper surfaced by the first
+  plant run: `stmt_multi_step` returns `{:ok, %{rows, done}}`, not `{:rows,…}`/`{:done,…}` — the
+  scheduler probe's step drain has the same stale shape but is A4-irrelevant, left as-is.)
+- **A12 verdict: CLEAN — zero new CONFIRMED** (the E6 addition + RED→GREEN is harness coverage +
+  teeth-proof, not a product finding).
+
+### Cross-cutting spot-checks (same code; SPOT-CHECKS only — no A1/A10 dryness credit)
+
+- **A1 (panic surface) — NARROWED, not widened.** `encode_text` is `OwnedBinary::new(…)
+  .ok_or_else(…)?` — no `unwrap`/`expect`/`panic!`; the OOM `panic!` inside rustler's `str`
+  encoder is removed from the row-value/column-name return path. `copy_from_slice` cannot panic
+  (lengths provably equal). Decision 2 adds a `Cell` (safe, no new `unsafe`). No new
+  panic-capable construct anywhere in the churn. (Full A1 census owed separately — not this run.)
+- **A10 (error contract) — no new shape.** The OOM branch returns
+  `XqliteError::InternalEncodingError { context: String }` → `{:internal_encoding_error,
+  String.t()}`, already a member of `error_reason/0` (`lib/xqlite.ex:160`); `with`-matchable,
+  leading-classification-atom. The `connection.rs` Encoder degrades an `encode_column_names`
+  failure to the same `{:internal_encoding_error, ctx}` (row VALUES fail earlier in
+  `process_rows` via `?`, before the Encoder runs). Structurally sound. (Full A10 contract run
+  owed separately — not this run.)
+
+### Evidence / disposition / dryness
+
+- `mix verify` **GREEN** end-to-end this session (format, compile `--warnings-as-errors`, deps
+  audit, sobelow, `cargo clippy -D warnings`, dialyzer, `cargo test`, full `mix test.seq`) — the
+  product code is pristine vs HEAD (`git diff --stat native/xqlitenif/src/` empty after the
+  plant-and-revert cycles), only the three CI-isolated probe files changed. All three harness
+  teeth proven LIVE this session (A4 control 35 hits; A11 plant→rc 1 REGRESSION; A12 plant→E6/E4
+  byte-mismatch FAIL).
+- **No new findings.** Files changed (ALL review-infra, CI-isolated, left uncommitted for the
+  orchestrator): `feature_islands/busy_elapsed.exs` (rewritten to assert the per-event budget +
+  teeth), `feature_islands/run.sh` (verdict block reframed), `binary_crossing/edges.exs` (new E6
+  + `step_all`/`step_drain`/`column_names` helpers), `REVIEW_LEDGER.md`, `REVIEW_AXES.md`. No
+  `BACKLOG.md` change (no filings).
+- **DRYNESS.** The maintainer pass re-wet all three axes; Run 21 is each one's FIRST clean
+  covering run over that churn:
+  - **A4** — Run 19 (1 of 2) → maintainer 20-NIF `schedule=` flip RE-WET → Run 21 clean =
+    **1 of 2 consecutive, NOT DRY**, one more owed.
+  - **A11** — Run 13 (1 of 2) → maintainer `busy_handler.rs` callback/state change RE-WET →
+    Run 21 clean = **1 of 2 consecutive, NOT DRY**, one more owed.
+  - **A12** — Run 15 (1 of 2) → maintainer `encode_text` (`util.rs` + `connection.rs`) RE-WET →
+    Run 21 clean = **1 of 2 consecutive, NOT DRY**, one more owed.
+  Re-wet triggers UNCHANGED per axis (A4: any new `#[rustler::nif]`/`schedule=`/blocking-work-
+  under-conn-Mutex; A11: `busy_handler.rs`/any island/guide; A12: `util.rs` value encoders /
+  `encode_text` / `blob.rs` / hook payloads / rustler bump).
+
+### Completeness critic
+
+- Covered: the full maintainer churn (`git diff 3d9f260..5a05d91` code hunks) across A4/A11/A12,
+  each harness RE-RUN with teeth proven this session, plus A1/A10 spot-checks on the shared code.
+- NOT covered (honest gaps): the A1 panic census and the A10 contract probe are NOT full runs
+  (spot-checks only → no dryness credit for A1/A10; their own covering runs remain owed per their
+  AXES entries). The `encode_text` OOM branch is not RED-tested (OOM-only, impractical — verified
+  by source + the byte-exact success path + graceful shape, exactly like the BLOB/F-A10-6 cases).
+  The six A11 islands beyond busy were not churned and are covered by re-execution of their
+  `test/` regressions under `mix verify`, not a fresh six-stance sweep. The scheduler S2 block
+  duration (~1.32 s) and DirtyIo-pool occupancy under heavy reader volume are the documented
+  single-owner tradeoff (F-A4-1 resolved to move-to-DirtyIo), unchanged and not re-litigated.

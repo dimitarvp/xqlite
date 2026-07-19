@@ -66,6 +66,23 @@ defmodule A12.Edges do
     end
   end
 
+  defp step_all(conn, sql) do
+    {:ok, st} = XqliteNIF.stmt_prepare(conn, sql)
+    step_drain(st, [])
+  end
+
+  defp step_drain(st, acc) do
+    case XqliteNIF.stmt_multi_step(st, 100) do
+      {:ok, %{rows: rows, done: false}} -> step_drain(st, [rows | acc])
+      {:ok, %{rows: rows, done: true}} -> [rows | acc] |> Enum.reverse() |> Enum.concat()
+    end
+  end
+
+  defp column_names(conn, sql) do
+    {:ok, %{columns: cols}} = XqliteNIF.query(conn, sql, [])
+    cols
+  end
+
   # ---- E1: empty blob on both paths --------------------------------------
   def e1 do
     {:ok, conn} = Xqlite.open_in_memory()
@@ -188,6 +205,47 @@ defmodule A12.Edges do
     end
   end
 
+  # ---- E6: encode_text byte-exactness across every TEXT return site -------
+  # The maintainer TEXT-OOM fix (F-A12-3) routes row/column TEXT values through
+  # util::encode_text (a fallible OwnedBinary) instead of rustler's str encoder.
+  # The success path must be byte-identical. Exercise it across the empty string,
+  # ASCII, multibyte UTF-8, interior-NUL, and a ~MB multibyte value, on the query
+  # (encode_val), stream + step (sqlite_row_to_elixir_terms), column-name
+  # (encode_column_names), and pragma (encode_val via pragma.rs) sites.
+  def e6 do
+    {:ok, conn} = Xqlite.open_in_memory()
+    {:ok, _} = XqliteNIF.query(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, s TEXT)", [])
+
+    samples = [
+      {1, ""},
+      {2, "hello"},
+      {3, "héllo · 世界 · 🌍 · Ω≈ç"},
+      {4, "a\0b\0c"},
+      {5, String.duplicate("Ω世🌍z", 200_000)}
+    ]
+
+    Enum.each(samples, fn {id, s} ->
+      {:ok, _} = XqliteNIF.query(conn, "INSERT INTO t VALUES(?1, ?2)", [id, s])
+    end)
+
+    expect = Enum.map(samples, fn {_id, s} -> [s] end)
+
+    q = query_one(conn, "SELECT s FROM t ORDER BY id")
+    s = stream_all(conn, "SELECT s FROM t ORDER BY id")
+    st = step_all(conn, "SELECT s FROM t ORDER BY id")
+    cols = column_names(conn, ~s|SELECT s AS "名前_α" FROM t LIMIT 1|)
+    {:ok, enc} = XqliteNIF.get_pragma(conn, "encoding")
+
+    cond do
+      q != expect -> {:fail, "query TEXT mismatch (byte-inexact)"}
+      s != expect -> {:fail, "stream TEXT mismatch (byte-inexact)"}
+      st != expect -> {:fail, "step TEXT mismatch (byte-inexact)"}
+      cols != ["名前_α"] -> {:fail, "column name mismatch = #{inspect(cols)}"}
+      enc != "UTF-8" -> {:fail, "pragma encoding TEXT = #{inspect(enc)}"}
+      true -> :ok
+    end
+  end
+
   def main do
     IO.puts("=== xqlite A12 binary-crossing correctness edges ===")
 
@@ -196,7 +254,8 @@ defmodule A12.Edges do
       check("E2 sub-binary param + blob_write round-trip byte-exact", &e2/0),
       check("E3 query blob (owned resource binary) survives conn close", &e3/0),
       check("E4 interior-NUL blob+text byte-exact both paths", &e4/0),
-      check("E5 iodata rejected (binary-only), failure mode pinned", &e5/0)
+      check("E5 iodata rejected (binary-only), failure mode pinned", &e5/0),
+      check("E6 encode_text byte-exact (query/stream/step/column/pragma)", &e6/0)
     ]
 
     if Enum.all?(results) do

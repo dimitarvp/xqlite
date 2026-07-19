@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 #
-# A11 feature-island probe harness. Demonstrates F-A11-4 (S3): a busy retry
-# policy's `:max_elapsed_ms` ceiling is anchored at the busy slot's INSTALL
-# time, not at the start of each busy event, so on a connection older than the
-# ceiling the policy gives up with zero retries.
+# A11 feature-island probe harness. Verifies F-A11-4 RESOLVED (maintainer
+# decision 2026-07-20): a busy retry policy's `:max_elapsed_ms` is a PER-EVENT
+# budget — the elapsed clock resets at the start of each fresh busy event, so a
+# connection alive longer than the ceiling still retries a new contention
+# through the lock release. Before the fix the ceiling was anchored at the busy
+# slot's INSTALL time, so an aged connection gave up with zero retries.
 #
 # The three S0-S2 findings from this axis (F-A11-1 backup hang on
 # pages_per_step<1, F-A11-2 changeset :replace misuse->abort, F-A11-3 interior
 # NUL in SQL truncation) were FIXED and are covered by permanent regression
 # tests in test/ (backup_progress_test.exs, session_test.exs,
-# error_input_test.exs). This dir carries only the S3 busy-elapsed footgun,
-# which is documented-and-correct behavior (so not a test/ regression) but worth
-# a reproducible, teeth-backed artifact.
+# error_input_test.exs); the busy per-event budget likewise has a permanent
+# regression test (busy_handler_test.exs). This dir carries the teeth-backed
+# adversarial artifact for the per-event budget.
 #
-# TEETH (hard gate): the probe SELF-ABORTS (rc 2) unless the retry mechanism is
-# proven to work — a young connection AND an aged connection with a huge ceiling
-# both succeed by retrying through the lock release. Only against that control
-# does the aged+small-ceiling instant give-up mean anything.
+# TEETH (hard gate): the probe SELF-ABORTS (rc 2) unless the mechanism
+# discriminates the budget in BOTH directions — a young connection and an aged
+# connection with a huge ceiling both SUCCEED by retrying through the release,
+# AND a starved connection (ceiling smaller than the release) GIVES UP fast.
+# Only against that control does the aged-conn success mean anything.
 #
 # SAFETY: the only OS processes are `mix run` children under `timeout`. File DBs
 # live in a private mktemp dir removed on exit. No SIGKILL, no pkill/name-match.
@@ -52,19 +55,22 @@ echo ""
 echo "=== VERDICT ==="
 case "${RC}" in
   0)
-    echo "REPRODUCED — teeth held (retry mechanism works) and the aged connection"
-    echo "gave up instantly with zero retries: max_elapsed_ms is install-anchored"
-    echo "(F-A11-4, S3). Documented in guides/gotchas.md + BACKLOG.md."
+    echo "PER-EVENT BUDGET CONFIRMED — teeth held (retry works AND the budget"
+    echo "still bites) and the aged connection retried through the release, as did"
+    echo "a second event 800 ms later: max_elapsed_ms resets per busy event"
+    echo "(F-A11-4 resolved). Regression-tested in test/nif/busy_handler_test.exs."
     exit 0
     ;;
-  3)
-    echo "FINDING GONE — teeth held but the aged connection no longer gives up"
-    echo "instantly; max_elapsed_ms may now be per-event. Update BACKLOG.md."
-    exit 0
+  1)
+    echo "REGRESSION — teeth held but an aged / second busy event GAVE UP;"
+    echo "max_elapsed_ms is anchored at install again (F-A11-4 has regressed)."
+    echo "Inspect busy_handler.rs busy_callback (the count==0 clock reset)."
+    exit 1
     ;;
   2)
-    echo "TEETH FAILED — the retry mechanism did not work even on a young/huge-"
-    echo "ceiling connection; the probe proves nothing. Investigate before trust."
+    echo "TEETH FAILED — the mechanism did not discriminate the budget (retry did"
+    echo "not work, or the budget was not enforced); the probe proves nothing."
+    echo "Investigate before trust."
     exit 1
     ;;
   124)
