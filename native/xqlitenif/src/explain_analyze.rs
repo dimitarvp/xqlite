@@ -128,16 +128,21 @@ unsafe fn run_and_collect<'a>(
     let mut rows_produced: u64 = 0;
 
     loop {
+        // SAFETY: per this fn's contract, `stmt_ptr` is a live prepared statement
+        // stepped with the connection Mutex held.
         let rc = unsafe { ffi::sqlite3_step(stmt_ptr) };
         match rc {
             ffi::SQLITE_ROW => rows_produced += 1,
             ffi::SQLITE_DONE => break,
+            // SAFETY: `db_handle` is valid and the Mutex is held (fn contract).
             _ => return Err(unsafe { ffi_error(db_handle, rc) }),
         }
     }
 
     let wall_time_ns = start.elapsed().as_nanos() as u64;
+    // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
     let stmt_counters = unsafe { collect_stmt_counters(stmt_ptr) };
+    // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
     let scans = unsafe { collect_scan_status(stmt_ptr) };
 
     Ok(ExplainAnalyze {
@@ -206,7 +211,10 @@ fn collect_query_plan(conn: &Connection, sql: &str) -> Result<Vec<QueryPlanRow>,
 /// # Safety
 /// `stmt_ptr` must be valid and the connection Mutex must be held.
 unsafe fn collect_stmt_counters(stmt_ptr: *mut ffi::sqlite3_stmt) -> StmtCounters {
-    let get = |op: i32| -> i64 { unsafe { ffi::sqlite3_stmt_status(stmt_ptr, op, 0) as i64 } };
+    let get = |op: i32| -> i64 {
+        // SAFETY: `stmt_ptr` is valid and the Mutex is held (fn contract).
+        unsafe { ffi::sqlite3_stmt_status(stmt_ptr, op, 0) as i64 }
+    };
 
     StmtCounters {
         fullscan_step: get(ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP),
@@ -231,6 +239,8 @@ unsafe fn collect_scan_status(stmt_ptr: *mut ffi::sqlite3_stmt) -> Vec<ScanStatu
 
     loop {
         let mut nloop: i64 = 0;
+        // SAFETY: `stmt_ptr` is valid and the Mutex is held (fn contract); the
+        // out-param is a stack local written by SQLite.
         let rc = unsafe {
             ffi::sqlite3_stmt_scanstatus_v2(
                 stmt_ptr,
@@ -251,6 +261,9 @@ unsafe fn collect_scan_status(stmt_ptr: *mut ffi::sqlite3_stmt) -> Vec<ScanStatu
         let mut selectid: c_int = 0;
         let mut parentid: c_int = 0;
 
+        // SAFETY: `stmt_ptr` is valid and the Mutex is held (fn contract). Each
+        // out-param is a stack local; `name_ptr`/`explain_ptr` receive
+        // SQLite-owned pointers valid while the statement lives under the lock.
         unsafe {
             ffi::sqlite3_stmt_scanstatus_v2(
                 stmt_ptr,
@@ -297,7 +310,10 @@ unsafe fn collect_scan_status(stmt_ptr: *mut ffi::sqlite3_stmt) -> Vec<ScanStatu
             );
         }
 
+        // SAFETY: `name_ptr` is null or a SQLite-owned NUL-terminated string,
+        // valid while the statement lives under the held Mutex.
         let name = unsafe { cstr_to_string(name_ptr) };
+        // SAFETY: as above, for `explain_ptr`.
         let explain = unsafe { cstr_to_string(explain_ptr) };
 
         scans.push(ScanStatus {
@@ -323,6 +339,8 @@ unsafe fn cstr_to_string(ptr: *const std::os::raw::c_char) -> String {
     if ptr.is_null() {
         String::new()
     } else {
+        // SAFETY: `ptr` is non-null here and, per this fn's contract, points to a
+        // valid NUL-terminated C string live for the copy.
         unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned()
@@ -334,10 +352,13 @@ unsafe fn cstr_to_string(ptr: *const std::os::raw::c_char) -> String {
 /// hold its Mutex.
 unsafe fn ffi_error(db_handle: *mut ffi::sqlite3, code: c_int) -> XqliteError {
     let message = {
+        // SAFETY: `db_handle` is valid and the Mutex is held (fn contract).
         let err_msg_ptr = unsafe { ffi::sqlite3_errmsg(db_handle) };
         if err_msg_ptr.is_null() {
             format!("SQLite error (code {code}) but no message available")
         } else {
+            // SAFETY: `err_msg_ptr` is non-null here and points to SQLite's
+            // NUL-terminated error string, valid while the Mutex is held.
             unsafe { CStr::from_ptr(err_msg_ptr) }
                 .to_string_lossy()
                 .into_owned()

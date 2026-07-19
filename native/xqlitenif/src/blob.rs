@@ -98,10 +98,12 @@ pub(crate) fn open(
             std::ffi::CString::new(column).map_err(|_| XqliteError::NulErrorInString)?;
 
         // SAFETY: `with_conn` holds the connection Mutex, so `conn.handle()`
-        // yields the live `sqlite3*`. `sqlite3_blob_open` writes `blob_ptr`
-        // only on SQLITE_OK; the C string pointers are valid for the call.
+        // yields the live `sqlite3*`.
         let raw_db = unsafe { conn.handle() };
         let mut blob_ptr: *mut ffi::sqlite3_blob = std::ptr::null_mut();
+        // SAFETY: `raw_db` is the live handle above; `sqlite3_blob_open` writes
+        // `blob_ptr` only on SQLITE_OK and the C string pointers stay valid for
+        // the call.
         let rc = unsafe {
             ffi::sqlite3_blob_open(
                 raw_db,

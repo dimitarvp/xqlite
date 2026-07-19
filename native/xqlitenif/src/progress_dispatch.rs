@@ -61,9 +61,11 @@ pub(crate) struct CancelSubscriber {
     flag: *const AtomicBool,
 }
 
-/// Pointer dereference is safe under the `ProgressDispatch`
-/// invariants documented at the module level.
+// SAFETY: the raw `*const AtomicBool` is dereferenced only under the
+// `ProgressDispatch` invariants documented at the module level — the owning
+// `Arc` outlives every subscriber via the `ProgressHandlerGuard`.
 unsafe impl Send for CancelSubscriber {}
+// SAFETY: see the `Send` impl above; the same pointer invariants apply.
 unsafe impl Sync for CancelSubscriber {}
 
 impl CancelSubscriber {

@@ -244,8 +244,8 @@ fn swap_in(
 }
 
 fn ffi_rc_to_error(conn: &Connection, rc: c_int) -> XqliteError {
-    // Callers already hold the connection Mutex (public functions document
-    // this); `conn.handle()` is valid for the duration of this read.
+    // SAFETY: callers already hold the connection Mutex (public functions
+    // document this); `conn.handle()` is valid for the duration of this read.
     let msg = unsafe {
         let ptr = ffi::sqlite3_errmsg(conn.handle());
         if ptr.is_null() {

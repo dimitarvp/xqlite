@@ -67,6 +67,8 @@ fn log_callback(err_code: c_int, msg: &str) {
 ///
 /// See `busy_handler::send_busy_to_pid`.
 unsafe fn send_log_to_pid(pid: &LocalPid, err_code: c_int, msg: &str) {
+    // SAFETY: every enif_* call operates on a freshly allocated msg_env and no
+    // references are retained across the send (see `send_busy_to_pid`).
     unsafe {
         let msg_env = enif_alloc_env();
 

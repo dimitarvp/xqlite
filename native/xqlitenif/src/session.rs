@@ -22,6 +22,7 @@ pub(crate) struct XqliteSession {
 // SAFETY: Session is protected by a Mutex. The connection is protected by its
 // own Mutex. Access is serialized.
 unsafe impl Send for XqliteSession {}
+// SAFETY: see the `Send` impl above; access is serialized by the same Mutexes.
 unsafe impl Sync for XqliteSession {}
 
 #[resource_impl]

@@ -49,11 +49,11 @@ impl<'d> ProgressHandlerGuard<'d> {
     pub(crate) fn new(dispatch: &'d ProgressDispatch, tokens: Vec<Arc<AtomicBool>>) -> Self {
         let mut entries = Vec::with_capacity(tokens.len());
         for token in tokens {
+            let raw = Arc::as_ptr(&token);
             // SAFETY: we hold the Arc in `entries` for the guard's
             // lifetime, so the AtomicBool stays alive while the
             // subscriber's raw pointer is reachable from
             // `dispatch.cancels`.
-            let raw = Arc::as_ptr(&token);
             let subscriber = unsafe { CancelSubscriber::new(raw) };
             let id = dispatch.cancels.register(subscriber);
             entries.push((id, token));

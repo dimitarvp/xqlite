@@ -135,6 +135,10 @@ pub(crate) fn handle_open_result(
                     .lock()
                     .map_err(|e| XqliteError::LockError(e.to_string()))?;
                 if let Some(conn_ref) = conn_guard.as_ref() {
+                    // SAFETY: the conn Mutex is held here; the wal/progress
+                    // dispatch references live inside the same ResourceArc as
+                    // `handle`, so they outlive any in-flight callback (see the
+                    // field-order note above).
                     unsafe {
                         progress_dispatch::install_callback(
                             conn_ref,

@@ -1,3 +1,5 @@
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 pub(crate) mod atoms {
     rustler::atoms! {
         alter_table,
