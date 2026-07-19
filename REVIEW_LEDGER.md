@@ -2264,3 +2264,197 @@ Grouped, worst-case noted:**
 - **Docs note (out of this pass's scope, flagged for the maintainer):** CLAUDE.md's
   `sqlite3_changes()` architecture note still says non-DML is "detected by empty
   columns" — now superseded by the total_changes-delta detector.
+
+---
+
+## S3 fix pass — round 2 — 2026-07-19 — F-A10-1/2/4/6/7/8, F-A12-1/2
+
+- Commit at scan: `287c403` (HEAD, clean, CI green). A committed post-burn-down S3
+  pass (not an axis run): the eight assigned filed items fixed, `mix verify` green,
+  orchestrator commits. Composition: single Opus pass (this agent). Every runtime
+  claim below was RUN this session against the bundled SQLite 3.53.2 (commands +
+  output captured). Scope held to the eight items; one un-enumerated FIFTH site of
+  F-A10-6's pattern (`schema.rs`) was found and folded in (identical class, not a
+  separate finding). Per a mid-run maintainer directive, all NEW/edited code
+  comments (and three pre-existing ones in touched files) were scrubbed of
+  review-program nomenclature — finding IDs / run+axis refs / severity grades now
+  live only here, in BACKLOG.md, and REVIEW_AXES.md; code comments state the
+  engineering constraint in plain domain terms.
+
+### Fix 1 — F-A10-1: text-parse census exceptions (resolved two ways)
+
+- **Mechanism.** Two distinct message-text classifications outside the sanctioned
+  `constraint_parse.rs`: (a) the four `NoSuchTable`/`NoSuchIndex`/`TableExists`/
+  `IndexExists` arms in `classify_sqlite_error`, and (b) a `message == "interrupted"`
+  string-compare in the `From<RusqliteError>` catch-all (former `error.rs:786`).
+- **Resolution split by whether SQLite gives a code.** (a) The four table/index
+  conditions are ALL primary `SQLITE_ERROR` (1) with no distinguishing extended
+  code — SQLite gives no other signal, so the English message prefix is the only
+  discriminator. KEPT but DOCUMENTED as a deliberate exception in a code comment
+  (mirroring `constraint_parse.rs`'s justification), stating the accepted
+  consequence: a reword/localization gracefully downgrades to the generic
+  `SqliteFailure` (no wrong result, no crash), never a misclassification. (b) The
+  `"interrupted"` compare is DEAD and was ELIMINATED. A SQLite interrupt is always a
+  `SqliteFailure` carrying extended `SQLITE_INTERRUPT` (9), classified by the code
+  arm at the top of `classify_sqlite_error`; the `From` catch-all only sees
+  non-`SqliteFailure`/`SqlInputError` rusqlite variants, and NONE `Display`s as
+  "interrupted". Proof this session: read rusqlite 0.40.1 `src/error.rs` Display
+  impl — the only literal-string arms are `SqliteFailure(_, Some(s)) => "{s}"`
+  (routed through `classify`, not the catch-all) and fixed strings like "unwinding
+  panic" / "Multiple statements provided"; no variant emits "interrupted". Interrupt
+  classification is now purely code-driven.
+- **Evidence.** Dead-code removal ⇒ no RED (nothing triggered it). The interrupt
+  path stays exercised by the existing cancellation suite (interrupt →
+  `:operation_cancelled` via the code arm) — full suite green.
+
+### Fix 2 — F-A10-2: semantic variants dropped the extended result code
+
+- **Mechanism.** `DatabaseBusyOrLocked`/`ReadOnlyDatabase`/`SchemaChanged`/
+  `AuthorizationDenied` carried only `message: String`, so a caller could not tell
+  BUSY (5) from LOCKED (6), nor the READONLY_*/BUSY_SNAPSHOT/AUTH sub-codes, without
+  parsing text — while the generic `SqliteFailure` fallback carried both codes.
+- **Fix.** Added `extended_code: i32` to exactly those four variants (constructed in
+  `classify_sqlite_error`, where `ffi_err.extended_code` is in hand) and encode as
+  `{atom, extended_code, message}` — a 3-tuple that KEEPS the leading classification
+  atom (dispatch ergonomics intact). `extended_code &&& 0xFF` recovers the primary
+  class. **Deliberately surgical:** the four TEXT-classified variants
+  (no_such_table/index, table/index_exists) stay message-only because their extended
+  code is invariantly `SQLITE_ERROR` (1) — surfacing it would be noise, not signal,
+  and would needlessly widen the blast radius (their Elixir synthesizer at
+  `lib/xqlite.ex` and ~10 test sites keep the 2-tuple). This ties F-A10-1 and
+  F-A10-2 into one coherent story: the four "SQLite gives no discriminating code"
+  cases are both text-classified AND kept codeless. **Shape choice:** flat tuple
+  over a map, for consistency with the sibling `{:sqlite_failure, code,
+  extended_code, message}`; the pre-1.0 loud MatchError on old 2-tuple matchers is a
+  cleaner break than a silent string→map type swap.
+- **RED → green (runtime, bundled SQLite 3.53.2, this session).** BEFORE (unfixed
+  NIF): `NIF.execute(ro, "CREATE TABLE x…")` → `{:error, {:read_only_database,
+  "attempt to write a readonly database"}}`; authorizer DELETE →
+  `{:error, {:authorization_denied, "not authorized"}}` — both 2-tuples, no code.
+  AFTER: `{:read_only_database, 8, "…"}` and `{:authorization_denied, 23,
+  "not authorized"}`. New structured-field assertions (`read_only_db_test.exs`,
+  `authorizer_test.exs`) assert `is_integer(code)` and `code &&& 0xFF == 8` / `== 23`;
+  ~16 in-repo 2-tuple test/doc sites updated to the 3-tuple (incl. the authorizer
+  doctest); `error_reason/0` union updated. Full suite green.
+- **ADAPTER BLAST RADIUS (`xqlite_ecto3`, read-only — enumerated, NOT edited).** The
+  code carries the shape change: `lib/xqlite_ecto3/error.ex` `Error.wrap/1` has a
+  generic 2-tuple clause `wrap({tag, msg}) when is_atom(tag) and is_binary(msg)`
+  (`:190`) but NO 3-tuple clause; a `{:read_only_database, 8, msg}` now falls
+  through to the `inspect/1` catch-all `wrap(reason)` (`:198`) → `%Error{type:
+  nil}`, LOSING the classification. Load-bearing adapter fix owed: add a
+  `wrap({tag, ext, msg})` clause. Dependent sites (file:line): `error.ex:190/198`
+  (the clause + catch-all); `test/xqlite_ecto3/error_wrap_test.exs:118-123` (unit
+  test of `wrap({:database_busy_or_locked, msg})` — still passes but now a STALE
+  2-tuple fixture; add 3-tuple coverage); `driver_connect_pragmas_test.exs:136-137`
+  (asserts the RAW NIF `{:error, {:read_only_database, _}}` — breaks to 3-tuple);
+  `fk_diagnostics_test.exs:222` (asserts wrapped `%Error{type:
+  :database_busy_or_locked}` — becomes `type: nil` until the wrap clause lands);
+  `telemetry_open_telemetry_test.exs:50` (2-tuple fixture models the shape). No
+  `lib/` production code beyond `error.ex` matches these atoms. NOT touched (adapter
+  is read-only for this pass).
+
+### Fix 3 — F-A10-4: `:unsupported_atom` discarded the offending atom
+
+- **Mechanism.** `UnsupportedAtom { atom_value: _ } => atoms::unsupported_atom()`
+  encoded a BARE atom, dropping the `atom_value` the variant already carried.
+- **Fix.** Encode `(atoms::unsupported_atom(), atom_value)` →
+  `{:unsupported_atom, "the_atom_name"}`; replaced bare `:unsupported_atom` with
+  `{:unsupported_atom, String.t()}` in `error_reason/0`.
+- **RED → green.** BEFORE (this session): `NIF.execute(c, "…VALUES(?1)",
+  [:some_bogus_atom])` → `{:error, :unsupported_atom}` (bare; the rejected atom is
+  gone). AFTER: `{:error, {:unsupported_atom, "some_bogus_atom"}}`.
+  `error_input_test.exs` tightened to assert the carried name (3 sites).
+- **ADAPTER: benign.** The adapter's generic `wrap({tag, msg})` clause absorbs the
+  new 2-tuple (`type: :unsupported_atom`, `details: name` — unchanged type); zero
+  `unsupported_atom` grep hits in the adapter.
+
+### Fix 4 — F-A10-6: doubled-`:error` fallback shape (+ 5th site)
+
+- **Mechanism.** Map-build-failure arms encoded `(atoms::error(), err)` →
+  `{:error, {:error, {:internal_encoding_error, …}}}`, violating the "leading
+  classification atom, never `:error`" shape. Filed sites: `error.rs` ×3
+  (`InvalidParameterCount`/`SqlInputError`/`ConstraintViolation`),
+  `connection.rs` (`XqliteQueryResult`). A FIFTH identical site not in the filing
+  was found by grep and folded in: `schema.rs` `DefaultValue::Blob`'s
+  OwnedBinary-alloc-failure arm.
+- **Fix.** All five now encode `err` directly → `{:internal_encoding_error, ctx}`
+  (already in `error_reason/0`). The `Err(_)` arm can't be dropped (the `Result`
+  match needs both arms to typecheck), so emitting the plain structured term is the
+  resolution. Practically unreachable (BEAM `map_new`/`map_put` never fail; the
+  blob arm is OOM-only) ⇒ no RED; clippy `-D warnings` + full suite green.
+
+### Fix 5 — F-A10-7 / F-A10-8: `error_reason/0` union gaps
+
+- Added `:invalid_transaction_mode` (backs the existing `XqliteNIF.begin/2`
+  docstring promise) and `{:cannot_convert_atom_to_string, String.t()}`. Both shapes
+  were runtime-confirmed in the round-1 ledger; dialyzer green.
+
+### Fix 6 — F-A12-1: query-vs-stream BLOB backing asymmetry
+
+- **Mechanism.** `encode_val` (query/execute path) wrapped EVERY blob — including
+  tiny ones — in a `BlobResource` off-heap resource binary
+  (`enif_make_resource_binary`, off-heap + per-object overhead at any size), while
+  the stream path copies into an `OwnedBinary` (heap binary when `<= 64 B`). Same
+  bytes, different backing; measured (Run 11) ~1.5-3× HEAVIER on the query path for
+  many small blobs.
+- **Fix.** Made `encode_val`'s blob arm SIZE-ADAPTIVE (helper `encode_blob` +
+  `HEAP_BINARY_THRESHOLD = 64`): blobs `> 64 B` still zero-copy-wrap a
+  `BlobResource` (the large-blob win preserved — the stream path can't do this,
+  working from a transient pointer); blobs `<= 64 B` copy into an `OwnedBinary` → a
+  cheap process-heap binary. 64 B is the BEAM heap-binary boundary, so a sub-64 B
+  resource binary was pure overhead. This is the filing's OWN first-suggested
+  direction ("copy small blobs on the query path too") and STRICTLY improves the
+  query path (no large-blob regression), so it needed no maintainer tradeoff ruling
+  — the residual large-blob backing difference (query resource-binary vs stream
+  OwnedBinary) is benign (query leaner). Small-blob-copy OOM degrades to the wrap
+  (graceful, non-panic).
+- **Measured before/after (`binary_crossing/run.sh`, RUN this session; harness
+  UNMODIFIED).** 100k × 16 B blobs, query path: BEFORE (Run 11) ~128 B/row off-heap
+  resource binary (~23 MB `:erlang.memory(:binary)`, the ~1.5-3× heavier case);
+  AFTER **0.0 B/row** in the binary allocator (now process-heap binaries) — query
+  total 9.32 MB, now LEANER than stream's 13.95 MB (asymmetry flipped to the good
+  direction, ratio 1.5×). Large-result (256 B blobs) query stays 448 B/row (still
+  wrapped, `> 64 B`). All byte-exact edges (empty / sub-binary / survives-conn-close
+  / interior-NUL) PASS; leak-gate PASS; teeth LIVE. New suite regression
+  (`blob_test.exs`, inside `for_each_opener`): query round-trips BLOBs byte-exact
+  across `{1, 63, 64, 65, 200, 4096}` B — both branches + the 64/65 boundary,
+  payloads led by a UTF-8 continuation byte so they bind as BLOB not TEXT.
+
+### Fix 7 — F-A12-2: `blob_read` double-copy
+
+- **Mechanism.** `blob::read` read SQLite into `vec![0u8; actual_len]`, then
+  `to_owned_binary` allocated an `OwnedBinary` and copied the Vec into it — 2 allocs
+  / 2 memcpys and a transient 2× peak per read.
+- **Fix.** Allocate the returned `OwnedBinary` first and `sqlite3_blob_read`
+  straight into its `as_mut_slice()`, dropping the staging `Vec`: 1 alloc / 1
+  memcpy. `sqlite3_blob_read` fills exactly `actual_len` bytes on `SQLITE_OK`, so no
+  uninitialised byte can escape; on error the binary is dropped, never released to
+  the BEAM. Mirrors `serialize`'s alloc-then-copy-once. The empty-range short-circuit
+  keeps its single 0-byte `to_owned_binary`.
+- **Evidence.** Pure efficiency, no behavior change ⇒ no RED. Byte-exactness held by
+  the existing `blob_read` suite (partial / past-end-clamp / offset-beyond-size /
+  zeroblob / write-read-back / 100 KB chunked / 100 KB at-once) — all green; the
+  copy-count halving (2→1 alloc, 2→1 copy) is evident from the diff. A pre-fix
+  runtime probe this session confirmed whole/mid-slice/past-end reads byte-exact
+  (the post-fix suite re-confirms).
+
+### Disposition & dryness
+
+- All eight assigned filed items closed (F-A10-1/2/4/6/7/8, F-A12-1/2), plus a 5th
+  F-A10-6-class site (`schema.rs`) folded in. No new findings filed. `mix verify`
+  green (see below). Adapter blast radius for the two error-shape changes
+  (F-A10-2, F-A10-4) reported, not edited (adapter read-only).
+- CHURN / re-wet: this pass re-wets **A10** (touched `classify_sqlite_error`,
+  `From`, the `Encoder`, and `error_reason/0` — squarely A10's re-wet list; the
+  owed covering re-run should re-pin the busy/readonly/schema/auth extended-code
+  surfacing, the sanctioned-text-parse comment, and the dead-`"interrupted"`
+  removal) and **A12** (touched `util.rs encode_val`, `blob.rs read` — A12's re-wet
+  list; the owed re-run should re-pin the size-adaptive query-blob backing and the
+  single-copy blob_read against `binary_crossing`). A1 posture unchanged-to-slightly-
+  improved (F-A10-6 removed five reachable-in-theory doubled-`:error` encodes; no new
+  panic surface). Neither axis reaches DRY. Annotated in `REVIEW_AXES.md`.
+- **Docs note (flagged, out of scope):** CLAUDE.md's `sqlite3_changes()` note still
+  cites the superseded empty-columns detector (already flagged round 1); and the
+  `binary_crossing/` harness labels still say "encode_val -> resource binary" for the
+  small-blob case, now stale (the harness is CI-isolated and was intentionally not
+  modified this pass).

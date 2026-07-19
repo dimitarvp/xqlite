@@ -256,7 +256,19 @@ NOT fixed. NOT yet DRY (first covering A10 run; one more owed; churn in
 `error_reason/0` union — both squarely in this axis's churn list; two new S3
 union gaps filed (F-A10-7 `:invalid_transaction_mode`, F-A10-8
 `:cannot_convert_atom_to_string`). The owed covering re-run should re-pin the
-RETURNING/DDL/PRAGMA changes() matrix and the corrected specs.
+RETURNING/DDL/PRAGMA changes() matrix and the corrected specs. RE-WET (S3 fix pass
+round 2, 2026-07-19): the remaining six A10 items fixed — F-A10-2 added
+`extended_code` to the four busy/readonly/schema/auth variants (now
+`{atom, ext, msg}`); F-A10-4 made `:unsupported_atom` carry the atom
+(`{:unsupported_atom, name}`); F-A10-1 documented the four SQLITE_ERROR-1
+text-parse arms as a sanctioned exception AND removed the dead `== "interrupted"`
+catch-all (interrupt is code-classified); F-A10-6 replaced five doubled-`:error`
+encodes with plain `{:internal_encoding_error, …}` (incl. a 5th un-filed
+`schema.rs` site); F-A10-7/8 closed the `error_reason/0` union. This churns
+`classify_sqlite_error` / `From` / the `Encoder` / the raw-FFI classification and
+`error_reason/0` — all in A10's re-wet list. The owed covering re-run should re-pin
+the busy/readonly/schema/auth extended-code surfacing, the sanctioned-text-parse
+comment, the dead-code removal, and the two new/changed union members.
 
 ### A11. Feature islands
 Session/changesets, blob I/O, backup+progress, serialize,
@@ -328,7 +340,17 @@ gotchas; F-A12-2 `blob_read` double-copy → BACKLOG; F-A12-3 latent/OOM-only
 covering run; one more owed). Churn re-wets: `util.rs` `encode_val` /
 `sqlite_row_to_elixir_terms` / param decoders, `blob.rs` read/write,
 `session.rs` `to_owned_binary`, `serialize`/`deserialize`/`changeset_*`,
-`hook_util.rs` `make_binary` / any hook payload, or a rustler bump.
+`hook_util.rs` `make_binary` / any hook payload, or a rustler bump. RE-WET (S3 fix
+pass round 2, 2026-07-19): both A12 items fixed — F-A12-1 made `util.rs encode_val`'s
+blob arm size-adaptive (`<= 64 B` → heap-binary copy, `> 64 B` → zero-copy
+`BlobResource`); F-A12-2 collapsed `blob.rs read` from a `vec` + `to_owned_binary`
+double-copy to a single read straight into the returned `OwnedBinary`. Re-measured
+against the (UNMODIFIED) `binary_crossing/run.sh` this session: the small-blob query
+path went from ~128 B/row off-heap resource binary to 0.0 B/row (process-heap),
+asymmetry flipped to query-leaner; byte-exact edges + leak-gate PASS. Both squarely
+in A12's re-wet list; the owed covering re-run should re-pin the size-adaptive blob
+backing and the single-copy blob_read (and note the harness's now-stale
+"resource binary" small-blob label).
 
 ### A13. Hot-upgrade posture
 rustler upgrade support is an open upstream gap; on_load is

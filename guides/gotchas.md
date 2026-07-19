@@ -342,24 +342,25 @@ need it all at once, stream it and process each batch, don't `query` it.**
 There is no memory leak on either path — once you drop the result (or the
 consuming process dies), all of it is reclaimed at the next GC.
 
-### BLOB values are backed differently by `query` vs `stream`
+### BLOB values are backed differently by `query` vs `stream` (large blobs only)
 
 A subtlety only worth knowing if you are profiling memory for a blob-heavy
-workload. A `BLOB` column value crosses the NIF boundary two different ways:
+workload. A `BLOB` column value crosses the NIF boundary as one of two kinds of
+binary, chosen by size so each stays on its leaner backing:
 
-- through `query` / `query_with_changes` / `execute`, a blob is handed back as a
-  *reference-counted resource binary* that wraps SQLite's bytes with no extra
-  copy — leanest for large blobs;
-- through `stream` / prepared `step` / `blob_read`, a blob is *copied* into a
-  fresh binary.
+- a blob **larger than 64 bytes** returned through `query` /
+  `query_with_changes` / `execute` is handed back as a *reference-counted
+  resource binary* that wraps SQLite's already-copied bytes with no further copy
+  — leanest for large blobs. The `stream` / prepared `step` / `blob_read` paths
+  instead *copy* it into a fresh reference-counted binary (they work from a
+  transient SQLite pointer and so cannot wrap it in place);
+- a blob **64 bytes or smaller** is, on every path, copied into a cheap
+  process-heap binary — no off-heap object and no asymmetry.
 
-They are byte-for-byte identical values; only the backing differs. The practical
-consequence is small and never a correctness issue: reading *many small* blobs
-via `query` costs modestly more memory than streaming them (roughly 1.5–3× in
-measurements), because every blob — however tiny — becomes an off-heap
-reference-counted binary with per-object overhead, whereas the streamed copy of a
-≤64-byte blob can live cheaply on the process heap. For a handful of blobs, or
-for large blobs, the difference is negligible.
+They are byte-for-byte identical values; only the backing of *large* blobs
+differs between the paths, and there the `query` path is the leaner one (it skips
+the copy). The difference is never a correctness issue and, for typical
+workloads, negligible.
 
 ## Deployment and releases
 

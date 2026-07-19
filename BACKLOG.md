@@ -7,68 +7,6 @@ burn-down.
 
 ## Open
 
-- [S3] F-A10-1 (Run 8): error classification by English message-substring.
-  `error.rs:689-704` classifies `NoSuchTable` / `NoSuchIndex` / `TableExists`
-  / `IndexExists` via `lower_msg.starts_with("no such table")` /
-  `starts_with("no such index")` / `starts_with("table") && contains("already
-  exists")` / `starts_with("index") && contains("already exists")`, and
-  `error.rs:786` classifies `OperationCancelled` via `message_string ==
-  "interrupted"`. All four table/index cases are primary `SQLITE_ERROR` (1)
-  with no distinguishing extended code, so message text is the only signal —
-  but this is (a) undocumented as a sanctioned exception (unlike
-  `constraint_parse.rs`, whose module header justifies it) and (b) coupled to
-  SQLite's English wording: a reword/localization silently downgrades all four
-  to `{:sqlite_failure, 1, 1, msg}`. Fix options: document these as a
-  sanctioned exception like `constraint_parse`, or accept the downgrade
-  explicitly. Repro: `Xqlite.query(c, "SELECT * FROM nope", [])` →
-  `{:error, {:no_such_table, "no such table: nope"}}` today.
-- [S3] F-A10-2 (Run 8): semantic error variants drop the extended result
-  code. `DatabaseBusyOrLocked` / `ReadOnlyDatabase` / `SchemaChanged` /
-  `AuthorizationDenied` / `NoSuchTable` / `NoSuchIndex` / `TableExists` /
-  `IndexExists` (`error.rs`) carry only `message: String`, so a caller cannot
-  distinguish `SQLITE_BUSY` (5) from `SQLITE_LOCKED` (6) — both →
-  `:database_busy_or_locked` — nor the `READONLY_*` / `BUSY_SNAPSHOT`
-  sub-codes, without parsing text (forbidden by the house rule). The generic
-  `SqliteFailure` fallback carries BOTH codes; the "nicer" variants carry
-  less. Consider adding an `extended_code` field to these variants (or at
-  least splitting busy vs locked). Repro (from `error_contract/`): busy →
-  `{:database_busy_or_locked, "database is locked"}`, readonly →
-  `{:read_only_database, "attempt to write a readonly database"}` — no code.
-- [S3] F-A10-4 (Run 8): `:unsupported_atom` discards the offending atom.
-  `error.rs:447` `UnsupportedAtom { atom_value: _ } => atoms::unsupported_atom()`
-  encodes a BARE atom, so the Elixir error never names which atom was rejected,
-  even though the variant carries `atom_value` (and `Display` uses it).
-  Inconsistent with `UnsupportedDataType`, which encodes its `term_type`.
-  Encode it as `(atoms::unsupported_atom(), atom_value)` and add the tuple form
-  to `error_reason/0`. Latent-ish (needs a bad atom param to trigger).
-- [S3] F-A10-6 (Run 8, latent): doubled-`:error` fallback shape. The
-  map-build-failure arms of the encoders (`error.rs:513/579/626`,
-  `connection.rs:95`) encode `(atoms::error(), err)`, i.e. `{:error, {:error,
-  {:internal_encoding_error, …}}}`, violating the "leading classification
-  atom, never `:error`" shape. Practically unreachable (BEAM `map_new`/
-  `map_put` don't fail) but a latent wart — either prove it dead and drop the
-  arm, or emit a plain `{:internal_encoding_error, ctx}`.
-- [S3] F-A10-7 (S3 fix pass round 1, A10): `error_reason/0` typespec omits
-  `:invalid_transaction_mode`. `error.rs:523` encodes
-  `XqliteError::InvalidTransactionMode` as the bare atom `:invalid_transaction_mode`
-  (`transaction.rs:23`, `TransactionMode::from_atom` on a mode that isn't
-  `:deferred`/`:immediate`/`:exclusive`). `XqliteNIF.begin/2` is `@spec … :: :ok |
-  Xqlite.error()` and its docstring (`xqlitenif.ex:479`) explicitly promises
-  `{:error, :invalid_transaction_mode}`, but the `@type error_reason` union omits
-  it — a dialyzer contract gap at the raw-NIF layer (the high-level `Xqlite.begin/2`
-  guards the mode with `when mode in [...]`, so it can't reach it). Same class as
-  F-A10-5/F-A11-5. Fix: add `:invalid_transaction_mode` to the union. Repro
-  (runtime-confirmed): `XqliteNIF.begin(c, :bogus_mode)` →
-  `{:error, :invalid_transaction_mode}`.
-- [S3] F-A10-8 (S3 fix pass round 1, A10, latent): `error_reason/0` typespec omits
-  `{:cannot_convert_atom_to_string, String.t()}`. `error.rs:491` encodes
-  `(cannot_convert_atom_to_string, reason)`, produced at `util.rs:204` (keyword-param
-  key atom whose `atom_to_string` fails, in `decode_exec_keyword_params`) and
-  `util.rs:242` (`format_term_for_pragma` non-`nil`/`true`/`false` atom). Reachable
-  via query/execute keyword params or the PRAGMA-value path — both spec'd through
-  `Xqlite.error()` — but omitted from the union. Latent (`atom_to_string` rarely
-  fails). Same class as F-A10-5/F-A11-5. Fix: add
-  `{:cannot_convert_atom_to_string, String.t()}`.
 - [S3] F-A11-4 (Run 9, A11): `set_busy_policy/2`'s `:max_elapsed_ms` is
   anchored at the busy slot's **first installation**, not at the start of each
   busy event, so it never resets. Once a connection has been alive (with a
@@ -112,31 +50,6 @@ burn-down.
   single-owner model) and rely on the gotcha? Repro: share one handle across two
   processes, run a slow `query` on one, `changes` on the other → the `changes`
   call blocks for the query's full duration on a normal scheduler.
-- [S3] F-A12-1 (Run 11, A12): BLOB column values cross the boundary two ways —
-  `query`/`query_with_changes`/`execute` (via `encode_val`, `util.rs:27-36`) hand
-  a blob back as a ZERO-copy resource binary (`ResourceArc<BlobResource>::
-  make_binary` → `enif_make_resource_binary`, refcounted, off-heap regardless of
-  size), while `stream`/prepared `step`/`blob_read` (via
-  `sqlite_row_to_elixir_terms`, `util.rs:337-373`, and `blob::read`) COPY into an
-  `OwnedBinary`. Byte-identical values; only the backing differs. Measured
-  (`binary_crossing/run.sh`, 100k rows): for LARGE blobs the query path is ~1.3×
-  LEANER in total memory (no copy); for MANY SMALL blobs the query path is
-  ~1.5–3× HEAVIER (every blob is an off-heap resource binary with per-object
-  overhead, vs a ≤64 B streamed copy that can live on the process heap). No
-  correctness impact, no leak (leak-gate PASS), and the ratio is well under the
-  10× cliff bar → S3 characterization, not a divergence. Documented user-facing in
-  `guides/gotchas.md` ("BLOB values are backed differently by `query` vs
-  `stream`"). Maintainer question: acceptable as-is (documented), or unify the two
-  paths (e.g. copy small blobs on the query path too, or wrap on the stream path)?
-- [S3] F-A12-2 (Run 11, A12): `blob_read` double-copies. `blob::read`
-  (`blob.rs:131-164`) reads SQLite into a `vec![0u8; actual_len]` buffer, then
-  `to_owned_binary` (`session.rs:128-139`) allocates an `OwnedBinary` and copies
-  the buffer into it — two allocations and two memcpys for one read, and a
-  transient 2× peak on a large `blob_read`. Reading directly into an
-  `OwnedBinary`/`NewBinary` target (as `serialize` does: alloc-then-copy-once)
-  would halve both. Pure efficiency, no correctness impact. Fix: allocate the
-  `OwnedBinary` first, `sqlite3_blob_read` into its `as_mut_slice()`, drop the
-  intermediate `Vec`.
 - [S3] F-A12-3 (Run 11, A12, latent/OOM-only): TEXT column values (and column
   names, and all `String`/`&str` we hand back) cross via rustler's `str::encode`
   (`rustler-0.38.0/src/types/string.rs:30-42`), which `panic!("binary term
@@ -223,6 +136,98 @@ burn-down.
 
 ## Closed
 
+- 2026-07-19 (S3 fix pass round 2, A10) F-A10-1 — text-parse census exceptions:
+  RESOLVED, split by whether SQLite gives a code. The four
+  no-such-table/index + table/index-exists arms (`classify_sqlite_error`) are all
+  primary `SQLITE_ERROR` (1) with NO distinguishing extended code, so the English
+  message prefix is the only signal — DOCUMENTED as a deliberate exception in a
+  code comment (mirroring `constraint_parse.rs`), stating the accepted consequence
+  (a reword/localization gracefully downgrades to `SqliteFailure`, never a
+  misclassification). The `message == "interrupted"` catch-all (former
+  `error.rs:786`) was ELIMINATED as dead code: a SQLite interrupt is ALWAYS a
+  `SqliteFailure` carrying extended `SQLITE_INTERRUPT` (9), classified by the code
+  arm; the `From` catch-all only sees non-`SqliteFailure`/`SqlInputError` rusqlite
+  variants and none `Display`s as "interrupted" (verified against rusqlite 0.40.1
+  `error.rs` Display impl — no variant emits that string). Interrupt
+  classification is now purely code-driven; existing cancellation tests stay green.
+- 2026-07-19 (S3 fix pass round 2, A10) F-A10-2 — semantic variants dropped the
+  extended result code: FIXED for the four variants where SQLite provides a
+  discriminating code. `DatabaseBusyOrLocked` / `ReadOnlyDatabase` / `SchemaChanged`
+  / `AuthorizationDenied` now carry `extended_code: i32` and encode as
+  `{atom, extended_code, message}` (3-tuple; leading classification atom kept).
+  `extended_code &&& 0xFF` recovers the primary (BUSY 5 vs LOCKED 6; READONLY
+  sub-codes; AUTH) — the discriminator the message-only variants hid. The four
+  text-classified variants (no_such_table/index, table/index_exists) DELIBERATELY
+  stay message-only: their extended code is invariantly `SQLITE_ERROR` (1), so it
+  carries no information (ties to F-A10-1) — cutting the shape change (and its
+  blast radius) to the four that gain real signal. Flat-tuple shape chosen over a
+  map for consistency with the existing `{:sqlite_failure, code, extended_code,
+  message}`. Runtime-confirmed this session (bundled SQLite 3.53.2): readonly →
+  `{:read_only_database, 8, "attempt to write a readonly database"}`; auth →
+  `{:authorization_denied, 23, "not authorized"}` (RED before: 2-tuples, no code).
+  `error_reason/0` typespec + ~18 in-repo test/doc sites updated; new low-byte
+  assertions added. ADAPTER BLAST RADIUS (reported to orchestrator, NOT edited):
+  `xqlite_ecto3` `Error.wrap/1` (`lib/xqlite_ecto3/error.ex:190` generic
+  `{tag, msg}` clause) does not match the 3-tuple → falls to the `inspect/1`
+  catch-all (`:198`) → `type: nil`, losing classification; needs a
+  `wrap({tag, ext, msg})` clause. Dependent adapter sites: `error.ex:190`,
+  `error_wrap_test.exs:118-123` (stale 2-tuple fixture), `driver_connect_pragmas_test.exs:136`
+  (raw NIF 2-tuple assert), `fk_diagnostics_test.exs:222` (`%Error{type:
+  :database_busy_or_locked}` becomes `type: nil`), `telemetry_open_telemetry_test.exs:50`
+  (2-tuple fixture).
+- 2026-07-19 (S3 fix pass round 2, A10) F-A10-4 — `:unsupported_atom` discarded
+  the offending atom: FIXED. The encoder (`error.rs`) now emits
+  `(atoms::unsupported_atom(), atom_value)` → `{:unsupported_atom, "the_atom_name"}`
+  (the variant already carried `atom_value`; the encode threw it away). Bare
+  `:unsupported_atom` replaced by `{:unsupported_atom, String.t()}` in
+  `error_reason/0`. Runtime-confirmed: `[:some_bogus_atom]` param →
+  `{:unsupported_atom, "some_bogus_atom"}` (RED before: bare `:unsupported_atom`).
+  `error_input_test.exs` assertions tightened to the carried name. ADAPTER: benign
+  — the adapter's generic `wrap({tag, msg})` clause absorbs the new 2-tuple
+  (`type: :unsupported_atom` unchanged); no adapter grep hits.
+- 2026-07-19 (S3 fix pass round 2, A10) F-A10-6 — doubled-`:error` fallback shape:
+  FIXED. The map-build-failure arms (`error.rs` ×3, `connection.rs`, and a FIFTH
+  un-enumerated site of the identical pattern, `schema.rs` `DefaultValue::Blob`)
+  encoded `(atoms::error(), err)` → `{:error, {:error, {:internal_encoding_error,
+  …}}}`. Now they encode `err` directly → `{:internal_encoding_error, ctx}` (a
+  leading-classification-atom term already in `error_reason/0`). Practically
+  unreachable (BEAM `map_new`/`map_put` don't fail; blob-alloc OOM-only) so no RED;
+  clippy `-D warnings` + full suite green. The arm can't be dropped (the
+  `Result` match needs both arms to typecheck) — emitting the plain term is the
+  sanctioned resolution.
+- 2026-07-19 (S3 fix pass round 2, A10) F-A10-7 — `error_reason/0` omitted
+  `:invalid_transaction_mode`: FIXED (added to the union). Backs the existing
+  `XqliteNIF.begin/2` docstring promise; dialyzer green.
+- 2026-07-19 (S3 fix pass round 2, A10) F-A10-8 — `error_reason/0` omitted
+  `{:cannot_convert_atom_to_string, String.t()}`: FIXED (added to the union).
+  Dialyzer green.
+- 2026-07-19 (S3 fix pass round 2, A12) F-A12-1 — query-vs-stream BLOB backing
+  asymmetry: FIXED by making the query path (`encode_val`) size-adaptive. Blobs
+  `> 64 B` still zero-copy-wrap a `BlobResource` (the large-blob win kept); blobs
+  `<= 64 B` now copy into an `OwnedBinary` → a cheap process-heap binary instead of
+  an off-heap resource binary with per-object overhead. 64 B is the BEAM
+  heap-binary threshold (`enif_make_resource_binary` is off-heap at any size), so a
+  sub-64 B resource binary was pure overhead. This is the filing's first suggested
+  direction ("copy small blobs on the query path too") and STRICTLY improves the
+  query path (no large-blob regression), so no maintainer tradeoff to punt.
+  Measured this session (`binary_crossing/run.sh`, 100k × 16 B blobs): query path
+  went from ~128 B/row off-heap resource binary (~23 MB, the pre-fix
+  `:erlang.memory(:binary)` load) to **0.0 B/row** (heap binaries, not in the
+  binary allocator); query total 9.32 MB now LEANER than stream 13.95 MB (was
+  1.5-3× HEAVIER). All byte-exact edges (empty/sub-binary/survives-close/
+  interior-NUL) still PASS; leak-gate PASS. New suite regression: query round-trips
+  BLOBs byte-exact across `{1,63,64,65,200,4096}` B (both branches + the 64/65
+  boundary).
+- 2026-07-19 (S3 fix pass round 2, A12) F-A12-2 — `blob_read` double-copy: FIXED.
+  `blob::read` now allocates the returned `OwnedBinary` first and
+  `sqlite3_blob_read`s straight into its `as_mut_slice()`, dropping the
+  intermediate `vec![0u8; n]` staging buffer + its `to_owned_binary` copy: 2
+  allocs / 2 memcpys (and a transient 2× peak) → 1 alloc / 1 memcpy. `blob_read`
+  fills exactly `actual_len` bytes on `SQLITE_OK`, so no uninitialised byte
+  escapes; on error the binary is dropped, never released. Pure efficiency (no
+  behavior change), so no RED; byte-exactness held by the existing blob_read
+  suite (partial/past-end/100 KB-at-once/write-read-back) — all green. `serialize`
+  already used this alloc-then-copy-once pattern.
 - 2026-07-19 (S3 fix pass round 1, A10) F-A10-3 — `INSERT/UPDATE/DELETE …
   RETURNING` reporting `changes: 0`: FIXED. The `query_with_changes[_cancellable]`
   empty-columns heuristic was wrong twice (RETURNING DML has columns → misdetected
