@@ -111,6 +111,7 @@ defmodule CT do
 end
 
 CT.start()
+import Bitwise
 
 # ===========================================================================
 # SELFTEST — prove the oracle has teeth and does not false-positive.
@@ -345,11 +346,20 @@ cond_readonly = fn dir ->
 
   {:ok, ro} = Xqlite.open_readonly(path)
   reason = assert_base.("read_only", Xqlite.execute(ro, "INSERT INTO t(x) VALUES (1)", []))
-  ro_ok = match?({:read_only_database, m} when is_binary(m), reason)
-  CT.expect("read_only/structured_msg_binary", ro_ok, CT.showt(reason))
-  # F-A10-2 observation: the semantic variant carries ONLY a message — the
-  # extended READONLY_* sub-code is not surfaced structurally.
-  CT.pin("read_only/no_extended_code(F-A10-2)", :"S3-FINDING", "reason = #{CT.showt(reason)}")
+  # The semantic variant now surfaces the extended result code as a 3-tuple
+  # {:read_only_database, extended_code, message}; its low byte is
+  # SQLITE_READONLY (8), the discriminator a message-only variant hid.
+  ro_ok =
+    match?({:read_only_database, ext, m} when is_integer(ext) and is_binary(m), reason)
+
+  CT.expect("read_only/3tuple_ext_and_msg", ro_ok, CT.showt(reason))
+
+  CT.expect(
+    "read_only/ext_low8_is_readonly",
+    match?({:read_only_database, ext, _} when (ext &&& 0xFF) == 8, reason),
+    CT.showt(reason)
+  )
+
   :ok = Xqlite.close(ro)
 end
 
@@ -370,9 +380,18 @@ cond_busy = fn dir ->
   case CT.err_reason(busy) do
     {:err, reason} ->
       _ = assert_base.("busy", busy)
-      busy_ok = match?({:database_busy_or_locked, m} when is_binary(m), reason)
-      CT.expect("busy/structured_msg_binary", busy_ok, CT.showt(reason))
-      CT.pin("busy/no_extended_code(F-A10-2)", :"S3-FINDING", "reason = #{CT.showt(reason)}")
+      # 3-tuple carrying the extended code; low byte is SQLITE_BUSY (5) or
+      # SQLITE_LOCKED (6) — the discriminator a message-only variant hid.
+      busy_ok =
+        match?({:database_busy_or_locked, ext, m} when is_integer(ext) and is_binary(m), reason)
+
+      CT.expect("busy/3tuple_ext_and_msg", busy_ok, CT.showt(reason))
+
+      CT.expect(
+        "busy/ext_low8_is_busy_or_locked",
+        match?({:database_busy_or_locked, ext, _} when (ext &&& 0xFF) in [5, 6], reason),
+        CT.showt(reason)
+      )
 
     {:no_err, other} ->
       # Contention did not reproduce in this environment/timing; not a contract
@@ -417,35 +436,37 @@ cond_changes_returning = fn ->
   c = CT.mem()
   {:ok, _} = Xqlite.execute(c, "CREATE TABLE t(x)", [])
 
-  # plain DML via query_with_changes -> changes counted correctly.
-  {:ok, del_setup} = Xqlite.query(c, "INSERT INTO t(x) VALUES (1),(2),(3)", [])
-  CT.pin("changes/plain_insert", :INFO, "changes=#{del_setup.changes} num_rows=#{del_setup.num_rows}")
+  # changes() is reported via a sqlite3_total_changes()-delta detector: the fresh
+  # sqlite3_changes() only when THIS statement moved the total, else 0. Correct
+  # for RETURNING DML (has columns yet changes rows) AND for DDL/read-PRAGMA (no
+  # columns, and must not leak the sticky prior-DML count).
+  {:ok, ins} = Xqlite.query(c, "INSERT INTO t(x) VALUES (1),(2),(3)", [])
+  CT.expect("changes/plain_insert", ins.changes == 3, "changes=#{ins.changes} (want 3)")
 
-  # INSERT ... RETURNING returns columns, so query_with_changes' empty-columns
-  # heuristic misdetects it as non-DML and zeroes `changes` despite modifying a
-  # row. Rows come back (num_rows correct), so no data loss -> S3 doc/precision.
+  # INSERT ... RETURNING returns columns but must report the true affected count.
   ret = Xqlite.query(c, "INSERT INTO t(x) VALUES (4) RETURNING x", [])
 
   case ret do
     {:ok, r} ->
-      CT.pin("changes/returning", :INFO, "changes=#{r.changes} num_rows=#{r.num_rows} rows=#{CT.show(r.rows)}")
-
-      if r.changes == 0 and r.num_rows >= 1 do
-        CT.pin(
-          "changes/returning_zeroed(F-A10-3)",
-          :"S3-FINDING",
-          "INSERT..RETURNING reports changes=0 despite inserting #{r.num_rows} row(s); Xqlite.query/4 doc says changes=affected for DML"
-        )
-      else
-        CT.pin("changes/returning_ok", :OK, "changes=#{r.changes} tracks the DML")
-      end
+      CT.expect(
+        "changes/returning_counts",
+        r.changes == 1 and r.num_rows == 1,
+        "changes=#{r.changes} num_rows=#{r.num_rows} rows=#{CT.show(r.rows)} (want 1/1)"
+      )
 
     other ->
-      CT.pin("changes/returning", :INFO, "unexpected: #{CT.showt(other)}")
+      CT.pin("changes/returning", :S2_NO_ERROR, "unexpected: #{CT.showt(other)}")
   end
 
-  # negative control: a SELECT after DML must report changes=0 (sticky-counter
-  # zeroing works for the non-DML case).
+  # DDL after DML must NOT leak the sticky prior-DML count (report 0, not 4).
+  {:ok, ddl} = Xqlite.query(c, "CREATE TABLE t2(y)", [])
+  CT.expect("changes/ddl_no_stale_leak", ddl.changes == 0, "DDL changes=#{ddl.changes} (want 0)")
+
+  # read-PRAGMA after DML must report 0.
+  {:ok, prg} = Xqlite.query(c, "PRAGMA user_version", [])
+  CT.expect("changes/pragma_read_zeroed", prg.changes == 0, "PRAGMA changes=#{prg.changes} (want 0)")
+
+  # negative control: a SELECT after DML must report changes=0.
   {:ok, sel} = Xqlite.query(c, "SELECT x FROM t", [])
   CT.expect("changes/select_zeroed", sel.changes == 0, "SELECT changes=#{sel.changes} (expected 0)")
 end

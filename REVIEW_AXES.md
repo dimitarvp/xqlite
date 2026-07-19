@@ -269,6 +269,19 @@ encodes with plain `{:internal_encoding_error, …}` (incl. a 5th un-filed
 `error_reason/0` — all in A10's re-wet list. The owed covering re-run should re-pin
 the busy/readonly/schema/auth extended-code surfacing, the sanctioned-text-parse
 comment, the dead-code removal, and the two new/changed union members.
+COVERING RE-RUN (Run 13, 2026-07-19): the owed re-run over the churn. RAN the
+changes()-delta matrix (RETURNING INSERT/UPDATE/DELETE true count, DDL/read-PRAGMA/
+SELECT no stale leak, AFTER-INSERT trigger → outer-only count, SAVEPOINT/RELEASE 0,
+cross-db ATTACH counted, no-op/identical UPDATE) — all HELD; the busy/readonly/auth
+3-tuple + `extended_code &&& 0xFF` (5/8/23) — HELD; interrupt via the code arm
+(removed `"interrupted"` text-compare) → `:operation_cancelled` — HELD; all 43
+Encoder shapes re-checked vs `error_reason/0`. Updated the `error_contract/` oracle
+to the 3-tuple + delta-detector contract (11-control teeth re-proven, `RESULT PASS
+no findings`). ONE new S3: F-A10-9 (direct-NIF atoms `:extension_loading_disabled` +
+`:invalid_conflict_strategy` omitted from `error_reason/0` — the round-1 audit was
+Encoder-scoped). DRYNESS: a new CONFIRMED (S3) surfaced, so this is NOT a clean
+covering run — A10 stands at 0 of 2 consecutive clean covering runs, NOT DRY;
+re-wet list unchanged.
 
 ### A11. Feature islands
 Session/changesets, blob I/O, backup+progress, serialize,
@@ -305,6 +318,20 @@ Churn re-wets: `nif.rs` backup guard / changeset handler, `query.rs`
 authorizer/hook code, `busy_handler.rs`, or any guide edit. RE-WET (S3 fix
 pass round 1, 2026-07-19): F-A10-3 added `query::core_query_with_changes` (a
 new `query.rs` `core_*`) and rewired the `query_with_changes` NIFs.
+COVERING RE-RUN (Run 13, 2026-07-19): the owed re-run over the churn. RAN the
+changeset `:replace` conflict matrix (replace/omit/abort × CONFLICT + replace ×
+NOTFOUND → clean SQLITE_ABORT-4, no misuse-21, no data change — the maintainer's
+ABORT-vs-OMIT semantics unchanged), blob byte-exactness on the query path
+(size-adaptive `encode_val`) AND `blob_read` (single-copy) across {0,1,63,64,65,200,
+4096,1_000_000} B incl. the 64/65 boundary + partial-straddle + past-end-clamp, the
+backup `pages_per_step < 1` guard, and interior-NUL rejection on query/execute/
+execute_batch/prepare/stream + no-partial-batch-run + bound-value byte-exact
+round-trip. Re-ran `feature_islands/run.sh` (F-A11-4 reproduces, teeth held) and
+`binary_crossing/run.sh` (size-adaptive backing confirmed: small-blob query 0.0 B/row,
+>64 B→binary-alloc / ≤64 B→process-heap; teeth LIVE, leak-gate PASS); FTS5 guide test
+green in the full suite. CLEAN — zero new findings. DRYNESS: first of TWO consecutive
+clean covering runs after the Run-9 + S3-fix-pass re-wet; one more clean covering run
+owed before A11 is DRY. Re-wet list unchanged.
 
 ### A12. Binary crossing
 Probes: copy vs refcounted binaries across the boundary; memory

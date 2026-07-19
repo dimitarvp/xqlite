@@ -2458,3 +2458,178 @@ Grouped, worst-case noted:**
   `binary_crossing/` harness labels still say "encode_val -> resource binary" for the
   small-blob case, now stale (the harness is CI-isolated and was intentionally not
   modified this pass).
+
+---
+
+## Run 13 — 2026-07-19 — A10+A11 dryness covering re-run
+
+- Commit at scan: `6046806` (HEAD, clean; targets = the two S3 fix passes' churn
+  over `1e4bafa` + `287c403`). Scope: a full covering re-run of BOTH axes with
+  emphasis on the fresh churn — A10 (structured-error contract: text-parse census,
+  extended codes, changes() paths, error-shape contracts, `error_reason/0`
+  end-to-end) and A11 (feature islands: backup guard, changeset `:replace` handler,
+  blob raw-handle + single-copy read + size-adaptive backing, NUL-in-SQL
+  rejection, guide-rot). Composition: single Opus pass (this agent) — adversarial
+  source read + a runtime churn-edges probe + re-run of the three CI-isolated
+  harnesses + full `mix test.seq`. Every runtime claim RUN this session against the
+  bundled SQLite 3.53.2 (commands + output captured); nothing from memory.
+  Orchestrator commits.
+
+### A10 — all four sub-areas re-covered, churn attacked at runtime
+
+- **Text-parse census (churn: sanctioned-exception comment + removed
+  `"interrupted"` compare).** The four SQLITE_ERROR-1 table/index arms are the only
+  message-text classifications outside `constraint_parse.rs`, carrying the
+  documented sanctioned-exception comment. The dead `message == "interrupted"`
+  catch-all is GONE; interrupts still classify via the code arm — RAN a real
+  cancellation of a recursive-CTE query → `{:error, :operation_cancelled}`.
+- **Extended codes (churn: F-A10-2 3-tuples).** The four semantic variants encode
+  `{atom, extended_code, message}`. RAN: read-only write → `{:read_only_database,
+  8, …}` (low8=8); authorizer DELETE deny → `{:authorization_denied, 23, …}`
+  (low8=23); 2-conn write contention → `{:database_busy_or_locked, 5, …}` (low8=5).
+  The four text-classified variants stay message-only by design (ext invariantly 1).
+- **changes() (churn: new `core_query_with_changes` total_changes-delta detector).**
+  Re-pinned the full matrix by RUNNING it: plain INSERT=3; INSERT/UPDATE/DELETE
+  RETURNING report the TRUE count (2/2/1); SELECT / read-PRAGMA / DDL-after-DML all
+  0 with NO stale leak (the F-A10-3 second leg); no-op DELETE=0. Adversarial edges
+  the churn invited, all HELD: an AFTER-INSERT TRIGGER → changes reports the OUTER
+  statement only (1, trigger rows excluded) while the detector still fires
+  (total moved, log row confirmed); SAVEPOINT/RELEASE report 0 (not DML, no leak);
+  a cross-database ATTACH INSERT is counted (2) and the following attached-db SELECT
+  reports 0; `UPDATE t SET x=x` matching rows reports the matched count. Both
+  counters are read after `process_rows` steps to SQLITE_DONE, under the conn Mutex.
+- **Shapes + `error_reason/0` end-to-end (churn: F-A10-4/6/7/8 union edits +
+  encoder fallbacks).** Cross-checked all 43 `XqliteError` `Encoder` shapes against
+  the union — all match (incl. F-A10-4 `{:unsupported_atom, name}` and the five
+  F-A10-6 plain `{:internal_encoding_error, ctx}` fallbacks across
+  `error.rs`/`connection.rs`/`schema.rs`/`explain_analyze.rs`). The map-build /
+  blob-alloc fallback arms are OOM-only (source audit; no RED possible).
+
+### A10 — ONE new finding (S3, filed): F-A10-9
+
+- **F-A10-9 — S3 — CONFIRMED — BACKLOG.** The round-1 `error_reason/0` audit was
+  scoped "vs the `error.rs` Encoder" and MISSED the direct-NIF error atoms (the
+  `(atoms::error(), <atom>)` returns in `nif.rs` that bypass `XqliteError`). Two are
+  absent from the union AND from all of `lib/`: `:extension_loading_disabled`
+  (`load_extension/3`, reachable via a well-typed call before enabling extensions —
+  the default disabled state) and `:invalid_conflict_strategy` (`changeset_apply/3`,
+  reachable only by a param-type violation). Both spec'd `:ok | Xqlite.error()`;
+  both are correctly-classified structured atoms — a pure typespec-completeness gap
+  (dialyzer "can never match" for a caller matching either atom). Same class as the
+  fixed F-A10-5/7/8. RAN this session: load_extension-before-enable →
+  `{:error, :extension_loading_disabled}`; changeset_apply bogus strategy →
+  `{:error, :invalid_conflict_strategy}`. Filed BACKLOG (fix deferred per the S3
+  mandate: add both atoms to the union). The third direct-NIF atom
+  `:invalid_pages_per_step` IS in the union (Run 9), so the gap is exactly these two.
+
+### A11 — churned islands re-covered, CLEAN
+
+- **backup (pages_per_step guard).** Source-verified the `< 1` reject →
+  `{:error, {:invalid_pages_per_step, n}}` (0 and negatives); a huge positive
+  copies-all-in-one-step, no hang. Regression test present + green.
+- **session/changeset (`:replace` handler — OPEN maintainer call, NOT changed).**
+  RAN the conflict matrix against the implemented ABORT-vs-OMIT behavior:
+  replace+CONFLICT (dup PK) overwrites (`:ok`, row→999); omit+CONFLICT skips (`:ok`,
+  unchanged); abort+CONFLICT → clean `{:sqlite_failure, 4, 4, _}` (SQLITE_ABORT), no
+  change; replace+NOTFOUND (a genuine UPDATE of a missing row, seeded before the
+  session so it is not coalesced to an INSERT) → the same clean ABORT-4, no change.
+  The handler returns REPLACE only for DATA/CONFLICT and ABORT otherwise — no
+  misuse(21) reachable.
+- **blob (raw-handle + single-copy read + size-adaptive backing).** RAN
+  byte-exactness on BOTH the query path (size-adaptive `encode_val`) and the
+  `blob_read` single-copy path across {0, 1, 63, 64, 65, 200, 4096, 1_000_000} B —
+  every size byte-identical on both paths, including the 64/65 backing boundary and
+  the empty/huge extremes; a partial `blob_read` straddling the boundary is
+  byte-exact; a past-end read clamps to `<<>>`.
+- **NUL-in-SQL rejection (bypass attempts).** RAN interior-NUL through every
+  SQL-text entry point: query / execute / execute_batch / prepare / stream(open)
+  all → `{:error, :null_byte_in_string}` (stream returns it eagerly per its
+  `Enumerable.t() | error()` spec — never a silently-truncated stream). A
+  multi-statement batch `"CREATE TABLE keep(x);\0DROP TABLE keep"` is REJECTED and
+  does NOT partially run (`keep` absent afterward). A bound VALUE with an interior
+  NUL still round-trips byte-exact (`<<97,0,98>>`) — the guard checks SQL text only.
+
+### Harness runs (all CI-isolated; teeth re-proven; `mix verify` untouched)
+
+- **`error_contract/run.sh` — HARNESS MAINTENANCE + re-run.** Its oracle expected
+  the OLD 2-tuple `read_only`/`busy` shapes and pinned the now-fixed F-A10-2/3 as
+  open S3 findings. Updated to the post-churn contract: `read_only`/`busy` assert
+  the 3-tuple + `extended_code &&& 0xFF` (8 / {5,6}); the changes()-RETURNING pin
+  became a positive assertion and gained DDL-no-leak + read-PRAGMA legs. Teeth
+  RE-PROVEN: the 11-control selftest gate PASSED first (`SELFTEST_PASS`), then the
+  probe → `RESULT PASS contract held, no findings` (was `PASS_WITH_FINDINGS`).
+- **`feature_islands/run.sh` — re-run.** The F-A11-4 busy-elapsed footgun still
+  reproduces with teeth intact: young + aged-huge-ceiling both SUCCEED (153 ms),
+  aged+small-ceiling GIVES UP in 0 ms / 0 retries.
+- **`binary_crossing/run.sh` — re-run (re-pins the size-adaptive backing).** Teeth
+  LIVE (20000×512 B retention grew the binary counter 10.83 MB, settled on
+  release); leak-gate PASS (0.0 MB residual both paths). Small-blob query path =
+  0.0 B/row (process-heap binaries, F-A12-1) vs stream 2.0 B/row, total-memory
+  ratio 1.4× (query LEANER; under the 10× cliff). S4: a 1000 B blob lands in the
+  binary allocator, an 8 B value on the process heap (the 64 B threshold split).
+  The harness's "encode_val -> resource binary" small-blob label is now stale (the
+  0.0 B/row measurement is correct); harness left unmodified (A12's, CI-isolated).
+- **Guides.** `test/nif/fts5_guide_test.exs` runs green in the suite. Churned-surface
+  snippets spot-run: `security.md` interior-NUL → `:null_byte_in_string`;
+  `gotchas.md` blob/backing behavior consistent with the byte-exact + memory results.
+- **`mix test.seq` — full suite GREEN** ("All tests passed!", 66 files), incl. the
+  permanent regressions for the churn: blob {1,63,64,65,200,4096} boundary
+  (round-2), changeset replace-abort (Run 9), interior-NUL on all SQL entry points
+  (Run 9), query_with_changes RETURNING/DDL/PRAGMA matrix (round-1), FTS5 guide.
+
+### Churn-attack table (edge → verdict)
+
+| axis | churn edge attacked | verdict |
+|------|---------------------|---------|
+| A10 | RETURNING DML (INSERT/UPDATE/DELETE) true count | HELD (2/2/1) |
+| A10 | DDL-after-DML stale sticky leak | HELD (0, no leak) |
+| A10 | read-PRAGMA / SELECT after DML | HELD (0) |
+| A10 | AFTER-INSERT trigger vs changes() | HELD (outer-only 1) |
+| A10 | SAVEPOINT / RELEASE (not DML) | HELD (0) |
+| A10 | cross-db ATTACH INSERT counted | HELD (2) |
+| A10 | no-op / identical-value UPDATE | HELD (0 / matched) |
+| A10 | busy/readonly/auth 3-tuple + ext low byte | HELD (5/8/23) |
+| A10 | interrupt via code (removed "interrupted" text) | HELD (:operation_cancelled) |
+| A10 | error_reason/0 vs direct-NIF atoms | BROKE → F-A10-9 (S3) |
+| A11 | backup pages_per_step < 1 | HELD (rejected) |
+| A11 | changeset replace/omit/abort × CONFLICT | HELD |
+| A11 | changeset replace × NOTFOUND | HELD (clean ABORT-4) |
+| A11 | blob byte-exact {0,1,63,64,65,200,4096,1M} × query+blob_read | HELD |
+| A11 | blob partial read straddling 64/65 / past-end | HELD |
+| A11 | NUL reject: query/execute/batch/prepare/stream | HELD |
+| A11 | NUL multi-statement batch no partial run | HELD |
+| A11 | bound-value interior NUL round-trip | HELD (byte-exact) |
+
+### Completeness critic
+
+- A10 sub-areas: all four re-covered with the churn (3-tuples, delta-detector,
+  removed text-compare, union edits, encoder fallbacks) attacked at runtime. A11
+  islands: backup, session/changeset, blob, NUL — the churned surfaces — re-covered;
+  the four non-churned islands (serialize, authorizer, hooks, busy footgun) were NOT
+  re-audited (covered clean Run 9, no churn since). Honest gaps: (1) SQLITE_SCHEMA
+  (17) 3-tuple not reproduced at runtime (hard to force) — source-verified only;
+  (2) the OOM-only encoder fallbacks have no RED — source audit only; (3) no
+  TSan/Miri on the live NIF (Miri can't run the bundled C SQLite — Runs 2/4/5); the
+  oracle is behavior + exit-code + the source audit bounded by THREADSAFE=1 +
+  single-Mutex.
+
+### Disposition & dryness
+
+- **A10: covering re-run done — 0 new S0/S1/S2, ONE new CONFIRMED S3 (F-A10-9)
+  filed to BACKLOG.** The `error_contract` oracle was updated to the post-churn
+  contract (harness maintenance, teeth re-proven) and passes with no findings.
+  Because a new CONFIRMED finding surfaced, this run is NOT a clean covering run:
+  A10 stands at **0 of 2** consecutive clean covering runs (re-wet by both S3 fix
+  passes; residual union gap now filed). NOT DRY. Re-wet triggers unchanged
+  (`error.rs` classify/Encoder/From, the raw-FFI builders, `constraint_parse.rs`,
+  the `query_with_changes` detector, the `error_reason/0` typespec).
+- **A11: CLEAN — zero new findings (S0/S1/S2/S3).** Every churned island held under
+  runtime attack; the three harnesses + full suite are green. This is the **first
+  of two** consecutive clean covering runs after the Run-9 + S3-fix-pass churn
+  re-wet A11; **one more clean covering run owed** before DRY. Re-wet triggers
+  unchanged (nif.rs backup guard / changeset handler, `query.rs core_*`, any
+  session/blob/backup/serialize/authorizer/hook code, `busy_handler.rs`,
+  `util.rs encode_val`, `blob.rs read`, or any guide edit).
+- `mix verify` GREEN (below). No S0/S1/S2 anywhere; the sole finding is the S3
+  union gap. Only intended files changed: `error_contract/probe.exs` (oracle
+  maintenance), `REVIEW_LEDGER.md`, `REVIEW_AXES.md`, `BACKLOG.md`.

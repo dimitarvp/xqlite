@@ -7,6 +7,28 @@ burn-down.
 
 ## Open
 
+- [S3] F-A10-9 (Run 13, A10): two direct-NIF error atoms bypass the `error.rs`
+  `Encoder` (which the round-1 `error_reason/0` audit was explicitly scoped to) and
+  are absent from the `error_reason/0` union AND from all of `lib/`. (1)
+  `XqliteNIF.load_extension/3` (`@spec :: :ok | Xqlite.error()`) returns
+  `{:error, :extension_loading_disabled}` when extension loading was not first
+  enabled (`native/xqlitenif/src/nif.rs:1670`) — reachable through a well-typed,
+  common call (the default state is disabled). (2) `XqliteNIF.changeset_apply/3`
+  (`@spec :: :ok | Xqlite.error()`) returns `{:error, :invalid_conflict_strategy}`
+  for a `conflict_strategy` outside `:omit | :replace | :abort` (`nif.rs:1941`) —
+  reachable only by violating the param type (dialyzer already flags such a call).
+  Both errors are correctly classified structured atoms; the only defect is the
+  union typespec omits them, so a caller pattern-matching either atom in an
+  `{:error, reason}` gets a dialyzer "can never match" warning. Same class as the
+  fixed F-A10-5/7/8; the round-1 audit missed them because it enumerated the
+  `XqliteError` `Encoder` variants, not the direct `(atoms::error(), <atom>)`
+  returns in `nif.rs`. Runtime-confirmed this session (bundled SQLite 3.53.2):
+  `XqliteNIF.load_extension(c, "/nonexistent/libfoo.so", nil)` →
+  `{:error, :extension_loading_disabled}`; `XqliteNIF.changeset_apply(c, cs,
+  :not_a_real_strategy)` → `{:error, :invalid_conflict_strategy}`. Fix (deferred,
+  S3): add both bare atoms to `error_reason/0` (optionally naming them in the two
+  docstrings, as `begin/2` does for `:invalid_transaction_mode`). NOTE: the third
+  direct-NIF atom, `:invalid_pages_per_step`, IS in the union (added in Run 9).
 - [S3] F-A11-4 (Run 9, A11): `set_busy_policy/2`'s `:max_elapsed_ms` is
   anchored at the busy slot's **first installation**, not at the start of each
   busy event, so it never resets. Once a connection has been alive (with a
