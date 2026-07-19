@@ -1716,3 +1716,199 @@ Grouped, worst-case noted:**
   any change to what a normal NIF does under the conn `Mutex` (new blocking work,
   new lock), or a `with_conn`/`with_session`/`with_live_blob`/`with_live_stmt`
   restructuring.
+
+## Run 11 — 2026-07-19 — A12 binary crossing
+
+- Commit at scan: `a6292ff` (HEAD). Scope: what happens to bytes crossing the
+  NIF boundary, BOTH directions — every inbound binary-accepting path (SQL text,
+  string/blob params, `blob_write`/`deserialize`/`changeset_*` payloads) and
+  every outbound producer (row TEXT/BLOB via the query path AND the stream/step
+  path, `blob_read`, `serialize`, `session_changeset`/`patchset`,
+  `changeset_invert`/`concat`, column names, and the raw-`enif_make_new_binary`
+  hook payloads). Composition: single Opus pass (this agent) — a source-level
+  copy-vs-refcount audit grounded in the LOCKED rustler-0.38.0 source (read, not
+  recalled: `Binary`/`OwnedBinary`/`NewBinary` `types/binary.rs`, `str`/`String`
+  encode+decode `types/string.rs`, `ResourceArc::make_binary` +
+  `enif_make_resource_binary` `resource/arc.rs`) + a build-and-measure memory
+  profile + a correctness-edges probe. A12 is a drive-and-measure axis (like
+  A4/A6), not a fleet read; every runtime claim RUN this session (harness output
+  pasted below). Did NOT re-litigate settled findings.
+
+### Inbound audit (Elixir → Rust) — copy-vs-zero-copy map
+
+| Path | Arg decode | Copy? | Notes |
+|---|---|---|---|
+| SQL text (`query`/`execute`/`execute_batch`/`query_with_changes` + cancellable) | `sql: String` (`String::decode` = `enif_inspect_binary` + `from_utf8` + `to_string`) | COPY 1× → Rust `String` | binary-ONLY; iolist → `BadArg` → ArgumentError; interior NUL → `:null_byte_in_string` (A11 F-A11-3) |
+| text params | `Term` → `elixir_term_to_rusqlite_value` `decode::<String>` | COPY → `Value::Text(String)` | then rusqlite bind SQLITE_TRANSIENT (2nd copy into SQLite) |
+| blob params (non-UTF-8) | `decode::<Binary>` → `as_slice().to_vec()` | COPY → `Value::Blob(Vec)` | then SQLITE_TRANSIENT (2nd copy) |
+| `blob_write` data | `data: Binary` → `as_slice()` | ZERO-COPY view → `sqlite3_blob_write` (SQLite copies) | binary-only |
+| `deserialize` data | `data: Binary` → `as_slice()` → `Cursor` | ZERO-COPY view, consumed synchronously | binary-only |
+| `changeset_apply`/`invert`/`concat` | `Binary` → `as_slice()` → `Cursor` | ZERO-COPY view, consumed synchronously | binary-only |
+
+- **Term-lifetime discipline HOLDS.** `Binary::decode` (`enif_inspect_binary`)
+  yields a view tied to the term's env lifetime; every inbound path either COPIES
+  it into an owned `Value`/`String` at once (params, SQL) or CONSUMES it
+  synchronously within the call (blob_write via SQLITE_TRANSIENT; deserialize /
+  changeset via a `Cursor` read that finishes before return). NO resource stores
+  a `Binary<'a>`, a `Term<'a>`, or a `&[u8]` view (struct census: XqliteConn /
+  Stream / Statement / Blob / Session hold raw ptrs / `Vec` / `AtomicPtr` only) —
+  so no slice outlives its env (no use-after-env UB).
+- **Sub-binary of a huge parent HOLDS.** A sub-binary term decodes to a
+  zero-copy view into its parent ProcBin, but since every inbound path copies or
+  synchronously consumes, the parent is never retained past the call → no
+  parent-pinning leak. Exercised for real (edge E2 below).
+- **iodata story — consistent, no divergence.** Nothing accepts iodata: rustler's
+  `Binary::decode`/`String::decode` are `enif_inspect_binary` (binary-only);
+  `Binary::from_iolist` (`enif_inspect_iolist_as_binary`, the only iolist path)
+  is UNUSED by xqlite. All public specs are `binary()`/`String.t()` (grep:
+  `lib/**` has ZERO `iodata`/`iolist`). An iolist SQL arg → `BadArg` →
+  ArgumentError (edge E5); an iolist param VALUE → structured
+  `{:unsupported_data_type, :list}`. Behavior matches typespecs and docs.
+
+### Outbound audit (Rust → Elixir) — allocation map
+
+| Producer | Mechanism | Copy? | Binary kind |
+|---|---|---|---|
+| query/execute row TEXT + all column names / schema strings | rustler `str::encode` = `OwnedBinary::new` + `enif_make_binary` | COPY | refc binary (always) |
+| query/execute row BLOB | `ResourceArc<BlobResource>::make_binary` = `enif_make_resource_binary` | **ZERO byte-copy** (wraps the owned `Vec`) | resource binary (refc, off-heap) + per-resource overhead |
+| stream/step row TEXT | `str::encode` (copies the SQLite `column_text` view) | COPY | refc binary |
+| stream/step row BLOB | `OwnedBinary::new` + `copy_from_slice` | COPY | refc binary |
+| `blob_read` | `vec![0;len]` then `to_owned_binary` (OwnedBinary copy) | COPY 2× (F-A12-2) | refc binary |
+| `serialize` / `session_changeset`/`patchset` / `changeset_invert`/`concat` | Vec → `to_owned_binary` / OwnedBinary | COPY | refc binary |
+| hook payloads (update/log/wal/commit/rollback/busy) | `enif_make_new_binary` into a fresh `msg_env` | COPY | heap binary ≤64 B else refc |
+
+- **No escaped view into SQLite-owned memory.** The stream/step TEXT path encodes
+  the `sqlite3_column_text` `&str` via `str::encode`, which allocates + copies
+  IMMEDIATELY (under the conn Mutex, pointer still valid) — the view never
+  survives the next `sqlite3_step`; BLOB copies into an `OwnedBinary` at once. The
+  ONE zero-copy outbound path (`encode_val` BLOB) wraps OWNED memory (rusqlite's
+  `Value::Blob(Vec)`), NOT a SQLite pointer, and `enif_make_resource_binary`
+  refcounts the `BlobResource` so the binary keeps its `Vec` alive independent of
+  the local `ResourceArc` (source-verified `resource/arc.rs:81-95`). RUNTIME-PROVEN
+  independent of the connection: a query blob stays byte-exact after `Xqlite.close/1`
+  + GC (edge E3). No resource holds an Elixir term (no term-pinning).
+- **Hook payloads bounded + leak-free.** update/wal/commit/rollback/log/busy
+  payloads carry only SQLite identifiers (db/table name), a formatted log
+  message, and integer rowid/frame counts — NONE is caller-data-sized (no hook
+  forwards column values), so all bounded. Every sender pairs `enif_alloc_env`
+  with an UNCONDITIONAL `enif_free_env` (verified 1:1 in all 8 hook modules +
+  the backup sender `nif.rs:1806/1822`; M4's conditional-free leak stays fixed).
+
+### Measurement — harness `binary_crossing/` (invoke `bash binary_crossing/run.sh`)
+
+- CI-isolated exactly like `scheduler/`…`type_edges/`: not under `test/`, not in
+  `elixirc_paths` (`["lib"]`), and the formatter `inputs` glob
+  (`{config,lib,test}/**`) matches ZERO `binary_crossing/` files (verified via
+  `Path.wildcard` → `[]`) — `mix verify` untouched (re-run GREEN at HEAD with the
+  harness present). Two `mix run --no-compile --no-start` children under an OS
+  `timeout`; in-memory DBs only, source data generated INSIDE SQLite via a
+  recursive-CTE `randomblob`/`hex` INSERT (no big inbound crossing to conflate);
+  no files, no SIGKILL, no pkill/name-match. Instrument: `:erlang.memory(:binary)`
+  (precise for refc + resource binaries; SQLite's own copy of the data lives in
+  SQLite's malloc heap, NOT this counter, so it isolates the crossing) + OS RSS
+  (`/proc/self/status` VmRSS). Each crossing runs INSIDE a `Task` so its death
+  frees every crossed binary → a parent snapshot after `await` isolates any
+  retention leak.
+
+- **TEETH (hard gate — run.sh ABORTs rc 2 otherwise):** a deliberate-retention
+  control (20 000 × 512 B refc binaries held across a GC) MUST grow
+  `:erlang.memory(:binary)`. Delivered **+10.83 MB** for a 9.77 MB nominal
+  payload while referenced, and **fell 10.83 MB back** on release — so the counter
+  provably tracks retained refc binaries AND detects release; every "0 residual"
+  below is real. (Analogue of the lifecycle-harness leak teeth.)
+
+- **S1 — large result (100 000 rows × [256 B TEXT + 256 B BLOB], ~48.8 MB
+  payload), full materialization:** `query` held **42.73 MB binary / 61.9 MB
+  total**, peak RSS Δ +98 MB, **448 B/row** binary; `stream`-to-list held
+  **61.0 MB binary / 83.7 MB total**, peak RSS Δ +124 MB, **640 B/row** binary
+  (the query path is ~1.3× leaner — its zero-copy resource binaries don't
+  re-copy blob bytes into the binary allocator; stream's OwnedBinary path does).
+  **RETENTION-LEAK gate: 0.0 MB residual on BOTH paths** (holder-process death
+  reclaims every crossed binary) → no leak.
+- **S2 — streaming consume-and-discard bounded peak (batch 500):** peak binary
+  **0.62 MB above start** for the same 100 000-row scan vs 42.73 MB for the full
+  query → **68.5× smaller peak**. The streaming memory advantage, measured: peak
+  is ~one batch, independent of N.
+- **S3 — many small blobs (100 000 × 16 B):** `query` (resource binary)
+  **23.4 MB total / 128 B/row binary**; `stream` (OwnedBinary → heap binary for
+  ≤64 B) **~7.5–13 MB total / ~0–2 B/row binary**; total-memory ratio **1.8×**
+  (run-to-run 1.5–3× under settle noise; the ≤64 B blobs become process-heap
+  binaries on the stream path but always-off-heap resource binaries on the query
+  path). Well under the 10× cliff → S3 characterization (F-A12-1).
+- **S4 — refc classification:** a 1000 B blob lands in the binary allocator
+  (>64 B), an 8 B value in the process heap (≤64 B) — the documented threshold,
+  confirmed.
+
+### Correctness edges — `binary_crossing/edges.exs` (hard assertions, all PASS)
+
+- **E1** empty (0-byte) BLOB round-trips as `<<>>` on BOTH paths — query
+  (`make_binary` on an empty `Vec`, dangling-aligned ptr, len 0) and stream
+  (null-ptr + len-0 branch). No crash.
+- **E2** a 32-byte SUB-BINARY carved from an 8 MB parent round-trips byte-exact as
+  a blob PARAM and as `blob_write` data (inbound copies the view; never retains
+  the parent).
+- **E3** a `query` blob (resource binary owning a copied-out `Vec`) stays
+  byte-exact AFTER `Xqlite.close/1` + GC → the crossed binary is independent of
+  SQLite-owned memory (no escaped view).
+- **E4** interior-NUL BLOB `<<1,0,255,0,2>>` + TEXT `"a\0b\0c"` byte-exact via
+  query AND stream.
+- **E5** an iolist SQL arg → ArgumentError; an iolist param value →
+  `{:unsupported_data_type, :list}` — iodata rejected, binary-only, matching the
+  typespecs.
+
+### Findings — 0 S0/S1/S2, 3 S3 (BACKLOG, NOT fixed this run)
+
+- **F-A12-1 — S3 — query-path resource-binary vs stream-path OwnedBinary
+  asymmetry for BLOB columns.** Same bytes, different backing; measured 1.3×
+  (large, query leaner) to ~1.5–3× (tiny blobs, query heavier via per-resource
+  overhead). No correctness impact, no leak, < 10× cliff. → BACKLOG +
+  `guides/gotchas.md` ("BLOB values are backed differently by `query` vs `stream`").
+- **F-A12-2 — S3 — `blob_read` double-copies** (SQLite → `vec` → `OwnedBinary`);
+  reading straight into an `OwnedBinary` target would halve the peak + memcpys.
+  Pure efficiency. → BACKLOG.
+- **F-A12-3 — S3 (latent/OOM-only) — TEXT/string encode panics on alloc failure
+  while BLOB encode degrades gracefully.** rustler's `str::encode`
+  (`string.rs:34`) `panic!`s if `OwnedBinary::new` returns `None`; our BLOB
+  encoders use `ok_or_else(InternalEncodingError)`. Caught by the return-encode
+  `catch_unwind` (Run 1) → `:nif_panicked`, never a VM crash; OOM-only (a ~1 GB
+  TEXT near `SQLITE_MAX_LENGTH`). Same class as M8/M10/M11; crate-wide consistency
+  call (column names + schema strings share `str::encode`). Cross-refs A1. →
+  BACKLOG.
+
+### Completeness critic
+
+- Covered: every inbound binary path (SQL/params/blob_write/deserialize/changeset)
+  and every outbound producer (row TEXT/BLOB × query+stream, blob_read, serialize,
+  changeset/session, column names, all six hook payloads) mapped copy-vs-refcount
+  against the LOCKED rustler source; large-result memory profiled query-vs-stream
+  with teeth; sub-binary, empty-blob, escaped-view, interior-NUL, and iodata
+  exercised at runtime; hook-payload bounds + msg_env balance verified. NOT covered
+  / honest gaps: (1) the memory instrument is `:erlang.memory(:binary)` + RSS +
+  the holder-death leak gate, not a per-binary refcount BIF (none exposed); a leak
+  smaller than settle noise (~±0.5 MB) could hide, but the teeth prove the counter
+  tracks retention at the MB scale. (2) Values were driven to 256 B / 64 MB, not to
+  the `SQLITE_MAX_LENGTH` (~1 GB) ceiling (RAM) — the OOM-panic reachability of
+  F-A12-3 is reasoned, not forced. (3) No TSan/Miri on the live NIF (Runs 2/4/5:
+  Miri can't run the bundled C SQLite); the escaped-view conclusion rests on the
+  source deref-chain audit + E3's after-close byte-exactness, bounded by the fact
+  that the sole zero-copy path wraps OWNED memory. (4) `str::encode`'s OOM panic is
+  not force-triggered (needs real allocator exhaustion); its catch-and-surface is
+  inherited from Run 1's source-verified rustler behavior, not re-run here.
+
+### Disposition & dryness
+
+- **0 S0/S1/S2 — nothing to fix.** The binary-crossing model is sound: inbound
+  copies-or-synchronously-consumes with no term/slice escaping its env; outbound
+  copies every SQLite view before return and the lone zero-copy path refcounts
+  owned memory; no leak (gate + msg_env balance); no ≥10× cliff (query-vs-stream
+  1.3–3×); iodata consistently rejected per the typespecs. 3 S3 filed to BACKLOG
+  (F-A12-1 + gotchas, F-A12-2, F-A12-3); none blocks per the ratified bar.
+  `mix verify` GREEN with the harness present.
+- **A12: none-measured → one covering measure+audit run, 0 S0/S1/S2, 3 S3, teeth
+  proven.** This is the FIRST dedicated A12 covering run. Per the
+  two-consecutive-covering-runs rule A12 is NOT yet DRY; one more covering run is
+  owed. Churn re-wets it: any change to `util.rs` `encode_val` /
+  `sqlite_row_to_elixir_terms` / the param decoders, `blob.rs` read/write,
+  `session.rs` `to_owned_binary`, the `serialize`/`deserialize`/`changeset_*` NIFs,
+  the `hook_util.rs` `make_binary` / any hook payload, or a rustler bump (the
+  Binary/OwnedBinary/resource-binary semantics are version-locked evidence).

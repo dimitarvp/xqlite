@@ -323,3 +323,40 @@ concurrency. Open one connection per process (or use a pool of independent
 handles). If you genuinely must share a handle, treat *every* call on it —
 including the cheap readers — as something that can block for as long as the
 longest operation currently running on that connection.
+
+## Memory and binaries
+
+### `query` materializes the whole result; `stream` bounds the peak
+
+`Xqlite.query/4` builds the *entire* result set in memory before it returns —
+every row, every value, all at once. For a large result that is a large, if
+transient, allocation: a 100 000-row result of ~0.5 KB rows is ~50 MB of BEAM
+binaries held live until you drop the result. `Xqlite.stream/4` instead fetches
+in batches, so if you *consume and discard* rows as they arrive (rather than
+`Enum.to_list/1`-ing them back into one list) the peak stays bounded to roughly
+one batch, independent of how many rows the query returns — measured at ~68×
+smaller peak binary memory for a 100 000-row scan. The rule of thumb is the
+usual one, now with a number behind it: **if a result set is large and you don't
+need it all at once, stream it and process each batch, don't `query` it.**
+
+There is no memory leak on either path — once you drop the result (or the
+consuming process dies), all of it is reclaimed at the next GC.
+
+### BLOB values are backed differently by `query` vs `stream`
+
+A subtlety only worth knowing if you are profiling memory for a blob-heavy
+workload. A `BLOB` column value crosses the NIF boundary two different ways:
+
+- through `query` / `query_with_changes` / `execute`, a blob is handed back as a
+  *reference-counted resource binary* that wraps SQLite's bytes with no extra
+  copy — leanest for large blobs;
+- through `stream` / prepared `step` / `blob_read`, a blob is *copied* into a
+  fresh binary.
+
+They are byte-for-byte identical values; only the backing differs. The practical
+consequence is small and never a correctness issue: reading *many small* blobs
+via `query` costs modestly more memory than streaming them (roughly 1.5–3× in
+measurements), because every blob — however tiny — becomes an off-heap
+reference-counted binary with per-object overhead, whereas the streamed copy of a
+≤64-byte blob can live cheaply on the process heap. For a handful of blobs, or
+for large blobs, the difference is negligible.

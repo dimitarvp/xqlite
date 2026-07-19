@@ -285,7 +285,38 @@ authorizer/hook code, `busy_handler.rs`, or any guide edit.
 ### A12. Binary crossing
 Probes: copy vs refcounted binaries across the boundary; memory
 profile of large result sets; iodata acceptance on the way in.
-Coverage: none measured.
+Coverage: Run 11 — first dedicated covering run (source audit against the
+LOCKED rustler-0.38.0 `Binary`/`OwnedBinary`/`make_binary` semantics +
+build-and-measure `binary_crossing/run.sh`, CI-isolated). INBOUND map:
+SQL text + params always COPY into owned rusqlite `Value`/`String`;
+`blob_write`/`deserialize`/`changeset_*` take a ZERO-COPY `Binary::as_slice`
+view consumed synchronously (SQLITE_TRANSIENT / `Cursor`). No `Binary`/`Term`/
+slice stored in any resource → no view escapes its env (no use-after-env UB);
+sub-binary of a huge parent never retained past the call (E2). OUTBOUND map:
+TEXT + column names COPY via rustler `str::encode`; stream/step BLOB copies into
+`OwnedBinary`; the query path BLOB is ZERO byte-copy via
+`enif_make_resource_binary` wrapping the owned `Vec` (refcounted, keeps the Vec
+alive independent of the local ResourceArc — source-verified). NO SQLite-owned
+view escapes: every column view is copied before return, and the one zero-copy
+path wraps OWNED memory (RUNTIME-PROVEN independent of the conn — a query blob
+stays byte-exact after `close/1` + GC, E3). Hook payloads (`enif_make_new_binary`
+into `msg_env`) are bounded (identifiers / log message / counts, never caller-
+data-sized) and leak-free (alloc/free balanced 1:1 in all 8 senders; M4 holds).
+iodata REJECTED everywhere (rustler decodes binaries only; `from_iolist` unused);
+all specs `binary()`/`String.t()`, consistent — iolist SQL → ArgumentError,
+iolist param → `{:unsupported_data_type, :list}` (E5). MEASURED (100k rows):
+leak-gate PASS (0.0 MB residual after holder death, both paths); streaming
+consume-and-discard peak 68.5× below full-query materialization; query-vs-stream
+BLOB total-memory asymmetry 1.3× (large, query leaner) to ~1.5–3× (tiny blobs,
+query heavier) — under the 10× cliff; teeth (a 20k×512 B retention control)
+proven to grow + settle the `:erlang.memory(:binary)` counter. 0 S0/S1/S2; THREE
+S3 (F-A12-1 query-vs-stream resource-binary/OwnedBinary asymmetry → BACKLOG +
+gotchas; F-A12-2 `blob_read` double-copy → BACKLOG; F-A12-3 latent/OOM-only
+`str::encode` alloc-panic vs graceful BLOB encode → BACKLOG). NOT yet DRY (first
+covering run; one more owed). Churn re-wets: `util.rs` `encode_val` /
+`sqlite_row_to_elixir_terms` / param decoders, `blob.rs` read/write,
+`session.rs` `to_owned_binary`, `serialize`/`deserialize`/`changeset_*`,
+`hook_util.rs` `make_binary` / any hook payload, or a rustler bump.
 
 ### A13. Hot-upgrade posture
 rustler upgrade support is an open upstream gap; on_load is

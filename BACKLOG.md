@@ -118,6 +118,50 @@ burn-down.
   single-owner model) and rely on the gotcha? Repro: share one handle across two
   processes, run a slow `query` on one, `changes` on the other → the `changes`
   call blocks for the query's full duration on a normal scheduler.
+- [S3] F-A12-1 (Run 11, A12): BLOB column values cross the boundary two ways —
+  `query`/`query_with_changes`/`execute` (via `encode_val`, `util.rs:27-36`) hand
+  a blob back as a ZERO-copy resource binary (`ResourceArc<BlobResource>::
+  make_binary` → `enif_make_resource_binary`, refcounted, off-heap regardless of
+  size), while `stream`/prepared `step`/`blob_read` (via
+  `sqlite_row_to_elixir_terms`, `util.rs:337-373`, and `blob::read`) COPY into an
+  `OwnedBinary`. Byte-identical values; only the backing differs. Measured
+  (`binary_crossing/run.sh`, 100k rows): for LARGE blobs the query path is ~1.3×
+  LEANER in total memory (no copy); for MANY SMALL blobs the query path is
+  ~1.5–3× HEAVIER (every blob is an off-heap resource binary with per-object
+  overhead, vs a ≤64 B streamed copy that can live on the process heap). No
+  correctness impact, no leak (leak-gate PASS), and the ratio is well under the
+  10× cliff bar → S3 characterization, not a divergence. Documented user-facing in
+  `guides/gotchas.md` ("BLOB values are backed differently by `query` vs
+  `stream`"). Maintainer question: acceptable as-is (documented), or unify the two
+  paths (e.g. copy small blobs on the query path too, or wrap on the stream path)?
+- [S3] F-A12-2 (Run 11, A12): `blob_read` double-copies. `blob::read`
+  (`blob.rs:131-164`) reads SQLite into a `vec![0u8; actual_len]` buffer, then
+  `to_owned_binary` (`session.rs:128-139`) allocates an `OwnedBinary` and copies
+  the buffer into it — two allocations and two memcpys for one read, and a
+  transient 2× peak on a large `blob_read`. Reading directly into an
+  `OwnedBinary`/`NewBinary` target (as `serialize` does: alloc-then-copy-once)
+  would halve both. Pure efficiency, no correctness impact. Fix: allocate the
+  `OwnedBinary` first, `sqlite3_blob_read` into its `as_mut_slice()`, drop the
+  intermediate `Vec`.
+- [S3] F-A12-3 (Run 11, A12, latent/OOM-only): TEXT column values (and column
+  names, and all `String`/`&str` we hand back) cross via rustler's `str::encode`
+  (`rustler-0.38.0/src/types/string.rs:30-42`), which `panic!("binary term
+  allocation fail")`s if `OwnedBinary::new(len)` returns `None` on allocation
+  failure — whereas OUR BLOB encoders degrade gracefully with
+  `OwnedBinary::new(len).ok_or_else(InternalEncodingError)` (`util.rs:346,363`,
+  `session.rs:132`, `nif.rs:1623`). The panic is CAUGHT by rustler's
+  return-value-encode `catch_unwind` (Run 1: surfaces as `:nif_panicked`, never a
+  VM crash), so it does not break the "will never crash the BEAM" claim, but it is
+  inconsistent with the crate's graceful-degradation convention and is the same
+  class as the fixed M8 (and the latent M10/M11). Reachability is OOM-only (a
+  ~1 GB TEXT value near `SQLITE_MAX_LENGTH` on a memory-constrained box). Fixing
+  only the two row-value TEXT sites (`encode_val` Value::Text + the SQLITE_TEXT
+  arm of `sqlite_row_to_elixir_terms`) while column-names / schema strings still
+  route through `str::encode` would be inconsistent — so this is really a
+  crate-wide "encode all TEXT via a graceful OwnedBinary helper" consistency call.
+  Cross-refs A1. Maintainer question: reimplement TEXT-value encoding to degrade
+  like BLOB, or accept rustler's `str::encode` OOM-panic (caught → `:nif_panicked`)
+  as the crate-wide behavior?
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)
