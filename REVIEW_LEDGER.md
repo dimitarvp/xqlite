@@ -2633,3 +2633,174 @@ Grouped, worst-case noted:**
 - `mix verify` GREEN (below). No S0/S1/S2 anywhere; the sole finding is the S3
   union gap. Only intended files changed: `error_contract/probe.exs` (oracle
   maintenance), `REVIEW_LEDGER.md`, `REVIEW_AXES.md`, `BACKLOG.md`.
+
+---
+
+## Run 14 — 2026-07-19 — F-A14-1 deciding probe (constrained-RAM)
+
+- Commit at scan: `e14fe12` (HEAD, clean). A TARGETED probe run (not a full axis
+  re-run): it discharges the ONE deferred deciding probe Run 12 left open under
+  F-A14-1 — reproduce (or bound) the spurious-`SQLITE_NOMEM` flake behind gotcha #1
+  under a MEMORY CAP mimicking a constrained CI runner. Composition: single Opus
+  pass (this agent). Every runtime claim below was RUN this session (commands +
+  output captured) against the bundled SQLite 3.53.2 on OTP 29 / Elixir 1.20.2,
+  rustler 0.38.0. Substrate: systemd 261 user manager, cgroup v2 (memory
+  controller delegated), prlimit util-linux 2.42.2, 15.9 GB RAM + 4 GB swap.
+  BEAM boots at ~100 MB RSS but reserves ~3.74 GB VIRTUAL (VmSize) — the load-
+  bearing calibration fact for the two mechanisms below. Orchestrator commits.
+
+### The extension (`test_arch/capped_probe.exs` + `capped_run.sh`, both new)
+
+- Run 12's `test_arch/probe.exs` per-cycle footprint (a 200×1 KB-row transaction)
+  is FAR too small to differentiate under any sane cap, so a NEW probe was added
+  alongside it (the Run-12 harness is untouched). Each worker HOLDS a large
+  allocation in a private `:memory:` DB (1 MB `zeroblob` rows) — in-memory DB
+  pages live in SQLite's shared process-global heap, the exact global gotcha #1
+  names, so a malloc-NULL there surfaces as `SQLITE_NOMEM` (code 7), the literal
+  symptom. The **parallel** leg rendezvouses K workers at a BARRIER so all K holds
+  coexist (peak ≈ baseline + K×H); the **serial** control holds one at a time
+  (peak ≈ baseline + 1×H). A cap between the two peaks is the deciding probe. Each
+  completed hold runs `PRAGMA integrity_check` before teardown (corruption oracle,
+  per the "byte-compare where legs complete" rule — 0 corruption everywhere).
+  Single leg per process, classification-bearing exit codes (0 clean · 3
+  `SQLITE_NOMEM` seen · 1 anomaly/corruption · 2 setup); the wrapper adds external
+  137 = cgroup SIGKILL, 134/135/136 = BEAM/C abort, 124 = timeout. CI-isolated
+  exactly like the rest of `test_arch/` (not under `test/`, not in `elixirc_paths`,
+  not matched by the formatter `inputs` glob `{config,lib,test}/**`).
+
+### Peak-footprint calibration (UNCAPPED — chooses the ladder rungs)
+
+- `K=24 hold=30 MB`, self-measured VmHWM from `/proc/self/status`:
+  - **serial** peak VmHWM **~134–137 MB** (RSS returns to ~105 MB between cycles —
+    each close frees back to the OS), exit 0, 24/24 clean.
+  - **parallel** peak VmHWM **~876–900 MB** (24 holds coexisting), exit 0, 24/24
+    clean. → a **~6.5× peak-footprint amplification**, parallel over serial, and a
+    wide cap window (~150–850 MB) where serial should survive and parallel die.
+
+### TOOTH — the cap must BIND the real BEAM+xqlite process (hard gate)
+
+- Neutral (non-BEAM) control that the cap MECHANISM itself binds, RUN this session:
+  - cgroup: `systemd-run --user --scope -p MemoryMax=200M -p MemorySwapMax=0 --
+    python3 -c 'bytearray(600MB)'` → **rc 137** (SIGKILL); same alloc uncapped → rc 0.
+  - prlimit: `prlimit --as=300M -- python3 -c 'bytearray(600MB)'` → **MemoryError**
+    (malloc→NULL); uncapped → rc 0.
+- Cap binds the REAL process via the SAME `:memory:`-zeroblob path (`alloc_tooth`
+  holds 600 MB), RUN this session:
+  - cgroup, cap 256 MB → **rc 137 OOMKILL** (killed mid-fill); uncapped → rc 0.
+  - prlimit, `--as=4000M` → **rc 3**, probe printed `SQLITE_NOMEM at row 370 — cap
+    BOUND via malloc-NULL`, VmSize pinned at `4096000 kB` = the 4000 MB cap;
+    uncapped → rc 0. This is the clean malloc-NULL→`SQLITE_NOMEM` binding (NOT a
+    BEAM abort). No verdict was trusted before both teeth tripped.
+
+### Cap ladder A — cgroup `MemoryMax` + `MemorySwapMax=0` (RSS cap; SIGKILL surface)
+
+    cap(MB) | parallel      | serial
+    --------+---------------+---------
+    1024    | PASS(0)       | PASS(0)
+     768    | OOMKILL(137)  | PASS(0)
+     512    | OOMKILL(137)  | PASS(0)
+     384    | OOMKILL(137)  | PASS(0)
+     256    | OOMKILL(137)  | PASS(0)
+     192    | OOMKILL(137)  | PASS(0)
+     144    | OOMKILL(137)  | PASS(0)
+
+- **DIFFERENTIAL** between 1024 (both PASS; parallel peak ~880 MB < 1024) and 768
+  (parallel OOM-killed, serial PASS) and holding all the way down to 144 (serial
+  peak ~134 MB still fits). Under a cgroup RSS cap a SERIALIZED run survives, the
+  PARALLEL run is OOM-KILLED — confirming **peak-FOOTPRINT amplification**. Per the
+  verdict logic: an OOM-kill (SIGKILL 137) is a CGROUP KILL, NOT the SQLite-`NOMEM`
+  atom — it confirms the footprint-amplification half of the mechanism, not the
+  literal "out of memory" signature.
+
+### Cap ladder B — `prlimit --as` (address-space cap; malloc-NULL → `SQLITE_NOMEM`)
+
+    cap(MB) | parallel      | serial
+    --------+---------------+---------
+    4500    | PASS(0)       | PASS(0)
+    4200    | PASS(0)       | PASS(0)
+    4000    | NOMEM(3)      | PASS(0)
+    3900    | NOMEM(3)      | PASS(0)
+    3850    | ANOMALY(1)*   | PASS(0)
+    3800    | NOMEM(3)      | PASS(0)
+
+- **DIFFERENTIAL** at 4000 MB (and 3900/3800): the PARALLEL leg hit `SQLITE_NOMEM`
+  while the SERIAL control PASSED at the SAME cap — e.g. one 3900 MB run:
+  `holds=24 clean=6 nomem=18 ... exit 3 — SQLITE_NOMEM observed (18)`, VmSize pinned
+  at ~3992 MB. This is the **LITERAL gotcha #1 symptom** — spurious "out of memory"
+  (`SQLITE_NOMEM`, code 7) in the parallel-only leg — reproduced under constrained
+  RAM. Because BEAM's ~3.74 GB virtual floor sits just below these rungs, the
+  window is narrow (~3.78–4.4 GB) and boot-VmSize varies ±5 MB run-to-run, so the
+  exact rung where PASS flips to NOMEM shifts slightly between runs.
+- `*` the single **ANOMALY(1)** is a NON-DETERMINISTIC near-boot-floor artifact: at
+  the tightest rungs a BEAM-side allocation (not SQLite's) occasionally fails first
+  (`erts_mmap`/`eheap`), exiting 1 instead of a clean `SQLITE_NOMEM`. It hops rungs
+  between runs (3900 one run, 3850 another, 3800 another) and re-running the rung
+  yields a clean NOMEM(3). It is a BEAM allocator effect under an address-space
+  starve, NOT an xqlite defect and NOT the SQLite-NOMEM signature — classified
+  separately (exit 1, ABORT-class family), never conflated with NOMEM(3).
+
+### Verdict — F-A14-1 mechanism CONFIRMED (upgraded from PLAUSIBLE); NOT a defect
+
+- The deferred deciding probe reproduced the differential BOTH ways: under a cap a
+  serialized run survives, a parallel run of K coexisting connections in one OS
+  process fails — as an OOM-kill under a cgroup RSS cap (footprint amplification)
+  AND as the literal `SQLITE_NOMEM` "out of memory" under an address-space cap
+  (the exact gotcha #1 symptom). So gotcha #1's spurious-NOMEM mechanism is
+  **CONFIRMED** (Run 12 could not force it only because the dev box had unconstrained
+  RAM; the flake is memory-pressure-gated, exactly as Run 12 reasoned). `test.seq`
+  is CONFIRMED load-bearing: the SERIAL leg IS the model of one-OS-process-per-file
+  (one connection's footprint at a time), and it survived every cap the parallel
+  leg died at.
+- **This is a confirmed MECHANISM, NOT a product defect.** SQLite correctly returns
+  `SQLITE_NOMEM` when its allocator is starved; xqlite classifies and propagates it
+  as a structured `{:error, {:sqlite_failure, 7, _, _}}` with ZERO crash, ZERO
+  corruption (every completed hold's `integrity_check` = ok), across thousands of
+  NOMEM-triggering inserts. That is correct, defensive behavior — the "flake" is a
+  TEST-ARCHITECTURE property (many async connections summing their footprint in one
+  VM), and `test.seq` is the working, load-bearing mitigation. There is no xqlite
+  bug here: 0 S0/S1/S2/S3, 0 new product defects.
+
+### Teeth
+
+- Cap-binding teeth (both mechanisms) tripped before any rung was trusted (above):
+  neutral python control + the real-process `alloc_tooth`, each PASS uncapped and
+  die/NOMEM capped; `capped_run.sh` ABORTs (rc 2) if either the uncapped hold fails
+  or the capped hold survives. The per-hold `integrity_check` corruption oracle
+  (inherited from the Run-12 probe philosophy) reported 0 corruption in every
+  completed leg. Scope hygiene: transient scopes carry `CollectMode=inactive-or-
+  failed` (0 lingering failed units verified post-run); DBs are `:memory:` (no temp
+  files); only spawned PIDs die (systemd/cgroup-scoped or prlimit'd children).
+
+### Completeness critic — honest gaps
+
+- (1) The probe stresses SQLite's INSERT/storage-side allocator; it does NOT
+  exercise the rustler `str::encode` TEXT-RETURN OOM-panic path (backlog F-A12-3,
+  a distinct latent/OOM-only item) — that is a separate encode-side surface, not
+  re-decided here. (2) The near-boot-floor prlimit ANOMALY is a BEAM allocator
+  artifact under an address-space starve, not xqlite; a wider virtual headroom
+  would remove it but also raise the floor. (3) The exact CI failure (many test
+  files' setup pressure at once) is MODELED (K coexisting connection footprints),
+  not REPLAYED (a bare full-async `mix test` flake-hunt under the cap was not run —
+  the synthetic barrier stresses the shared allocator far harder and more
+  deterministically). (4) No TSan/Miri on the live NIF (Runs 2/4/5: Miri can't run
+  the bundled C SQLite); the oracle is exit-code + integrity + tallies, bounded by
+  the THREADSAFE=1 source analysis from Run 12.
+
+### Disposition & dryness
+
+- **F-A14-1 CONFIRMED → CLOSED** in BACKLOG.md with the constrained-RAM verdict
+  (both differentials, tooth evidence, the honest narrow-window/ANOMALY caveats).
+  0 S0/S1/S2, 0 new product defects — a confirmed MECHANISM is not a defect.
+- **A14 dryness:** because this covering probe found **zero new CONFIRMED product
+  defects**, it counts toward the arithmetic. Run 12 (re-derivation + symbol
+  analysis + parallel/serial stress) was the first clean covering run; Run 14 (the
+  constrained-RAM decider) is the second consecutive clean covering run and closes
+  the one probe Run 12 deferred → **A14 is DRY**. Re-wet triggers UNCHANGED: a
+  bundled-SQLite version bump (re-verify THREADSAFE + #1860 + static-bundle
+  symbols), any `test.seq`/opener change, or a rusqlite/libsqlite3-sys bump
+  (re-check `-DSQLITE_THREADSAFE=1`). Note the scope: Run 14 re-decided the NOMEM
+  flake specifically; it did not re-run the full Run-12 symbol/THREADSAFE
+  re-derivation (unchanged at this commit, re-wet only by a SQLite bump).
+- `mix verify` GREEN (below). Only intended files changed: `test_arch/capped_probe.exs`
+  + `test_arch/capped_run.sh` (new, CI-isolated), `REVIEW_LEDGER.md`,
+  `REVIEW_AXES.md`, `BACKLOG.md`.

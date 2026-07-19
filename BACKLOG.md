@@ -108,22 +108,6 @@ burn-down.
   upgrade support is ever wanted, carry it to rustler as a feature request (populate
   `upgrade`/`unload` from the `init!` macro). Repro: on a running node,
   `:code.load_file(XqliteNIF)` → `{:error, :on_load_failure}`.
-- [S3] F-A14-1 (Run 12, A14): the spurious-"out of memory" flake behind gotcha #1
-  (parallel test files contending on the shared per-OS-process SQLite globals) was
-  NOT reproduced at dev-box scale — `test_arch/run.sh` ran ~830k parallel isolated-DB
-  ops (36×60 and 48×40 + 48×600 open/close churn) with 0 crash / 0 corruption / 0
-  NOMEM, byte-for-byte equal to the serialized control (teeth: byte-smash →
-  SQLITE_CORRUPT caught). The mechanism is graded PLAUSIBLE (not refuted): it is a
-  RAM/environment-sensitive contention/flake class (a 7 GB GHA runner holding many
-  async connections is a far tighter allocator than this box; true C-level
-  concurrency is also scheduler-capped at ~10 dirty-IO schedulers, already
-  saturated), and rusqlite#1860 is a real OPEN upstream issue in the class.
-  `mix test.seq` remains the load-bearing mitigation regardless (it removes the
-  shared-globals surface deterministically). **Deferred deciding probe:** re-run
-  `test_arch/` under a cgroup RAM cap (e.g. `systemd-run --scope -p MemoryMax=1G`)
-  mimicking a constrained runner to try to force the parallel-only NOMEM, which
-  would upgrade the verdict from PLAUSIBLE to CONFIRMED. Repro: `bash
-  test_arch/run.sh` (currently PASS = no repro).
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)
@@ -158,6 +142,35 @@ burn-down.
 
 ## Closed
 
+- 2026-07-19 (Run 14, A14) F-A14-1 — the spurious-"out of memory" (`SQLITE_NOMEM`)
+  flake behind gotcha #1: mechanism CONFIRMED (upgraded from PLAUSIBLE) via the
+  deferred constrained-RAM deciding probe; CLOSED. Run 12 could not reproduce it at
+  dev-box scale only because RAM was UNCONSTRAINED. The new capped extension
+  (`test_arch/capped_probe.exs` + `capped_run.sh`, CI-isolated) holds a large
+  `:memory:`-DB allocation per worker and compares a PARALLEL leg (K holds coexist
+  at a barrier, peak ~876 MB for K=24×30 MB) against a SERIAL control (one hold at a
+  time, peak ~134 MB — a ~6.5× amplification) under an external memory cap. RUN this
+  session, both cap mechanisms reproduced the differential (parallel fails while
+  serial survives at the SAME cap): (a) cgroup `MemoryMax`+`MemorySwapMax=0` →
+  parallel OOM-KILLED (rc 137) at ≤768 MB, serial PASS down to 144 MB — peak-
+  FOOTPRINT amplification; (b) `prlimit --as` → parallel `SQLITE_NOMEM` (code 7,
+  exit 3; e.g. 18/24 workers) at ≤4000 MB, serial PASS — the LITERAL gotcha symptom
+  (malloc-NULL inside SQLite). Teeth: both caps proven to bind (neutral python
+  control + a real-process `alloc_tooth` 600 MB hold, PASS uncapped / die-or-NOMEM
+  capped; the prlimit tooth prints `SQLITE_NOMEM at row 370 — cap BOUND via
+  malloc-NULL`, VmSize pinned at the cap). NOT a product defect: SQLite correctly
+  returns `SQLITE_NOMEM` under allocator starvation, xqlite propagates it as a
+  structured `{:error, {:sqlite_failure, 7, _, _}}` with 0 crash / 0 corruption
+  (`integrity_check` = ok on every completed hold); the flake is a TEST-ARCHITECTURE
+  property and `mix test.seq` (one OS process per file → one connection's footprint
+  at a time = the surviving serial model) is the confirmed load-bearing mitigation.
+  Honest caveats: an OOM-kill is a cgroup SIGKILL, not the literal `NOMEM` atom (only
+  the prlimit path yields the literal signature); BEAM's ~3.74 GB virtual-boot floor
+  makes the prlimit window narrow, so a non-deterministic near-floor BEAM-side
+  allocation ANOMALY (exit 1, an `erts_mmap`/`eheap` starve, NOT the SQLite path)
+  hops the tightest rung between runs. Full transcript: REVIEW_LEDGER.md Run 14.
+  Repro: `MECH=cgroup bash test_arch/capped_run.sh` and `MECH=prlimit bash
+  test_arch/capped_run.sh`.
 - 2026-07-19 (S3 fix pass round 2, A10) F-A10-1 — text-parse census exceptions:
   RESOLVED, split by whether SQLite gives a code. The four
   no-such-table/index + table/index-exists arms (`classify_sqlite_error`) are all

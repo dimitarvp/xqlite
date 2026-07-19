@@ -436,6 +436,30 @@ reproduction). NOT yet DRY (first covering run; one more owed). Churn
 re-wets: a bundled-SQLite version bump (re-verify THREADSAFE + #1860 +
 static-bundle symbols), a `test.seq`/opener change, or a rusqlite/
 libsqlite3-sys bump (re-check `-DSQLITE_THREADSAFE=1`).
+DECIDING PROBE (Run 14, 2026-07-19): the deferred F-A14-1 constrained-RAM
+reproduction. A new CI-isolated capped extension (`test_arch/capped_probe.exs` +
+`capped_run.sh`) holds a large `:memory:`-DB allocation per worker and compares a
+barrier-synchronised PARALLEL leg (K holds coexist, peak ~876 MB @ K=24×30 MB)
+against a SERIAL control (one hold at a time, peak ~134 MB — ~6.5× amplification)
+under an external cap. RUN this session, BOTH mechanisms reproduced the
+differential (parallel fails while serial survives at the SAME cap): cgroup
+`MemoryMax`+`MemorySwapMax=0` → parallel OOM-KILLED (137) ≤768 MB / serial PASS to
+144 MB (peak-FOOTPRINT amplification); `prlimit --as` → parallel `SQLITE_NOMEM`
+(code 7) ≤4000 MB / serial PASS (the LITERAL "out of memory" symptom, malloc-NULL
+inside SQLite). Teeth: both caps proven to bind (neutral python control + a
+real-process 600 MB `alloc_tooth`; prlimit prints `SQLITE_NOMEM ... cap BOUND via
+malloc-NULL`). Distinguished carefully: an OOM-kill is a cgroup SIGKILL, not the
+literal NOMEM atom (only prlimit yields it); a non-deterministic near-boot-floor
+BEAM `erts_mmap`/`eheap` ANOMALY (exit 1) is NOT the SQLite path. VERDICT: gotcha #1
+mechanism CONFIRMED (upgraded from PLAUSIBLE — Run 12 non-repro was only the box's
+unconstrained RAM); `test.seq` CONFIRMED load-bearing (the surviving serial leg IS
+its model). This is a confirmed MECHANISM, **NOT a product defect** — SQLite
+correctly returns `SQLITE_NOMEM` under starvation, xqlite propagates it structured
+with 0 crash / 0 corruption (integrity ok on every completed hold). F-A14-1 CLOSED.
+DRYNESS: zero new CONFIRMED product defects, so this counts toward the arithmetic;
+Run 12 (re-derivation) + Run 14 (constrained-RAM decider) = two consecutive clean
+covering runs → **A14 DRY**. Re-wet triggers UNCHANGED (a bundled-SQLite version
+bump, a `test.seq`/opener change, or a rusqlite/libsqlite3-sys bump).
 
 ## Release-readiness axis (RC gate; both repos)
 
