@@ -366,127 +366,131 @@ impl StmtCounters {
 
 // --- encoding to Elixir -----------------------------------------------------
 
+/// Finalizes a chained `map_put` build. A map-build failure is practically
+/// unreachable (the receiver is always a map), but degrade it to a structured
+/// `InternalEncodingError` term instead of panicking — matching the crate's
+/// graceful `ok_or_else`/`map_err` convention rather than `unwrap`.
+#[inline]
+fn map_or_encoding_error<'b>(
+    env: Env<'b>,
+    built: rustler::NifResult<Term<'b>>,
+    context: &str,
+) -> Term<'b> {
+    built.unwrap_or_else(|_| {
+        XqliteError::InternalEncodingError {
+            context: context.to_string(),
+        }
+        .encode(env)
+    })
+}
+
 impl Encoder for ExplainAnalyze {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         let scans_terms: Vec<Term> = self.scans.iter().map(|s| s.encode(env)).collect();
         let plan_terms: Vec<Term> = self.query_plan.iter().map(|r| r.encode(env)).collect();
 
-        let map = map_new(env);
-        let map = map
+        let built = map_new(env)
             .map_put(
                 atoms::wall_time_ns().encode(env),
                 self.wall_time_ns.encode(env),
             )
-            .unwrap();
-        let map = map
-            .map_put(
-                atoms::rows_produced().encode(env),
-                self.rows_produced.encode(env),
-            )
-            .unwrap();
-        let map = map
-            .map_put(
-                atoms::stmt_counters().encode(env),
-                self.stmt_counters.encode(env),
-            )
-            .unwrap();
-        let map = map
-            .map_put(atoms::scans().encode(env), scans_terms.encode(env))
-            .unwrap();
-        map.map_put(atoms::query_plan().encode(env), plan_terms.encode(env))
-            .unwrap()
+            .and_then(|m| {
+                m.map_put(
+                    atoms::rows_produced().encode(env),
+                    self.rows_produced.encode(env),
+                )
+            })
+            .and_then(|m| {
+                m.map_put(
+                    atoms::stmt_counters().encode(env),
+                    self.stmt_counters.encode(env),
+                )
+            })
+            .and_then(|m| m.map_put(atoms::scans().encode(env), scans_terms.encode(env)))
+            .and_then(|m| m.map_put(atoms::query_plan().encode(env), plan_terms.encode(env)));
+
+        map_or_encoding_error(env, built, "explain_analyze result")
     }
 }
 
 impl Encoder for StmtCounters {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
-        let map = map_new(env);
-        let map = map
+        let built = map_new(env)
             .map_put(
                 atoms::fullscan_step().encode(env),
                 self.fullscan_step.encode(env),
             )
-            .unwrap();
-        let map = map
-            .map_put(atoms::sort().encode(env), self.sort.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(atoms::autoindex().encode(env), self.autoindex.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(atoms::vm_step().encode(env), self.vm_step.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(atoms::reprepare().encode(env), self.reprepare.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(atoms::run().encode(env), self.run.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(
-                atoms::filter_miss().encode(env),
-                self.filter_miss.encode(env),
-            )
-            .unwrap();
-        let map = map
-            .map_put(atoms::filter_hit().encode(env), self.filter_hit.encode(env))
-            .unwrap();
-        map.map_put(
-            atoms::memused_bytes().encode(env),
-            self.memused_bytes.encode(env),
-        )
-        .unwrap()
+            .and_then(|m| m.map_put(atoms::sort().encode(env), self.sort.encode(env)))
+            .and_then(|m| {
+                m.map_put(atoms::autoindex().encode(env), self.autoindex.encode(env))
+            })
+            .and_then(|m| m.map_put(atoms::vm_step().encode(env), self.vm_step.encode(env)))
+            .and_then(|m| {
+                m.map_put(atoms::reprepare().encode(env), self.reprepare.encode(env))
+            })
+            .and_then(|m| m.map_put(atoms::run().encode(env), self.run.encode(env)))
+            .and_then(|m| {
+                m.map_put(
+                    atoms::filter_miss().encode(env),
+                    self.filter_miss.encode(env),
+                )
+            })
+            .and_then(|m| {
+                m.map_put(atoms::filter_hit().encode(env), self.filter_hit.encode(env))
+            })
+            .and_then(|m| {
+                m.map_put(
+                    atoms::memused_bytes().encode(env),
+                    self.memused_bytes.encode(env),
+                )
+            });
+
+        map_or_encoding_error(env, built, "explain_analyze stmt_counters")
     }
 }
 
 impl Encoder for ScanStatus {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
-        let map = map_new(env);
-        let map = map
+        let built = map_new(env)
             .map_put(atoms::loops().encode(env), self.loops.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(
-                atoms::rows_visited().encode(env),
-                self.rows_visited.encode(env),
-            )
-            .unwrap();
-        let map = map
-            .map_put(
-                atoms::estimated_rows().encode(env),
-                self.estimated_rows.encode(env),
-            )
-            .unwrap();
-        let map = map
-            .map_put(atoms::name().encode(env), self.name.as_str().encode(env))
-            .unwrap();
-        let map = map
-            .map_put(
-                atoms::explain().encode(env),
-                self.explain.as_str().encode(env),
-            )
-            .unwrap();
-        let map = map
-            .map_put(atoms::selectid().encode(env), self.selectid.encode(env))
-            .unwrap();
-        map.map_put(atoms::parentid().encode(env), self.parentid.encode(env))
-            .unwrap()
+            .and_then(|m| {
+                m.map_put(
+                    atoms::rows_visited().encode(env),
+                    self.rows_visited.encode(env),
+                )
+            })
+            .and_then(|m| {
+                m.map_put(
+                    atoms::estimated_rows().encode(env),
+                    self.estimated_rows.encode(env),
+                )
+            })
+            .and_then(|m| m.map_put(atoms::name().encode(env), self.name.as_str().encode(env)))
+            .and_then(|m| {
+                m.map_put(
+                    atoms::explain().encode(env),
+                    self.explain.as_str().encode(env),
+                )
+            })
+            .and_then(|m| m.map_put(atoms::selectid().encode(env), self.selectid.encode(env)))
+            .and_then(|m| m.map_put(atoms::parentid().encode(env), self.parentid.encode(env)));
+
+        map_or_encoding_error(env, built, "explain_analyze scan")
     }
 }
 
 impl Encoder for QueryPlanRow {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
-        let map = map_new(env);
-        let map = map
+        let built = map_new(env)
             .map_put(atoms::id().encode(env), self.id.encode(env))
-            .unwrap();
-        let map = map
-            .map_put(atoms::parent().encode(env), self.parent.encode(env))
-            .unwrap();
-        map.map_put(
-            atoms::detail().encode(env),
-            self.detail.as_str().encode(env),
-        )
-        .unwrap()
+            .and_then(|m| m.map_put(atoms::parent().encode(env), self.parent.encode(env)))
+            .and_then(|m| {
+                m.map_put(
+                    atoms::detail().encode(env),
+                    self.detail.as_str().encode(env),
+                )
+            });
+
+        map_or_encoding_error(env, built, "explain_analyze query_plan row")
     }
 }

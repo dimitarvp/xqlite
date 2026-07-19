@@ -160,6 +160,9 @@ defmodule Xqlite do
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
           | {:invalid_on_error, term()}
+          | {:invalid_open_option,
+             %{key: atom(), reason: :unknown_key, allowed: [atom()], value: nil}
+             | %{key: atom(), reason: :invalid_value, value: term(), message: String.t()}}
           | {:invalid_pages_per_step, integer()}
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
@@ -177,7 +180,7 @@ defmodule Xqlite do
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
           | {:unsupported_data_type, atom()}
-          | {:utf8_error, String.t()}
+          | {:utf8_error, non_neg_integer(), String.t()}
 
   @type error :: {:error, error_reason()}
 

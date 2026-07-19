@@ -133,13 +133,7 @@ fn query_with_changes<'a>(
     params_term: Term<'a>,
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
-        let qr = query::core_query(env, conn, &sql, params_term)?;
-        let changes = if qr.columns.is_empty() {
-            conn.changes()
-        } else {
-            0
-        };
-        Ok((qr, changes))
+        query::core_query_with_changes(env, conn, &sql, params_term)
     });
 
     match result {
@@ -161,13 +155,7 @@ fn query_with_changes_cancellable<'a>(
     let result = connection::with_conn(&handle, |conn| {
         let _guard =
             crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
-        let qr = query::core_query(env, conn, &sql, params_term)?;
-        let changes = if qr.columns.is_empty() {
-            conn.changes()
-        } else {
-            0
-        };
-        Ok((qr, changes))
+        query::core_query_with_changes(env, conn, &sql, params_term)
     });
 
     match result {

@@ -56,7 +56,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
       end
 
       test "INSERT RETURNING returns rows AND changes", %{conn: conn} do
-        assert {:ok, %{columns: ["id"], rows: [[1]], num_rows: 1, changes: 0}} =
+        assert {:ok, %{columns: ["id"], rows: [[1]], num_rows: 1, changes: 1}} =
                  NIF.query_with_changes(
                    conn,
                    "INSERT INTO qwc VALUES (1, 'a') RETURNING id",
@@ -92,6 +92,16 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
                  NIF.query_with_changes(conn, "UPDATE qwc SET val = 'x' WHERE id = 999", [])
       end
 
+      test "UPDATE RETURNING returns rows AND changes", %{conn: conn} do
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO qwc VALUES (1, 'a')", [])
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO qwc VALUES (2, 'b')", [])
+
+        assert {:ok, %{columns: ["id"], rows: rows, num_rows: 2, changes: 2}} =
+                 NIF.query_with_changes(conn, "UPDATE qwc SET val = 'x' RETURNING id", [])
+
+        assert Enum.sort(rows) == [[1], [2]]
+      end
+
       # -------------------------------------------------------------------
       # DELETE — changes should match affected count
       # -------------------------------------------------------------------
@@ -109,18 +119,35 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
                  NIF.query_with_changes(conn, "DELETE FROM qwc WHERE id = 999", [])
       end
 
+      test "DELETE RETURNING returns rows AND changes", %{conn: conn} do
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO qwc VALUES (1, 'a')", [])
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO qwc VALUES (2, 'b')", [])
+
+        assert {:ok, %{columns: ["id"], rows: rows, num_rows: 2, changes: 2}} =
+                 NIF.query_with_changes(conn, "DELETE FROM qwc RETURNING id", [])
+
+        assert Enum.sort(rows) == [[1], [2]]
+      end
+
       # -------------------------------------------------------------------
       # DDL — changes should be 0
       # -------------------------------------------------------------------
 
-      test "DDL returns stale changes (sqlite3_changes is sticky)", %{conn: conn} do
+      test "DDL after DML returns changes 0 (no sticky leak)", %{conn: conn} do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO qwc VALUES (1, 'a')", [])
 
-        # DDL has empty columns like DML, so changes reflects the prior
-        # INSERT's count. This is documented SQLite behavior — DDL should
-        # go through execute_batch, not query_with_changes.
-        assert {:ok, %{columns: [], changes: 1}} =
+        # CREATE TABLE changes no rows, so its reported count is 0 even
+        # though sqlite3_changes() stays sticky at the prior INSERT's 1.
+        assert {:ok, %{columns: [], changes: 0}} =
                  NIF.query_with_changes(conn, "CREATE TABLE qwc2 (id INTEGER)", [])
+      end
+
+      test "PRAGMA read after DML returns changes 0", %{conn: conn} do
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO qwc VALUES (1, 'a')", [])
+
+        # A read PRAGMA returns columns but changes no rows.
+        assert {:ok, %{changes: 0}} =
+                 NIF.query_with_changes(conn, "PRAGMA user_version", [])
       end
 
       # -------------------------------------------------------------------

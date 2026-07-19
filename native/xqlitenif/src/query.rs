@@ -75,6 +75,33 @@ pub(crate) fn core_query<'a>(
     })
 }
 
+/// Runs a query and reports how many rows THIS statement changed.
+///
+/// `sqlite3_changes()` is sticky — it keeps the last INSERT/UPDATE/DELETE's
+/// count across intervening SELECT/DDL/PRAGMA statements. Detecting "did this
+/// statement change rows" by empty columns is wrong twice: an `… RETURNING`
+/// DML has columns yet changed rows, and a DDL/PRAGMA has no columns yet must
+/// report 0 (not the stale prior count). We instead observe
+/// `sqlite3_total_changes()` across the statement: a non-zero delta means this
+/// statement (or its triggers) changed rows, so the fresh `sqlite3_changes()`
+/// is meaningful; a zero delta means it changed nothing, so we report 0
+/// regardless of the sticky counter.
+pub(crate) fn core_query_with_changes<'a>(
+    env: Env<'a>,
+    conn: &Connection,
+    sql: &str,
+    params_term: Term<'a>,
+) -> Result<(XqliteQueryResult<'a>, u64), XqliteError> {
+    let before = conn.total_changes();
+    let qr = core_query(env, conn, sql, params_term)?;
+    let changes = if conn.total_changes() == before {
+        0
+    } else {
+        conn.changes()
+    };
+    Ok((qr, changes))
+}
+
 pub(crate) fn core_execute<'a>(
     env: Env<'a>,
     conn: &Connection,
