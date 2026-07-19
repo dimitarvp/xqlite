@@ -3963,3 +3963,110 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   crate lived only in the scratchpad, and the clippy/Miri runs left artifacts only
   under gitignored `target/`). Files changed: `REVIEW_LEDGER.md`, `REVIEW_AXES.md`,
   `BACKLOG.md` only. No product code (`native/`/`lib/`/`test/`).
+
+---
+
+## S3 fix pass — round 3 — 2026-07-20 — F-A3-1, F-A10-9, cancel-token doc
+
+- Commit at scan: `264740e` (HEAD, clean; xqlite 0.10.0 just published to Hex —
+  these fixes open the next version). A committed post-burn-down S3 pass (not an axis
+  run): the three assigned filed items fixed, `mix verify` green, orchestrator
+  commits. Composition: single Opus pass (this agent). The runtime claim below
+  (F-A10-9) was RUN this session against a freshly source-built NIF (bundled SQLite
+  3.53.2); command + output captured. Scope held to the three items; one in-scope
+  superset (3 `unsafe impl` blocks the newly-enabled lint surfaced beyond the filed
+  19) was handled — see Fix 1. No new findings filed.
+
+### Fix 1 — F-A3-1: `// SAFETY:` house rule now lint-enforced (+ 19 blocks + 3 impls)
+
+- **Mechanism.** The CLAUDE.md rule "every `unsafe` block carries a `// SAFETY:`
+  comment" was not machine-checked: `clippy::undocumented_unsafe_blocks` is a
+  `restriction`-group lint absent from `clippy::all`, and `lib.rs` carried no
+  crate-level attribute, so the `-D warnings` gate never saw it. 19 sound blocks had
+  drifted.
+- **Fix.** Added `#![warn(clippy::undocumented_unsafe_blocks)]` at the crate root
+  (`native/xqlitenif/src/lib.rs`). Under the existing `cargo clippy -- -D warnings`
+  gate (`verify.ex:93`, `ci.yml:80`) `warn` is promoted to a hard error — the rule is
+  now enforced on every future `unsafe` block. Added the missing `// SAFETY:` to all
+  19 filed blocks:
+  - `explain_analyze.rs` (12): inner FFI blocks of the four `# Safety`-doc'd
+    `unsafe fn`s (`run_and_collect`, `collect_stmt_counters`, `collect_scan_status`,
+    `cstr_to_string`, `ffi_error`); each per-block comment concisely restates the
+    enclosing contract (live `stmt_ptr`/`db_handle` + connection Mutex held;
+    SQLite-owned out-pointers valid under the lock; NUL-terminated C strings copied
+    out). The one-line `get` closure was expanded so its block gets an adjacent
+    comment (rustfmt keeps it multi-line because of the comment).
+  - the three `send_*_to_pid` hook bodies (`commit_hook.rs`, `rollback_hook.rs`,
+    `log_hook.rs`): all enif_* calls operate on a fresh `msg_env`, no refs retained
+    (mirrors `send_busy_to_pid`).
+  - `busy_handler.rs` `ffi_rc_to_error`: the pre-existing safety EXPLANATION
+    re-prefixed to `// SAFETY:` (clippy needs the literal prefix).
+  - the three adjacency-broken sites: `blob.rs` (comment split so both the
+    `conn.handle()` and `sqlite3_blob_open` blocks are covered), `cancel.rs`
+    (`let raw = …` reordered above the comment so it sits next to the
+    `CancelSubscriber::new` block), `connection.rs` (fresh `// SAFETY:` next to the
+    wal/progress install block, restating the field-order lifetime note above it).
+- **Superset surfaced by the lint (not in the filed 19).** The lint also flags
+  undocumented `unsafe impl` blocks. Three were bare: `progress_dispatch.rs`
+  `Send`+`Sync for CancelSubscriber` (had a `///` DOC comment, which clippy does NOT
+  count as a safety comment) and `session.rs` `Sync for XqliteSession` (the existing
+  `// SAFETY:` was adjacent to the `Send` impl only). All three documented so the
+  gate is clean; the invariants (Arc-outlives-subscriber raw pointer;
+  Mutex-serialized session access) were read and hold. The finding enumerated
+  `unsafe {}` blocks; a clean `-D warnings` with the lint requires the impls too.
+- **Evidence.** `cd native/xqlitenif && cargo clippy -- -D warnings` → exit 0 (was
+  exit 101, 22 errors: 19 `unsafe block missing` + 3 `unsafe impl missing`). No
+  review nomenclature in any comment. `mix verify` GREEN.
+
+### Fix 2 — F-A10-9: two direct-NIF atoms added to `error_reason/0`
+
+- **Mechanism.** The round-1 `error_reason/0` audit was scoped to the `error.rs`
+  `Encoder`, so two atoms returned DIRECTLY in `nif.rs` (bypassing the encoder) were
+  omitted: `load_extension` → `{:error, :extension_loading_disabled}` when extension
+  loading is disabled (`nif.rs:1674`), and `changeset_apply` →
+  `{:error, :invalid_conflict_strategy}` for a strategy outside `:omit|:replace|:abort`
+  (`nif.rs:1945`). Both are `@spec … :: :ok | Xqlite.error()`, so a caller
+  pattern-matching either atom got a dialyzer "can never match".
+- **Fix.** Added both bare atoms to the union's alphabetical bare-atom section
+  (`lib/xqlite.ex`).
+- **Runtime-confirmed (this session; freshly source-built NIF, bundled SQLite
+  3.53.2).** `XqliteNIF.load_extension(c, "/nonexistent/libfoo.so", nil)` →
+  `{:error, :extension_loading_disabled}`;
+  `XqliteNIF.changeset_apply(c, <<>>, :not_a_real_strategy)` →
+  `{:error, :invalid_conflict_strategy}` (the strategy check precedes any cursor
+  work, so an empty binary reaches it). Dialyzer GREEN.
+- **Adapter blast radius (`xqlite_ecto3`, read-only — NOT edited): BENIGN.** Both are
+  bare atoms; `Error.wrap/1`'s `wrap(reason) when is_atom(reason)` clause
+  (`lib/xqlite_ecto3/error.ex:208`) already maps any bare atom to
+  `%Error{type: <atom>, message: Atom.to_string(atom)}`. No adapter change owed.
+
+### Fix 3 — cancel-token single-use footgun (doc): inline docstrings
+
+- The user-facing `guides/gotchas.md` "Cancel tokens are single-use" subsection
+  ALREADY exists and fully covers the finding (set-once flag; spent-token reuse →
+  `{:error, :operation_cancelled}`; "create a fresh token per cancellable operation";
+  a correct code example; the list-of-tokens OR distinction, each still single-use).
+  Per the backlog, the SOLE residual was repeating the note in the inline
+  `lib/xqlite.ex` docstrings.
+- **Fix.** `create_cancel_token/0` and `cancel_operation/1` docstrings now each state
+  the token is single-use / set-once-never-reset / spent-after-signal, and to create
+  a fresh token per operation, cross-referencing the Gotchas guide. Doc-only, no
+  behavior change. A duplicate gotchas.md subsection was deliberately NOT added
+  (minimal diff, no duplication) — the guide already carries the canonical version;
+  the task's "add to gotchas.md" framing predates that subsection's existence.
+
+### Disposition & dryness
+
+- 3 filed items closed (F-A3-1, F-A10-9, cancel-token). No new findings filed.
+  `mix verify` GREEN. This pass CHURNS **A3** (added the crate-level lint + touched
+  the `// SAFETY:` surface across 8 files' unsafe blocks and 2 files' unsafe impls —
+  squarely A3's re-wet list "any new `unsafe` block … or unsafe-surface change"; the
+  owed A3 SECOND covering run should re-verify comments still match blocks and the
+  lint stays green) and **A10** (added two members to `error_reason/0` — A10's re-wet
+  list; the owed re-run should re-pin the union vs the direct-NIF atom returns in
+  `nif.rs`). A1 posture UNCHANGED (comment-only + typespec + docstring edits; no
+  panic surface touched). A5 doc-only. Annotated in `REVIEW_AXES.md`.
+- Files changed: `native/xqlitenif/src/{lib,explain_analyze,commit_hook,rollback_hook,
+  log_hook,busy_handler,blob,cancel,connection,progress_dispatch,session}.rs` (11),
+  `lib/xqlite.ex` (union + 2 docstrings), `BACKLOG.md`, `REVIEW_LEDGER.md`,
+  `REVIEW_AXES.md`. NOT `guides/gotchas.md` (already complete).

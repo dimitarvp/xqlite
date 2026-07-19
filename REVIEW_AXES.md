@@ -159,6 +159,15 @@ NOT a clean covering run — A3 stands at **0 of 2 consecutive clean covering ru
 DRY**; one clean covering run owed. Re-wet: any new `unsafe` block, any AtomicPtr /
 Arc-as-ptr / Box-slot / HookList / transmute change, a rustler bump, or a
 libsqlite3-sys bump (re-verify the FFI-boundary set).
+RE-WET (S3 fix pass round 3, 2026-07-20): F-A3-1 fixed — added
+`#![warn(clippy::undocumented_unsafe_blocks)]` to `lib.rs` (now a hard error under
+the `-D warnings` gate) and the missing `// SAFETY:` comments to all 19 filed
+`unsafe {}` blocks PLUS 3 `unsafe impl` blocks the newly-enabled lint surfaced
+(`progress_dispatch.rs` Send/Sync, `session.rs` Sync). This churns the
+unsafe-comment surface across 10 files — squarely this axis's re-wet list. A3 stays
+at **0 of 2 consecutive clean covering runs, NOT DRY**; the owed clean covering run
+should confirm every per-block comment still matches its block and the lint holds
+green.
 
 ### A4. Scheduler discipline
 NIFs must be <1ms proven or Dirty (CPU vs IO correctly chosen).
@@ -477,6 +486,11 @@ no findings`). ONE new S3: F-A10-9 (direct-NIF atoms `:extension_loading_disable
 Encoder-scoped). DRYNESS: a new CONFIRMED (S3) surfaced, so this is NOT a clean
 covering run — A10 stands at 0 of 2 consecutive clean covering runs, NOT DRY;
 re-wet list unchanged.
+RE-WET (S3 fix pass round 3, 2026-07-20): F-A10-9 fixed — added
+`:extension_loading_disabled` + `:invalid_conflict_strategy` to the `error_reason/0`
+union (`lib/xqlite.ex`). The union is in this axis's re-wet list; the owed covering
+re-run should re-pin it against the direct `(atoms::error(), <atom>)` returns in
+`nif.rs`. A10 was already NOT DRY (Run 13 surfaced F-A10-9); this keeps it so.
 
 ### A11. Feature islands
 Session/changesets, blob I/O, backup+progress, serialize,

@@ -7,54 +7,6 @@ burn-down.
 
 ## Open
 
-- [S3] F-A3-1 (Run 20, A3): the CLAUDE.md house rule "Every `unsafe` block must
-  have a `// SAFETY:` comment" is NOT lint-enforced, and 19 `unsafe` blocks have
-  drifted from it. Both the `mix verify` gate (`lib/mix/tasks/verify.ex:93`) and
-  CI (`.github/workflows/ci.yml:80`) run `cargo clippy -- -D warnings`, but
-  `clippy::undocumented_unsafe_blocks` is a `restriction`-group lint (not in
-  `clippy::all`), so it never fires; `native/xqlitenif/src/lib.rs` carries no
-  crate-level lint attribute either. Explicitly running it this session flags 19
-  blocks: `explain_analyze.rs:131,135,140,141,209,234,254,300,301,326,337,341`
-  (12 — inner blocks of `unsafe fn`s that carry a `# Safety` doc contract but no
-  per-block `// SAFETY:`), `commit_hook.rs:53` / `rollback_hook.rs:48` /
-  `log_hook.rs:70` (the `send_*_to_pid` bodies, same shape), `busy_handler.rs:249`
-  (`ffi_rc_to_error` — a safety EXPLANATION at `:247-248` but not the `// SAFETY:`
-  prefix), and `blob.rs:105` / `cancel.rs:57` / `connection.rs:138` (a `// SAFETY:`
-  comment IS present and covers the block, but an intervening statement breaks
-  clippy's immediate-adjacency check). ALL 19 are SOUND — no soundness impact: the
-  enclosing `unsafe fn`s document the invariant in `# Safety` docs, every block was
-  read this session and holds (explain_analyze runs under the NIF `with_conn`
-  Mutex with a just-prepared non-null stmt; the `send_*_to_pid` helpers copy into a
-  fresh `msg_env`), and the A1 Run-16 census already cleared `explain_analyze.rs`.
-  This is purely a doc-convention drift against the house rule. Fix (deferred, S3):
-  add `#![warn(clippy::undocumented_unsafe_blocks)]` (or `deny`) to
-  `native/xqlitenif/src/lib.rs` so the rule is enforced mechanically, then add the
-  19 missing/misplaced per-block `// SAFETY:` comments (moving the 3 adjacency ones
-  next to their block and re-prefixing the busy_handler one). Repro: `cd
-  native/xqlitenif && cargo clippy -- -W clippy::undocumented_unsafe_blocks 2>&1 |
-  rg 'unsafe block missing'` → 19 hits.
-- [S3] F-A10-9 (Run 13, A10): two direct-NIF error atoms bypass the `error.rs`
-  `Encoder` (which the round-1 `error_reason/0` audit was explicitly scoped to) and
-  are absent from the `error_reason/0` union AND from all of `lib/`. (1)
-  `XqliteNIF.load_extension/3` (`@spec :: :ok | Xqlite.error()`) returns
-  `{:error, :extension_loading_disabled}` when extension loading was not first
-  enabled (`native/xqlitenif/src/nif.rs:1670`) — reachable through a well-typed,
-  common call (the default state is disabled). (2) `XqliteNIF.changeset_apply/3`
-  (`@spec :: :ok | Xqlite.error()`) returns `{:error, :invalid_conflict_strategy}`
-  for a `conflict_strategy` outside `:omit | :replace | :abort` (`nif.rs:1941`) —
-  reachable only by violating the param type (dialyzer already flags such a call).
-  Both errors are correctly classified structured atoms; the only defect is the
-  union typespec omits them, so a caller pattern-matching either atom in an
-  `{:error, reason}` gets a dialyzer "can never match" warning. Same class as the
-  fixed F-A10-5/7/8; the round-1 audit missed them because it enumerated the
-  `XqliteError` `Encoder` variants, not the direct `(atoms::error(), <atom>)`
-  returns in `nif.rs`. Runtime-confirmed this session (bundled SQLite 3.53.2):
-  `XqliteNIF.load_extension(c, "/nonexistent/libfoo.so", nil)` →
-  `{:error, :extension_loading_disabled}`; `XqliteNIF.changeset_apply(c, cs,
-  :not_a_real_strategy)` → `{:error, :invalid_conflict_strategy}`. Fix (deferred,
-  S3): add both bare atoms to `error_reason/0` (optionally naming them in the two
-  docstrings, as `begin/2` does for `:invalid_transaction_mode`). NOTE: the third
-  direct-NIF atom, `:invalid_pages_per_step`, IS in the union (added in Run 9).
 - [S3] F-A11-4 (Run 9, A11): `set_busy_policy/2`'s `:max_elapsed_ms` is
   anchored at the busy slot's **first installation**, not at the start of each
   busy event, so it never resets. Once a connection has been alive (with a
@@ -151,23 +103,50 @@ burn-down.
   scheduler (session_changeset/patchset path) vs the repo's dirty-only
   note — the busy_handler comment claims "any thread (OTP 26.1+)".
   Reconcile the comments and confirm against an assertion-enabled ERTS.
-- [S3] Cancel token single-use footgun (Run 6, A5): the cancel flag is
-  a set-once `Arc<AtomicBool>` with no reset path, so a signalled token
-  reused on a later op aborts it immediately (`{:error,
-  :operation_cancelled}`). Correct + tested behavior
-  (`statement_cancel_test.exs:38`), but the user-facing
-  `create_cancel_token/0` / `cancel_operation/1` docs (`lib/xqlite.ex`)
-  never say "a signalled token is single-use — create a fresh token per
-  operation"; only `XqliteNIF.cancel_operation/1` hints it ("the
-  cancellation signal remains active for the token", `xqlitenif.ex:1063`).
-  Doc-clarity only; no code change. Well-defined, not a crash/wrong-result.
-  NOW documented user-facing in `guides/gotchas.md` ("Cancel tokens are
-  single-use" — spells out "create a fresh token per cancellable
-  operation"); the only residual is repeating the line in the inline
-  `lib/xqlite.ex` docstrings.
-
 ## Closed
 
+- 2026-07-20 (S3 fix pass round 3, A3) F-A3-1 — the CLAUDE.md "// SAFETY: on every
+  unsafe block" house rule is now MACHINE-ENFORCED: added
+  `#![warn(clippy::undocumented_unsafe_blocks)]` to `native/xqlitenif/src/lib.rs`,
+  which the `mix verify` + CI gate (`cargo clippy -- -D warnings`) promotes to a
+  hard error. Added the missing `// SAFETY:` comment to all 19 filed `unsafe {}`
+  blocks: 12 in `explain_analyze.rs` (inner FFI blocks of the `# Safety`-doc'd
+  `unsafe fn`s — each restates the fn contract: live stmt/db_handle, Mutex held),
+  the three `send_*_to_pid` hook bodies (`commit_hook`/`rollback_hook`/`log_hook` —
+  fresh-msg_env sends, cf. `send_busy_to_pid`), `busy_handler.rs` `ffi_rc_to_error`
+  (re-prefixed the existing explanation to `// SAFETY:`), and the three
+  adjacency-broken ones (`blob.rs`/`cancel.rs`/`connection.rs` — comment moved
+  next to its block, or the block's statement reordered above the comment).
+  Enabling the lint under `-D warnings` ALSO surfaced 3 undocumented `unsafe impl`
+  blocks OUTSIDE the filed 19-block list (`progress_dispatch.rs` Send+Sync for
+  `CancelSubscriber` used a `///` doc comment clippy does not count as a safety
+  comment; `session.rs` Sync for `XqliteSession` — the existing `// SAFETY:`
+  covered only the adjacent Send impl) — all three documented so the gate is
+  clean. No review nomenclature in any comment. Clippy `-D warnings` + `mix verify`
+  GREEN. Repro (now clean): `cd native/xqlitenif && cargo clippy -- -D warnings`.
+- 2026-07-20 (S3 fix pass round 3, A10) F-A10-9 — two direct-NIF error atoms added
+  to the `error_reason/0` union (`lib/xqlite.ex`, alphabetical bare-atom section):
+  `:extension_loading_disabled` (from `load_extension` when extension loading is
+  not enabled, `nif.rs:1674`) and `:invalid_conflict_strategy` (from
+  `changeset_apply` for a `conflict_strategy` outside `:omit|:replace|:abort`,
+  `nif.rs:1945`). Both are bare atoms. Runtime-confirmed this session (bundled
+  SQLite 3.53.2, freshly source-built NIF):
+  `XqliteNIF.load_extension(c, "/nonexistent/libfoo.so", nil)` →
+  `{:error, :extension_loading_disabled}`;
+  `XqliteNIF.changeset_apply(c, <<>>, :not_a_real_strategy)` →
+  `{:error, :invalid_conflict_strategy}`. Dialyzer GREEN. Adapter blast radius:
+  BENIGN — `xqlite_ecto3` `Error.wrap/1`'s bare-atom clause (`error.ex:208`,
+  `wrap(reason) when is_atom(reason)`) already maps both to `%Error{type: <atom>}`;
+  no adapter change owed.
+- 2026-07-20 (S3 fix pass round 3, A5) Cancel token single-use footgun — CLOSED.
+  The user-facing `guides/gotchas.md` "Cancel tokens are single-use" subsection
+  (added when the guide was created) already spells out the set-once flag, the
+  spent-token reuse hazard, "create a fresh token per cancellable operation", a
+  correct code example, and the list-of-tokens OR distinction. The only residual
+  this entry named — repeating the note in the inline `lib/xqlite.ex` docstrings —
+  is now done: `create_cancel_token/0` and `cancel_operation/1` each state the
+  token is single-use, stays signalled with no un-signal, and must be replaced per
+  operation, cross-referencing the Gotchas guide. Doc-only, no behavior change.
 - 2026-07-19 (Run 14, A14) F-A14-1 — the spurious-"out of memory" (`SQLITE_NOMEM`)
   flake behind gotcha #1: mechanism CONFIRMED (upgraded from PLAUSIBLE) via the
   deferred constrained-RAM deciding probe; CLOSED. Run 12 could not reproduce it at
