@@ -4070,3 +4070,157 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   log_hook,busy_handler,blob,cancel,connection,progress_dispatch,session}.rs` (11),
   `lib/xqlite.ex` (union + 2 docstrings), `BACKLOG.md`, `REVIEW_LEDGER.md`,
   `REVIEW_AXES.md`. NOT `guides/gotchas.md` (already complete).
+
+## Maintainer decisions — 2026-07-20 — :replace / busy-elapsed / reader-scheduler / text-OOM
+
+- Commit at scan: `3d9f260` (HEAD, clean; xqlite 0.10.0 published — these open the next
+  version). A committed post-burn-down pass implementing four owner rulings on filed items;
+  not an axis run. Composition: single Opus pass (this agent). Every runtime claim below was
+  RUN this session against a freshly source-built NIF (bundled SQLite 3.53.2); commands +
+  output captured. Priority order honored (D2 > D4 > D3 > D1); all four landed.
+
+### Decision 1 — `changeset_apply(_, _, :replace)`: KEEP ABORT (document + close)
+
+- **Ruling.** The current behavior is correct: a `:replace` request that hits a conflict
+  SQLite forbids replacing (NOTFOUND / CONSTRAINT / FOREIGN_KEY) aborts the whole apply and
+  rolls back cleanly (SQLITE_ABORT, code 4), never OMIT-skipping the offending change. This is
+  the Run 9 F-A11-2 fix's semantics; the Run 9 open question ("ABORT vs OMIT fallback for
+  `:replace`") is CLOSED as keep-abort.
+- **No code change.** The `nif.rs` conflict handler already returns `REPLACE` only for
+  `SQLITE_CHANGESET_DATA`/`_CONFLICT` and `ABORT` otherwise; regression coverage already exists
+  (`test/nif/session_test.exs` "replace on a CONSTRAINT conflict aborts cleanly, not misuse" +
+  the NOTFOUND twin: assert code == 4, refute misuse 21, assert no data change).
+- **Doc enhanced.** The `changeset_apply` docstring (`lib/xqlite/xqlitenif.ex`) now states
+  plainly that a non-replaceable conflict aborts and rolls back the entire apply, returning an
+  error — the offending change is not silently skipped (that is `:omit`, not `:replace`).
+
+### Decision 2 — busy `:max_elapsed_ms`: RESET PER STALL (per-event budget) — RED→green
+
+- **Bug.** `BusySlotState.start` (an `Instant`) was set at the slot's first install and only
+  preserved across mutations, never reset. `busy_callback` measured `elapsed_ms =
+  start.elapsed()` against `max_elapsed_ms`, so a connection alive past `max_elapsed_ms` had its
+  first callback of EVERY new contention already over budget → gave up with 0 retries (worst on
+  pooled/long-lived handles; default 5_000 → stops retrying 5 s after open).
+- **Fix (`busy_handler.rs`, minimal).** `start` is now `Cell<Instant>` (interior-mutable; no new
+  `unsafe` — `Cell::set`/`get` through the existing `&BusySlotState` deref, serialized by the
+  conn Mutex like every other slot access). `busy_callback` resets it at `count == 0` (SQLite's
+  fresh-busy-event marker): `if retries == 0 { state.start.set(Instant::now()); }` then reads
+  `state.start.get().elapsed()`. `max_elapsed_ms` is now a per-event wall-time budget matching
+  `max_retries`; `snapshot` preserves the current `start` across mutations (so a mid-contention
+  mutation keeps that event's clock). Single-subscriber slot design intact.
+- **RED→green** (`test/nif/busy_handler_test.exs` new test "max_elapsed_ms is a per-event
+  budget: an aged connection still retries"). Added to that file's DOCUMENTED for-loop exception
+  (contention needs two file-backed handles to the same DB; in-memory conns have separate lock
+  domains — the file's header states this). Policy `max_retries: 1000, max_elapsed_ms: 400,
+  sleep_ms: 5`; `Process.sleep(600)` ages the slot; then a fresh contention. Structured
+  assertions only (no message text): first busy event `{:xqlite_busy, 0, first_elapsed}` with
+  `first_elapsed < 400`, a second event `retries >= 1`, then `{:ok, 1}` after release.
+  - **RED (pre-fix, full `mix test.seq` this session):** `1) test max_elapsed_ms is a per-event
+    budget … Assertion with < failed / code: assert first_elapsed < 400 / left: 600 / right:
+    400` — the aged conn's first callback reported 600 ms elapsed (since install) and gave up.
+    14/15 other busy tests passed (no collateral).
+  - **GREEN (post-fix):** `✓ test/nif/busy_handler_test.exs passed` (in the `mix verify` run);
+    first callback `elapsed 0`, retries continue, insert succeeds after the holder releases.
+- **Docs.** `lib/xqlite.ex` `:max_elapsed_ms` docstring rewritten to "per busy event, resets
+  each contention"; `guides/gotchas.md` busy section retitled from footgun to the now-correct
+  per-event semantics.
+
+### Decision 3 — trivial readers: MOVE TO DIRTYIO (robustness over hot-path latency)
+
+- **Flips.** All 20 F-A4-1 readers were bare `#[rustler::nif]` (normal) at HEAD — VERIFIED
+  before flipping; none already dirty/renamed. Flipped to `#[rustler::nif(schedule = "DirtyIo")]`:
+  `changes`, `total_changes`, `db_path`, `autocommit`, `txn_state`, `set_busy_policy`,
+  `remove_busy_policy`, `register`/`unregister_busy_observer`, `set`/`remove_authorizer`,
+  `register`/`unregister_progress_hook`, `enable_load_extension`, `session_new`,
+  `session_attach`, `session_is_empty`, `blob_size`, `blob_close`, `stmt_column_names`.
+  **New A4 census: 91 DirtyIo / 5 normal / 0 DirtyCpu** (was 71/25/0). The 5 remaining normal
+  NIFs are the no-conn-Mutex ones that cannot block on a query: `create_cancel_token`,
+  `cancel_operation` (deliberately lock-free), `sqlite_version`, `register`/`unregister_log_hook`
+  (MASTER_LOCK). DirtyIo not DirtyCpu — they take the conn lock / can block on I/O.
+- **MEASURED cost (owner's explicit ask; `changes/1` tight loop, 300k individually-timed calls,
+  100k warmup, 3 runs each, this session).**
+  - Normal (before): `mean ~101–106 ns, p50 100, p90 100, p99 200, p999 ~2800 ns`.
+  - DirtyIo (after): `mean ~922–1001 ns, p50 ~800–900, p90 ~900–1000, p99 ~4800–6800,
+    p999 ~19900–21100 ns`.
+  - **Per-call delta ≈ +0.85 µs median/mean, +~5 µs at p99, +~18 µs at p999** — an ~8–9×
+    absolute slowdown on this trivial reader, but still sub-µs median and ~1 µs mean, far under
+    the 1 ms normal-scheduler bar. (Both include the same ~100 ns `System.monotonic_time`
+    instrument overhead, so the delta is the scheduler hop.) The `scheduler/run.sh` LAT section
+    corroborates: `changes` mean rose to 4.01 µs (max 5952 µs tail) from sub-µs on normal.
+- **`scheduler/run.sh` RE-RAN (RESULT this session — VERDICT PASS).** `threshold=25ms
+  schedulers=12 dirty_io=10 otp=29`. TEETH: `CONTROL_term_to_binary 1898.6ms
+  long_schedule_hits=35 [monitor ARMED + DELIVERING]`. S1 every must-be-dirty family 0 hits
+  (`query 1422.9/0`). **S2 MUTEX-CONTENTION — the confirmation:** shared-handle slow query pins
+  the Mutex; the readers now show `changes blocked=1322.2ms … long_schedule_hits=0`,
+  `db_path 1318.2/0`, `txn_state 1320.2/0`, `total_changes 1323.6/0` — was **1 hit each** at
+  Run 19; the block still lasts the query's ~1.32 s (serialization unchanged) but now lands on
+  a DIRTY scheduler, off the normal ones. `SUMMARY: control_hits=35 intrinsic_fail=false
+  VERDICT: PASS`.
+- **DirtyIo-pool consideration (recorded).** These readers now share the 10-scheduler DirtyIo
+  pool with real queries; under heavy reader volume they add to dirty-pool occupancy (the
+  long_schedule gate cannot see pool saturation — bounded by the pool being sized for blocking).
+  `guides/gotchas.md` reader-scheduler section updated: readers on DirtyIo, normal-scheduler
+  latency now protected, shared-handle serialization (and its block) unchanged.
+
+### Decision 4 — TEXT-encode OOM: FIX to match BLOB (graceful error, not panic)
+
+- **Fix.** Added `util::encode_text(env, &[u8]) -> Result<Term, XqliteError>`: fallible
+  `OwnedBinary::new(len).ok_or_else(InternalEncodingError)` + `copy_from_slice` + `release`,
+  mirroring the BLOB encoders. The success path is byte-identical to rustler's `str::encode`
+  (an `OwnedBinary` of the same bytes) — only the OOM `None` branch differs (structured error
+  vs `panic!`). Routed the three EXPLICIT value-return TEXT sites through it:
+  - `encode_val` `Value::Text` (`util.rs`) — query/execute + pragma row values. Signature
+    changed to `Result<Term, XqliteError>`; the three callers propagate (`process_rows` `?`,
+    `pragma.rs` get/set ×2).
+  - `sqlite_row_to_elixir_terms` `SQLITE_TEXT` arm (`util.rs`) — stream/step row values.
+  - `XqliteQueryResult` column names (`connection.rs`) via a new `encode_column_names` that
+    maps each name through `encode_text` and folds an alloc failure into the existing
+    `InternalEncodingError` map-build path.
+- **Reachability & verification.** OOM-only (a ~1 GB TEXT near `SQLITE_MAX_LENGTH`), so a RED is
+  impractical — documented, like the BLOB case (F-A10-6, M10/M11). Verified by clippy
+  `-D warnings` (0), dialyzer (0), full `mix test.seq` (green), and a source audit: no
+  `str::encode`/`.encode(env)` on a `String`/`&str` remains at the three row-value/column-name
+  sites.
+- **LEFT unconverted (judgment; stated).** `stmt_column_names` / `stream_get_columns`
+  (`Vec<String>` returns), `db_path` (`Option<String>`), `sqlite_version` (`String`), the
+  `schema.rs` introspection strings, and `get_create_sql` — all rustler-AUTO-encoded NIF return
+  types carrying BOUNDED metadata identifiers, NOT the ~1 GB row-value payload that makes
+  F-A12-3 reachable. Converting them means abandoning rustler's return auto-encode for dozens of
+  NIFs for a case that is not the OOM-reachable one, and the Run-1 return-encode `catch_unwind`
+  (→ `:nif_panicked`, never a VM crash) still nets any such OOM. The line drawn: every site
+  where OUR code explicitly `.encode`s a row/column value is now graceful; the residue is
+  bounded-metadata return-type auto-encoding.
+- **No new error shape.** `{:internal_encoding_error, String.t()}` was already in
+  `error_reason/0` (`lib/xqlite.ex:160`); the OOM-degradation path introduces nothing new.
+
+### Evidence / teeth / adapter
+
+- `mix verify` **GREEN** end-to-end this session (`✓ All checks passed. Safe to commit.`,
+  exit 0): mix format, compile `--warnings-as-errors`, deps audit, sobelow, `cargo clippy
+  -D warnings`, dialyzer, `cargo test`, full `mix test.seq` (`✓ All tests passed!`, incl. the
+  new busy test GREEN). Decision 2 RED captured on the pristine HEAD build before any Rust edit
+  (the assertion-failure output above); GREEN in the verify run. Scheduler harness teeth: the
+  fix-independent `term_to_binary/[:compressed]` control delivered 35 `long_schedule` hits
+  (monitor armed), so the readers' post-flip S2 `long_schedule_hits=0` is real silence.
+- **Adapter blast radius (`/home/dimi/kod/xqlite_ecto3`, read-only — NOT edited): NONE.** No
+  decision changes an error SHAPE crossing to the adapter — D1/D2/D3 change no error term; D4's
+  only new outcome is `{:internal_encoding_error, ctx}` in place of an OOM `:nif_panicked`, and
+  the adapter's `Error.wrap({tag, msg}) when is_atom(tag) and is_binary(msg)` clause
+  (`lib/xqlite_ecto3/error.ex:204`) already maps it to `%Error{type: :internal_encoding_error}`.
+
+### Disposition & dryness
+
+- 3 filed items CLOSED (F-A11-4, F-A4-1, F-A12-3) + the Run 9 `:replace` open question ruled
+  keep-abort. No new findings. This pass CHURNS several axes → re-wets their dryness:
+  **A4** (a `schedule=` change on 20 NIFs — squarely A4's re-wet list; the census shifts to
+  91/5/0, and the owed A4 covering re-run must re-verify the split + re-run the gate),
+  **A11** (busy `busy_handler.rs` callback/state change — A11's hook-island re-wet trigger;
+  the busy footgun is now a passing regression test), **A12** (`util.rs` `encode_val` +
+  `sqlite_row_to_elixir_terms` + a new `connection.rs` encoder — A12's re-wet list names exactly
+  these), and **A1** (panic surface REDUCED — a `str::encode` panic site removed on the
+  row-value return path; the owed A1 re-run should re-confirm no panic-capable `.encode` remains
+  there). Annotated in `REVIEW_AXES.md`.
+- Files changed: `native/xqlitenif/src/{busy_handler,util,connection,pragma,nif}.rs` (5),
+  `lib/xqlite.ex` (busy docstring), `lib/xqlite/xqlitenif.ex` (changeset_apply docstring),
+  `test/nif/busy_handler_test.exs` (new RED→green test), `guides/gotchas.md` (busy + reader
+  sections), `BACKLOG.md`, `REVIEW_LEDGER.md`, `REVIEW_AXES.md`.

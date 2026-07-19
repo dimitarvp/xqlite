@@ -7,68 +7,6 @@ burn-down.
 
 ## Open
 
-- [S3] F-A11-4 (Run 9, A11): `set_busy_policy/2`'s `:max_elapsed_ms` is
-  anchored at the busy slot's **first installation**, not at the start of each
-  busy event, so it never resets. Once a connection has been alive (with a
-  policy installed) longer than `max_elapsed_ms`, the elapsed check trips on the
-  first callback of every subsequent busy event → the policy gives up with ZERO
-  retries, as if none were installed. Hits long-lived/pooled connections hardest
-  (default `max_elapsed_ms: 5_000` → policy stops retrying 5 s after install).
-  Behavior is DOCUMENTED ("from the busy slot's first installation",
-  `lib/xqlite.ex:1359`) and surfaces a clean `{:database_busy_or_locked, …}`
-  error (no corruption/wrong-result), so S3 — but a genuine footgun. Confirmed
-  empirically (`feature_islands/run.sh` busy-elapsed probe: aged conn gives up in
-  ~0 ms / 0 retries; young conn + huge-ceiling conn both succeed in ~150 ms).
-  Now documented user-facing in `guides/gotchas.md`. **Maintainer question:**
-  reset the elapsed clock at the start of each busy event (count == 0) so
-  `max_elapsed_ms` becomes a per-event budget (needs `start` to be interior-
-  mutable in `BusySlotState`), or keep-and-document? Repro:
-  `set_busy_policy(c, max_retries: 1000, max_elapsed_ms: 400, sleep_ms: 5)`,
-  `Process.sleep(600)`, then contend → instant give-up.
-- [S3] F-A4-1 (Run 10, A4): the 20 conn-`Mutex` trivial normal-scheduler readers
-  (`changes`/`total_changes`/`db_path`/`autocommit`/`txn_state`/`set_busy_policy`/
-  `remove_busy_policy`/`register_busy_observer`/`unregister_busy_observer`/
-  `set_authorizer`/`remove_authorizer`/`register_progress_hook`/
-  `unregister_progress_hook`/`enable_load_extension`/`session_new`/`session_attach`/
-  `session_is_empty`/`blob_size`/`blob_close`/`stmt_column_names`) are <1ms
-  intrinsically (LAT ≤ 60 µs uncontended) but acquire the connection `Mutex` via
-  `with_conn`/`with_session`/`with_live_blob`/`with_live_stmt`. If a connection
-  handle is SHARED across processes and one runs a slow Dirty op, a reader on
-  another process blocks on a NORMAL scheduler for that op's whole duration →
-  normal-scheduler occupancy (a `long_schedule` hit). Confirmed empirically
-  (`scheduler/run.sh` S2): a ~1.5 s Dirty query on a shared handle blocked
-  `changes` 1493 ms / `db_path` 1456 ms / `txn_state` 1479 ms / `total_changes`
-  1454 ms, 1 long_schedule hit each. **S3, not S2:** it requires sharing a handle
-  across processes, which the documented architecture forbids (CLAUDE.md: read
-  concurrency = a pool of independent handles); a single owner is sequential, and
-  the blocking IS the intentional serialization surfacing on the wrong scheduler.
-  Consequence is latency degradation, not corruption. Now documented user-facing
-  in `guides/gotchas.md`. **Maintainer question:** flip these conn-`Mutex` trivial
-  readers to `DirtyIo` so a contended reader blocks a Dirty (not normal)
-  scheduler — at a per-call dirty-scheduler-hop cost on hot introspection paths
-  (`changes`/`txn_state` are called often) — or keep normal (fast in the intended
-  single-owner model) and rely on the gotcha? Repro: share one handle across two
-  processes, run a slow `query` on one, `changes` on the other → the `changes`
-  call blocks for the query's full duration on a normal scheduler.
-- [S3] F-A12-3 (Run 11, A12, latent/OOM-only): TEXT column values (and column
-  names, and all `String`/`&str` we hand back) cross via rustler's `str::encode`
-  (`rustler-0.38.0/src/types/string.rs:30-42`), which `panic!("binary term
-  allocation fail")`s if `OwnedBinary::new(len)` returns `None` on allocation
-  failure — whereas OUR BLOB encoders degrade gracefully with
-  `OwnedBinary::new(len).ok_or_else(InternalEncodingError)` (`util.rs:346,363`,
-  `session.rs:132`, `nif.rs:1623`). The panic is CAUGHT by rustler's
-  return-value-encode `catch_unwind` (Run 1: surfaces as `:nif_panicked`, never a
-  VM crash), so it does not break the "will never crash the BEAM" claim, but it is
-  inconsistent with the crate's graceful-degradation convention and is the same
-  class as the fixed M8 (and the latent M10/M11). Reachability is OOM-only (a
-  ~1 GB TEXT value near `SQLITE_MAX_LENGTH` on a memory-constrained box). Fixing
-  only the two row-value TEXT sites (`encode_val` Value::Text + the SQLITE_TEXT
-  arm of `sqlite_row_to_elixir_terms`) while column-names / schema strings still
-  route through `str::encode` would be inconsistent — so this is really a
-  crate-wide "encode all TEXT via a graceful OwnedBinary helper" consistency call.
-  Cross-refs A1. Maintainer question: reimplement TEXT-value encoding to degrade
-  like BLOB, or accept rustler's `str::encode` OOM-panic (caught → `:nif_panicked`)
-  as the crate-wide behavior?
 - [S3] F-A13-1 (Run 12, A13): hot code upgrade of the xqlite NIF is unsupported
   because rustler 0.38's init codegen hardcodes the `ErlNifEntry`
   `upgrade`/`reload`/`unload` callbacks to `None`
@@ -105,6 +43,61 @@ burn-down.
   Reconcile the comments and confirm against an assertion-enabled ERTS.
 ## Closed
 
+- 2026-07-20 (maintainer decisions, A11) `changeset_apply(_, _, :replace)` conflict
+  handling — RULED keep-abort (closes the Run 9 open question). The owner ruled the
+  current behavior correct: when a `:replace` request hits a conflict SQLite forbids
+  replacing (NOTFOUND / CONSTRAINT / FOREIGN_KEY), abort the whole apply and roll back
+  cleanly (SQLITE_ABORT, code 4) — never OMIT-skip the offending change. NO code change;
+  behavior already regression-tested (`session_test.exs` replace-on-CONSTRAINT / -NOTFOUND
+  assert code 4, refute misuse 21). Enhanced the `changeset_apply` docstring
+  (`lib/xqlite/xqlitenif.ex`) to state plainly that a non-replaceable conflict aborts and
+  rolls back the entire apply, returning an error — the offending change is not silently
+  skipped (that is `:omit`).
+- 2026-07-20 (maintainer decisions, A11) F-A11-4 — busy `:max_elapsed_ms` RESET PER STALL
+  (per-event budget). The elapsed clock was anchored at the busy slot's first install and
+  never reset, so a connection alive past `max_elapsed_ms` gave up on the first callback of
+  every fresh contention (0 retries). FIXED: `BusySlotState.start` is now interior-mutable
+  (`Cell<Instant>`); `busy_callback` resets it at `count == 0` (SQLite marks each fresh busy
+  event's start there), so `max_elapsed_ms` is a per-event wall-time budget matching
+  `max_retries`. RED→green (`test/nif/busy_handler_test.exs` new "per-event budget" test —
+  added to that file's documented for-loop exception, since contention needs two file-backed
+  handles): RED (pre-fix, this session) `assert first_elapsed < 400` failed `left: 600` (an
+  aged conn's first callback already reported 600 ms since install → instant give-up); GREEN
+  (post-fix) first callback `elapsed 0`, it keeps retrying, insert succeeds after release.
+  Docstring (`lib/xqlite.ex`) + `guides/gotchas.md` busy section rewritten from footgun to the
+  now-correct per-event semantics.
+- 2026-07-20 (maintainer decisions, A4) F-A4-1 — the 20 trivial conn-`Mutex` readers MOVED
+  TO DIRTYIO (owner chose robustness over hot-path latency). All 20 named readers were bare
+  `#[rustler::nif]` at HEAD; flipped to `schedule = "DirtyIo"`. New census **91 DirtyIo /
+  5 normal / 0 DirtyCpu** (was 71/25/0); the 5 remaining normal NIFs are the no-conn-Mutex
+  ones that cannot block on a query (`create_cancel_token`, `cancel_operation`,
+  `sqlite_version`, `register`+`unregister_log_hook`). MEASURED cost (this session,
+  `changes/1` tight loop, 300k timed calls): normal mean ~101 ns / p50 100 / p99 200 →
+  DirtyIo mean ~950 ns / p50 ~850 / p99 ~5500 — a ~+850 ns median per-call hop, fatter tail,
+  still sub-µs median (well under the 1 ms bar). `scheduler/run.sh` RE-RAN, VERDICT PASS,
+  control teeth 35 hits; S2 shared-handle contention now `long_schedule_hits=0` for all
+  readers (was 1 each — the block still lasts the query's ~1.32 s but now on a DIRTY
+  scheduler, off the normal ones). Consideration recorded: these readers now share the
+  10-scheduler DirtyIo pool with real queries, adding to dirty-pool occupancy under heavy
+  reader volume. `guides/gotchas.md` reader-scheduler section updated accordingly.
+- 2026-07-20 (maintainer decisions, A12/A1) F-A12-3 — TEXT-encode OOM FIXED to match BLOB
+  (graceful error, not panic). Row TEXT values crossed via rustler's `str`/`String` encoder,
+  which `panic!`s if `OwnedBinary::new` returns `None` under allocation failure, while the
+  BLOB encoders degrade with `ok_or_else(InternalEncodingError)`. Added `util::encode_text`
+  (fallible `OwnedBinary::new` + `copy_from_slice`, returns `InternalEncodingError` on `None`,
+  success path byte-identical to `str::encode`) and routed the three explicit value-return
+  TEXT sites through it: `encode_val` `Value::Text` (query/execute/pragma row values — now
+  returns `Result`), `sqlite_row_to_elixir_terms` `SQLITE_TEXT` (stream/step row values), and
+  `XqliteQueryResult` column names (`connection.rs`). OOM-only, so no RED (documented, like the
+  BLOB case); clippy `-D warnings` + dialyzer + full suite green; source audit shows no
+  `str::encode`/`.encode(env)` on a String/&str remaining at those sites. LEFT (judgment —
+  bounded metadata, NOT the ~1 GB payload, rustler-auto-encoded return types):
+  `stmt_column_names` / `stream_get_columns` (`Vec<String>`), `db_path` (`Option<String>`),
+  `sqlite_version`, the `schema.rs` introspection strings, and `get_create_sql` — converting
+  them means abandoning rustler's return auto-encode for a non-OOM-reachable case, and the
+  Run-1 return-encode `catch_unwind` (→ `:nif_panicked`) still nets any such OOM. No new error
+  shape: `{:internal_encoding_error, String.t()}` already in `error_reason/0`; adapter blast
+  radius NONE.
 - 2026-07-20 (S3 fix pass round 3, A3) F-A3-1 — the CLAUDE.md "// SAFETY: on every
   unsafe block" house rule is now MACHINE-ENFORCED: added
   `#![warn(clippy::undocumented_unsafe_blocks)]` to `native/xqlitenif/src/lib.rs`,

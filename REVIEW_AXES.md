@@ -168,6 +168,15 @@ unsafe-comment surface across 10 files — squarely this axis's re-wet list. A3 
 at **0 of 2 consecutive clean covering runs, NOT DRY**; the owed clean covering run
 should confirm every per-block comment still matches its block and the lint holds
 green.
+MAINTAINER DECISIONS (2026-07-20): the F-A12-3 fix REDUCES the panic surface on A1's watch —
+the row-value TEXT return path no longer routes through rustler's OOM-`panic!`ing `str::encode`.
+New `util::encode_text` (fallible `OwnedBinary` → `InternalEncodingError`) backs `encode_val`
+`Value::Text`, `sqlite_row_to_elixir_terms` `SQLITE_TEXT`, and `XqliteQueryResult` column names.
+Bounded-metadata String RETURNS (stmt/stream column names, `db_path`, `sqlite_version`, schema
+strings) still auto-encode via rustler — not the ~1 GB payload, and the Run-1 return-encode
+`catch_unwind` still nets any OOM (→ `:nif_panicked`). Panic surface NARROWED, not widened; the
+owed A1 clean covering run should re-confirm no panic-capable `.encode` remains on the row-value
+return path. No new `unsafe` (Decision 2's `Cell` is safe).
 
 ### A4. Scheduler discipline
 NIFs must be <1ms proven or Dirty (CPU vs IO correctly chosen).
@@ -221,6 +230,17 @@ decided). CLEAN — zero new CONFIRMED. DRYNESS: Run 10 carried a CONFIRMED S2 (
 9-NIF fix) so it was not a clean run, and the churn re-wet the axis → Run 19 is the
 **FIRST clean covering run, 1 of 2 consecutive, NOT DRY**, one more owed. Re-wet
 triggers UNCHANGED.
+MAINTAINER DECISIONS (2026-07-20): F-A4-1 RESOLVED — owner chose MOVE-TO-DIRTYIO. The 20
+trivial conn-`Mutex` readers flipped `#[rustler::nif]` → `schedule = "DirtyIo"`; new census
+**91 DirtyIo / 5 normal / 0 DirtyCpu** (was 71/25/0; the 5 normal survivors are the
+no-conn-Mutex NIFs — `create_cancel_token`, `cancel_operation`, `sqlite_version`,
+`register`/`unregister_log_hook`). Measured `changes/1` cost normal→DirtyIo (300k timed calls):
+mean ~101→~950 ns, p50 100→~850, p99 200→~5500 (~+0.85 µs median hop, still sub-µs, far under
+the 1 ms bar). `scheduler/run.sh` RE-RAN VERDICT PASS (control 35 hits); S2 shared-handle
+contention now `long_schedule_hits=0` for all readers (was 1 each — the block still lasts the
+query's ~1.32 s but on a DIRTY scheduler, off the normal ones). DirtyIo-pool occupancy under
+heavy reader volume noted. A `schedule=` change on 20 NIFs RE-WETS A4 → back to **0 of 2 clean
+covering runs, NOT DRY**; the owed re-run must re-census the 91/5/0 split and re-run the gate.
 
 ### A5. Cancellation semantics
 8-VM-step progress-handler cadence, un-tuned. Probes: cancel latency
@@ -541,6 +561,13 @@ round-trip. Re-ran `feature_islands/run.sh` (F-A11-4 reproduces, teeth held) and
 green in the full suite. CLEAN — zero new findings. DRYNESS: first of TWO consecutive
 clean covering runs after the Run-9 + S3-fix-pass re-wet; one more clean covering run
 owed before A11 is DRY. Re-wet list unchanged.
+MAINTAINER DECISIONS (2026-07-20): F-A11-4 RESOLVED — busy `:max_elapsed_ms` is now a per-event
+budget (`BusySlotState.start` → `Cell<Instant>`, reset at `count == 0` in `busy_callback`); the
+footgun is a passing RED→green regression (`busy_handler_test.exs`, `first_elapsed < 400` on an
+aged conn: RED left=600 → GREEN 0). The Run 9 `:replace` open question RULED keep-abort (no code
+change; `changeset_apply` docstring enhanced). The `busy_handler.rs` callback/state change
+RE-WETS A11's hook-island scope → still NOT DRY; the owed clean covering run should re-attack the
+busy slot + changeset islands.
 
 ### A12. Binary crossing
 Probes: copy vs refcounted binaries across the boundary; memory
@@ -608,6 +635,16 @@ maintainer call). CLEAN — zero new CONFIRMED. DRYNESS: Run 11 surfaced 3 new S
 pass round 2 churned this scope (F-A12-1/2), so A12 was RE-WET; Run 15 is the FIRST clean
 covering run (zero new CONFIRMED) over that churn — A12 stands at 1 of 2 consecutive clean
 covering runs, NOT DRY, one more clean covering run owed. Re-wet list UNCHANGED.
+MAINTAINER DECISIONS (2026-07-20): F-A12-3 RESOLVED — TEXT-value encode now degrades like BLOB.
+`util::encode_text` (fallible `OwnedBinary::new` + `copy_from_slice`, `InternalEncodingError` on
+`None`, success byte-identical to `str::encode`) backs the three explicit value-return TEXT sites
+(`encode_val` `Value::Text` — now returns `Result`; `sqlite_row_to_elixir_terms` `SQLITE_TEXT`;
+`XqliteQueryResult` column names via a new `connection.rs` `encode_column_names`). Bounded-metadata
+String return TYPES left rustler-auto-encoded (judgment — not the OOM-reachable payload). OOM-only
+→ no RED; clippy `-D warnings` + dialyzer + full suite green; source audit clean at the three sites.
+Touching `util.rs` `encode_val`/`sqlite_row_to_elixir_terms` + a new `connection.rs` encoder RE-WETS
+A12 → back off DRY; the owed re-run should re-audit the outbound copy-vs-refcount map incl. the new
+`encode_text` path.
 
 ### A13. Hot-upgrade posture
 rustler upgrade support is an open upstream gap; on_load is
