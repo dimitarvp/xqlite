@@ -13,10 +13,18 @@
 # durability + integrity invariants. Every reopen is classified PASS /
 # CORRUPTION / LOSTWRITE / HANG.
 #
-# TEETH: before any real run, two deterministic negative controls must trip —
-# a byte-smash must be classified CORRUPTION and a deleted committed row must
-# be classified LOSTWRITE — or the whole run aborts. A harness that stays green
-# on a known-bad input is worthless.
+# Each committed row also carries a guaranteed interior-NUL BLOB payload and an
+# interior-NUL bound TEXT value, both deterministic from the id; the verifier
+# recomputes and compares them BYTE-EXACT. This makes the harness an A8xA9
+# cross-axis leg: a pathological typed value written mid-write must survive the
+# SIGKILL byte-exact on reopen (or be cleanly absent), never a torn half-value.
+#
+# TEETH: before any real run, three deterministic negative controls must trip —
+# a byte-smash must be classified CORRUPTION, a deleted committed row must be
+# classified LOSTWRITE, and a tampered typed value (structurally valid, so
+# integrity_check stays "ok") must be classified CORRUPTION by the byte-exact
+# recompute — or the whole run aborts. A harness that stays green on a known-bad
+# input is worthless.
 #
 # SAFETY: only ever SIGKILLs the exact PID of a child it spawned this loop,
 # cross-checked against the writer's self-reported OS pid. Never pkill/killall,
@@ -60,7 +68,7 @@ printf 'tag\ti\tmode\tsync\tdelay_ms\talive_at_kill\twatermark\tdb_max\tdb_count
 # globals set by functions below
 ALIVE_AT_KILL="" ; LAST_DELAY_MS="" ; DB="" ; ACK=""
 VCLASS="" ; VCODE="" ; VWM="" ; VDBMAX="" ; VDBCOUNT="" ; VERIFY_OUT=""
-TEETH_CX="" ; TEETH_LW=""
+TEETH_CX="" ; TEETH_LW="" ; TEETH_VT=""
 
 echo "durability crash-harness"
 echo "  work dir: ${WORK}"
@@ -223,12 +231,35 @@ teeth_lostwrite() {
   rm -f "${DB}" "${DB}-wal" "${DB}-shm" "${DB}-journal" "${ACK}" "${DB}.pid"
 }
 
+# Typed-value teeth (A8xA9 cross-axis leg): corrupt one row's interior-NUL TEXT
+# value WITHOUT touching the file structure (integrity_check stays "ok"), and
+# prove the verifier's byte-exact typed-value recompute still classifies it
+# CORRUPTION. A torn/wrong typed value that integrity_check cannot see must not
+# slip past.
+teeth_value_tamper() {
+  echo "== teeth self-test 3/3: typed-value CORRUPTION detection =="
+  spawn_kill_reap teeth_vt 0 delete normal "${SAFE_ROW_BYTES}" 300 500
+  [ "${ALIVE_AT_KILL}" = "never_ready" ] && abort "teeth_value_tamper: writer never ready"
+  do_verify "${DB}" delete normal "${ACK}" "${SAFE_ROW_BYTES}"
+  [ "${VCLASS}" = "PASS" ] || abort "teeth_value_tamper baseline expected PASS, got ${VCLASS}: ${VERIFY_OUT}"
+  local w=${VWM}
+  { [ "${w}" != "NA" ] && [ "${w}" -ge 2 ]; } 2>/dev/null || abort "teeth_value_tamper: watermark too small (${w})"
+  "${MIX_RUN[@]}" durability/inject_tamper.exs "${DB}" delete normal "${w}" \
+    || abort "teeth_value_tamper: inject_tamper failed"
+  do_verify "${DB}" delete normal "${ACK}" "${SAFE_ROW_BYTES}"
+  [ "${VCLASS}" = "CORRUPTION" ] || abort "teeth_value_tamper: expected CORRUPTION after tampering typed value of id ${w}, got ${VCLASS}: ${VERIFY_OUT}"
+  echo "  OK: tampering interior-NUL TEXT value of id ${w} -> CORRUPTION (vcode ${VCODE})"
+  TEETH_VT="PASS (tampered typed value id ${w} -> CORRUPTION)"
+  rm -f "${DB}" "${DB}-wal" "${DB}-shm" "${DB}-journal" "${ACK}" "${DB}.pid"
+}
+
 # ---- run --------------------------------------------------------------------
 echo "compiling once (XQLITE_BUILD=true mix compile)..."
 XQLITE_BUILD=true mix compile >/dev/null 2>&1 || abort "mix compile failed"
 
 teeth_corrupt
 teeth_lostwrite
+teeth_value_tamper
 
 echo "== negative control: journal_mode=off synchronous=off, ${UNSAFE_ROW_BYTES}B rows x ${ITER_UNSAFE} =="
 for i in $(seq 1 "${ITER_UNSAFE}"); do
@@ -254,6 +285,7 @@ done
   echo "work_dir=${WORK}"
   echo "teeth_corruption_control=${TEETH_CX}"
   echo "teeth_lostwrite_control=${TEETH_LW}"
+  echo "teeth_value_tamper_control=${TEETH_VT}"
   echo
   awk -F'\t' '
     NR==1 { next }

@@ -3387,3 +3387,201 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   `concurrency/probe_common.exs` (harness oracle fix), `REVIEW_LEDGER.md`,
   `REVIEW_AXES.md`. No product code (`native/`/`lib/`/`test/`) touched; no
   `BACKLOG.md` change.
+
+---
+
+## Run 18 — 2026-07-19 — A8+A9 dryness covering re-run (churn attacked)
+
+- Commit at scan: `8535ddc` (HEAD, clean, CI green). Scope: the durability
+  crash-harness (A8) and the type/value-edge matrix (A9) re-verified at HEAD,
+  with the write-path / value-path churn since their baselines (A8 Run 3
+  `3893256`, A9 Run 7 `d5507c6` + the F1/F2 fix `16ca65d`) attacked hardest: the
+  `core_query_with_changes` total-changes detector (F-A10-3, `6ec14dc`), the
+  3-tuple busy/readonly/schema/auth + `{:utf8_error, col, msg}` error encoders
+  (F-A10-2 / round-2), the `reject_interior_nul` SQL-text guard (F-A11-3), the
+  size-adaptive `encode_blob` + single-copy `blob::read` (F-A12-1/2), and the F1
+  non-finite-float sentinels + F2 stream `on_error` (`16ca65d`). Composition:
+  single Opus pass (this agent) — source-level write-path re-verification +
+  RE-RAN both probe harnesses (the covering evidence) + a stale-probe RED→GREEN
+  maintenance fix forced by the F1/F2 churn + a new A8×A9 cross-axis
+  value-durability leg (teeth-proven). Did NOT re-litigate settled findings.
+
+### Churn map (what moved in each axis's scope, vs the baselines)
+
+- **A8 durability path is churn-CLEAN (source-verified).** The writer drives
+  `begin`→`execute`→`commit`. `Xqlite.execute` routes to `query::core_execute`
+  (nif.rs:113), NOT `core_query_with_changes` (nif.rs:136/158) — the F-A10-3
+  detector never touches the INSERT path. `commit`/`begin` route to
+  `transaction::commit`/`begin` (nif.rs:610/604) = `conn.execute("COMMIT;"/
+  "BEGIN …;")`, bypassing both `core_execute`'s NUL pre-check and the changes
+  detector; unchanged since Run 3. The ONLY churn on `core_execute` is
+  `reject_interior_nul(sql)?` (F-A11-3), a reject-BEFORE-mutate scan of the SQL
+  string — it cannot tear a write, and the writer's INSERT SQL is NUL-free (the
+  NUL lives in a bound VALUE, never scanned). The 3-tuple error encoders
+  (F-A10-2) change only the ERROR shape, never the success/commit path.
+  `commit/1` returns `:ok` only after `sqlite3_step(COMMIT)` reports
+  `SQLITE_DONE` (durable to the `synchronous` level) — no
+  success-before-durability path exists.
+- **A9 value paths churned heavily** (the re-wet list): `encode_f64` sentinels
+  (F1), `encode_blob` size-adaptive backing (F-A12-1), `blob::read` single-copy
+  (F-A12-2), the `{:utf8_error, col, msg}` 3-tuple (round-2) surfaced on
+  query/step directly AND via `Xqlite.StreamError.reason` on the stream path
+  (F2), and the `reject_interior_nul` SQL-text guard (F-A11-3).
+
+### A9 HARNESS MAINTENANCE (forced by the F1/F2 churn) — RED→GREEN
+
+- **The `type_edges/probe.exs` oracle was STALE at HEAD.** The probe (`743e295`,
+  Run 7) predates the F1/F2 fix (`16ca65d`, an ancestor of HEAD; verified) and
+  was never updated for it — the PRODUCT is the ruled-and-fixed behavior; the
+  PROBE rotted (the Run-17 stale-oracle class, review-infra not product).
+  - **RED (this session, `bash type_edges/run.sh`, captured):** `RESULT FAIL`
+    (rc 1). Two distinct staleness points: (1) `edge_nonfinite` classified the
+    F1 sentinels `:positive_infinity`/`:negative_infinity` as `:S0_returned_atom`
+    (the old `Classify.tag` flagged any non-`nil/true/false` atom "suspicious")
+    → 4 hard-S0 pins; (2) the `stream_silent_truncation` edge's unguarded
+    `Enum.to_list(stream(...))` raised `Xqlite.StreamError` UNCAUGHT (F2 default
+    `:raise`) → crashed the probe before edges 5/6/7 ran.
+  - **FIX (probe only, CI-isolated, not formatter-matched):** pin the RULED
+    contract with teeth. `edge_nonfinite` now `expect_eq`-asserts the exact
+    sentinel on every read path (query/stream/step/stored; NaN→nil; a regression
+    to a raise / a different atom / a raw float breaks the `===` oracle).
+    `edge_bad_utf8` asserts the stream RAISES `Xqlite.StreamError` carrying
+    structured `:reason == {:utf8_error, 0, _}` (asserted on the struct field,
+    never the message string) and pins all three ruled `on_error` modes
+    (`:raise` / `:halt` lossy / `:emit_error` terminal-tagged), each shape
+    distinct. Dead `Classify.nonfinite` + its exclusive helpers removed.
+  - **GREEN (this session, same harness post-fix):** `RESULT PASS_WITH_FINDINGS`
+    (rc 0), teeth `SELFTEST_PASS` (6 controls); the only findings are the two
+    DOCUMENTED decision-debts (D1 datetime lexical sort, D2 stored NaN→NULL) —
+    not new.
+
+### A9 churn attacked (new legs, teeth-proven THIS session)
+
+- **Adaptive blob backing (F-A12-1) on the A9 axis.** New `edge_interior_nul`
+  leg: an interior-NUL blob at {1, 63, 64, 65, 200} B — straddling the 64-byte
+  `HEAP_BINARY_THRESHOLD` (≤64 → OwnedBinary copy branch; >64 → zero-copy
+  `BlobResource` branch) — round-trips BYTE-EXACT via query / prepared step /
+  incremental `blob_read` (15 pins, all OK). TEETH: a temporary 1-byte-truncated
+  STORE flipped all {63,64,65,200} B pins to S0 on all three read paths (the 1B
+  case a correct no-op), rc 1; reverted.
+- **The Run-9 NUL distinction (F-A11-3).** New pin `nul_in_sql_text_rejected`: a
+  NUL in a bound VALUE round-trips byte-exact (above), but a NUL in the SQL TEXT
+  itself is REJECTED `{:error, :null_byte_in_string}` on query/execute/
+  execute_batch — never truncated at the NUL. HELD (all three paths).
+- **F1 sentinel teeth:** a temporary wrong-sentinel expectation flipped
+  `inf_read_via_query` to S0 (got `:positive_infinity`, want
+  `:negative_infinity`), rc 1; reverted.
+- **3-tuple `{:utf8_error, col, msg}` arity uniform** across query (direct),
+  step (direct), and stream (via `StreamError.reason`) — all surface
+  `{:utf8_error, 0, _}`. HELD.
+
+### A8×A9 cross-axis value-durability leg (NEW, teeth-proven)
+
+- The durability harness already wrote a BLOB payload per row; this run makes it
+  a genuine typed-value matrix across a crash. `harness_common.exs`: `payload/2`
+  now forces a deterministic interior NUL (was ~12%-incidental); a new
+  `nul_text/1` produces a deterministic interior-NUL bound TEXT value. `writer`
+  binds both per row (bind path: interior-NUL TEXT VALUE + interior-NUL BLOB);
+  `verify` recomputes and compares BOTH byte-exact, emitting
+  `{:torn_value, field, id}` (CORRUPTION) on any mismatch. So every safe-mode
+  reopen now proves a pathological typed value written mid-write survives the
+  SIGKILL byte-exact (or is cleanly absent) — no torn half-value. (Scope
+  honesty: a stored non-finite float is NOT bindable — F1 makes a BEAM
+  non-finite float unconstructible — so that edge stays in A9's read-path
+  probe, not the crash writer.)
+- **THIRD teeth control added** (`durability/inject_tamper.exs` +
+  `teeth_value_tamper`): a structurally-valid UPDATE of one row's interior-NUL
+  TEXT value (so `integrity_check` stays "ok") MUST be classified CORRUPTION by
+  the byte-exact recompute — a torn/wrong value integrity_check cannot see must
+  not slip past. Tripped every run.
+
+### Harnesses re-run — RESULT lines captured THIS session (covering evidence)
+
+- **`bash type_edges/run.sh` (A9) — VERDICT PASS (rc 0).**
+  - `RESULT SELFTEST_PASS oracle has teeth (6 controls)`
+  - `RESULT PASS_WITH_FINDINGS round-trips byte-exact; 2 S1/S2/decision-debt
+    finding(s) reported above` — the 2 are D1 + D2 (documented, not new).
+  - New/re-pinned legs all OK: `nul_blob_{query,step,read}_{1,63,64,65,200}B`;
+    F1 sentinels `inf_read_via_{query,stream,step}` + `neg_inf` + `stored_inf`;
+    `computed_nan_read_via_query`→nil; F2 `stream_on_error_{raise,halt_lossy,
+    emit_error}`; `bad_utf8_read_via_stream_raises`; `nul_in_sql_text_rejected`.
+- **`bash durability/run.sh` (A8) — VERDICT PASS (rc 0).** ITER_SAFE=200 /
+  ITER_UNSAFE=100 (baseline, NO reduction). All THREE teeth tripped:
+  `teeth_corruption_control=PASS (16384B smash -> CORRUPTION)`,
+  `teeth_lostwrite_control=PASS (deleted acked id -> LOSTWRITE)`,
+  `teeth_value_tamper_control=PASS (tampered typed value -> CORRUPTION)`.
+  - `tag=wal   total=200 PASS=200 CORRUPTION=0 LOSTWRITE=0 HANG=0 ERROR=0
+    SKIP_BOOT=0` (landed-mid-write=200, committed-at-kill k=383..18722 mean 8329).
+  - `tag=delete total=200 PASS=200 CORRUPTION=0 LOSTWRITE=0 HANG=0 ERROR=0
+    SKIP_BOOT=0` (landed-mid-write=200, k=289..5680 mean 2552).
+  - `tag=unsafe total=100 PASS=99 CORRUPTION=1 LOSTWRITE=0 HANG=0` (journal=off
+    sync=off neg-control; landed-mid-write=100, k=17..253 mean 105). The unsafe
+    config CAN corrupt (1/100 this run vs 15/100 in Run 3 — probabilistic in
+    when the kill lands vs a torn multi-page flush; the corroborating control,
+    not the primary teeth), proving the safe-mode 0-corruption is meaningful.
+  - **0 CORRUPTION / 0 LOSTWRITE / 0 HANG across 400 safe-mode reopens.** Every
+    externally-acked commit — INCLUDING its interior-NUL BLOB and interior-NUL
+    bound TEXT typed values — survived byte-exact; present ids a contiguous
+    checksum-clean prefix; `integrity_check == ok` every time.
+
+### Findings
+
+- **CLEAN — zero new CONFIRMED product findings on either axis.** The A9 probe
+  RED→GREEN is review-infra (a stale oracle after the ruled F1/F2 fix), not a
+  product defect; the product behavior is correct at HEAD. A9's only findings
+  are the two DOCUMENTED decision-debts (D1/D2) — not re-filed. A8's write path
+  is source-verified churn-clean and the harness is green with all teeth. No
+  S0/S1/S2/S3. No BACKLOG change (open maintainer calls F-A11-4 / F-A4-1 /
+  F-A12-3 / F-A13-1 / F-A10-9 and the A5 single-use-token S3 left untouched).
+
+### Verdict — A8, A9 both HOLD at HEAD
+
+- xqlite upholds SQLite's crash-atomicity / durability guarantee through a
+  SIGKILL of the writer VM mid-commit on its default WAL config and on
+  rollback-journal DELETE, with pathological typed values (interior-NUL BLOB +
+  TEXT) surviving byte-exact; and every value round-trip holds byte-exact across
+  every read path with the F1 sentinels, F2 on_error modes, adaptive blob
+  backing, and NUL distinction all correct. Only as strong as the teeth — all
+  three durability teeth (corruption/lostwrite/value-tamper) and the A9 oracle
+  (6 selftest controls + two live plant-and-revert proofs) tripped on known-bad
+  input this session.
+
+### Completeness critic
+
+- The covering evidence is the two re-run harness RESULT lines above, not
+  session memory. Honest gap, unchanged and stated in Run 3: **process-kill ≠
+  power-loss** — a BEAM SIGKILL leaves every `write()`n byte in the OS page
+  cache, so this validates crash-atomicity + crash-recovery under PROCESS death,
+  NOT true power-loss / OS-crash durability (that turns on fsync/`synchronous`
+  and needs a block-device fault injector or a VM power-cut, unavailable here;
+  infra-gated). The A9 oracle is byte-exact equality + structured-field
+  assertions, not a fuzzer — it pins the enumerated edges, and a value class not
+  in the matrix could go unseen (bounded by the source read of the encoders).
+  The unsafe neg-control's low hit-rate (1/100) is a reminder it is
+  corroborating, not the hard gate; the deterministic teeth are.
+
+### Dryness
+
+- **A8 — 1 of 2 consecutive clean covering runs (NOT DRY).** Run 3 was A8's one
+  covering run (pre-churn); the write-path churn (changes detector, 3-tuple
+  errors, NUL pre-check) re-wet it. Run 18 is the FIRST clean covering run over
+  that churn — source-verified churn-clean + green harness (WAL/DELETE 200 each,
+  0 findings, 3 teeth) + a new A8×A9 cross-axis value-durability leg; one more
+  owed. Re-wet: commit/open-path churn (`transaction.rs`, `core_execute`, the
+  open flags/pragma defaults), or a bundled-SQLite version bump.
+- **A9 — 1 of 2 consecutive clean covering runs (NOT DRY).** Run 7 was A9's one
+  covering run; the F1/F2 fixes + 3-tuple `utf8_error` + adaptive blob backing +
+  NUL guard re-wet it. Run 18 is the first clean covering run over that churn —
+  the probe brought to the ruled contract, all new legs teeth-proven, 0 new
+  CONFIRMED (only D1/D2 documented); one more owed. Re-wet: `util.rs` value
+  encoders (`encode_val`/`encode_f64`/`encode_blob`/`sqlite_row_to_elixir_terms`),
+  the stream fetch loop / `on_error` handling, `blob::read`, `reject_interior_nul`,
+  or any type_extension encoder.
+- `mix verify` GREEN (harnesses CI-isolated; the formatter `inputs` glob
+  `{config,lib,test}/**` matches ZERO `durability/`/`type_edges/` files —
+  verified via `Path.wildcard`, incl. the new `durability/inject_tamper.exs`).
+  Files changed: `type_edges/probe.exs` (stale-oracle fix + new legs),
+  `durability/{run.sh,harness_common.exs,writer.exs,verify.exs}` (value-matrix
+  leg), `durability/inject_tamper.exs` (NEW, typed-value teeth),
+  `REVIEW_LEDGER.md`, `REVIEW_AXES.md`. No product code (`native/`/`lib/`/
+  `test/`) touched; no `BACKLOG.md` change.

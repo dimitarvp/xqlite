@@ -79,42 +79,10 @@ defmodule TE do
 end
 
 defmodule Classify do
-  # Is a BEAM float finite? Arithmetic on a non-finite float raises, so a
-  # raise here also means non-finite.
-  defp finite_float?(v) when is_float(v) do
-    v == v and v - v == 0.0
-  rescue
-    _ -> false
-  end
-
-  defp tag(v) when is_float(v), do: if(finite_float?(v), do: :finite_float, else: :nonfinite_float)
-  defp tag(v) when is_atom(v) and v not in [nil, true, false], do: :suspicious_atom
-  defp tag(nil), do: :null
-  defp tag(_), do: :other
-
-  defp rows_of({:returned, {:ok, %{rows: rows}}}), do: {:ok, List.flatten(rows)}
-  defp rows_of({:returned, list}) when is_list(list), do: {:ok, List.flatten(list)}
-  defp rows_of({:returned, {:row, vals}}), do: {:ok, vals}
-  defp rows_of(other), do: {:no, other}
-
-  def nonfinite(res) do
-    case rows_of(res) do
-      {:ok, vals} ->
-        tags = Enum.map(vals, &tag/1)
-
-        cond do
-          :suspicious_atom in tags -> :S0_returned_atom
-          :nonfinite_float in tags -> :S2_returned_nonfinite_float
-          :null in tags -> :returned_null
-          true -> :returned_value
-        end
-
-      {:no, {:returned, {:error, _}}} -> :clean_error
-      {:no, {:raised, _, _}} -> :S1_public_api_raise
-      {:no, {:caught, _, _}} -> :S1_public_api_throw
-      {:no, _} -> :other
-    end
-  end
+  # F1 (ruled + fixed 16ca65d): a non-finite REAL now reads back as a SANCTIONED
+  # sentinel (+Inf -> :positive_infinity, -Inf -> :negative_infinity, NaN -> nil)
+  # on every read path, so the nonfinite behavior is PINNED byte-exact by
+  # `expect_eq` in edge_nonfinite rather than classified as unknown here.
 
   def utf8({:returned, {:error, {:utf8_error, _col, _}}}), do: :OK_structured_utf8_error
   def utf8({:returned, {:error, other}}), do: {:other_error_class, other}
@@ -132,9 +100,35 @@ defmodule Classify do
 end
 
 TE.start()
-classify_nonfinite = &Classify.nonfinite/1
 classify_utf8 = &Classify.utf8/1
 classify_err = &Classify.err/1
+
+# Extract the single scalar of a one-column, one-row read on each read path.
+# A raise/regression returns the raw {:raised, ...} tuple so the === oracle in
+# expect_eq flags it (a return to the pre-F1 ArgumentError never passes silently).
+scalar_query = fn c, sql ->
+  case TE.safe(fn -> Xqlite.query(c, sql, []) end) do
+    {:returned, {:ok, %{rows: [[v]]}}} -> v
+    other -> other
+  end
+end
+
+scalar_step = fn c, sql ->
+  case TE.safe(fn ->
+         {:ok, st} = Xqlite.prepare(c, sql)
+         Xqlite.step(st)
+       end) do
+    {:returned, {:row, [v]}} -> v
+    other -> other
+  end
+end
+
+scalar_stream = fn c, sql ->
+  case TE.safe(fn -> Enum.to_list(Xqlite.stream(c, sql, [])) end) do
+    {:returned, [row]} when is_map(row) -> row |> Map.values() |> hd()
+    other -> other
+  end
+end
 
 verdict_utf8 = fn
   :OK_structured_utf8_error -> :OK
@@ -253,35 +247,28 @@ edge_nonfinite = fn ->
 
   c = TE.mem()
 
-  q_inf = TE.safe(fn -> Xqlite.query(c, "SELECT 9e999", []) end)
-  TE.pin("inf_read_via_query", classify_nonfinite.(q_inf), TE.showt(q_inf))
-
-  s_inf = TE.safe(fn -> Enum.to_list(Xqlite.stream(c, "SELECT 9e999", [])) end)
-  TE.pin("inf_read_via_stream", classify_nonfinite.(s_inf), TE.showt(s_inf))
-
-  p_inf =
-    TE.safe(fn ->
-      {:ok, st} = Xqlite.prepare(c, "SELECT 9e999")
-      Xqlite.step(st)
-    end)
-
-  TE.pin("inf_read_via_step", classify_nonfinite.(p_inf), TE.showt(p_inf))
-
-  q_ninf = TE.safe(fn -> Xqlite.query(c, "SELECT -9e999", []) end)
-  TE.pin("neg_inf_read_via_query", classify_nonfinite.(q_ninf), TE.showt(q_ninf))
+  # F1 (ruled + fixed 16ca65d): reading a non-finite REAL returns a SANCTIONED
+  # sentinel on EVERY read path — +Inf -> :positive_infinity,
+  # -Inf -> :negative_infinity, NaN -> nil — never the pre-fix ArgumentError.
+  # Byte-exact assertions: a regression to a raise, a different atom, or a raw
+  # float all break the === oracle.
+  TE.expect_eq("inf_read_via_query", scalar_query.(c, "SELECT 9e999"), :positive_infinity)
+  TE.expect_eq("inf_read_via_stream", scalar_stream.(c, "SELECT 9e999"), :positive_infinity)
+  TE.expect_eq("inf_read_via_step", scalar_step.(c, "SELECT 9e999"), :positive_infinity)
+  TE.expect_eq("neg_inf_read_via_query", scalar_query.(c, "SELECT -9e999"), :negative_infinity)
 
   {:ok, _} = Xqlite.execute(c, "CREATE TABLE f(x REAL)", [])
   {:ok, _} = Xqlite.execute(c, "INSERT INTO f VALUES (9e999)", [])
-  st_inf = TE.safe(fn -> Xqlite.query(c, "SELECT x, typeof(x) FROM f", []) end)
-  TE.pin("stored_inf_read_via_query", classify_nonfinite.(st_inf), TE.showt(st_inf))
+  TE.expect_eq("stored_inf_read_via_query", scalar_query.(c, "SELECT x FROM f"), :positive_infinity)
 
-  # severity bound: is the connection still usable AFTER an Inf-raise, or is it
-  # wedged/poisoned? (enif_make_double badarg is a return-time BEAM raise, so
-  # the conn Mutex should drop cleanly.) Wedged would be far worse (S0).
-  after_raise = TE.safe(fn -> Xqlite.query(c, "SELECT 1", []) end)
-  usable = match?({:returned, {:ok, _}}, after_raise)
-  TE.pin("inf_raise_conn_still_usable", if(usable, do: :OK, else: :S0), TE.showt(after_raise))
+  # The connection stays usable after reading a non-finite (the conn Mutex drops
+  # cleanly before the sentinel encode returns; a wedged conn would be S0).
+  after_inf = TE.safe(fn -> Xqlite.query(c, "SELECT 1", []) end)
+  usable = match?({:returned, {:ok, _}}, after_inf)
+  TE.pin("inf_read_conn_still_usable", if(usable, do: :OK, else: :S0), TE.showt(after_inf))
 
+  # Stored NaN silently becomes NULL (SQLite has no NaN storage class) — D2
+  # decision-debt, documented in guides/gotchas.md.
   {:ok, _} = Xqlite.execute(c, "CREATE TABLE g(x REAL)", [])
   {:ok, _} = Xqlite.execute(c, "INSERT INTO g VALUES (9e999 - 9e999)", [])
   {:ok, gr} = Xqlite.query(c, "SELECT x, typeof(x) FROM g", [])
@@ -289,8 +276,8 @@ edge_nonfinite = fn ->
   nan_verdict = if gval == nil, do: :"DECISION-DEBT", else: :S2
   TE.pin("stored_nan_becomes_null", nan_verdict, "value=#{TE.show(gval)} typeof=#{TE.show(gtype)}")
 
-  q_nan = TE.safe(fn -> Xqlite.query(c, "SELECT 9e999 - 9e999", []) end)
-  TE.pin("computed_nan_read_via_query", classify_nonfinite.(q_nan), TE.showt(q_nan))
+  # Computed NaN reads back as nil (F1 NaN arm of encode_f64).
+  TE.expect_eq("computed_nan_read_via_query", scalar_query.(c, "SELECT 9e999 - 9e999"), nil)
 end
 
 # ===========================================================================
@@ -327,6 +314,53 @@ edge_interior_nul = fn ->
   {:ok, bsz} = XqliteNIF.blob_size(bh)
   {:ok, bbytes} = XqliteNIF.blob_read(bh, 0, bsz)
   TE.expect_eq("nul_blob_via_blob_read", bbytes, blob)
+
+  # Adaptive blob backing (F-A12-1): the query encode_val path copies blobs
+  # <= 64 B into a heap OwnedBinary and zero-copy-wraps blobs > 64 B in a
+  # BlobResource. Prove an interior-NUL blob survives BYTE-EXACT across the
+  # 64-byte threshold on every read path (query/step/blob_read) — the
+  # size-adaptive branch must never truncate at a NUL nor drop a byte.
+  nul_blob = fn n -> <<1, 0, 0xFF, 0, 2>> |> :binary.copy(div(n, 5) + 1) |> binary_part(0, n) end
+  {:ok, _} = Xqlite.execute(c, "CREATE TABLE tb(id INTEGER PRIMARY KEY, y BLOB)", [])
+
+  Enum.each([1, 63, 64, 65, 200], fn n ->
+    b = nul_blob.(n)
+    {:ok, _} = Xqlite.execute(c, "INSERT INTO tb(id, y) VALUES (?, ?)", [n, b])
+
+    {:ok, rq} = Xqlite.query(c, "SELECT y FROM tb WHERE id = ?", [n])
+    TE.expect_eq("nul_blob_query_#{n}B", hd(hd(rq.rows)), b)
+
+    {:ok, ps} = Xqlite.prepare(c, "SELECT y FROM tb WHERE id = ?")
+    :ok = Xqlite.bind(ps, [n])
+    {:row, [sb]} = Xqlite.step(ps)
+    TE.expect_eq("nul_blob_step_#{n}B", sb, b)
+
+    {:ok, bh2} = XqliteNIF.blob_open(c, "main", "tb", "y", n, true)
+    {:ok, sz2} = XqliteNIF.blob_size(bh2)
+    {:ok, rr} = XqliteNIF.blob_read(bh2, 0, sz2)
+    TE.expect_eq("nul_blob_read_#{n}B", rr, b)
+  end)
+
+  # Run 9 distinction (reject_interior_nul, F-A11-3): a NUL in a bound VALUE
+  # round-trips byte-exact (above), but a NUL in the SQL TEXT itself is REJECTED
+  # with :null_byte_in_string on query/execute/execute_batch — never silently
+  # truncated at the NUL (SQLite's tokenizer stops at a NUL, shortening the
+  # statement into something unintended).
+  nul_sql = "SELECT 1" <> <<0>> <> " , 2"
+  rq_nul = Xqlite.query(c, nul_sql, [])
+  re_nul = Xqlite.execute(c, nul_sql, [])
+  rb_nul = Xqlite.execute_batch(c, nul_sql)
+
+  reject_ok =
+    match?({:error, :null_byte_in_string}, rq_nul) and
+      match?({:error, :null_byte_in_string}, re_nul) and
+      match?({:error, :null_byte_in_string}, rb_nul)
+
+  TE.pin(
+    "nul_in_sql_text_rejected",
+    if(reject_ok, do: :OK, else: :S1_nul_sql_not_rejected),
+    "query=#{TE.showt(rq_nul)} execute=#{TE.showt(re_nul)} batch=#{TE.showt(rb_nul)}"
+  )
 end
 
 # ===========================================================================
@@ -344,7 +378,6 @@ edge_bad_utf8 = fn ->
   TE.expect_eq("bad_utf8_negctl_valid_text", hd(hd(vr.rows)), "valid")
 
   q = TE.safe(fn -> Xqlite.query(c, "SELECT x FROM u WHERE rowid=1", []) end)
-  s = TE.safe(fn -> Enum.to_list(Xqlite.stream(c, "SELECT x FROM u WHERE rowid=1", [])) end)
 
   p =
     TE.safe(fn ->
@@ -352,13 +385,34 @@ edge_bad_utf8 = fn ->
       Xqlite.step(st)
     end)
 
+  # query + step surface the structured 3-tuple {:utf8_error, col, detail}.
   TE.pin("bad_utf8_read_via_query", verdict_utf8.(classify_utf8.(q)), TE.showt(q))
-  TE.pin("bad_utf8_read_via_stream", verdict_utf8.(classify_utf8.(s)), TE.showt(s))
   TE.pin("bad_utf8_read_via_step", verdict_utf8.(classify_utf8.(p)), TE.showt(p))
 
-  # SILENT TRUNCATION demo: good rows BEFORE a bad row are yielded, then the
-  # stream halts on the bad row (Logger.error, no error to the consumer) and
-  # the trailing good row is never seen. query surfaces the error instead.
+  # Stream (F2 default :raise, fixed 16ca65d) raises Xqlite.StreamError whose
+  # STRUCTURED :reason field carries the SAME 3-tuple. Assert on :reason, never
+  # the message string. Pre-fix this error was swallowed into Logger + silent
+  # truncation; a regression to that makes stream_raise :no_raise -> flagged.
+  stream_raise =
+    try do
+      _ = Enum.to_list(Xqlite.stream(c, "SELECT x FROM u WHERE rowid=1", []))
+      :no_raise
+    rescue
+      e in Xqlite.StreamError -> {:stream_error_reason, e.reason}
+    end
+
+  sr_ok = match?({:stream_error_reason, {:utf8_error, 0, _}}, stream_raise)
+
+  TE.pin(
+    "bad_utf8_read_via_stream_raises",
+    if(sr_ok, do: :OK, else: :S1_stream_swallowed),
+    TE.showt(stream_raise)
+  )
+
+  # The three ruled on_error modes over a table whose row 3 is invalid UTF-8
+  # (rows 1,2 good; row 4 good but unreachable once row 3 fails). batch_size: 1
+  # forces the error mid-stream. Each mode's shape is DISTINCT — a collapse is
+  # flagged.
   {:ok, _} = Xqlite.execute(c, "CREATE TABLE w(x TEXT)", [])
 
   {:ok, _} =
@@ -368,17 +422,47 @@ edge_bad_utf8 = fn ->
       []
     )
 
-  trunc = Enum.to_list(Xqlite.stream(c, "SELECT x FROM w ORDER BY rowid", [], batch_size: 1))
-  q_all = TE.safe(fn -> Xqlite.query(c, "SELECT x FROM w ORDER BY rowid", []) end)
-  got_labels = Enum.map(trunc, & &1["x"])
-
-  verdict =
-    if length(trunc) == 4, do: :OK, else: :S1_stream_silent_truncation
+  # :raise (default) — a mid-stream error raises; a failed read can never
+  # masquerade as a completed stream.
+  raise_mode =
+    try do
+      _ = Enum.to_list(Xqlite.stream(c, "SELECT x FROM w ORDER BY rowid", [], batch_size: 1))
+      :no_raise
+    rescue
+      e in Xqlite.StreamError -> {:raised, e.reason}
+    end
 
   TE.pin(
-    "stream_silent_truncation",
-    verdict,
-    "stream yielded #{length(trunc)}/4 rows #{TE.showt(got_labels)}; query -> #{TE.showt(q_all)}"
+    "stream_on_error_raise",
+    if(match?({:raised, {:utf8_error, _, _}}, raise_mode), do: :OK, else: :S1_no_raise),
+    TE.showt(raise_mode)
+  )
+
+  # :halt (opt-in, documented LOSSY) — yields the good prefix, logs, stops.
+  halt_labels =
+    c
+    |> Xqlite.stream("SELECT x FROM w ORDER BY rowid", [], batch_size: 1, on_error: :halt)
+    |> Enum.map(& &1["x"])
+
+  TE.pin(
+    "stream_on_error_halt_lossy",
+    if(halt_labels == ["g1", "g2"], do: :OK, else: :S2_halt_shape),
+    "yielded #{TE.showt(halt_labels)} (documented lossy truncation)"
+  )
+
+  # :emit_error — uniform {:ok, row} elements then a terminal {:error, reason}.
+  emit_rows =
+    c
+    |> Xqlite.stream("SELECT x FROM w ORDER BY rowid", [], batch_size: 1, on_error: :emit_error)
+    |> Enum.to_list()
+
+  emit_ok =
+    match?([{:ok, %{"x" => "g1"}}, {:ok, %{"x" => "g2"}}, {:error, {:utf8_error, 0, _}}], emit_rows)
+
+  TE.pin(
+    "stream_on_error_emit_error",
+    if(emit_ok, do: :OK, else: :S1_emit_shape),
+    TE.showt(emit_rows)
   )
 end
 

@@ -7,15 +7,34 @@
 defmodule Durability.Row do
   @moduledoc false
 
-  # Deterministic payload of exactly `bytes` bytes derived from `id`.
-  # A 32-byte SHA-256 of the id, tiled and truncated to the requested width.
+  # Deterministic BLOB payload of exactly `bytes` bytes derived from `id`:
+  # a 32-byte SHA-256 of the id, tiled to the requested width, with one 0x00
+  # forced in at a deterministic offset. The forced NUL makes this an A8xA9
+  # cross-axis leg — a guaranteed interior-NUL BLOB must survive a mid-write
+  # SIGKILL byte-exact on reopen (or be cleanly absent), never truncated at the
+  # NUL nor a torn half-value. SHA output alone would carry an interior NUL only
+  # ~12% of the time per 32 bytes; forcing it makes every row exercise the edge.
+  # The verifier recomputes this identically.
   def payload(id, bytes) when is_integer(id) and is_integer(bytes) and bytes > 0 do
     seed = :crypto.hash(:sha256, <<id::64>>)
     reps = div(bytes, 32) + 1
 
-    seed
-    |> :binary.copy(reps)
-    |> binary_part(0, bytes)
+    base =
+      seed
+      |> :binary.copy(reps)
+      |> binary_part(0, bytes)
+
+    nul_at = rem(id, bytes)
+    <<head::binary-size(^nul_at), _::binary-size(1), tail::binary>> = base
+    head <> <<0>> <> tail
+  end
+
+  # Deterministic TEXT value carrying interior NUL bytes, recomputable by the
+  # verifier. A bound TEXT VALUE with interior NULs must round-trip byte-exact
+  # (only a NUL in SQL *text* is rejected — the Run 9 distinction), so this
+  # proves a pathological bound TEXT value also survives a mid-write crash.
+  def nul_text(id) when is_integer(id) do
+    "row" <> <<0>> <> Integer.to_string(id) <> <<0>> <> "end"
   end
 
   # Content checksum of a payload. CRC32 is enough to catch a torn/partial

@@ -46,7 +46,7 @@ conn =
 {:ok, _} =
   Xqlite.execute(
     conn,
-    "CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, payload BLOB NOT NULL, ck INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, payload BLOB NOT NULL, ck INTEGER NOT NULL, nt TEXT NOT NULL)",
     []
   )
 
@@ -57,14 +57,15 @@ conn =
 
 {:ok, ack} = File.open(ack_path, [:write, :raw, :binary])
 
-insert = "INSERT INTO t(id, payload, ck) VALUES (?1, ?2, ?3)"
+insert = "INSERT INTO t(id, payload, ck, nt) VALUES (?1, ?2, ?3, ?4)"
 
 commit_row = fn id ->
   payload = Durability.Row.payload(id, row_bytes)
   ck = Durability.Row.checksum(payload)
+  nt = Durability.Row.nul_text(id)
 
   :ok = Xqlite.begin(conn, :immediate)
-  {:ok, _} = Xqlite.execute(conn, insert, [id, payload, ck])
+  {:ok, _} = Xqlite.execute(conn, insert, [id, payload, ck, nt])
   :ok = Xqlite.commit(conn)
 
   # Ack AFTER the commit returns: the row is durable before it is recorded.

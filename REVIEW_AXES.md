@@ -275,6 +275,30 @@ xqlite defaults + deterministic & realistic-unsafe negative controls; 0
 corruption/lost-write/hang, teeth proven. NOT yet DRY (one covering run);
 process-kill ≠ power-loss (fsync/`synchronous` untested vs true power
 loss); commit/open-path churn re-wets.
+COVERING RE-RUN (Run 18, 2026-07-19): the owed re-run over the write-path churn since
+Run 3. The durability path (`begin`→`execute`→`commit`) is SOURCE-VERIFIED churn-clean:
+`Xqlite.execute`→`query::core_execute` (nif.rs:113), NOT the F-A10-3
+`core_query_with_changes`; `commit`/`begin`→`transaction::commit`/`begin`
+(nif.rs:610/604) = `conn.execute("COMMIT;")`, bypassing both the changes detector and
+`core_execute`'s NUL pre-check; the only `core_execute` churn is `reject_interior_nul`
+(reject-before-mutate, and the writer's INSERT SQL is NUL-free); the 3-tuple error
+encoders touch only the ERROR shape; `commit/1` returns `:ok` only after
+`sqlite3_step(COMMIT)` reports `SQLITE_DONE` (no success-before-durability). RE-RAN
+`durability/run.sh` at baseline (ITER_SAFE=200/ITER_UNSAFE=100, NO reduction): VERDICT
+PASS — WAL 200 PASS=200/0/0/0, DELETE 200 PASS=200/0/0/0 (0 CORRUPTION/LOSTWRITE/HANG
+across 400 safe reopens; k landed-mid-write on every iteration), unsafe neg-control
+99 PASS/1 CORRUPTION (config CAN corrupt). NEW A8×A9 cross-axis value leg: every row now
+carries a GUARANTEED interior-NUL BLOB payload + an interior-NUL bound TEXT value, both
+recomputed byte-exact by the verifier across the SIGKILL — so a pathological typed value
+written mid-write survives byte-exact or is cleanly absent (no torn half-value). THIRD
+teeth control added (`inject_tamper.exs`: a structurally-valid typed-value UPDATE that
+`integrity_check` cannot see → CORRUPTION via byte-exact recompute); all three teeth
+(corruption/lostwrite/value-tamper) tripped this session. CLEAN — zero new CONFIRMED.
+DRYNESS: Run 3 (pre-churn) was re-wet by the write-path churn → Run 18 is the FIRST clean
+covering run over it — **A8 stands at 1 of 2 consecutive clean covering runs, NOT DRY**,
+one more owed. Standing gap UNCHANGED: process-kill ≠ power-loss (fsync/`synchronous`
+untested vs true power loss; infra-gated). Re-wet: commit/open-path churn
+(`transaction.rs`, `core_execute`, open flags/pragma defaults) or a bundled-SQLite bump.
 
 ### A9. Type/value edges
 Probes: Elixir bignums beyond i64 (error or truncation?); NaN/
@@ -303,6 +327,28 @@ wrong), D2 stored NaN→NULL (SQLite behavior, undocumented). 0 S0.
 NOT yet DRY (first value-edge run; one more owed; F1/F2 fixes or any
 `util.rs` encoder / stream-fetch / type_extension-encoder churn
 re-wets). Findings → BACKLOG + ledger Run 7.
+COVERING RE-RUN (Run 18, 2026-07-19): the owed re-run over the F1/F2 + adaptive-blob +
+NUL-guard + 3-tuple churn. The `type_edges/probe.exs` oracle was STALE at HEAD (it
+predates the F1/F2 fix `16ca65d` and was never updated) — RED this session (`RESULT FAIL`
+rc 1: the F1 sentinels `:positive_infinity`/`:negative_infinity` misclassified as
+`:S0_returned_atom`, and the F2 default-`:raise` stream crashed the probe uncaught). FIXED
+(probe only, review-infra): `edge_nonfinite` now `expect_eq`-asserts the exact sentinel on
+query/stream/step/stored + NaN→nil; `edge_bad_utf8` asserts the stream raises
+`Xqlite.StreamError` with structured `:reason == {:utf8_error, 0, _}` (struct field, never
+message text) and pins all three ruled `on_error` modes. NEW churn-attack legs, TEETH-PROVEN
+(plant-and-revert this session): interior-NUL blob byte-exact across the 64 B threshold
+{1,63,64,65,200}B via query/step/blob_read (F-A12-1 both branches); the Run-9 distinction
+(`nul_in_sql_text_rejected` on query/execute/execute_batch vs NUL-in-VALUE round-trip);
+the `{:utf8_error, col, msg}` 3-tuple arity uniform across query/step/stream. GREEN post-fix
+(`RESULT PASS_WITH_FINDINGS` rc 0, teeth SELFTEST_PASS 6 controls). Only findings the two
+DOCUMENTED decision-debts (D1 lexical DateTime sort, D2 stored NaN→NULL) — NOT re-filed.
+CLEAN — zero new CONFIRMED product findings (the probe RED→GREEN is stale-oracle
+maintenance, not product). DRYNESS: Run 7 was re-wet by the F1/F2 fix + 3-tuple utf8_error
++ adaptive blob + NUL guard → Run 18 is the FIRST clean covering run over that churn —
+**A9 stands at 1 of 2 consecutive clean covering runs, NOT DRY**, one more owed. Re-wet:
+`util.rs` value encoders (`encode_val`/`encode_f64`/`encode_blob`/
+`sqlite_row_to_elixir_terms`), the stream fetch loop / `on_error`, `blob::read`,
+`reject_interior_nul`, or any type_extension encoder.
 
 ### A10. Structured-error contract
 Probes: audit remaining text-parsing paths ("mostly succeeded" —

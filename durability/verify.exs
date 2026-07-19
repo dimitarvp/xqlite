@@ -84,7 +84,7 @@ table_exists? =
 
 rows =
   if table_exists? do
-    case Xqlite.query(conn, "SELECT id, payload, ck FROM t ORDER BY id", []) do
+    case Xqlite.query(conn, "SELECT id, payload, ck, nt FROM t ORDER BY id", []) do
       {:ok, %{rows: rows}} -> rows
       {:error, reason} -> emit.("CORRUPTION", 3, -1, -1, -1, {:select_error, reason})
     end
@@ -92,16 +92,20 @@ rows =
     []
   end
 
-ids = Enum.map(rows, fn [id, _payload, _ck] -> id end)
+ids = Enum.map(rows, fn [id, _payload, _ck, _nt] -> id end)
 db_count = length(ids)
 db_min = Enum.min(ids, fn -> 0 end)
 db_max = Enum.max(ids, fn -> 0 end)
 
-# --- per-row checksum (torn / partial page write) ----------------------------
-bad_checksum =
-  Enum.find(rows, fn [id, payload, ck] ->
+# --- per-row byte-exact value check (torn / partial page write, PLUS the
+# A8xA9 cross-axis leg: a guaranteed interior-NUL BLOB payload and an
+# interior-NUL bound TEXT value must both survive the crash byte-exact) --------
+bad_row =
+  Enum.find(rows, fn [id, payload, ck, nt] ->
     expected = Durability.Row.payload(id, row_bytes)
-    payload != expected or ck != Durability.Row.checksum(expected)
+
+    payload != expected or ck != Durability.Row.checksum(expected) or
+      nt != Durability.Row.nul_text(id)
   end)
 
 # --- contiguity: present ids must be exactly 1..db_max (no gap) ---------------
@@ -114,9 +118,19 @@ missing_acked = ack_ids |> Enum.reject(&MapSet.member?(id_set, &1)) |> Enum.sort
 Xqlite.close(conn)
 
 cond do
-  bad_checksum != nil ->
-    [id, _p, _c] = bad_checksum
-    emit.("CORRUPTION", 3, db_min, db_max, db_count, {:bad_checksum, id})
+  bad_row != nil ->
+    [id, payload, ck, nt] = bad_row
+    expected = Durability.Row.payload(id, row_bytes)
+
+    field =
+      cond do
+        payload != expected -> :blob_payload
+        ck != Durability.Row.checksum(expected) -> :checksum
+        nt != Durability.Row.nul_text(id) -> :nul_text
+        true -> :unknown
+      end
+
+    emit.("CORRUPTION", 3, db_min, db_max, db_count, {:torn_value, field, id})
 
   missing_acked != [] ->
     emit.("LOSTWRITE", 4, db_min, db_max, db_count, {:acked_missing, Enum.take(missing_acked, 20)})
