@@ -4,9 +4,9 @@
 # cannot settle. Every check is a hard assertion; any failure -> rc 1.
 #
 #   E1  empty (0-byte) BLOB round-trips as <<>> on BOTH outbound paths: query
-#       (encode_val -> ResourceArc<BlobResource>::make_binary on an EMPTY Vec,
-#       dangling-but-aligned ptr, len 0) and stream (sqlite_row_to_elixir_terms
-#       null-ptr + len-0 branch). Neither may crash.
+#       (encode_val, size-adaptive: 0 <= 64 so it copies into a 0-byte
+#       OwnedBinary) and stream (sqlite_row_to_elixir_terms null-ptr + len-0
+#       branch). Neither may crash.
 #   E2  a SUB-BINARY of a huge parent, passed as a blob param and as blob_write
 #       data, round-trips byte-exact (inbound copies the view; never retains the
 #       parent past the call — the source claim, here exercised for real).
@@ -192,7 +192,7 @@ defmodule A12.Edges do
     IO.puts("=== xqlite A12 binary-crossing correctness edges ===")
 
     results = [
-      check("E1 empty blob (query resource-binary + stream len-0)", &e1/0),
+      check("E1 empty blob (query 0-byte OwnedBinary + stream len-0)", &e1/0),
       check("E2 sub-binary param + blob_write round-trip byte-exact", &e2/0),
       check("E3 query blob (owned resource binary) survives conn close", &e3/0),
       check("E4 interior-NUL blob+text byte-exact both paths", &e4/0),

@@ -2804,3 +2804,158 @@ Grouped, worst-case noted:**
 - `mix verify` GREEN (below). Only intended files changed: `test_arch/capped_probe.exs`
   + `test_arch/capped_run.sh` (new, CI-isolated), `REVIEW_LEDGER.md`,
   `REVIEW_AXES.md`, `BACKLOG.md`.
+
+---
+
+## Run 15 — 2026-07-19 — A12 dryness covering re-run
+
+- Commit at scan: `e858fa8` (HEAD, clean, CI green; targets = the S3 fix pass
+  round-2 churn over `287c403`). Scope: a full covering re-run of A12 (what happens
+  to bytes crossing the NIF boundary, both directions) with the fix-pass churn
+  attacked hardest — F-A12-1 (`util.rs encode_val` blob arm made size-adaptive) and
+  F-A12-2 (`blob.rs read` collapsed to a single copy). Composition: single Opus pass
+  (this agent) — a source-level copy-vs-refcount re-audit grounded in the LOCKED
+  rustler-0.38.0 `Binary`/`OwnedBinary`/`make_binary` semantics (read this session,
+  not recalled) + admissible runtime edge probes against the bundled SQLite 3.53.2
+  (commands + output captured) + the `binary_crossing/` harness re-run. Did NOT
+  re-litigate F-A12-3 (OPEN maintainer call — untouched, unchanged). A12 is a
+  drive-and-measure axis; every runtime claim RUN this session.
+
+### Churn boundary (git diff `a6292ff..e858fa8`, A12 scope)
+
+- Only three files changed in scope: `util.rs` (the `encode_blob` size-adaptive
+  helper), `blob.rs` (the `read` single-copy rewrite + a comment scrub), `nif.rs`
+  (the `query_with_changes` empty-columns→delta change, which is A10 churn, NOT
+  binary-crossing). `session.rs to_owned_binary`, `hook_util.rs`, and every
+  param/SQL/changeset/serialize path are UNCHANGED since Run 11 — re-verified by diff.
+
+### Churn-attack table (edge → verdict)
+
+| churn edge attacked | verdict |
+|---|---|
+| `encode_blob` blob `> 64 B` → zero-copy resource binary (256 B, 4096 B) | HELD (byte-exact; 448 B/row resource, S1/E3) |
+| `encode_blob` blob `<= 64 B` → OwnedBinary heap copy (0/1/63/64 B) | HELD (byte-exact; 0.0 B/row heap) |
+| `encode_blob` 64/65 threshold exactness | HELD (64 B → 0 B/row heap; 65 B → 128 B/row binary-alloc) |
+| `encode_blob` empty 0-byte blob → `OwnedBinary::new(0)` copy | HELD (`<<>>`, no crash; E1) |
+| `encode_blob` OOM-degrade arm (`OwnedBinary::new`→None → wrap) | HELD (source: `owned_vec` still owned; degrade routes to the established >64 B path; no NEW panic — `OwnedBinary::new` returns None gracefully) |
+| `encode_blob` `copy_from_slice` length match | HELD (source: dst = `OwnedBinary::new(owned_vec.len())`, src = `&owned_vec`; equal → cannot panic) |
+| `blob::read` no uninitialised byte escapes | HELD (source: `sqlite3_blob_read` fills exactly `actual_len` on OK; bounds forbid the past-end error, so OK ⇒ full-fill; on any err the OwnedBinary is dropped → `enif_release_binary`, never `release`d to the BEAM) |
+| `blob::read` locking law (every `sqlite3_*` under the conn Mutex) | HELD (source: whole body inside `with_live_blob`; `_bytes`/`_read`/`_errmsg` all under the held guard; lock-then-load) |
+| `blob::read` whole / partial / past-end-clamp / at-end / beyond / zero-len | HELD (byte-exact runtime) |
+| `blob::read` on a 0-byte blob handle | HELD (all reads `<<>>`, no crash) |
+| `blob::read` offset+len bounds + i32 casts | HELD (source: past the empty short-circuit `offset < size <= i32::MAX`, `actual_len <= size-offset` → both casts lossless) |
+| gotchas.md "Memory and binaries" threshold claim vs measured | HELD (doc: `>64 B`→resource binary / `<=64 B`→process-heap on every path — matches the 64→0 / 65→128 B/row measurement exactly; no doc change owed) |
+
+### Runtime edge confirmations (RUN this session; bundled SQLite 3.53.2)
+
+- `a12_edges_confirm.exs` (scratchpad, deleted after; `mix run --no-compile`):
+  - **query-path byte-exactness across the boundary:** `n ∈ {0,1,63,64,65,200,4096}`
+    all round-trip byte-exact (both `encode_blob` branches + the 64/65 split).
+  - **binary-allocator classification at the EXACT 64/65 boundary:** 64 B × 50 000
+    rows held → `:erlang.memory(:binary)` delta **0 B (0.0 B/row)** = process-heap
+    binary; 65 B × 50 000 rows → **6 400 072 B (128.0 B/row)** = binary allocator.
+    Pins `HEAP_BINARY_THRESHOLD = 64` to `ERL_ONHEAP_BIN_LIMIT`: `<=64` copies to a
+    heap binary (empirically 0 in the binary counter), `>64` is an off-heap refc/
+    resource binary.
+  - **blob_read matrix:** whole / partial-middle / length-past-end-clamp /
+    offset-at-end / offset-beyond-end / zero-length-requested all byte-exact; a
+    0-byte blob handle returns `<<>>` for every read, no crash.
+
+### Re-measured numbers vs Run 11 (`binary_crossing/run.sh`, 100k rows, RUN this session)
+
+| metric | Run 11 | Run 15 | delta |
+|---|---|---|---|
+| S1 query held(binary) / per_row | 42.73 MB / 448 B | 42.73 MB / 448 B | same |
+| S1 stream held(binary) / per_row | 61.0 MB / 640 B | 61.04 MB / 640 B | same |
+| S1 retention-leak residual (both paths) | 0.0 MB | 0.0 MB | HELD |
+| S2 streaming consume-discard peak | 0.62 MB (68.5×) | 0.62 MB (68.5×) | same |
+| S3 query small-blob per_row(binary) | **128 B (resource binary)** | **0.0 B (heap binary)** | **FIXED (F-A12-1)** |
+| S3 query total | 23.4 MB | 9.64 MB | leaner |
+| S3 query/stream ratio | 1.8× (query HEAVIER) | 1.4× (query LEANER) | flipped to the good direction |
+| S4 1000 B / 8 B classification | binary-alloc / process-heap | binary-alloc (2032 B) / process-heap | same |
+| TEETH (20 000×512 B retention) | +10.83 MB grow / settle back | +10.83 MB grow / settle back | LIVE |
+
+- The ONLY delta from Run 11 is the intended F-A12-1 effect: the small-blob query
+  path moved from a 128 B/row off-heap resource binary to a 0.0 B/row process-heap
+  binary, flipping the query/stream asymmetry from 1.8× (query heavier) to 1.4×
+  (query leaner). Every large-blob (`>64 B`) number is byte-identical to Run 11 (the
+  size-adaptive change is a no-op above the threshold), and the leak gate + teeth +
+  streaming advantage all reproduce unchanged.
+
+### Full covering sweep (fresh eyes, non-churn paths)
+
+- **Inbound copy map** — UNCHANGED from Run 11 and re-verified: SQL text + params
+  COPY into owned `String`/`Value`; `blob_write`/`deserialize`/`changeset_*` take a
+  zero-copy `Binary::as_slice` view consumed synchronously (SQLITE_TRANSIENT /
+  `Cursor`). E5 (iodata rejected) + E2 (sub-binary param/blob_write, no parent
+  retention) PASS at runtime.
+- **Term-lifetime census** — HOLDS: enumerated every `#[resource_impl]` struct
+  (`XqliteConn`/`Statement`/`Stream`/`Blob`/`Session`/`CancelToken`/`BlobResource`);
+  none stores a `Term`, `Binary`, or borrowed slice (the `&str`/`&[u8]` grep hits are
+  all fn params; `XqliteQueryResult<'a>` and `ProgressHandlerGuard<'d>` are transient,
+  not resources — a `<'a>` type cannot be a `'static` resource). No view outlives its
+  env. E3 re-proves it: a `query` blob (`>64 B` resource binary owning a copied-out
+  `Vec`) stays byte-exact after `close/1` + GC.
+- **Outbound allocation map** — every producer (`serialize`, `session_changeset`/
+  `patchset`, `changeset_invert`/`concat`, `blob_read`) allocates an `OwnedBinary`,
+  copies once, and `release(env)`s exactly once on success; the error arm drops the
+  `OwnedBinary` (freed, never released). Verified at each `nif.rs` site.
+- **Hook payload bounds + msg_env balance** — UNCHANGED (not in the churn diff) and
+  re-checked: all 8 senders (`nif.rs` backup + wal/log/update/commit/rollback/busy/
+  progress) pair one `enif_alloc_env` with one unconditional `enif_free_env` (M4
+  stays fixed); payloads carry only identifiers / log message / counts, never
+  caller-data-sized.
+
+### Harness maintenance (label fix, teeth re-proven)
+
+- Run 13 flagged the `binary_crossing/` harness's stale small-blob "resource binary"
+  labels (the label said `encode_val -> resource binary` while the measurement read
+  0.0 B/row — a heap binary). FIXED the labels to describe the size-adaptive backing
+  in `run.sh` (S3 comment), `probe.exs` (header map, S3 scenario comment + header +
+  query line + methodology note), and `edges.exs` (E1 comment + E1 check label). The
+  survivors that still say "resource binary" are all correctly scoped to `>64 B`
+  (E3's 4096 B, S4's 1000 B, the header's `>64 B` branch). Comment/string-only — NO
+  measurement logic changed. TEETH RE-PROVEN after the edits: the 20 000×512 B
+  retention control grew `:erlang.memory(:binary)` +10.83 MB and settled back; the
+  leak gate PASSed 0.0 MB on both paths; the corrected S3 label now reads
+  `encode_val <=64B -> OwnedBinary heap binary` consistent with the 0.0 B/row number.
+
+### Completeness critic — honest gaps
+
+- (1) The memory instrument is `:erlang.memory(:binary)` + RSS + the holder-death
+  leak gate, not a per-binary refcount BIF (none exposed); a leak below settle noise
+  (~±0.5 MB) could hide, but the teeth prove the counter tracks retention at the MB
+  scale. (2) The OOM-degrade arm of `encode_blob` and the `blob::read` alloc-failure
+  arm are SOURCE-audited, not force-triggered (needs real allocator exhaustion; same
+  RAM constraint as F-A12-3) — the claim is that `OwnedBinary::new`→None is handled
+  without a NEW panic, which is a control-flow fact, not a measurement. (3) No
+  TSan/Miri on the live NIF (Runs 2/4/5: Miri can't run the bundled C SQLite); the
+  escaped-view conclusion rests on the source deref-chain audit + E3's after-close
+  byte-exactness, bounded by the fact that the sole zero-copy outbound path wraps
+  OWNED memory. (4) Values driven to 4096 B / ~64 MB, not the ~1 GB `SQLITE_MAX_LENGTH`
+  ceiling (RAM) — the `str::encode` TEXT OOM-panic (F-A12-3) is reasoned, not forced,
+  and was explicitly out of scope this run.
+
+### Disposition & dryness
+
+- **CLEAN — 0 new CONFIRMED S0/S1/S2/S3.** The size-adaptive `encode_blob` and the
+  single-copy `blob::read` are sound at the source level (boundary-exact, no
+  uninitialised escape, locking law upheld, OOM-degrade graceful) and reproduce
+  byte-exact + leak-free at runtime; the re-measured profile matches Run 11 for large
+  blobs and confirms the intended small-blob improvement. F-A12-3 remains OPEN
+  (maintainer call, untouched). The harness label drift is repaired with teeth
+  re-proven.
+- **A12 dryness — 1 of 2 consecutive clean covering runs.** Run 11 was the first
+  covering run but surfaced 3 new CONFIRMED S3 (F-A12-1/2/3) AND the S3 fix pass
+  round 2 then CHURNED A12's scope (`util.rs encode_val`, `blob.rs read` — squarely
+  the re-wet list) by fixing F-A12-1/2 — so the pre-fix covering count was reset:
+  the axis was RE-WET. Run 15 is the **first clean covering run** (zero new CONFIRMED)
+  over that churn; **one more clean covering run is owed** before A12 is DRY (the
+  same arithmetic A11 stands at after Run 13). Re-wet triggers UNCHANGED: any change
+  to `util.rs encode_val`/`sqlite_row_to_elixir_terms`/param decoders, `blob.rs`
+  read/write, `session.rs to_owned_binary`, the `serialize`/`deserialize`/`changeset_*`
+  NIFs, `hook_util.rs make_binary`/any hook payload, or a rustler bump.
+- `mix verify` GREEN (below). Only intended files changed: `binary_crossing/run.sh`,
+  `binary_crossing/probe.exs`, `binary_crossing/edges.exs` (label maintenance,
+  CI-isolated), `REVIEW_LEDGER.md`, `REVIEW_AXES.md`. No `BACKLOG.md` change (no new
+  filing; F-A12-3 left as-is).

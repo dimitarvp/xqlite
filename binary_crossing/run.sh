@@ -21,8 +21,10 @@
 #           -> a residual above the ceiling is an S1 leak (rc 1).
 #   S2    — streaming consume-and-discard: peak binary MUST stay bounded far
 #           below full materialization (the streaming memory advantage).
-#   S3    — many small blobs (100k x 16B): query path (encode_val -> resource
-#           binary) vs stream path (sqlite_row_to_elixir_terms -> OwnedBinary).
+#   S3    — many small blobs (100k x 16B): query path (encode_val, size-adaptive
+#           -> a <=64B blob is copied into a process-heap OwnedBinary) vs stream
+#           path (sqlite_row_to_elixir_terms -> OwnedBinary). Both land on the
+#           process heap for small blobs, so the paths should track closely.
 #           A >=10x total-memory difference for the same data is an S2 cliff
 #           (rc 1); anything less is documented characterization.
 #   S4    — refc classification micro-probe (>64B -> binary allocator,

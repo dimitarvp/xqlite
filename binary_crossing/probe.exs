@@ -5,11 +5,13 @@
 #
 #   * query path  (XqliteNIF.query -> core_query/process_rows/encode_val):
 #       TEXT -> str::encode (OwnedBinary copy, refc binary)
-#       BLOB -> ResourceArc<BlobResource>::make_binary (ZERO byte-copy;
-#               enif_make_resource_binary wraps the owned Vec, refcounted)
+#       BLOB -> size-adaptive: >64B wraps the owned Vec in a
+#               ResourceArc<BlobResource> (ZERO byte-copy resource binary via
+#               enif_make_resource_binary); <=64B is copied into an OwnedBinary
+#               (a cheap process-heap binary, matching the stream path)
 #   * stream path (stream_open/stream_fetch -> sqlite_row_to_elixir_terms):
 #       TEXT -> str::encode (copy)
-#       BLOB -> OwnedBinary + copy_from_slice (copy, refc binary)
+#       BLOB -> OwnedBinary + copy_from_slice (copy; heap binary <=64B else refc)
 #
 # The instrument is the BEAM binary allocator counter :erlang.memory(:binary)
 # (precise for refc + resource binaries; SQLite's own copy of the source data
@@ -326,11 +328,12 @@ defmodule A12.Probe do
   end
 
   # =======================================================================
-  # Scenario 3 — small-blob asymmetry: resource-binary vs OwnedBinary
+  # Scenario 3 — small-blob backing: both paths land on the process heap
+  # (query's encode_val copies <=64B into an OwnedBinary, matching stream)
   # =======================================================================
 
   def scenario_small(conn) do
-    IO.puts("\n== S3: many small blobs (#{@small_rows} rows x #{@small_blob_bytes}B BLOB) — resource-binary vs OwnedBinary ==")
+    IO.puts("\n== S3: many small blobs (#{@small_rows} rows x #{@small_blob_bytes}B BLOB) — both paths -> process-heap binary ==")
     sql = "SELECT blb FROM small"
 
     {qpre, q, _qpost} = run_in_child(fn -> cross_query_full(conn, sql) end)
@@ -343,14 +346,15 @@ defmodule A12.Probe do
     q_rss = q.peak.rss - qpre.rss
     s_rss = s.peak.rss - spre.rss
 
-    IO.puts("   query  (encode_val -> resource binary): held(binary)=#{mb(q_held)} MB " <>
+    IO.puts("   query  (encode_val <=64B -> OwnedBinary heap binary): held(binary)=#{mb(q_held)} MB " <>
       "held(total)=#{mb(q_total)} MB rss_delta=#{mb(q_rss)} MB #{per_row(q_held, q.rows)} B/row")
 
     IO.puts("   stream (sqlite_row_to_elixir_terms -> OwnedBinary): held(binary)=#{mb(s_held)} MB " <>
       "held(total)=#{mb(s_total)} MB rss_delta=#{mb(s_rss)} MB #{per_row(s_held, s.rows)} B/row")
 
-    # The apples-to-apples cross-boundary cost is (binary + process) memory:
-    # resource binaries add per-resource overhead the OwnedBinary path lacks.
+    # The apples-to-apples cross-boundary cost is (binary + process) memory,
+    # which captures whichever backing each path picks — process-heap binaries
+    # here (both paths, <=64B), so the two should track closely.
     q_cross = q_total
     s_cross = s_total
     cliff = ratio(max(q_cross, s_cross), min(q_cross, s_cross))

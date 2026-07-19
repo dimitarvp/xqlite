@@ -378,6 +378,27 @@ asymmetry flipped to query-leaner; byte-exact edges + leak-gate PASS. Both squar
 in A12's re-wet list; the owed covering re-run should re-pin the size-adaptive blob
 backing and the single-copy blob_read (and note the harness's now-stale
 "resource binary" small-blob label).
+COVERING RE-RUN (Run 15, 2026-07-19): the owed re-run over the fix-pass churn, churn
+attacked hardest. RE-AUDITED (source, LOCKED rustler 0.38.0) + RUNTIME-CONFIRMED (bundled
+SQLite 3.53.2, commands captured): `encode_blob` boundary EXACT (query byte-exact across
+{0,1,63,64,65,200,4096} B; 64 B×50k → 0 B/row process-heap, 65 B×50k → 128 B/row binary-
+alloc — pins `HEAP_BINARY_THRESHOLD=64` to `ERL_ONHEAP_BIN_LIMIT`), OOM-degrade arm sound
+(`owned_vec` still owned, no NEW panic), `copy_from_slice` lengths provably equal;
+`blob::read` single-copy proven: no uninitialised byte escapes (`sqlite3_blob_read` fills
+exactly `actual_len` on OK, bounds forbid the past-end error, err-arm drops the OwnedBinary),
+locking law upheld (every `sqlite3_*` under `with_live_blob`), whole/partial/past-end-clamp/
+at-end/beyond/zero-len byte-exact. Re-measured `binary_crossing/run.sh`: large-blob numbers
+BYTE-IDENTICAL to Run 11 (S1 query 42.73 MB/448 B/row, stream 61.0 MB/640 B/row, leak 0.0 MB
+both, S2 68.5×), small-blob query 128→0.0 B/row (F-A12-1 effect, asymmetry flipped 1.8×→1.4×
+query-leaner), teeth LIVE (+10.83 MB grow/settle). Full sweep (term-lifetime census, inbound
+copy map, outbound producers, hook msg_env 1:1 balance) HOLDS. gotchas.md "Memory and binaries"
+threshold claim matches measured behavior (no doc change). Harness stale "resource binary"
+small-blob labels FIXED (run.sh/probe.exs/edges.exs), teeth re-proven post-edit; surviving
+"resource binary" labels are all `>64 B` (E3 4096 B, S4 1000 B). F-A12-3 untouched (OPEN
+maintainer call). CLEAN — zero new CONFIRMED. DRYNESS: Run 11 surfaced 3 new S3 AND the S3 fix
+pass round 2 churned this scope (F-A12-1/2), so A12 was RE-WET; Run 15 is the FIRST clean
+covering run (zero new CONFIRMED) over that churn — A12 stands at 1 of 2 consecutive clean
+covering runs, NOT DRY, one more clean covering run owed. Re-wet list UNCHANGED.
 
 ### A13. Hot-upgrade posture
 rustler upgrade support is an open upstream gap; on_load is
