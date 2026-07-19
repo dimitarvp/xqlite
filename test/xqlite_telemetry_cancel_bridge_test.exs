@@ -1,6 +1,6 @@
-defmodule Xqlite.XqliteTelemetryBlock4Test do
+defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
   @moduledoc """
-  Block 4 telemetry: cancel events + the hook → telemetry bridge.
+  Telemetry coverage for cancel events + the hook → telemetry bridge.
 
   Cancel events:
     [:xqlite, :cancel, :token_created]

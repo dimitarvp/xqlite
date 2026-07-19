@@ -4,8 +4,7 @@ defmodule Xqlite.XqliteTelemetryTest do
   documented `:telemetry` events with the documented measurement keys
   and metadata keys.
 
-  Test bar (per `feedback_subscription_api_test_bar` memory + the
-  T2.2 plan): for every event we wire in Block 2, this file must
+  Test bar: for every statement-level operation event, this file must
   cover the happy path, the error path, and any operation-specific
   invariants (cancellation outcome, transaction reasons, etc.).
 

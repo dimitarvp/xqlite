@@ -42,7 +42,7 @@ defmodule Xqlite.Telemetry do
       :operation_cancelled` (NOT `:exception`). A separate
       `[:xqlite, :cancel, :honored]` event also fires.
 
-  ## Event surface — Tier A (operations)
+  ## Event surface — operation events (always-on)
 
   These events fire automatically when telemetry is compiled in. No
   registration needed; just attach a handler with `:telemetry.attach/4`.
@@ -218,7 +218,7 @@ defmodule Xqlite.Telemetry do
   signal interrupted: `:query`, `:execute`, `:execute_batch`, or
   `:backup_with_progress`.
 
-  ## Event surface — Tier B (hook bridge, opt-in registration)
+  ## Event surface — hook bridge events (opt-in registration)
 
   The hook bridge layer turns multi-subscriber hook deliveries into
   telemetry events. NOT auto-attached — the user explicitly calls
@@ -425,7 +425,7 @@ defmodule Xqlite.Telemetry do
   def monotonic_time, do: System.monotonic_time(:nanosecond)
 
   # ---------------------------------------------------------------------------
-  # Hook → telemetry bridge (Tier B)
+  # Hook → telemetry bridge
   # ---------------------------------------------------------------------------
 
   @doc """

@@ -1,10 +1,10 @@
-defmodule Xqlite.XqliteTelemetryBlock3Test do
+defmodule Xqlite.XqliteTelemetryIoOpsTest do
   @moduledoc """
-  Block 3 telemetry coverage: stream / backup / restore / wal_checkpoint /
+  Telemetry coverage for stream / backup / restore / wal_checkpoint /
   serialize / deserialize / load_extension / enable_load_extension /
   pragma get/set.
 
-  Same harness as the Block 2 test file: per-test handler attach with a
+  Same harness as `xqlite_telemetry_test.exs`: per-test handler attach with a
   unique handler-id, capture events into the test mailbox, assert
   expected shape, detach.
   """

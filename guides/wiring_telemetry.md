@@ -50,7 +50,7 @@ counts).
   NOT `:exception`. A separate `[:xqlite, :cancel, :honored]` event
   also fires.
 
-## Event surface (Tier A — operations, always-on)
+## Event surface — operation events (always-on)
 
 See `Xqlite.Telemetry` moduledoc for the complete schema with every
 measurement and metadata key. Highlights:
@@ -78,7 +78,7 @@ measurement and metadata key. Highlights:
 | `[:xqlite, :cancel, :signalled]` | `Xqlite.cancel_operation/1` | `:token` |
 | `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:operation`, `:tokens` |
 
-## Event surface (Tier B — hook bridge, opt-in)
+## Event surface — hook bridge events (opt-in)
 
 The hook bridge turns the multi-subscriber hook fan-out (commit,
 rollback, update, wal, progress) into telemetry events. NOT

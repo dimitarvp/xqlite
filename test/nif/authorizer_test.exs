@@ -15,9 +15,13 @@ defmodule Xqlite.NIF.AuthorizerTest do
     test "denying :delete blocks DELETE but leaves SELECT working", %{conn: conn} do
       :ok = Xqlite.set_authorizer(conn, [:delete])
 
-      assert {:error, {:authorization_denied, msg}} =
+      # The SQLite extended code is surfaced; its low byte is the primary
+      # SQLITE_AUTH (23).
+      assert {:error, {:authorization_denied, code, msg}} =
                NIF.execute(conn, "DELETE FROM t WHERE id = 1", [])
 
+      assert is_integer(code)
+      assert Bitwise.band(code, 0xFF) == 23
       assert is_binary(msg)
 
       assert {:ok, %{rows: [[1, "a"]], num_rows: 1}} =
@@ -27,13 +31,13 @@ defmodule Xqlite.NIF.AuthorizerTest do
     test "denying :create_table blocks CREATE TABLE; removal restores it", %{conn: conn} do
       :ok = Xqlite.set_authorizer(conn, [:create_table])
 
-      assert {:error, {:authorization_denied, _}} =
+      assert {:error, {:authorization_denied, _, _}} =
                NIF.execute(conn, "CREATE TABLE t2(x INTEGER)", [])
 
       :ok = Xqlite.remove_authorizer(conn)
 
       # Succeeds now; the affected-row count is `sqlite3_changes()`, which is
-      # sticky across DDL (see CLAUDE.md), so we only assert on success here.
+      # sticky across DDL, so we only assert on success here.
       assert {:ok, _} = NIF.execute(conn, "CREATE TABLE t2(x INTEGER)", [])
 
       assert {:ok, %{rows: [["t2"]]}} =
@@ -43,9 +47,9 @@ defmodule Xqlite.NIF.AuthorizerTest do
     test "denying :pragma makes get_pragma and set_pragma fail", %{conn: conn} do
       :ok = Xqlite.set_authorizer(conn, [:pragma])
 
-      assert {:error, {:authorization_denied, _}} = NIF.get_pragma(conn, "user_version")
+      assert {:error, {:authorization_denied, _, _}} = NIF.get_pragma(conn, "user_version")
 
-      assert {:error, {:authorization_denied, _}} =
+      assert {:error, {:authorization_denied, _, _}} =
                NIF.set_pragma(conn, "user_version", 7)
     end
 
@@ -57,7 +61,7 @@ defmodule Xqlite.NIF.AuthorizerTest do
       assert {:ok, 1} = NIF.execute(conn, "DELETE FROM t WHERE id = 1", [])
 
       # ...while INSERT is now the denied action.
-      assert {:error, {:authorization_denied, _}} =
+      assert {:error, {:authorization_denied, _, _}} =
                NIF.execute(conn, "INSERT INTO t(id, name) VALUES (2, 'b')", [])
     end
 
@@ -77,7 +81,7 @@ defmodule Xqlite.NIF.AuthorizerTest do
       :ok = Xqlite.set_authorizer(conn, [:delete])
 
       # Denied on `conn`...
-      assert {:error, {:authorization_denied, _}} =
+      assert {:error, {:authorization_denied, _, _}} =
                NIF.execute(conn, "DELETE FROM t WHERE id = 1", [])
 
       # ...but the independent `other` connection is untouched.

@@ -2,7 +2,7 @@ defmodule Xqlite.Telemetry.Bridge do
   @moduledoc """
   Forwards multi-subscriber hook deliveries into `:telemetry` events.
 
-  This is the Tier B layer of the telemetry plan. The fan-out hooks
+  This is the opt-in hook-bridge half of xqlite telemetry. The fan-out hooks
   (`update`, `wal`, `commit`, `rollback`, `progress`, plus the global
   `log` hook) deliver Erlang messages to subscribed pids. The bridge
   is a small GenServer that:
