@@ -2959,3 +2959,205 @@ Grouped, worst-case noted:**
   `binary_crossing/probe.exs`, `binary_crossing/edges.exs` (label maintenance,
   CI-isolated), `REVIEW_LEDGER.md`, `REVIEW_AXES.md`. No `BACKLOG.md` change (no new
   filing; F-A12-3 left as-is).
+
+---
+
+## Run 16 — 2026-07-19 — A1+A2 dryness covering re-run (churn attacked hardest)
+
+- Commit at scan: `6786f2b` (HEAD, clean, CI green). Scope: the two
+  PRIORITY-1 axes over the WHOLE crate at HEAD, with the churn since the A1/A2
+  baseline `61cf771` attacked hardest — every Rust line in `blob.rs` (rewrite),
+  `busy_handler.rs`, `connection.rs`, `error.rs`, `explain_analyze.rs`,
+  `hook_util.rs`, `lib.rs`, `nif.rs`, `progress_dispatch.rs`, `query.rs`,
+  `schema.rs`, `util.rs`, `wal_hook.rs` (`git diff --stat 61cf771 HEAD --
+  native/` = 13 files, +822/−401). Composition: single Opus pass (this agent) —
+  exhaustive `rg`-driven census + source-level lock/panic audit + a
+  teeth-proven runtime probe (A1/A2 are read+prove axes, not a fleet read). Did
+  NOT re-litigate the settled Run 1–2 mechanisms (M1/M2/M3/M5 blob-session-log,
+  B1 blob teardown) beyond verifying each still holds at HEAD by reading.
+
+### CONFIRMED (fixed this run)
+
+- **F-A1-1 — S0 — `stream_fetch` aborts the BEAM on a large-but-valid
+  `batch_size` (unbounded eager `Vec::with_capacity`).** `nif.rs:1279`
+  `let mut fetched_rows: Vec<Vec<Term>> = Vec::with_capacity(batch_size)` trusts
+  `batch_size` — a `pos_integer()` user argument (`lib/xqlite.ex:908`
+  `Keyword.get(opts, :batch_size, 500)`; `stream_resource_callbacks.ex:67`; NIF
+  only rejects `< 1` at `nif.rs:1249`) — as an EXACT capacity, reserving
+  `batch_size × 24` bytes up front, disconnected from the actual row count. A
+  pathological value routes to `RawVec`: for `batch_size × 24 <= isize::MAX` but
+  unsatisfiable → `handle_alloc_error` → **`abort()` (SIGABRT), NOT a catchable
+  panic** → the whole VM dies; for `> isize::MAX` → `capacity overflow` panic
+  which ALSO aborted (observed). Falsifies the public "will never crash the
+  BEAM" Hex claim (a hard abort, not a caught `:nif_panicked`). This was the
+  FIRST full A1 census (prior A1 coverage: "none yet — no census run"); the site
+  is pre-`61cf771` (blame `53753308`, 2025-05-24) but never audited. The sibling
+  `stmt_multi_step_impl` (`nif.rs:945`) was already immune — it uses
+  `Vec::new()`.
+  - **RED (this session, teeth-proven; command + output):**
+    `Xqlite.stream(conn, "SELECT x FROM t", [], batch_size: N)` on a 1-row table,
+    forced with `Enum.take(stream, 1)`, each run in its OWN OS process to observe
+    the child exit code:
+    - `N = 500` (control) → `{:took, [%{"x" => 1}]}`, exit 0.
+    - `N = 10_000_000_000_000` → `memory allocation of 240000000000000 bytes
+      failed` → **exit 134 (SIGABRT)**.
+    - `N = 100_000_000_000_000_000` → `memory allocation of 2400000000000000000
+      bytes failed` → **exit 134**.
+    - `N = 1_000_000_000_000_000_000` → `capacity overflow` panic → **exit 134**.
+  - **FIX:** `Vec::with_capacity(batch_size)` → `Vec::new()` (grow on demand,
+    matching the sibling `stmt_multi_step_impl`); a comment pins WHY so no future
+    "optimization" reintroduces the abort. The null-ptr early-return at
+    `nif.rs:1275` sits BEFORE the alloc, so an exhausted stream still short-
+    circuits to `:done` without allocating.
+  - **GREEN (this session, same probe, post-recompile):** all four `N` above
+    (500 / 1e13 / 1e17 / 1e18) → `{:took, [%{"x" => 1}]}`, **exit 0** — the VM
+    survives every previously-aborting value.
+  - **Regression test:** `test/nif/stream_test.exs` "stream_fetch/2 with a huge
+    batch_size does not crash the VM" inside the `connection_openers()` for-loop
+    (12-row `stream_items`, `batch_size = 10_000_000_000_000`, structured
+    assertion on `rows == for i <- 1..12, do: [i]` then `:done`). Pre-fix this
+    aborts the file's OS process; post-fix it passes.
+
+### A1 census — patterns + classifications (all `rg` over `native/xqlitenif/src/`)
+
+- **`unwrap`/`expect`** (`rg -e '\.unwrap\(\)' -e '\.expect\('`): **ZERO** in
+  non-test code, crate-wide. The only `unwrap`-family hits are `assert_eq!`/
+  `assert!` inside `constraint_parse.rs`'s `#[cfg(test)] mod tests` (34 lines),
+  not NIF-reachable. The S3 fix passes' ~25 unwrap removals HOLD and NO new one
+  crept in anywhere — including the fix code itself (changes-detector, NUL
+  reject, backup guard, conflict handler, 3-tuple encoders, adaptive blob,
+  single-copy read). Every fallible op degrades via `?`/`map_err`/`ok_or_else`/
+  total `unwrap_or[_else]` (`util.rs:198`, `schema.rs:247`, `wal_hook.rs:94`,
+  `hook_util.rs:107`, `connection.rs:157`).
+- **`panic!`/`unreachable!`/`todo!`/`unimplemented!`**: ZERO.
+- **Indexing / slicing** (`rg -e '\[[0-9]+\]' -e '\[[a-z_]+\]'`): only real
+  subscript is `schema.rs:221-224` `pair[0]`/`pair[1]` inside
+  `for pair in raw.chunks_exact(2)` — `chunks_exact` guarantees every `pair` is
+  length 2 (remainder dropped), panic-free by construction. All other bracket
+  hits are attributes / array literals / format braces.
+- **Integer arithmetic**: `[profile.release]` in `Cargo.toml` has NO
+  `overflow-checks` → release WRAPS (no overflow panic in the shipped artifact),
+  and NO `panic = "abort"` → panic = unwind (so rustler's NIF-body/encode
+  `catch_unwind` works — the Run-1 "S0 only in destructors" model holds).
+  Division/modulo (`rg '/ '`/`'% '`): **ZERO** integer `/` or `%` (the one `%`
+  became `progress_dispatch.rs:213 n.is_multiple_of(every_n)` — returns `n==0`
+  when `every_n==0`, never the `%0` panic). Subtraction: only `blob.rs:141
+  size - offset`, guarded by `if offset >= size { 0 } else { … }`. Defensive
+  helpers present: `checked_neg` (schema), `saturating_add` (blob),
+  `c_int::try_from` (stream binds), `usize::try_from` (stream_fetch).
+- **Alloc**: `Vec::with_capacity` census — 14 sites; 13 sized by
+  `column_count`/`count`/`.len()`/`tokens.len()` (all bounded by SQLite/data);
+  the sole unbounded-user-value site (`nif.rs:1279` stream_fetch) was F-A1-1,
+  now `Vec::new()`. `OwnedBinary::new(len)` sites all `.ok_or_else`-degrade
+  (`blob.rs:159`, `util.rs:384/401`, `session.rs:132`). (The latent OOM-only
+  `str::encode` TEXT-alloc panic remains F-A12-3, an OPEN maintainer call — not
+  re-filed.)
+
+### A1 Drop-impl table (7 destructors — rustler 0.38 wraps NONE in catch_unwind)
+
+| Resource | file:line | SQLite in Drop? | poison behavior | panic-capable? |
+|---|---|---|---|---|
+| `XqliteStream` | stream.rs:72 | `sqlite3_finalize` under conn Mutex (swap-then-lock) | `.map_err → LockError` | no — `writeln!`, no unwrap/index |
+| `XqliteStatement` | statement.rs:68 | same | `.map_err → LockError` | no |
+| `XqliteBlob` | blob.rs:67 | `sqlite3_blob_close` under conn Mutex | `.map_err → LockError` (leak on poison) | no — `writeln!` |
+| `XqliteSession` | session.rs:30 | `drop(Session)` only while conn open+locked | **`into_inner()` recovers poison** (never unwrap); `forget` on closed/poison | no |
+| `XqliteConn` | connection.rs:57 | none (`drop_hook` box) — `conn` field drops FIRST | n/a | no |
+| `ProgressHandlerGuard` | cancel.rs:65 | none — `cancels.unregister` under held conn Mutex | n/a | no |
+| `HookList<T>` | hook_util.rs:371 | none (`drop_all` box reclaim) | n/a | no |
+
+Every SQLite-touching Drop holds the conn Mutex; the seeded
+poisoned-`Mutex`→`.lock().unwrap()`→VM-death chain is DEFUSED at every one
+(session recovers via `into_inner`, the rest degrade to `LockError`). The
+cancel-guard Drop runs `unregister` while the conn Mutex is still held: every
+`ProgressHandlerGuard::new` is a local INSIDE a `with_conn`/`with_live_stmt`
+closure (`nif.rs:157/179/196/212/953`), so the guard drops before `with_conn`
+releases the lock — W3 re-verified at HEAD.
+
+### A1 raw-FFI callback unwind table (3 `unsafe extern "C"` + rusqlite-guarded)
+
+| Callback | file:line | guard | body panic-capable? |
+|---|---|---|---|
+| `progress_dispatch_callback` | progress_dispatch.rs:175 | `guard_ffi_callback(…, 0, …)` (M6) | no — atomic loads + `is_multiple_of` + fresh-env send |
+| `wal_hook_callback` | wal_hook.rs:74 | `guard_ffi_callback(…, SQLITE_OK, …)` (M6) | no — `to_str().unwrap_or("")`; in-callback `sqlite3_wal_checkpoint_v2` under the mid-commit lock (M7) |
+| `busy_callback` | busy_handler.rs:59 | `guard_ffi_callback(…, 0, …)` (M6) | no — `thread::sleep` under lock is by-design (M7) |
+| log (via `trace::config_log`) | log_hook.rs:42 | rusqlite path + `MASTER_LOCK` (`into_inner` poison-safe, M3) | no — panic-free by construction |
+| authorizer / update / commit / rollback / changeset-conflict | authorizer.rs:154, `*_hook.rs`, nif.rs:1951 | rusqlite SAFE-API trampolines (own `catch_unwind`) | no — pure match/enum returns |
+
+`rg 'extern "C"'` confirms EXACTLY the three raw callbacks; all others route
+through rusqlite's guarded closures. M6/M7 (`7e575f7`) verified intact.
+
+### A2 call-site table (every `sqlite3_*` C call; lock evidence)
+
+`rg 'sqlite3_[a-z_]+'` → each classified. Lock helpers: `with_conn`/
+`with_conn_mut` (connection.rs:181/199), `with_live_stmt` (statement.rs:44),
+`with_live_blob` (blob.rs:284), `with_session[_mut]` (session.rs:73/102),
+`take_and_finalize_raw` (stream.rs:37, swap-then-lock). Verdict: **every C call
+holds the conn Mutex for its full duration** (or is a callback that fires under
+it, or is process-global).
+
+| Module | calls | under the lock via |
+|---|---|---|
+| blob.rs | `_open/_read/_write/_bytes/_reopen/_close/_errmsg` | `with_conn` (open) + `with_live_blob` + `close` (swap-then-lock) |
+| stream.rs | `_step/_column_count/_column_*/_bind_*/_finalize/_errmsg` | caller holds lock (`with_live_stmt`/`stream_fetch` guard); `take_and_finalize_raw` swap-then-lock |
+| util.rs | `_column_type/_int64/_double/_text/_blob/_bytes` | `sqlite_row_to_elixir_terms` documented+called under lock (stream_fetch, explain) |
+| nif.rs | `_prepare_v2/_column_*/_reset/_clear_bindings/_finalize/_bind_parameter_count/_wal_checkpoint_v2/_db_status` | `with_conn`/`with_live_stmt` closures (748,1075,373,459,851,886,993,1007,1020) |
+| explain_analyze.rs | `_prepare_v2/_step/_finalize/_stmt_status/_stmt_scanstatus_v2/_errmsg` | `core_explain_analyze` under `with_conn` (SAFETY doc :64) |
+| busy_handler.rs | `_busy_handler/_errmsg` | `set_policy`/etc. callers hold conn Mutex; `swap_in` |
+| wal_hook.rs | `_wal_hook/_wal_checkpoint_v2` | `install_callback` under lock; checkpoint fires in mid-commit callback (M7) |
+| progress_dispatch.rs | `_progress_handler` | `install_callback` under lock (open) |
+| log_hook.rs | `sqlite3_config` (via `trace::config_log`) | process-global; `MASTER_LOCK` |
+| nif.rs:1407 | `sqlite3_libversion` | process-global (no connection) — no lock needed |
+
+Specifically re-verified for the churn: `conn.changes()`/`conn.total_changes()`
+in `core_query_with_changes` (F-A10-3) are called INSIDE `with_conn`
+(`nif.rs:135-136` and the cancellable `:155-158`) → under OUR Mutex; the
+`stream_fetch` finalize windows (`nif.rs:1334/1347`) run inside the held
+`conn_lock_guard`; the poison path (`:1283-1304`) finalizes only because a
+poisoned `.lock()` is mutually exclusive with any concurrent holder.
+
+### Verdict
+
+- **A1 — one CONFIRMED S0 (F-A1-1), FIXED RED→GREEN this run.** Otherwise the
+  first full panic census is CLEAN: zero non-test unwrap/expect/panic/index/
+  div-mod; release wraps overflow; every Drop and raw callback panic-free and
+  poison-safe. The one reachable BEAM-abort is closed.
+- **A2 — HOLDS, zero new CONFIRMED.** Every `sqlite3_*`/`ffi::` C call at HEAD
+  is under the connection Mutex for its full duration (table above); the
+  swap-then-lock finalizers, lock-then-load users, cancel-guard scoping, and
+  changes()-under-`with_conn` all verified at HEAD over the full churn. The
+  F-A1-1 fix touched only `stream_fetch`'s allocation, not its lock discipline.
+
+### Completeness critic
+
+- The A1 S0 was found by a MECHANICAL `Vec::with_capacity` census, not the
+  unwrap census — a reminder that "panic-freedom" ⊋ "no unwraps": eager
+  allocation, `str::encode` (F-A12-3, OPEN), and any future `/`/`%` are equally
+  in scope. The RED/GREEN is process-exit-code teeth (134 vs 0), the strongest
+  available for a hard abort; a subtler benign-looking abort with a different
+  message would need the same probe. No Miri/TSan on the live NIF (Run 2/4
+  established Miri can't run bundled C SQLite) — A2's oracle stays source-level
+  lock-scoping + the THREADSAFE=1 substrate, not a happens-before detector.
+  Unchanged non-churn hook modules (update/commit/rollback) were re-read-verified
+  at HEAD, not re-probed.
+
+### Dryness
+
+- **A1 — 0 of 2 consecutive clean covering runs (NOT DRY).** This was the FIRST
+  full A1 census and it surfaced a NEW CONFIRMED S0, so it is NOT a clean run;
+  the F-A1-1 fix additionally churns `stream_fetch`. Two clean covering runs are
+  owed from here. Re-wet triggers: any new `unwrap`/`expect`/index/`/`/`%`/
+  `Vec::with_capacity(user-value)`, any new Drop or raw-FFI callback, any change
+  to `guard_ffi_callback`, or a rustler bump (re-check the no-catch_unwind-in-
+  destructors fact).
+- **A2 — 1 of 2 consecutive clean covering runs (NOT DRY).** Run 2 was A2's last
+  clean covering pass, but Runs 7/9/10 + both S3 fix passes churned A2's scope
+  (blob rewrite, backup guard, changeset handler, `reject_interior_nul`, error
+  3-tuple, `core_query_with_changes`, adaptive blob / single-copy read). Run 16
+  is the FIRST clean covering run over that churn; one more owed. Re-wet
+  triggers: any new `sqlite3_*`/`ffi::` call site, any `with_conn`/`with_live_*`/
+  `with_session`/`take_and_finalize_raw` restructure, any new AtomicPtr resource,
+  or a cancel-path/hook-registration change.
+- `mix verify` GREEN (see below). Files changed: `native/xqlitenif/src/nif.rs`
+  (F-A1-1 fix), `test/nif/stream_test.exs` (regression), `REVIEW_LEDGER.md`,
+  `REVIEW_AXES.md`. No `BACKLOG.md` change (the finding was S0, fixed — not a
+  backlog item; F-A12-3 and the other maintainer calls left untouched).

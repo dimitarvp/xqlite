@@ -65,6 +65,22 @@ Coverage: none yet — no census run. Touched (S3 fix pass round 1,
 `explain_analyze.rs`'s encoders (→ graceful `InternalEncodingError`), and M11
 was verified already-resolved (`b1c60b4`) — both strictly shrink the panic
 surface, but no census has run.
+COVERING RE-RUN (Run 16, 2026-07-19): the FIRST full A1 census (whole crate at
+HEAD, churn since `61cf771` hardest). unwrap/expect/panic/index/div-mod census
+CLEAN (zero non-test unwrap/expect; the only integer `%` is `is_multiple_of`;
+release wraps overflow, panic=unwind); all 7 Drop impls poison-safe (session
+`into_inner`, rest `map_err→LockError`) + panic-free; all 3 raw `extern "C"`
+callbacks M6-guarded; the alloc census caught the finding. ONE new CONFIRMED S0
+(F-A1-1) + FIXED RED→GREEN: `stream_fetch`'s `Vec::with_capacity(batch_size)`
+trusted an unbounded `pos_integer()` user arg → `handle_alloc_error` → `abort()`
+(SIGABRT, uncatchable) → BEAM crash on `batch_size ≈ 1e13` (RED = child exit 134,
+proven this session; GREEN = exit 0 after `Vec::new()`, matching the immune
+sibling `stmt_multi_step_impl`); regression test in the `connection_openers`
+for-loop. DRYNESS: a new CONFIRMED surfaced (and the fix churns `stream_fetch`),
+so this is NOT clean — A1 stands at **0 of 2 consecutive clean covering runs, NOT
+DRY**; two owed. Re-wet: any new unwrap/expect/index/`/`/`%`/
+`with_capacity(user-value)`, any new Drop or raw callback, a `guard_ffi_callback`
+change, or a rustler bump.
 
 ### A2. The locking law — PRIORITY 1
 Every `sqlite3_*` call must hold the connection Mutex for its full
@@ -78,6 +94,26 @@ interleavings (the cancel path can't take the main lock — audit its
 dedicated synchronization); swap/finalize windows under concurrent
 finalize. Coverage: house rule + regression from the shipped bug;
 no systematic call-site audit yet.
+COVERING RE-RUN (Run 16, 2026-07-19): the FIRST systematic call-site audit — every
+`sqlite3_*`/`ffi::` call site enumerated by `rg` at HEAD and classified against its
+lock evidence (full table in the ledger). VERDICT: every C call holds the connection
+Mutex for its full duration (`with_conn`/`with_conn_mut`/`with_live_stmt`/
+`with_live_blob`/`with_session`, the swap-then-lock `take_and_finalize_raw`, or a
+callback that fires under the lock); `sqlite3_libversion` is the only process-global
+(no conn needed); `sqlite3_config` under `MASTER_LOCK`. Re-verified over the churn:
+`conn.changes()`/`total_changes()` (F-A10-3) called INSIDE `with_conn`; the blob
+rewrite's every `sqlite3_blob_*` under `with_live_blob`/`close`; the `stream_fetch`
+finalize windows under the held guard (poison path finalizes only because a poisoned
+lock excludes any holder); cancel-guard unregister under the held conn Mutex (W3); the
+stream AtomicPtr swap-then-lock discipline intact at the historical-bug site. ZERO new
+CONFIRMED. DRYNESS: Run 2 was A2's last clean covering pass but Runs 7/9/10 + both S3
+fix passes churned this scope (blob rewrite, backup guard, changeset handler,
+`reject_interior_nul`, error 3-tuple, `core_query_with_changes`, adaptive blob /
+single-copy read) → RE-WET; Run 16 is the **first clean covering run over that churn —
+1 of 2 consecutive, NOT DRY**, one more owed. (The F-A1-1 fix touched only
+`stream_fetch`'s allocation, not lock discipline.) Re-wet: any new `sqlite3_*`/`ffi::`
+site, a `with_*`/`take_and_finalize_raw` restructure, a new AtomicPtr resource, or a
+cancel-path/hook-registration change.
 
 ### A3. UB tooling
 Sources: Miri/ASan/TSan/cargo-careful docs. Probes: separability of
