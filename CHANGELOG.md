@@ -7,19 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-20
+
+This release fixes several memory-safety and crash defects present in
+0.9.0, and refines the error and streaming contracts. The error-tuple,
+streaming, and NUL-handling changes are breaking — see **Changed**.
+
+### Security
+
+- **Memory-safety fixes in resource teardown.** Several defects that
+  could crash or corrupt the BEAM were fixed: a use-after-move when an
+  incremental-blob resource was dropped, plus use-after-free, leak, and
+  panic residuals in the blob, session, and log-hook paths. Raw FFI
+  callbacks (progress, WAL, busy) are now guarded so a panic can never
+  unwind across the C boundary. Surfaced by an adversarial safety
+  review of the code shipped in 0.9.0.
+
+- **`Xqlite.stream/4` could abort the VM on a huge `batch_size`.** A
+  validly-typed but pathological `batch_size` (e.g. `10^13`) triggered
+  an eager multi-terabyte allocation that aborted the OS process before
+  any row was read. The accumulator now grows on demand.
+
+### Added
+
+- **Security guide** documenting the threat model, the per-connection
+  thread-safety model, and safe extension loading.
+- **Gotchas guide** collecting user-facing footguns (sticky
+  `changes/1`, single-writer behavior, busy-policy anchoring, memory
+  and binaries, one-connection-per-process, and more).
+
 ### Changed
 
-- **`Xqlite.stream/4` no longer silently truncates on a mid-fetch
-  error.** A new `:on_error` option chooses how a mid-stream failure
-  (e.g. an invalid-UTF-8 TEXT value) is surfaced, and the stream's
-  element shape follows the mode: `:raise` (the new default) raises
-  `Xqlite.StreamError` carrying the structured reason; `:halt` keeps
-  the previous stop-and-log behavior, now opt-in and documented as
-  lossy; `:emit_error` yields a uniformly tagged stream of
-  `{:ok, row}` elements followed by a terminal `{:error, reason}`.
-  The old default silently dropped the remaining rows with no signal
-  to the consumer, so a truncated read could not be told apart from a
+- **BREAKING: error tuples now carry the SQLite extended result code.**
+  `:database_busy_or_locked`, `:read_only_database`, `:schema_changed`,
+  and `:authorization_denied` are now the 3-tuple
+  `{tag, extended_code, message}` (previously `{tag, message}`), so
+  callers can tell e.g. `SQLITE_BUSY` from `SQLITE_LOCKED`. Other
+  message-classified errors are unchanged.
+- **BREAKING: `{:utf8_error, message}` is now
+  `{:utf8_error, column, message}`**, carrying the byte column of the
+  first invalid sequence.
+- **BREAKING: `Xqlite.stream/4` no longer silently truncates on a
+  mid-fetch error.** A new `:on_error` option chooses how a mid-stream
+  failure (e.g. an invalid-UTF-8 TEXT value) is surfaced, and the
+  stream's element shape follows the mode: `:raise` (the new default)
+  raises `Xqlite.StreamError` carrying the structured reason; `:halt`
+  keeps the previous stop-and-log behavior, now opt-in and documented
+  as lossy; `:emit_error` yields a uniformly tagged stream of
+  `{:ok, row}` elements followed by a terminal `{:error, reason}`. The
+  old default silently dropped the remaining rows with no signal to the
+  consumer, so a truncated read could not be told apart from a
   completed one.
+- **BREAKING: interior NUL bytes in SQL text are rejected.** SQL passed
+  to `query`, `execute`, and `execute_batch` containing an interior NUL
+  now returns `{:error, :null_byte_in_string}` instead of being
+  silently truncated at the NUL by SQLite's tokenizer. NUL bytes in
+  bound parameter values still round-trip unchanged.
 
 ### Fixed
 
@@ -32,12 +75,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:ok, _}` / `{:error, _}` contract; the row-value encoders now
   guard finiteness the way the schema layer already did.
 
+- **`query_with_changes/3` reports the correct affected-row count.** It
+  now returns the true count for `INSERT/UPDATE/DELETE ... RETURNING`
+  statements (previously `0`) and no longer leaks a stale prior-DML
+  count after a DDL or PRAGMA statement.
+
+- **`backup_with_progress/6` no longer loops forever** when given a
+  non-positive `pages_per_step`; it returns
+  `{:error, {:invalid_pages_per_step, n}}`.
+
+- **`changeset_apply/3` with `:replace`** no longer fails with
+  `SQLITE_MISUSE` on conflict types SQLite forbids replacing
+  (`NOTFOUND`, `CONSTRAINT`, `FOREIGN_KEY`); the apply aborts cleanly.
+
 - **Hexdocs stability and navigation.** `Xqlite.Telemetry`'s macro
   docs no longer depend on which compile-time telemetry flag was
   active when the docs were built (the disabled branch carried
   `@doc false`), and the docs sidebar now groups the previously
   ungrouped flagship modules: the type-extension family, the
   telemetry trio, `Xqlite.Result`, and `Xqlite.ExplainAnalyze`.
+
+### Performance
+
+- **Small blob values from `query` use a process-heap binary** instead
+  of an off-heap reference-counted binary, cutting per-value overhead
+  for reads of many small blobs. Large blobs keep the zero-copy
+  reference-counted backing.
+
+- **Slow session, blob, and changeset NIFs run on dirty schedulers**,
+  so serializing or copying a large changeset or blob no longer
+  occupies a normal BEAM scheduler.
 
 ## [0.9.0] - 2026-07-17
 
@@ -553,6 +620,7 @@ Initial public release. The supported SQLite functionality:
   callers).
 - **SQLite introspection** — `compile_options` and `sqlite_version`.
 
+[0.10.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.10.0
 [0.9.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.9.0
 [0.8.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.8.0
 [0.7.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.7.0
