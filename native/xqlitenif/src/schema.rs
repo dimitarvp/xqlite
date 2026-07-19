@@ -64,7 +64,7 @@ impl Encoder for DefaultValue {
                             bytes.len()
                         ),
                     };
-                    (atoms::error(), err).encode(env)
+                    err.encode(env)
                 }
             },
             DefaultValue::Current(kind) => {

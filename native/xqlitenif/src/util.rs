@@ -24,17 +24,55 @@ pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> 
         Value::Integer(i) => i.encode(env),
         Value::Real(f) => encode_f64(env, f),
         Value::Text(s) => s.encode(env),
-        Value::Blob(owned_vec) => {
-            // Zero-copy: wrap the owned Vec<u8> in a resource and let the BEAM
-            // reference its memory directly. The resource GC keeps it alive.
-            // This differs from sqlite_row_to_elixir_terms which must copy from
-            // a raw SQLite pointer that becomes invalid after the next step.
-            let resource = ResourceArc::new(BlobResource(owned_vec));
-            resource
-                .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
-                .encode(env)
-        }
+        Value::Blob(owned_vec) => encode_blob(env, owned_vec),
     }
+}
+
+/// Byte length at or below which a BEAM binary is a *heap binary* (lives on the
+/// process heap, copied on send) rather than an off-heap, reference-counted
+/// *refc binary*. `enif_make_resource_binary` ALWAYS produces an off-heap refc
+/// binary regardless of size, so wrapping a tiny blob in a `BlobResource` pays
+/// full refc + per-resource overhead for a value that would otherwise sit
+/// cheaply on the process heap.
+const HEAP_BINARY_THRESHOLD: usize = 64;
+
+/// Encodes a BLOB value on the query/execute path, which OWNS the bytes as a
+/// `Vec<u8>` (rusqlite already copied them out of SQLite). Size-adaptive so each
+/// regime uses its leaner backing:
+///
+/// * `> HEAP_BINARY_THRESHOLD`: wrap the owned `Vec` in a `BlobResource` and hand
+///   back a ZERO-copy resource binary — avoids re-copying large payloads. The
+///   stream path, working from a transient SQLite pointer, cannot do this.
+/// * otherwise: copy into an `OwnedBinary` so the value lands as a cheap
+///   process-heap binary instead of an off-heap resource binary with per-object
+///   overhead — matching the stream path's backing for small blobs and removing
+///   the measured small-blob memory blow-up (an off-heap resource binary per tiny
+///   value was ~1.5-3x heavier than a heap-binary copy).
+///
+/// On the (OOM-only) allocation failure of the small-blob copy, degrade to the
+/// resource-binary wrap rather than panic — the crate's graceful convention.
+#[inline]
+fn encode_blob(env: Env<'_>, owned_vec: Vec<u8>) -> Term<'_> {
+    if owned_vec.len() > HEAP_BINARY_THRESHOLD {
+        return wrap_blob_resource(env, owned_vec);
+    }
+    match OwnedBinary::new(owned_vec.len()) {
+        Some(mut bin) => {
+            bin.as_mut_slice().copy_from_slice(&owned_vec);
+            bin.release(env).encode(env)
+        }
+        None => wrap_blob_resource(env, owned_vec),
+    }
+}
+
+/// Wraps an owned `Vec<u8>` in a `BlobResource` and hands the BEAM a zero-copy
+/// resource binary referencing it; the resource GC keeps the `Vec` alive.
+#[inline]
+fn wrap_blob_resource(env: Env<'_>, owned_vec: Vec<u8>) -> Term<'_> {
+    let resource = ResourceArc::new(BlobResource(owned_vec));
+    resource
+        .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
+        .encode(env)
 }
 
 /// Encodes an `f64` column value, mapping the non-finite cases that rustler's

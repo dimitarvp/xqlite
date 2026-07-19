@@ -147,6 +147,9 @@ pub(crate) enum XqliteError {
         reason: String,
     },
     DatabaseBusyOrLocked {
+        // SQLITE_BUSY / SQLITE_LOCKED — the extended code discriminates
+        // BUSY (5) from LOCKED (6) and their sub-codes (BUSY_SNAPSHOT, …).
+        extended_code: i32,
         message: String,
     },
     OperationCancelled,
@@ -165,14 +168,18 @@ pub(crate) enum XqliteError {
     },
     SchemaChanged {
         // SQLITE_SCHEMA
+        extended_code: i32,
         message: String,
     },
     ReadOnlyDatabase {
-        // SQLITE_READONLY
+        // SQLITE_READONLY — the extended code names the sub-reason
+        // (READONLY_RECOVERY, READONLY_ROLLBACK, READONLY_DBMOVED, …).
+        extended_code: i32,
         message: String,
     },
     AuthorizationDenied {
         // SQLITE_AUTH — statement rejected by an installed authorizer
+        extended_code: i32,
         message: String,
     },
 
@@ -283,7 +290,10 @@ impl Display for XqliteError {
             XqliteError::CannotExecutePragma { pragma, reason } => {
                 write!(f, "Cannot execute PRAGMA '{pragma}': {reason}")
             }
-            XqliteError::DatabaseBusyOrLocked { message } => {
+            XqliteError::DatabaseBusyOrLocked {
+                extended_code: _,
+                message,
+            } => {
                 write!(f, "Database busy or locked: {message}")
             }
             XqliteError::OperationCancelled => {
@@ -301,13 +311,22 @@ impl Display for XqliteError {
             XqliteError::IndexExists { message } => {
                 write!(f, "Index already exists: {message}") // Message usually includes index name
             }
-            XqliteError::SchemaChanged { message } => {
+            XqliteError::SchemaChanged {
+                extended_code: _,
+                message,
+            } => {
                 write!(f, "Database schema changed: {message}") // SQLITE_SCHEMA
             }
-            XqliteError::ReadOnlyDatabase { message } => {
+            XqliteError::ReadOnlyDatabase {
+                extended_code: _,
+                message,
+            } => {
                 write!(f, "Database is read-only: {message}") // SQLITE_READONLY
             }
-            XqliteError::AuthorizationDenied { message } => {
+            XqliteError::AuthorizationDenied {
+                extended_code: _,
+                message,
+            } => {
                 write!(f, "Authorization denied: {message}")
             }
             XqliteError::CannotOpenDatabase {
@@ -444,8 +463,8 @@ impl Encoder for XqliteError {
             XqliteError::ExpectedList { value_str } => {
                 (atoms::expected_list(), value_str).encode(env)
             }
-            XqliteError::UnsupportedAtom { atom_value: _ } => {
-                atoms::unsupported_atom().encode(env)
+            XqliteError::UnsupportedAtom { atom_value } => {
+                (atoms::unsupported_atom(), atom_value).encode(env)
             }
             XqliteError::UnsupportedDataType { term_type } => (
                 atoms::unsupported_data_type(),
@@ -458,9 +477,10 @@ impl Encoder for XqliteError {
             XqliteError::CannotExecutePragma { pragma, reason } => {
                 (atoms::cannot_execute_pragma(), pragma, reason).encode(env)
             }
-            XqliteError::DatabaseBusyOrLocked { message } => {
-                (atoms::database_busy_or_locked(), message).encode(env)
-            }
+            XqliteError::DatabaseBusyOrLocked {
+                extended_code,
+                message,
+            } => (atoms::database_busy_or_locked(), extended_code, message).encode(env),
             XqliteError::OperationCancelled => atoms::operation_cancelled().encode(env),
             XqliteError::NoSuchTable { message } => {
                 (atoms::no_such_table(), message).encode(env)
@@ -474,15 +494,18 @@ impl Encoder for XqliteError {
             XqliteError::IndexExists { message } => {
                 (atoms::index_exists(), message).encode(env)
             }
-            XqliteError::SchemaChanged { message } => {
-                (atoms::schema_changed(), message).encode(env)
-            }
-            XqliteError::ReadOnlyDatabase { message } => {
-                (atoms::read_only_database(), message).encode(env)
-            }
-            XqliteError::AuthorizationDenied { message } => {
-                (atoms::authorization_denied(), message).encode(env)
-            }
+            XqliteError::SchemaChanged {
+                extended_code,
+                message,
+            } => (atoms::schema_changed(), extended_code, message).encode(env),
+            XqliteError::ReadOnlyDatabase {
+                extended_code,
+                message,
+            } => (atoms::read_only_database(), extended_code, message).encode(env),
+            XqliteError::AuthorizationDenied {
+                extended_code,
+                message,
+            } => (atoms::authorization_denied(), extended_code, message).encode(env),
             XqliteError::CannotOpenDatabase {
                 path,
                 code,
@@ -510,7 +533,7 @@ impl Encoder for XqliteError {
                         let err = XqliteError::InternalEncodingError {
                             context: "Failed map create for InvalidParameterCount".to_string(),
                         };
-                        (atoms::error(), err).encode(env)
+                        err.encode(env)
                     }
                 }
             }
@@ -576,7 +599,7 @@ impl Encoder for XqliteError {
                         let err = XqliteError::InternalEncodingError {
                             context: "Failed map create for SqlInputError".to_string(),
                         };
-                        (atoms::error(), err).encode(env)
+                        err.encode(env)
                     }
                 }
             }
@@ -623,7 +646,7 @@ impl Encoder for XqliteError {
                         let err = XqliteError::InternalEncodingError {
                             context: "Failed map create for ConstraintViolation".to_string(),
                         };
-                        (atoms::error(), err).encode(env)
+                        err.encode(env)
                     }
                 }
             }
@@ -663,16 +686,20 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
 
     match primary_code {
         ffi::SQLITE_READONLY => XqliteError::ReadOnlyDatabase {
+            extended_code: ffi_err.extended_code,
             message: message_string,
         },
         ffi::SQLITE_INTERRUPT => XqliteError::OperationCancelled,
         ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED => XqliteError::DatabaseBusyOrLocked {
+            extended_code: ffi_err.extended_code,
             message: message_string,
         },
         ffi::SQLITE_SCHEMA => XqliteError::SchemaChanged {
+            extended_code: ffi_err.extended_code,
             message: message_string,
         },
         ffi::SQLITE_AUTH => XqliteError::AuthorizationDenied {
+            extended_code: ffi_err.extended_code,
             message: message_string,
         },
         ffi::SQLITE_CONSTRAINT => {
@@ -685,7 +712,20 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
                 details: Box::new(details),
             }
         }
-        // Handle common errors by inspecting the message text.
+        // Text-based classification (the only place we do it outside
+        // `constraint_parse.rs`). These four conditions all surface as the
+        // primary `SQLITE_ERROR` (1) with NO distinguishing extended code — see
+        // the SQLite result-code list: "no such table"/"no such index"/"table …
+        // already exists"/"index … already exists" share code 1 with dozens of
+        // unrelated errors. SQLite gives us no other signal, so the (stable,
+        // English) message prefix is the only discriminator, exactly like
+        // `constraint_parse.rs` parses constraint metadata out of `errmsg` text.
+        // Consequence, accepted deliberately: a message reword/localization
+        // downgrades these to the generic `SqliteFailure` fallback — graceful (no
+        // wrong result, no crash), never a misclassification. This is also why
+        // these four variants stay message-only (no `extended_code` field, unlike
+        // the SQLITE_BUSY/READONLY/SCHEMA/AUTH variants above): their extended
+        // code is invariantly 1, so it would carry no information.
         _ if lower_msg.starts_with("no such table") => XqliteError::NoSuchTable {
             message: message_string,
         },
@@ -781,14 +821,14 @@ impl From<RusqliteError> for XqliteError {
             RusqliteError::MultipleStatement => XqliteError::MultipleStatements,
 
             // --- Final Catch-all for any other rusqlite::Error types ---
-            other_err => {
-                let message_string = other_err.to_string();
-                if message_string == "interrupted" {
-                    XqliteError::OperationCancelled
-                } else {
-                    XqliteError::CannotExecute(message_string)
-                }
-            }
+            // Only NON-`SqliteFailure`/`SqlInputError` rusqlite errors reach here
+            // (both are matched above and routed through `classify_sqlite_error`).
+            // A SQLite interrupt is ALWAYS a `SqliteFailure` carrying extended code
+            // `SQLITE_INTERRUPT` (9), classified by code — never by message text.
+            // No rusqlite variant reachable here `Display`s as "interrupted", so
+            // the former `message == "interrupted"` string-match was dead code;
+            // classification of interrupts is purely code-driven.
+            other_err => XqliteError::CannotExecute(other_err.to_string()),
         }
     }
 }

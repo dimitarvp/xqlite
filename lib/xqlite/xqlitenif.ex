@@ -85,7 +85,7 @@ defmodule XqliteNIF do
 
   The database must already exist — SQLite will not create it.
   Write operations (INSERT, UPDATE, DELETE, CREATE TABLE, etc.) will fail
-  with `{:error, {:read_only_database, message}}`.
+  with `{:error, {:read_only_database, extended_code, message}}`.
 
   Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_URI` flags.
 
@@ -1021,8 +1021,8 @@ defmodule XqliteNIF do
   SQLite consults the authorizer while *preparing* every statement.
   `denied_actions` is a list of action-kind atoms (e.g. `[:delete,
   :drop_table]`); any statement whose action kind is in the list fails at
-  preparation with `{:error, {:authorization_denied, message}}`. Everything
-  else is allowed. Granularity is the action kind only (table/column
+  preparation with `{:error, {:authorization_denied, extended_code, message}}`.
+  Everything else is allowed. Granularity is the action kind only (table/column
   arguments are ignored) and the only disposition is deny.
 
   The list is validated in full before anything is installed: an
@@ -1500,7 +1500,7 @@ defmodule XqliteNIF do
   new database entirely in memory.
 
   When `read_only` is `true`, write operations on the schema fail with
-  `{:error, {:read_only_database, _}}`. When `false` it is writable and
+  `{:error, {:read_only_database, _, _}}`. When `false` it is writable and
   may grow as needed.
 
   Use `Xqlite.deserialize/4` for defaulted `schema`/`read_only`.

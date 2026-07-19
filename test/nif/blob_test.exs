@@ -174,6 +174,30 @@ defmodule Xqlite.NIF.BlobTest do
                NIF.query(conn, "SELECT data FROM bl_wrp WHERE id = 1", [])
     end
 
+    # The query/execute path encodes BLOB column values size-adaptively — blobs
+    # <= 64 B copy into a cheap process-heap binary, larger ones zero-copy-wrap a
+    # resource binary. Both branches AND the 64/65 boundary must round-trip
+    # byte-exact. Each payload leads with a UTF-8 continuation byte so it binds as
+    # a BLOB (not TEXT), exercising encode_val's blob arm.
+    test "query round-trips BLOB values byte-exact across the heap/resource threshold",
+         %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, "CREATE TABLE bl_enc (id INTEGER PRIMARY KEY, data BLOB);")
+
+      for {id, size} <- [{1, 1}, {2, 63}, {3, 64}, {4, 65}, {5, 200}, {6, 4096}] do
+        payload =
+          :binary.list_to_bin(Enum.map(0..(size - 1)//1, fn i -> 0x80 + rem(i, 0x40) end))
+
+        assert byte_size(payload) == size
+
+        {:ok, 1} =
+          NIF.execute(conn, "INSERT INTO bl_enc(id, data) VALUES (?1, ?2)", [id, payload])
+
+        assert {:ok, %{rows: [[^payload]]}} =
+                 NIF.query(conn, "SELECT data FROM bl_enc WHERE id = ?1", [id])
+      end
+    end
+
     test "write on read-only blob returns error", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, """
@@ -446,7 +470,7 @@ defmodule Xqlite.NIF.BlobTest do
   # (`blob::close`) runs while the connection slot is already `None`. Pre-fix
   # this dereferenced a moved-from `&Connection` inside the rusqlite `Blob`
   # wrapper (a use-after-move; see the `XqliteBlob` doc comment in
-  # native/xqlitenif/src/blob.rs and REVIEW_LEDGER.md "Run 2"). Post-fix the blob
+  # native/xqlitenif/src/blob.rs). Post-fix the blob
   # owns only a raw `sqlite3_blob*` and closing it is sound (the open blob kept
   # the db alive via SQLITE_BUSY). The assertion is survival: the VM must still
   # be running afterward.

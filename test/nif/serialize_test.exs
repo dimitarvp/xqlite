@@ -130,7 +130,7 @@ defmodule Xqlite.NIF.SerializeTest do
                NIF.query(conn, "SELECT id FROM ro_t", [])
 
       # Writes should fail
-      assert {:error, {:read_only_database, _}} =
+      assert {:error, {:read_only_database, _, _}} =
                NIF.execute(conn, "INSERT INTO ro_t (id) VALUES (?1)", [2])
     end
 

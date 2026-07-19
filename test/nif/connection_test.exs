@@ -179,7 +179,7 @@ defmodule Xqlite.NIF.ConnectionTest do
       assert {:ok, ro} = Xqlite.open_readonly(path)
       assert {:ok, %{num_rows: 0}} = NIF.query(ro, "SELECT * FROM t", [])
 
-      assert {:error, {:read_only_database, _}} =
+      assert {:error, {:read_only_database, _, _}} =
                NIF.execute(ro, "INSERT INTO t VALUES (1)", [])
 
       assert :ok = Xqlite.close(ro)

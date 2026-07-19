@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 ///
 /// This resource deliberately stores NO rusqlite `Blob` wrapper, and no future
 /// maintainer may reintroduce one (see the WARNING below): doing so reopens a
-/// CONFIRMED S0 use-after-move (`REVIEW_LEDGER.md` "Run 2", fixed in `b1c60b4`).
-/// The rusqlite file:line citations below are from 0.40.1.
+/// use-after-move memory-safety bug that was already shipped and fixed once (in
+/// `b1c60b4`). The rusqlite file:line citations below are from 0.40.1.
 ///
 /// A rusqlite `Blob<'conn>` holds a real `&Connection` (`blob/mod.rs:202`) and
 /// dereferences it on `Drop`: `Blob::drop` (`blob/mod.rs:399`) -> `close_()`
@@ -35,11 +35,10 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// returns `SQLITE_BUSY`, and leaves the db alive (SQLite amalgamation fact; see
 /// `close`). ONLY the Rust `&Connection` wrapper was ever left dangling.
 ///
-/// This was CONFIRMED as UB by a Miri pattern-model: a `&T` into an `Option<T>`
-/// slot, `.take()` drops the `T`, then a `Drop` derefs the stale `&T` — Miri
-/// reports "reading uninitialized memory". That interim repro crate has since
-/// been removed after serving its purpose; the permanent record is
-/// `REVIEW_LEDGER.md` "Run 2".
+/// A Miri pattern-model demonstrated the UB: a `&T` into an `Option<T>` slot,
+/// `.take()` drops the `T`, then a `Drop` derefs the stale `&T` — Miri reports
+/// "reading uninitialized memory". That interim repro crate has since been
+/// removed after serving its purpose.
 ///
 /// MAINTAINER WARNING: never store a rusqlite `Blob` — or a `Session`, or ANY
 /// lifetime-erased wrapper whose `Drop` dereferences an `&Connection` — in a
@@ -150,16 +149,34 @@ pub(crate) fn read(
         // came from an i32, so both casts are lossless.
         let c_offset = offset as c_int;
         let c_len = actual_len as c_int;
-        let mut buf = vec![0u8; actual_len];
-        // SAFETY: `buf` holds `actual_len` bytes; `[offset, offset + actual_len)`
-        // is in bounds (checked above); `ptr`/`db` are valid under the Mutex.
-        let rc =
-            unsafe { ffi::sqlite3_blob_read(ptr, buf.as_mut_ptr().cast(), c_len, c_offset) };
+        // Read straight into the OwnedBinary we hand back — a single alloc + a
+        // single copy (was: a `vec![0; n]` staging buffer plus a second
+        // alloc+copy through `to_owned_binary`, i.e. 2 allocs / 2 memcpys and a
+        // transient 2x peak). `sqlite3_blob_read` writes exactly `actual_len`
+        // bytes on SQLITE_OK, so every byte of the freshly-allocated (and thus
+        // uninitialised) binary is filled before it can escape; on any error we
+        // drop it, never releasing it to the BEAM.
+        let mut binary = rustler::OwnedBinary::new(actual_len).ok_or_else(|| {
+            XqliteError::InternalEncodingError {
+                context: "failed to allocate binary for blob read".to_string(),
+            }
+        })?;
+        // SAFETY: `binary` owns `actual_len` writable bytes; `[offset, offset +
+        // actual_len)` is in bounds (checked above); `ptr`/`db` are valid under
+        // the Mutex.
+        let rc = unsafe {
+            ffi::sqlite3_blob_read(
+                ptr,
+                binary.as_mut_slice().as_mut_ptr().cast(),
+                c_len,
+                c_offset,
+            )
+        };
         if rc != ffi::SQLITE_OK {
             // SAFETY: `db` is valid while the connection Mutex is held.
             return Err(unsafe { blob_error(db, rc) });
         }
-        to_owned_binary(&buf, "blob read")
+        Ok(binary)
     })
 }
 

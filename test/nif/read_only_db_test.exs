@@ -73,39 +73,47 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
 
       # --- Write Operations (must fail) ---
 
-      test "INSERT fails with :read_only_database", %{conn: ro_conn} do
+      test "INSERT fails with :read_only_database, carrying the extended code", %{
+        conn: ro_conn
+      } do
         sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (2, 'new');"
-        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+        # The SQLite extended result code is surfaced; its low byte is the
+        # primary SQLITE_READONLY (8), which discriminates the sub-reason
+        # (READONLY_RECOVERY, READONLY_ROLLBACK, …) without parsing message text.
+        assert {:error, {:read_only_database, code, msg}} = NIF.execute(ro_conn, sql, [])
+        assert is_integer(code)
+        assert Bitwise.band(code, 0xFF) == 8
+        assert is_binary(msg)
       end
 
       test "UPDATE fails with :read_only_database", %{conn: ro_conn} do
         sql = "UPDATE #{@test_table_name} SET data = 'updated' WHERE id = 1;"
-        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+        assert {:error, {:read_only_database, _, _}} = NIF.execute(ro_conn, sql, [])
       end
 
       test "DELETE fails with :read_only_database", %{conn: ro_conn} do
         sql = "DELETE FROM #{@test_table_name} WHERE id = 1;"
-        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+        assert {:error, {:read_only_database, _, _}} = NIF.execute(ro_conn, sql, [])
       end
 
       test "CREATE TABLE fails with :read_only_database", %{conn: ro_conn} do
         sql = "CREATE TABLE new_ro_table (id INTEGER);"
-        assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+        assert {:error, {:read_only_database, _, _}} = NIF.execute(ro_conn, sql, [])
       end
 
       test "execute_batch with writes fails with :read_only_database", %{conn: ro_conn} do
         sql = "INSERT INTO #{@test_table_name} (id, data) VALUES (3, 'batch');"
-        assert {:error, {:read_only_database, _}} = NIF.execute_batch(ro_conn, sql)
+        assert {:error, {:read_only_database, _, _}} = NIF.execute_batch(ro_conn, sql)
       end
 
       test "begin + write fails with :read_only_database", %{conn: ro_conn} do
         case NIF.begin(ro_conn) do
           :ok ->
             sql = "UPDATE #{@test_table_name} SET data = 'tx_update' WHERE id = 1;"
-            assert {:error, {:read_only_database, _}} = NIF.execute(ro_conn, sql, [])
+            assert {:error, {:read_only_database, _, _}} = NIF.execute(ro_conn, sql, [])
             :ok = NIF.rollback(ro_conn)
 
-          {:error, {:read_only_database, _}} ->
+          {:error, {:read_only_database, _, _}} ->
             :ok
         end
       end
@@ -140,7 +148,7 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
     # Can read pragmas
     assert {:ok, _} = NIF.get_pragma(ro_conn, "encoding")
     # Cannot create tables
-    assert {:error, {:read_only_database, _}} =
+    assert {:error, {:read_only_database, _, _}} =
              NIF.execute(ro_conn, "CREATE TABLE t (id INTEGER);", [])
 
     NIF.close(ro_conn)

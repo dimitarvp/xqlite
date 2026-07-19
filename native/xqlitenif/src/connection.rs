@@ -92,7 +92,7 @@ impl Encoder for XqliteQueryResult<'_> {
             Ok(final_map) => final_map,
             Err(context) => {
                 let err = XqliteError::InternalEncodingError { context };
-                (atoms::error(), err).encode(env)
+                err.encode(env)
             }
         }
     }

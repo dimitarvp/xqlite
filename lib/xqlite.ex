@@ -136,18 +136,19 @@ defmodule Xqlite do
   @type error_reason ::
           :connection_closed
           | :execute_returned_results
+          | :invalid_transaction_mode
           | :multiple_statements
           | :null_byte_in_string
           | :operation_cancelled
           | :statement_finalized
-          | :unsupported_atom
-          | {:authorization_denied, String.t()}
+          | {:authorization_denied, integer(), String.t()}
+          | {:cannot_convert_atom_to_string, String.t()}
           | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
           | {:cannot_open_database, String.t(), integer(), String.t()}
           | {:constraint_violation, constraint_kind(), constraint_details()}
-          | {:database_busy_or_locked, String.t()}
+          | {:database_busy_or_locked, integer(), String.t()}
           | {:expected_keyword_list, String.t()}
           | {:expected_keyword_tuple, String.t()}
           | {:expected_list, String.t()}
@@ -172,13 +173,14 @@ defmodule Xqlite do
           | {:lock_error, String.t()}
           | {:no_such_index, String.t()}
           | {:no_such_table, String.t()}
-          | {:read_only_database, String.t()}
-          | {:schema_changed, String.t()}
+          | {:read_only_database, integer(), String.t()}
+          | {:schema_changed, integer(), String.t()}
           | {:schema_parsing_error, String.t(), {:unexpected_value, String.t()}}
           | {:sql_input_error, sql_input_error()}
           | {:sqlite_failure, integer(), integer(), String.t() | nil}
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
+          | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
           | {:utf8_error, non_neg_integer(), String.t()}
 
@@ -278,7 +280,7 @@ defmodule Xqlite do
   Fails with a structured error if the file does not exist — read-only
   opens never create. No PRAGMAs are applied; read-only databases
   can't persist most settings. Writes fail with
-  `{:error, {:read_only_database, message}}`.
+  `{:error, {:read_only_database, extended_code, message}}`.
 
   Emits `[:xqlite, :open, :start | :stop]` telemetry with mode
   `:readonly`.
@@ -1469,7 +1471,8 @@ defmodule Xqlite do
   SQLite consults an authorizer callback while *preparing* every statement.
   This installs one that denies a fixed set of action kinds: if a statement
   attempts any denied action, preparation fails and the call returns
-  `{:error, {:authorization_denied, message}}`. Everything else is allowed.
+  `{:error, {:authorization_denied, extended_code, message}}` (the extended
+  code is SQLite's `SQLITE_AUTH` family). Everything else is allowed.
 
   `denied_actions` is a list of action-kind atoms. The set mirrors SQLite's
   authorizer action codes — `:select`, `:read`, `:insert`, `:update`,
@@ -1500,7 +1503,7 @@ defmodule Xqlite do
   `XqliteNIF.get_pragma/2` and `set_pragma/3` run `PRAGMA` statements, which
   SQLite authorizes as the `:pragma` action; the schema-introspection helpers
   lean on PRAGMAs too. Denying `:pragma` therefore makes all of them fail with
-  `{:error, {:authorization_denied, _}}`. Deny it only when you intend to lock
+  `{:error, {:authorization_denied, _, _}}`. Deny it only when you intend to lock
   those paths out as well.
 
   No telemetry is emitted for authorizer install/remove or for denials.
@@ -1512,7 +1515,7 @@ defmodule Xqlite do
       {:ok, 0}
       iex> Xqlite.set_authorizer(conn, [:delete])
       :ok
-      iex> match?({:error, {:authorization_denied, _}}, XqliteNIF.execute(conn, "DELETE FROM t", []))
+      iex> match?({:error, {:authorization_denied, _, _}}, XqliteNIF.execute(conn, "DELETE FROM t", []))
       true
       iex> match?({:ok, _}, XqliteNIF.query(conn, "SELECT id FROM t", []))
       true

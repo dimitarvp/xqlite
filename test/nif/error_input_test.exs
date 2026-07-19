@@ -76,7 +76,8 @@ defmodule Xqlite.NIF.ErrorInputTest do
         # Based on implementation, ExpectedKeywordList seems less likely here than
         # ExpectedKeywordTuple or InvalidParameterName if it attempts binding.
         # Let's assert for the most likely based on needing {atom, term} tuples.
-        assert {:error, :unsupported_atom} =
+        # The rejected atom is carried in the structured error.
+        assert {:error, {:unsupported_atom, "not_a_keyword_list"}} =
                  NIF.query(conn, sql, invalid_keyword_list)
       end
 
@@ -91,16 +92,22 @@ defmodule Xqlite.NIF.ErrorInputTest do
                  NIF.query(conn, sql, invalid_element_list)
       end
 
-      test "execute/3 returns :unsupported_atom when parameter atom is invalid", %{conn: conn} do
+      test "execute/3 returns :unsupported_atom (carrying the atom) for an invalid atom param",
+           %{conn: conn} do
         sql = "INSERT INTO error_input_test (data) VALUES (?1);"
         params = [:unsupported_atom_value]
-        assert {:error, :unsupported_atom} = NIF.execute(conn, sql, params)
+        # The offending atom is named in the structured error.
+        assert {:error, {:unsupported_atom, "unsupported_atom_value"}} =
+                 NIF.execute(conn, sql, params)
       end
 
-      test "query/3 returns :unsupported_atom when parameter atom is invalid", %{conn: conn} do
+      test "query/3 returns :unsupported_atom (carrying the atom) for an invalid atom param",
+           %{conn: conn} do
         sql = "SELECT * FROM error_input_test WHERE data = ?1;"
         params = [:unsupported_atom_value]
-        assert {:error, :unsupported_atom} = NIF.query(conn, sql, params)
+
+        assert {:error, {:unsupported_atom, "unsupported_atom_value"}} =
+                 NIF.query(conn, sql, params)
       end
 
       test "execute/3 returns :multiple_statements for multi-statement SQL", %{conn: conn} do
