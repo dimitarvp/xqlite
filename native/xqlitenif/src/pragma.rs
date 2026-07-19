@@ -35,7 +35,7 @@ pub(crate) fn get<'a>(
     validate_name(pragma_name)?;
     let read_sql = format!("PRAGMA {pragma_name};");
     match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
-        Ok(value) => Ok(encode_val(env, value)),
+        Ok(value) => encode_val(env, value),
         Err(RusqliteError::QueryReturnedNoRows) => Ok(atoms::no_value().to_term(env)),
         Err(e) => Err(pragma_exec_error(read_sql, e)),
     }
@@ -57,7 +57,7 @@ pub(crate) fn set<'a>(
     match rows.next()? {
         Some(row) => {
             let value: Value = row.get(0)?;
-            Ok(encode_val(env, value))
+            encode_val(env, value)
         }
         None => Ok(rustler::types::atom::nil().encode(env)),
     }

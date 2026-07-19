@@ -6,6 +6,7 @@ use crate::hook_util::{self, HookList};
 use crate::progress_dispatch::{self, ProgressDispatch};
 use crate::rollback_hook::{self, RollbackSubscriber};
 use crate::update_hook::{self, UpdateSubscriber};
+use crate::util::encode_text;
 use crate::wal_hook::{self, WalDispatch};
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
@@ -72,11 +73,25 @@ pub(crate) struct XqliteQueryResult<'a> {
     pub(crate) num_rows: usize,
 }
 
+/// Encodes the column names as a list of binaries via the graceful
+/// `encode_text` (fallible `OwnedBinary`) rather than rustler's `str` encoder,
+/// so an allocation failure surfaces as a structured error instead of aborting
+/// — consistent with the row-value TEXT path.
+fn encode_column_names<'a>(env: Env<'a>, columns: &[String]) -> Result<Term<'a>, XqliteError> {
+    let terms = columns
+        .iter()
+        .map(|name| encode_text(env, name.as_bytes()))
+        .collect::<Result<Vec<Term<'a>>, XqliteError>>()?;
+    Ok(terms.encode(env))
+}
+
 impl Encoder for XqliteQueryResult<'_> {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
-        let map_value_result: Result<Term, String> = Ok(map_new(env))
-            .and_then(|map| {
-                map.map_put(atoms::columns(), &self.columns)
+        let map_value_result: Result<Term, String> = encode_column_names(env, &self.columns)
+            .map_err(|e| format!("{e:?}"))
+            .and_then(|columns| {
+                map_new(env)
+                    .map_put(atoms::columns(), columns)
                     .map_err(|_| "Failed to insert :columns key".to_string())
             })
             .and_then(|map| {

@@ -1364,8 +1364,9 @@ defmodule Xqlite do
 
     * `:max_retries` (non-negative integer, default `50`) — stop after this
       many retries and let the caller see `SQLITE_BUSY`.
-    * `:max_elapsed_ms` (non-negative integer, default `5_000`) — absolute
-      time ceiling in milliseconds from the busy slot's first installation.
+    * `:max_elapsed_ms` (non-negative integer, default `5_000`) — wall-time
+      ceiling in milliseconds for a single busy event; the clock resets at the
+      start of each fresh contention, like `:max_retries`.
     * `:sleep_ms` (non-negative integer, default `10`) — milliseconds to
       sleep between retries. Zero disables the pause (tight spin; rarely
       what you want).

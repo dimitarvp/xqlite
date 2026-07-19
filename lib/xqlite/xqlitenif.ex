@@ -1664,7 +1664,8 @@ defmodule XqliteNIF do
   - `:replace` — overwrite with the changeset's values. SQLite only permits
     replacement for `DATA` and `CONFLICT` conflicts; for a `NOTFOUND`,
     `CONSTRAINT`, or `FOREIGN_KEY` conflict there is nothing to overwrite, so
-    the apply is aborted (rolled back) instead.
+    the entire apply is aborted and rolled back, returning an error. The
+    offending change is not silently skipped — that is `:omit`, not `:replace`.
   - `:abort` — abort the entire apply operation
   """
   @spec changeset_apply(

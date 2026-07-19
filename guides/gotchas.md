@@ -220,48 +220,30 @@ model.
 
 ## Concurrency and busy handling
 
-### A busy policy's `:max_elapsed_ms` is measured from install, not per event
+### A busy policy's two ceilings are both per busy event
 
-`Xqlite.set_busy_policy/2` takes two independent give-up ceilings: `:max_retries`
-and `:max_elapsed_ms`. They anchor their clocks differently, and the difference
-is a footgun:
+`Xqlite.set_busy_policy/2` takes two independent give-up ceilings, and both are
+scoped to a single busy event — each resets at the start of every fresh
+contention:
 
-- **`:max_retries`** counts SQLite's retry count for *the current busy event* —
-  it resets to zero every time a fresh contention starts. This is the intuitive
-  behavior.
-- **`:max_elapsed_ms`** is an *absolute* ceiling measured from **when the busy
-  slot was first installed on the connection** — not from when a busy wait
-  begins. It never resets for the life of the slot.
+- **`:max_retries`** caps SQLite's retry count for the current busy event.
+- **`:max_elapsed_ms`** caps the wall-clock time spent retrying the current busy
+  event. Its clock resets on the first callback of each new contention — it is
+  *not* an absolute ceiling measured from when the policy was installed.
 
-The consequence: once a connection has been alive (with a policy installed)
-longer than `:max_elapsed_ms`, the elapsed check trips on the *first* callback of
-*every* subsequent busy event, so the policy gives up immediately with **zero
-retries** — as if no policy were installed at all.
+The effective per-event budget is whichever fires first: roughly
+`sleep_ms × max_retries`, capped at `max_elapsed_ms`. A long-lived, pooled
+connection — the always-open handles an Ecto-style adapter keeps — gets its full
+budget on *every* contention, no matter how long it has been open. Size
+`:max_retries` and `:sleep_ms` to the retry count and per-attempt pause you want,
+and `:max_elapsed_ms` as the hard wall-time cap per contention.
 
 ```elixir
-# Install a generous-looking policy, then let the connection age past the cap.
+# 1000 retries × 5 ms is the retry budget; max_elapsed_ms caps it at 400 ms of
+# wall time per contention. The clock resets on each new busy event, so this
+# behaves identically whether the connection is fresh or has been open for hours.
 :ok = Xqlite.set_busy_policy(conn, max_retries: 1_000, max_elapsed_ms: 400, sleep_ms: 5)
-Process.sleep(600)
-
-# A write that hits contention now surrenders instantly (0 retries), even though
-# the holder would release well within a 1000×5 ms retry budget:
-Xqlite.execute(conn, "INSERT INTO t VALUES (1)", [])
-#=> {:error, {:database_busy_or_locked, "database is locked"}}   # gave up in ~0 ms
 ```
-
-This bites long-lived connections hardest — exactly the pooled, always-open
-connections an Ecto-style adapter keeps. With the default `max_elapsed_ms:
-5_000`, a policy set at connection open silently stops retrying five seconds
-later.
-
-Treat `:max_retries` as the real retry gate: the effective retry budget is
-`sleep_ms × max_retries`, and `:max_elapsed_ms` only *lowers* it (never raises
-it) once the connection is older than that cap. If you want retries to keep
-working on a long-lived connection, set `:max_elapsed_ms` comfortably larger than
-the connection's expected lifetime (or very large), and size `:max_retries` /
-`:sleep_ms` to bound the per-event wait. To reset the elapsed clock, remove the
-policy (`Xqlite.remove_busy_policy/1`, with no observers left on the slot) and
-set it again.
 
 ### `PRAGMA busy_timeout` silently replaces your busy policy
 
@@ -299,24 +281,28 @@ connection feel stalled to its other callers. The [Security](security.md)
 guide's "Thread-safety model" section is the canonical home for this — it
 explains the per-connection mutex model that these two cases sit inside.
 
-### Give each process its own connection — sharing one stalls a scheduler
+### Give each process its own connection — a shared handle serializes
 
-Heavy operations (`query`, `execute`, `stream`, blob read/write, session and
-changeset work, `backup`, `serialize`, …) run on the BEAM's *dirty* schedulers,
-so they never tie up a normal scheduler no matter how long they take. The cheap
-state readers (`changes/1`, `total_changes/1`, `db_path/1`, `autocommit/1`,
-`transaction_state/2`, and the like) run on a *normal* scheduler because they are
-sub-microsecond in the intended usage.
+Every operation that touches a connection runs on the BEAM's *dirty* schedulers:
+the heavy ones (`query`, `execute`, `stream`, blob read/write, session and
+changeset work, `backup`, `serialize`, …) *and* the cheap state readers
+(`changes/1`, `total_changes/1`, `db_path/1`, `autocommit/1`,
+`transaction_state/2`, …). The readers are sub-microsecond in the intended usage,
+but they take the connection mutex and so can block; keeping them on a dirty
+scheduler means a slow operation on a shared handle never ties up a *normal*
+scheduler, so the VM's normal-scheduler latency is protected however connections
+are used.
 
-That intended usage is **one connection per process** — a pool of independent
-handles, which is exactly how the Ecto adapter uses xqlite. If you instead
-*share a single connection handle across processes*, every call to it is
-serialized by that connection's mutex (by design). The sharp edge: if one process
-is mid-way through a slow operation on the shared handle, another process calling
-even a trivial reader on the same handle **blocks on a normal scheduler for the
-slow operation's entire duration** — a multi-second reader call is enough to make
-that scheduler unresponsive to unrelated work. Enough of them at once degrades
-the whole VM's latency.
+The intended usage is still **one connection per process** — a pool of
+independent handles, which is exactly how the Ecto adapter uses xqlite. If you
+instead *share a single connection handle across processes*, every call to it is
+serialized by that connection's mutex (by design). The sharp edge that remains:
+if one process is mid-way through a slow operation on the shared handle, another
+process calling even a trivial reader on the same handle **blocks for the slow
+operation's entire duration**. That block now sits on a dirty scheduler rather
+than a normal one, so it no longer degrades unrelated normal-scheduler work — but
+the caller still waits, and enough concurrent blocked calls can saturate the
+dirty-scheduler pool.
 
 The fix is the design: don't share a connection handle between processes for
 concurrency. Open one connection per process (or use a pool of independent

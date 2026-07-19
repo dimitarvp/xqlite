@@ -18,13 +18,16 @@ pub(crate) struct BlobResource(pub(crate) Vec<u8>);
 impl Resource for BlobResource {}
 
 #[inline]
-pub(crate) fn encode_val(env: Env<'_>, val: rusqlite::types::Value) -> Term<'_> {
+pub(crate) fn encode_val(
+    env: Env<'_>,
+    val: rusqlite::types::Value,
+) -> Result<Term<'_>, XqliteError> {
     match val {
-        Value::Null => nil().encode(env),
-        Value::Integer(i) => i.encode(env),
-        Value::Real(f) => encode_f64(env, f),
-        Value::Text(s) => s.encode(env),
-        Value::Blob(owned_vec) => encode_blob(env, owned_vec),
+        Value::Null => Ok(nil().encode(env)),
+        Value::Integer(i) => Ok(i.encode(env)),
+        Value::Real(f) => Ok(encode_f64(env, f)),
+        Value::Text(s) => encode_text(env, s.as_bytes()),
+        Value::Blob(owned_vec) => Ok(encode_blob(env, owned_vec)),
     }
 }
 
@@ -73,6 +76,28 @@ fn wrap_blob_resource(env: Env<'_>, owned_vec: Vec<u8>) -> Term<'_> {
     resource
         .make_binary(env, |wrapper: &BlobResource| &wrapper.0)
         .encode(env)
+}
+
+/// Encodes bytes as a BEAM binary term via a fallible `OwnedBinary` allocation,
+/// degrading to a structured error on allocation failure instead of aborting.
+///
+/// rustler's `str`/`String` `Encoder` allocates the same `OwnedBinary` but
+/// `panic!`s when `OwnedBinary::new` returns `None`, so a returned TEXT value
+/// is the one outbound value path that aborts under allocation exhaustion
+/// rather than surfacing an error the way the BLOB encoders do. This mirrors
+/// their graceful convention. The success path is byte-identical to
+/// `str::encode`: an `OwnedBinary` holding exactly these bytes.
+#[inline]
+pub(crate) fn encode_text<'a>(env: Env<'a>, bytes: &[u8]) -> Result<Term<'a>, XqliteError> {
+    let mut bin =
+        OwnedBinary::new(bytes.len()).ok_or_else(|| XqliteError::InternalEncodingError {
+            context: format!(
+                "Failed to allocate {}-byte OwnedBinary for TEXT value",
+                bytes.len()
+            ),
+        })?;
+    bin.as_mut_slice().copy_from_slice(bytes);
+    Ok(bin.release(env).encode(env))
 }
 
 /// Encodes an `f64` column value, mapping the non-finite cases that rustler's
@@ -157,7 +182,7 @@ pub(crate) fn process_rows<'a, 'rows>(
                 let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
                 for i in 0..column_count {
                     let val = row.get::<usize, Value>(i)?;
-                    let term = encode_val(env, val);
+                    let term = encode_val(env, val)?;
                     row_values.push(term);
                 }
                 results.push(row_values);
@@ -363,7 +388,7 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                     let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx);
                     let text_slice = std::slice::from_raw_parts(s_ptr, len as usize);
                     match std::str::from_utf8(text_slice) {
-                        Ok(s) => s.encode(env),
+                        Ok(s) => encode_text(env, s.as_bytes())?,
                         Err(utf8_err) => {
                             return Err(XqliteError::Utf8Error {
                                 column: i,

@@ -5,6 +5,7 @@ use rustler::sys::{
     enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
+use std::cell::Cell;
 use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Instant;
@@ -29,11 +30,14 @@ pub(crate) struct BusyPolicy {
 /// and the C callback only ever runs inside `sqlite3_step`/friends —
 /// which also hold that Mutex — so a mutation can never race a callback
 /// read. Plain snapshot-build-swap is sufficient; no copy-on-write list.
+/// The callback also resets `start` (an interior-mutable `Cell`) at the
+/// beginning of each busy event; that write is serialised by the same
+/// Mutex, so it never races a mutator or another callback.
 pub(crate) struct BusySlotState {
     policy: Option<BusyPolicy>,
     observers: Vec<(u64, LocalPid)>,
     next_handle: u64,
-    start: Instant,
+    start: Cell<Instant>,
 }
 
 impl std::fmt::Debug for BusySlotState {
@@ -69,7 +73,13 @@ unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_in
         let state = unsafe { &*(user_data as *const BusySlotState) };
 
         let retries = count as u32;
-        let elapsed_ms = state.start.elapsed().as_millis() as u64;
+        // SQLite starts a fresh busy event at count == 0; reset the elapsed
+        // clock there so `max_elapsed_ms` is a per-event budget (matching
+        // `max_retries`), not an absolute ceiling from the slot's install.
+        if retries == 0 {
+            state.start.set(Instant::now());
+        }
+        let elapsed_ms = state.start.get().elapsed().as_millis() as u64;
 
         for (_handle, pid) in &state.observers {
             // SAFETY: see `send_busy_to_pid`. All data is copied into a fresh
@@ -175,7 +185,10 @@ pub(crate) fn unregister_observer(
 }
 
 /// Clone the current slot contents (or a fresh empty state), preserving
-/// the install-time `start` instant and handle counter across mutations.
+/// the current `start` instant and handle counter across mutations. The
+/// callback resets `start` at each busy event's first callback, so a
+/// mutation mid-contention keeps that event's clock rather than restarting
+/// it.
 ///
 /// Callers must hold the connection Mutex — that is what makes the raw
 /// read of the current pointee sound (no concurrent reclaim, no
@@ -188,7 +201,7 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
             policy: None,
             observers: Vec::new(),
             next_handle: 0,
-            start: Instant::now(),
+            start: Cell::new(Instant::now()),
         }
     } else {
         // SAFETY: non-null slot pointers always point to a live
@@ -198,7 +211,7 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
             policy: state.policy.clone(),
             observers: state.observers.clone(),
             next_handle: state.next_handle,
-            start: state.start,
+            start: Cell::new(state.start.get()),
         }
     }
 }

@@ -77,7 +77,7 @@ fn close(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn db_path(handle: ResourceArc<XqliteConn>) -> Result<Option<String>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         // SQLite reports an empty filename for in-memory and temporary
@@ -235,12 +235,12 @@ fn explain_analyze<'a>(
 // Transaction / autocommit introspection
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn autocommit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     connection::with_conn(&handle, |conn| Ok(conn.is_autocommit()))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn txn_state<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -267,7 +267,7 @@ fn txn_state<'a>(
 // Busy handler
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn set_busy_policy(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
@@ -286,7 +286,7 @@ fn set_busy_policy(
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn remove_busy_policy(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
     let result = connection::with_conn(&handle, |conn| {
         busy_handler::remove_policy(conn, &handle.busy_handler)
@@ -294,7 +294,7 @@ fn remove_busy_policy(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_>
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn register_busy_observer(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
@@ -309,7 +309,7 @@ fn register_busy_observer(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn unregister_busy_observer(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
@@ -325,7 +325,7 @@ fn unregister_busy_observer(
 // Authorizer (deny-list, single slot)
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn set_authorizer<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -341,7 +341,7 @@ fn set_authorizer<'a>(
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn remove_authorizer(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
     let result = connection::with_conn(&handle, authorizer::clear);
     singular_ok_or_error_tuple(env, result)
@@ -720,12 +720,12 @@ fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError
     connection::with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
     connection::with_conn(&handle, |conn| Ok(conn.changes()))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn total_changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
     connection::with_conn(&handle, |conn| Ok(conn.total_changes()))
 }
@@ -1013,7 +1013,7 @@ fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) 
     singular_ok_or_error_tuple(env, result)
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn stmt_column_names(
     stmt_handle: ResourceArc<XqliteStatement>,
 ) -> Result<Vec<String>, XqliteError> {
@@ -1554,7 +1554,7 @@ fn unregister_rollback_hook(
 // Progress hook NIFs (multi-subscriber on the progress_dispatch slot)
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn register_progress_hook(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
@@ -1583,7 +1583,7 @@ fn register_progress_hook(
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn unregister_progress_hook(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
@@ -1643,7 +1643,7 @@ fn deserialize<'a>(
 // Extension Loading NIFs
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn enable_load_extension<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -1853,7 +1853,7 @@ fn encode_query_result_with_changes<'a>(
 // Session Extension NIFs
 // ---------------------------------------------------------------------------
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn session_new<'a>(env: Env<'a>, handle: ResourceArc<XqliteConn>) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
         let s = rusqlite::session::Session::new(conn)?;
@@ -1873,7 +1873,7 @@ fn session_new<'a>(env: Env<'a>, handle: ResourceArc<XqliteConn>) -> Term<'a> {
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn session_attach<'a>(
     env: Env<'a>,
     session_handle: ResourceArc<XqliteSession>,
@@ -1918,7 +1918,7 @@ fn session_patchset<'a>(env: Env<'a>, session_handle: ResourceArc<XqliteSession>
     }
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn session_is_empty(session_handle: ResourceArc<XqliteSession>) -> Result<bool, XqliteError> {
     session::with_session(&session_handle, |s| Ok(s.is_empty()))
 }
@@ -2056,7 +2056,7 @@ fn blob_write<'a>(
     singular_ok_or_error_tuple(env, blob::write(&blob_handle, offset, data.as_slice()))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn blob_size(blob_handle: ResourceArc<XqliteBlob>) -> Result<usize, XqliteError> {
     blob::size(&blob_handle)
 }
@@ -2070,7 +2070,7 @@ fn blob_reopen<'a>(
     singular_ok_or_error_tuple(env, blob::reopen(&blob_handle, row_id))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn blob_close<'a>(env: Env<'a>, blob_handle: ResourceArc<XqliteBlob>) -> Term<'a> {
     singular_ok_or_error_tuple(env, blob::close(&blob_handle))
 }

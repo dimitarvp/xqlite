@@ -340,6 +340,40 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
+  test "max_elapsed_ms is a per-event budget: an aged connection still retries",
+       %{path: path} do
+    # The elapsed clock resets at the first callback (count == 0) of each fresh
+    # contention, so a connection alive far longer than max_elapsed_ms still gets
+    # its full per-event budget. Before this was per-event, the clock was anchored
+    # at install and an aged connection gave up on the first callback (0 retries).
+    {holder, probe} =
+      prime_contention(path, max_retries: 1_000, max_elapsed_ms: 400, sleep_ms: 5)
+
+    # Age well past the 400 ms ceiling since the policy was installed.
+    Process.sleep(600)
+
+    probe_task =
+      Task.async(fn ->
+        NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+      end)
+
+    # First callback of the fresh contention: retries == 0, and its elapsed_ms is
+    # measured from THIS event, not from the 600 ms-old install.
+    assert_receive {:xqlite_busy, 0, first_elapsed}, 500
+    assert first_elapsed < 400
+
+    # It genuinely keeps retrying (pre-fix it gave up right after the first).
+    assert_receive {:xqlite_busy, second_retries, _}, 500
+    assert second_retries >= 1
+
+    # Release; the still-retrying probe then completes.
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    assert {:ok, 1} = Task.await(probe_task, 1_000)
+
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
   test "the telemetry bridge re-emits busy deliveries as [:xqlite, :hook, :busy]",
        %{path: path} do
     {:ok, holder} = NIF.open(path)
