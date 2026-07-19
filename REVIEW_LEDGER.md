@@ -4430,3 +4430,215 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   `test/` regressions under `mix verify`, not a fresh six-stance sweep. The scheduler S2 block
   duration (~1.32 s) and DirtyIo-pool occupancy under heavy reader volume are the documented
   single-owner tradeoff (F-A4-1 resolved to move-to-DirtyIo), unchanged and not re-litigated.
+
+---
+
+## Run 22 — 2026-07-20 — A1+A2 dryness covering re-run (maintainer-pass churn attacked)
+
+- Commit at scan: `0f81e75` (HEAD, clean, `mix verify` green — see below). Scope: the two
+  PRIORITY-1 axes over the WHOLE crate at HEAD, with the churn since the previous A1+A2 run
+  (Run 16, scan `6786f2b`) attacked hardest. `git diff --stat 6786f2b 0f81e75 -- native/` =
+  16 files, +144/−49; the code (non-comment, non-attribute) churn is exactly: `util.rs`
+  (`encode_text` new + `encode_val` → `Result`), `connection.rs` (`encode_column_names` new +
+  `XqliteQueryResult::encode` rewrite), `pragma.rs` (`encode_val` `Result` threading),
+  `busy_handler.rs` (`start` → `Cell<Instant>` per-event reset), `nif.rs` (20 attribute-only
+  `schedule = "DirtyIo"` flips + the F-A1-1 `Vec::new` + `encode_val` `?` threading). Everything
+  else in the diff is F-A3-1 `// SAFETY:` comment splits (`blob.rs`/`explain_analyze.rs`/
+  `progress_dispatch.rs`/`log_hook.rs`/`commit_hook.rs`/`rollback_hook.rs`/`session.rs`/
+  `cancel.rs`) + the `lib.rs` `#![warn(clippy::undocumented_unsafe_blocks)]` lint attr — proven
+  comment/attribute-only (filter: `git diff … | rg '^[+-]' | rg -v '^[+-]\s*//…'` → empty).
+  Composition: single Opus pass (this agent) — exhaustive `rg`-driven census + source-level
+  lock/panic audit; the settled Run 1–2 mechanisms (M1/M2/M3/M5/M6/M7, B1) re-verified at HEAD by
+  reading, not re-litigated. No new runtime probe: the churn strictly NARROWS the panic surface
+  (graceful `encode_text` replaces rustler's OOM-`panic!`ing `str::encode` on the value path) and
+  is lock-scoping-NEUTRAL — the F-A1-1 (huge `batch_size`) and busy-per-event-budget regressions
+  in `test/` exercise the live paths under `mix verify`.
+
+### CONFIRMED
+
+- **NONE.** Zero new S0/S1/S2/S3 this run. The A1 census is CLEAN and the A2 audit HOLDS.
+
+### A1 census — patterns + classifications (all `rg` over `native/xqlitenif/src/`)
+
+- **`unwrap`/`expect`** (`rg -e '\.unwrap\(\)' -e '\.expect\('`, non-test): **ZERO** crate-wide.
+  The only hits are `assert_eq!`/`assert!` in `constraint_parse.rs`'s `#[cfg(test)] mod tests`.
+  The churn added no unwrap: `encode_text` = `OwnedBinary::new(len).ok_or_else(…)?` (no unwrap);
+  every `encode_val` caller propagates the new `Result` via `?` or direct return, NOT `.unwrap()`.
+- **`encode_val` call-site census** (`rg 'encode_val'`): exactly THREE real callers — `util.rs:185`
+  `encode_val(env, val)?` (`process_rows`), `pragma.rs:38`/`:60` `encode_val(env, value)` (return
+  position, `get`/`set`). ALL propagate the `Result`; making it fallible introduced **no unwrap at
+  any site**. (The maintainer concern re-verified precisely.)
+- **`encode_text` panic-freedom** (`util.rs:90-97`): `OwnedBinary::new(bytes.len()).ok_or_else(||
+  InternalEncodingError{…})?` then `bin.as_mut_slice().copy_from_slice(bytes)` then
+  `bin.release(env).encode(env)`. `copy_from_slice` panics only on length mismatch; `bin` is
+  allocated with `bytes.len()`, so `as_mut_slice().len() == bytes.len()` — **provably equal → no
+  panic**. OOM `None` → structured `InternalEncodingError`, never a panic. Success path
+  byte-identical to `str::encode`. Panic-free by construction.
+- **`panic!`/`unreachable!`/`todo!`/`unimplemented!`/`assert!`** (non-test): **ZERO** real
+  constructs — the only match is a DOC comment (`util.rs:85` explaining rustler's `str::encode`
+  `panic!`s, which is exactly what `encode_text` avoids) + the `#[cfg(test)]` asserts.
+- **Indexing / slicing** (`rg '\[[a-z_]+\]|\[[0-9]+\]'`, non-test): the sole real data subscript
+  is `schema.rs:222-223` `pair[0]`/`pair[1]` inside `for pair in raw.chunks_exact(2)` —
+  `chunks_exact(2)` yields length-2 slices (remainder dropped), so both indices are in-bounds by
+  construction. Panic-free. (Unchanged since Run 16.)
+- **Integer division/modulo** (`rg -e ' / ' -e ' % '`, non-test): TWO sites, both in the
+  `schema.rs` hex-blob-literal parser and both by the LITERAL constant 2 — `schema.rs:216`
+  `inner.len() % 2 != 0`, `:219` `Vec::with_capacity(inner.len() / 2)` — divisor provably non-zero,
+  dividend a `usize` length (no overflow) → panic-free. (Census correction vs Run 16's "ZERO
+  integer `/`/`%`": those two `/2`/`%2` sites exist and are panic-free-by-construction; the
+  `is_multiple_of` note in Run 16 stands for `progress_dispatch.rs`.) Subtraction: only
+  `blob.rs:143` `size - offset`, guarded by the enclosing `if offset >= size { 0 } else {…}`.
+- **Alloc** (`rg 'with_capacity'`): 13 real sites, ALL bounded — `column_count` (`nif.rs:814/1027/
+  1167`, `util.rs:182/366`; `sqlite3_column_count`, ≤ `SQLITE_MAX_COLUMN`), `temp_results.len()`
+  (`schema.rs:585/647/728/803/859`; prior SQLite rows), `tokens.len()` (`cancel.rs:50`; decoded
+  list, already allocated), `inner.len()`/`inner.len()/2` (`schema.rs:195/219`; bounded default-
+  value string). **F-A1-1 fix CONFIRMED in place** (`nif.rs:1283` `Vec::<Vec<Term>>::new()` +
+  pinning comment, grow-on-demand); zero `with_capacity(unbounded-user-value)` anywhere.
+  `OwnedBinary::new` sites all `.ok_or_else`-degrade.
+- **Release profile** (`Cargo.toml [profile.release]`): `lto`/`codegen-units` only — NO
+  `overflow-checks` (release WRAPS, no overflow panic) and NO `panic = "abort"` (panic = unwind →
+  rustler's NIF-body/return-encode `catch_unwind` works; the "S0 only in destructors/raw
+  callbacks" model holds).
+
+### A1 Drop-impl table (7 destructors — rustler 0.38 wraps NONE in catch_unwind)
+
+`rg 'impl Drop for'` + `rg 'impl<[^>]*> Drop for'` = 7; `rg '\.lock\(\)\.unwrap\(\)'` = **ZERO**.
+
+| Resource | file:line | churn since Run 16 | poison behavior | panic-capable? |
+|---|---|---|---|---|
+| `XqliteStream` | stream.rs:72 | none | `.map_err → LockError` | no |
+| `XqliteStatement` | statement.rs:68 | none | `.map_err → LockError` | no |
+| `XqliteBlob` | blob.rs:67 | SAFETY-comment split only | `.map_err → LockError` | no |
+| `XqliteSession` | session.rs:31 | SAFETY-comment only | `into_inner()` poison-recovery | no |
+| `XqliteConn` | connection.rs:58 | none (Drop body) | n/a (`drop_hook`, conn field drops FIRST) | no |
+| `ProgressHandlerGuard` | cancel.rs:65 | SAFETY-comment only | n/a (`unregister` under held conn Mutex) | no |
+| `HookList<T>` | hook_util.rs:371 | none | n/a (`drop_all` box reclaim) | no |
+
+`BusySlotState` gained a `Cell<Instant>` field but has **no custom `Drop`** — its implicit drop
+drops `Cell<Instant>` (trivial; `Instant` is `Copy`, no heap, no lock, no panic). It is reclaimed
+via `hook_util::drop_hook` (`XqliteConn::Drop`) / `swap_in` — both panic-free box reclaims, the
+former at zero-refcount teardown (no concurrent access). No new panic-capable Drop.
+
+### A1 raw-FFI callback unwind table (3 raw `unsafe extern "C"`)
+
+`rg 'extern "C"'` = exactly the three raw callbacks (the two `hook_util.rs` hits are comments);
+all others route through rusqlite's SAFE-API trampolines (their own `catch_unwind`).
+
+| Callback | file:line | guard | churn | body panic-capable? |
+|---|---|---|---|---|
+| `progress_dispatch_callback` | progress_dispatch.rs:177 | `guard_ffi_callback(…,0,…)` (M6) | SAFETY-comment only | no |
+| `wal_hook_callback` | wal_hook.rs:74 | `guard_ffi_callback(…,SQLITE_OK,…)` (M6) | none | no |
+| `busy_callback` | busy_handler.rs:63 | `guard_ffi_callback(…,0,…)` (M6) | **Cell reset added** | **no — re-audited** |
+
+`busy_callback` re-audited at HEAD over the `Cell<Instant>` churn: `if retries == 0 {
+state.start.set(Instant::now()); }` then `state.start.get().elapsed().as_millis() as u64` —
+`Cell::set`/`get`, `Instant::now`/`.elapsed()`, `.as_millis()`+`as u64` truncating cast: none
+panic. Still M6-guarded (a hypothetical panic → return 0, clean SQLITE_BUSY). Panic-free.
+
+### A2 call-site table (every `sqlite3_*` C call; lock evidence)
+
+`rg 'ffi::sqlite3_[a-z_0-9]+'` → each classified; **zero new/moved call sites vs Run 16** (the
+churn adds no `sqlite3_*` call — `encode_text`/`encode_val`/the `Cell`/the 20 flips call none).
+Lock helpers UNCHANGED since Run 16: `with_conn`/`with_conn_mut` (connection.rs:200/…, not in
+diff), `with_live_stmt` (statement.rs, unchanged), `with_live_blob` (blob.rs:284, unchanged),
+`with_session[_mut]` (session.rs, comment-only), `take_and_finalize_raw` (stream.rs:37, unchanged).
+
+| Module | calls | under the lock via |
+|---|---|---|
+| blob.rs | `_open/_read/_write/_bytes/_reopen/_close/_errmsg` | `with_conn` (open) + `with_live_blob` + `close` (swap-then-lock) |
+| stream.rs | `_step/_column_count/_column_*/_bind_*/_finalize/_errmsg` | `with_live_stmt` / `stream_fetch` conn_lock_guard; `take_and_finalize_raw` swap-then-lock |
+| util.rs | `_column_type/_int64/_double/_text/_blob/_bytes` | `sqlite_row_to_elixir_terms` (doc'd + called under lock) |
+| nif.rs | `_prepare_v2/_column_*/_reset/_clear_bindings/_finalize/_bind_parameter_count/_wal_checkpoint_v2/_db_status` | `with_conn`/`with_live_stmt` closures |
+| explain_analyze.rs | `_prepare_v2/_step/_finalize/_stmt_status/_stmt_scanstatus_v2/_errmsg` | `core_explain_analyze` under `with_conn` |
+| busy_handler.rs | `_busy_handler` (×2) `/_errmsg` | `swap_in`/`ffi_rc_to_error` — callers (`set_policy`/`register_observer`/…) hold conn Mutex |
+| wal_hook.rs | `_wal_hook/_wal_checkpoint_v2` | `install_callback` under lock; checkpoint in mid-commit callback (M7) |
+| progress_dispatch.rs | `_progress_handler` | `install_callback` under lock (open) |
+| nif.rs:1411 | `sqlite3_libversion` | process-global (no connection) — no lock needed |
+
+### Churn re-verification (the maintainer pass)
+
+- **20 DirtyIo flips (A2 lock scoping):** each is an ATTRIBUTE-ONLY `#[rustler::nif]` →
+  `#[rustler::nif(schedule = "DirtyIo")]` change; every body is byte-identical and still routes
+  through `with_conn`/`with_session`/`with_live_stmt`/`blob::` (spot-read: `db_path`/`autocommit`/
+  `changes`/`total_changes`/`set_busy_policy`/`remove_busy_policy`/`register_busy_observer`/
+  `unregister_busy_observer`/`set_authorizer`/`remove_authorizer`/`register_progress_hook`/
+  `unregister_progress_hook`/`enable_load_extension`/`session_new`/`session_is_empty`/
+  `stmt_column_names`/`blob_size`/`blob_close` + `txn_state`/`session_attach`). The scheduler
+  attribute does NOT touch lock discipline (a DirtyIo NIF still holds the conn Mutex for the C
+  call's full duration). **Lock scoping unchanged.**
+- **Busy `Cell<Instant>` under-lock (A2 serialization):** the Cell is touched at `busy_handler.rs:80`
+  (`set`) and `:82` (`get`) inside `busy_callback` — which runs inside `sqlite3_step` under the
+  conn Mutex — and at `snapshot` (`:204`/`:214`), whose callers (`set_policy`/`remove_policy`/
+  `register_observer`/`unregister_observer`) all run under `connection::with_conn` (verified: the
+  `register`/`unregister_busy_observer` NIFs at `nif.rs:303/318` wrap `with_conn`). **No path
+  touches the Cell outside the conn Mutex**; the `!Sync` Cell is sound behind the existing
+  `AtomicPtr<BusySlotState>` with no new `unsafe` (same discipline as the `observers` Vec).
+- **`encode_text`/`encode_val` under-lock (A2 C-memory read):** the SQLITE_TEXT branch of
+  `sqlite_row_to_elixir_terms` (`util.rs:379-399`) reads `sqlite3_column_text` (`:380`) +
+  `sqlite3_column_bytes` (`:388`) FIRST, then `encode_text(env, s.as_bytes())?` (`:391`) copies
+  the still-live C memory into an `OwnedBinary`. The copy sits AFTER the C reads and INSIDE
+  `sqlite_row_to_elixir_terms` (documented "caller must hold the connection mutex", called from
+  `stream_fetch` under `conn_lock_guard` and explain under `with_conn`). The refactor changed only
+  the OOM-degrade of the copy (panic → `Err`), **not the timing of any `sqlite3_column_*` read
+  relative to the lock**. No column read moved outside the lock.
+- **F-A1-1 fix + stream AtomicPtr (A1/A2):** `stream_fetch` `Vec::new()` present at `nif.rs:1283`;
+  the AtomicPtr swap-then-finalize windows (`:1292/1334/1347`) run inside the held `conn_lock_guard`,
+  and the poison-path finalize (`:1297`) is sound by mutual exclusion (a poisoned `.lock()`
+  excludes any concurrent holder). Cancel-guard W3: `ProgressHandlerGuard::new` at `nif.rs:157/179/
+  196/212/953` — all inside `with_conn`/`with_live_stmt` closures (none is a flipped NIF), so each
+  guard drops before its conn Mutex releases. Intact.
+
+### Verdict
+
+- **A1 — CLEAN, zero new CONFIRMED.** The full panic census at HEAD (unwrap/expect/panic-macros/
+  index/div-mod/subtraction/alloc, all `rg`-reproducible) is clean; the maintainer churn strictly
+  NARROWS the surface (`encode_text` replaces rustler's OOM-`panic!`ing `str::encode` on the three
+  value-return TEXT sites; every `encode_val` caller propagates `Result` with no unwrap). All 7
+  Drop impls panic-free + poison-safe (zero `.lock().unwrap()`); all 3 raw callbacks M6-guarded
+  and panic-free (busy re-audited over the Cell). F-A1-1 fix in place + regression-guarded.
+- **A2 — HOLDS, zero new CONFIRMED.** Every `sqlite3_*` C call at HEAD is under the connection
+  Mutex for its full duration; zero call sites added or moved. The 20 DirtyIo flips keep lock
+  scoping (attribute-only); the busy `Cell` is touched only under the lock; the `encode_text`
+  refactor did not move any column read outside the lock; swap-then-lock finalizers, cancel-guard
+  W3 scoping, and the stream AtomicPtr discipline all re-verified at HEAD.
+
+### Completeness critic
+
+- A1 "panic-freedom" ⊋ "no unwraps": the census is mechanical across ALL panic constructs (the
+  Run-16 S0 was an eager-alloc, not an unwrap), so alloc/`with_capacity`/div-mod/index/subtraction
+  are all in scope and all classified here. The one honest census refinement vs Run 16: the two
+  `schema.rs` `/2`/`%2` sites (Run 16 said "ZERO integer `/`/`%`") — surfaced and proven
+  panic-free-by-construction (constant divisor), not a finding. The `encode_text` OOM branch is not
+  RED-tested (OOM-only, impractical — like F-A12-3/F-A10-6; verified by source + the byte-exact
+  success path + graceful shape, and it is a NARROWING vs the prior panic). A2's oracle stays
+  source-level lock-scoping + the THREADSAFE=1 substrate (Run 2/4 established Miri can't cross the
+  bundled-C boundary; no happens-before detector on the live NIF). Unchanged non-churn modules
+  (update/commit/rollback/authorizer hooks, wal, statement, stream) re-read-verified at HEAD, not
+  re-probed.
+
+### Dryness
+
+- **A1 — 1 of 2 consecutive clean covering runs (NOT DRY), one more owed.** A1 had NEVER had a
+  clean covering run (Run 16, the first full census, surfaced F-A1-1 S0 → counter 0) AND the
+  maintainer pass re-wet the panic surface (`encode_text` new value-path function; `encode_val` →
+  `Result`; `busy_callback` body changed). Run 22 is A1's FIRST clean covering run → counter 1.
+  (From the true-zero start, two were owed; this discharges the first.) Re-wet triggers: any new
+  `unwrap`/`expect`/index/`/`/`%`/`with_capacity(user-value)`, any new Drop or raw-FFI callback,
+  a `guard_ffi_callback` change, or a rustler bump.
+- **A2 — 1 of 2 consecutive clean covering runs (NOT DRY), one more owed.** Run 16 was A2's first
+  clean covering run (1 of 2). The maintainer pass RE-WET A2's scope: it introduced the busy
+  `Cell<Instant>` — a new interior-mutable construct whose data-race-freedom rests entirely on the
+  conn Mutex (this run's own mission assigns "busy Cell touched only under the lock" to A2) — and
+  it modified `sqlite_row_to_elixir_terms`/`encode_val`, the functions that read C-owned memory
+  relative to the lock. Both required fresh under-lock proofs this run, so the Run-16 verdict does
+  not cover them → the streak resets and Run 22 is A2's first clean covering run over the churn (1
+  of 2), NOT the second-consecutive. **A2 does NOT go DRY.** (The 20 DirtyIo flips alone would not
+  re-wet A2 — scheduler thread ≠ lock scoping — but the Cell + encode_text do.) Re-wet triggers:
+  any new `sqlite3_*`/`ffi::` call site, any `with_conn`/`with_live_*`/`with_session`/
+  `take_and_finalize_raw` restructure, any new AtomicPtr/interior-mutable-under-lock construct, or
+  a cancel-path/hook-registration change.
+- `mix verify` GREEN (exit 0, "All checks passed. Safe to commit."). Files changed this run:
+  `REVIEW_LEDGER.md`, `REVIEW_AXES.md` (both coverage notes). No code change (CLEAN run, no
+  finding to fix); no `BACKLOG.md` change.
+
+---

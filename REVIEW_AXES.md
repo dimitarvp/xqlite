@@ -81,6 +81,24 @@ so this is NOT clean — A1 stands at **0 of 2 consecutive clean covering runs, 
 DRY**; two owed. Re-wet: any new unwrap/expect/index/`/`/`%`/
 `with_capacity(user-value)`, any new Drop or raw callback, a `guard_ffi_callback`
 change, or a rustler bump.
+RE-WET + COVERING RE-RUN (Run 22, 2026-07-20): the maintainer pass (2026-07-20) re-wet A1's panic
+surface — `util::encode_text` (new fallible value-path TEXT encoder), `encode_val` → `Result`, and
+the `busy_callback` `Cell<Instant>` reset. This is A1's FIRST clean covering run. Full census at HEAD
+`0f81e75` (all `rg`-reproducible): `unwrap`/`expect` non-test = ZERO (the new `encode_text` is
+`OwnedBinary::new(len).ok_or_else(…)?` + `copy_from_slice` with provably-equal lengths — panic-free;
+all THREE `encode_val` callers propagate `Result` via `?`/return, no unwrap introduced);
+`panic!`/`unreachable!`/`assert!` non-test = ZERO (one doc comment); indexing = only
+`schema.rs:222-223` `pair[0/1]` under `chunks_exact(2)` (in-bounds); div/mod = only `schema.rs`
+`%2`/`/2` by the constant 2 (panic-free — census refinement vs Run 16's "ZERO"); subtraction guarded
+(`blob.rs:143`); `with_capacity` = 13 sites all bounded, F-A1-1 `Vec::new()` in place at
+`nif.rs:1283`; release wraps overflow + panic=unwind. All 7 Drop impls panic-free + poison-safe
+(zero `.lock().unwrap()`; `BusySlotState`'s `Cell` adds no custom Drop); all 3 raw callbacks
+M6-guarded — `busy_callback` re-audited over the Cell (`set`/`get`/`Instant::now`/`elapsed`/`as u64`
+— none panic). The churn strictly NARROWS the surface (graceful `encode_text` replaces rustler's
+OOM-`panic!`ing `str::encode` on the three value-return TEXT sites). `mix verify` GREEN. DRYNESS: A1
+had NEVER had a clean covering run (Run 16 found F-A1-1 S0) and was re-wet by the maintainer pass →
+Run 22 is A1's **first clean covering run, 1 of 2 consecutive, NOT DRY**, one more owed. Re-wet
+triggers UNCHANGED.
 
 ### A2. The locking law — PRIORITY 1
 Every `sqlite3_*` call must hold the connection Mutex for its full
@@ -114,6 +132,27 @@ single-copy read) → RE-WET; Run 16 is the **first clean covering run over that
 `stream_fetch`'s allocation, not lock discipline.) Re-wet: any new `sqlite3_*`/`ffi::`
 site, a `with_*`/`take_and_finalize_raw` restructure, a new AtomicPtr resource, or a
 cancel-path/hook-registration change.
+RE-WET + COVERING RE-RUN (Run 22, 2026-07-20): the maintainer pass RE-WET A2 — it introduced the busy
+`Cell<Instant>` (a new interior-mutable construct whose data-race-freedom rests entirely on the conn
+Mutex) and modified `sqlite_row_to_elixir_terms`/`encode_val` (the C-owned-memory read path). Both
+demanded fresh under-lock proofs this run, so the Run-16 verdict does not cover them → the streak
+resets. Full `sqlite3_*` call-site enumeration at HEAD `0f81e75` (`rg 'ffi::sqlite3_'`): **zero call
+sites added or moved** vs Run 16; every C call under the conn Mutex for its full duration (table in
+the ledger; lock helpers `with_conn`/`with_live_stmt`/`with_live_blob`/`with_session`/
+`take_and_finalize_raw` all unchanged). Churn re-verified: the 20 `schedule = "DirtyIo"` flips are
+ATTRIBUTE-ONLY — every body byte-identical, each still routes through its `with_*` helper (scheduler
+thread ≠ lock scoping, so the flips ALONE would not re-wet A2); the busy `Cell` is touched only in
+`busy_callback` (inside `sqlite3_step` under the lock) + `snapshot` (callers hold the conn Mutex via
+`with_conn`), NEVER outside the lock; the `encode_text` copy sits AFTER the `sqlite3_column_text`/
+`_bytes` reads inside `sqlite_row_to_elixir_terms` (under the lock) — no column read moved out.
+Swap-then-lock finalizers, cancel-guard W3 (`ProgressHandlerGuard::new` at `nif.rs:157/179/196/212/
+953`, all inside `with_conn`/`with_live_stmt`), and the stream AtomicPtr discipline re-verified.
+ZERO new CONFIRMED. `mix verify` GREEN. DRYNESS: Run 16 was A2's first clean covering run (1 of 2);
+the maintainer `Cell` + `encode_text` churn RE-WET A2's serialization/under-lock scope → Run 22 is
+the **first clean covering run over that churn, 1 of 2 consecutive, NOT DRY**, one more owed — **A2
+does NOT go DRY.** Re-wet: any new `sqlite3_*`/`ffi::` site, a `with_*`/`take_and_finalize_raw`
+restructure, a new AtomicPtr/interior-mutable-under-lock construct, or a cancel-path/hook-
+registration change.
 
 ### A3. UB tooling
 Sources: Miri/ASan/TSan/cargo-careful docs. Probes: separability of
