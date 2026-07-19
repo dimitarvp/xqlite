@@ -174,6 +174,20 @@ legs, 0 crash/hang/torn; never-cancelled marginal overhead ≈0–1.5%
 single-use). NOT yet DRY (first dedicated latency/race/reuse/teardown
 matrix; one more owed; cancel.rs / progress_dispatch.rs / guard-scoping
 churn re-wets).
+COVERING RE-RUN (Run 17, 2026-07-19): re-verified all five windows at HEAD `9abf27e`.
+`cancel.rs`/`progress_dispatch.rs`/`hook_util.rs` are a ZERO diff vs the Run-6 baseline
+`4253b26` (M6/M7 predates it); re-wetting is ADJACENT — `query_with_changes_cancellable`
+now runs `core_query_with_changes` (F-A10-3) INSIDE its `with_conn`+guard closure (a
+mid-statement cancel short-circuits to `Err`, no cancel-vs-changes torn window), and the
+`stream_fetch` interrupt path W1 relies on churned (F-A1-1). All five guard sites
+(`nif.rs:157/179/196/212/953`) still drop before the conn Mutex releases (W3); DirtyIo
+flips register no cancel guard. RE-RAN `cancellation/run.sh`: VERDICT PASS, 4 teeth
+(CRASH-134/HANG-124/latency-validity-124/TORN-3) tripped; latency median 57 µs (40/40
+cancelled), race 169/131/0-torn (300 iters), reuse single_use=true/auto_reset=false/
+multi_token_or=true, teardown 271 cancelled/85 conn_closed/44 stmt_finalized/0 torn/0 crash
+(400 iters + ~57 GC-drop legs). CLEAN — zero new CONFIRMED. DRYNESS: **1 of 2 consecutive
+clean covering runs, NOT DRY** (Run 6 re-wet by the adjacent changes-detector + stream
+churn; one more owed). Re-wet triggers unchanged.
 
 ### A6. Resource lifecycle
 Probes: hostile drop orders (statement outliving conn; conn closed
@@ -198,6 +212,22 @@ Documented conn-close-with-live-child leak quantified = one
 `sqlite3*`/occurrence (~77 KB, bounded). 0 findings. NOT yet DRY
 (first dedicated A6 covering run; one more owed; any resource-Drop /
 AtomicPtr / conn-field-order / hook-registration churn re-wets).
+COVERING RE-RUN (Run 17, 2026-07-19): re-verified every lifecycle window at HEAD `9abf27e`.
+`session.rs`/`statement.rs`/`stream.rs` = ZERO diff vs the Run-5 baseline `51bbcb6`;
+`connection.rs` = 1 line (F-A10-6 Encoder `err.encode`, NOT a Drop/field-order/AtomicPtr
+change); `blob.rs` churned (single-copy read F-A12-2) but `Drop`→`close()` swap-then-lock is
+byte-identical (change is internal to the read op — fills exactly `actual_len` on OK, drops
+on error). The 9 DirtyIo flips are ATTRIBUTE-ONLY (`git show 8356dde`) — a `Drop` runs on a
+GC/scheduler thread regardless of the schedule attribute; `THREADSAFE=1` makes thread
+identity irrelevant, so no new drop/leak window. RE-RAN `lifecycle/run.sh`: VERDICT PASS, 3
+teeth TRIPPED LEAK; 6 leak loops fd-stable 19→19 (conn mem −5.59 MB / file −6.55 MB, stmt
+0.0 MB, stream −0.64 MB, blob −1.86 MB [single-copy read exercised 10^5×, no leak], session
++1.09 MB noise); hostile drop-order matrix 0 unexpected/no crash; documented
+conn-close-with-live-child leak = 77,346 B/occurrence (one `sqlite3*`, unchanged). CLEAN —
+zero new CONFIRMED. DRYNESS: **1 of 2 consecutive clean covering runs, NOT DRY** (the strict
+Drop/AtomicPtr/field-order triggers did NOT fire, but the blob resource module churned +
+DirtyIo moved blob/session scheduler → conservatively re-wet; one more owed). Re-wet
+triggers unchanged.
 
 ### A7. Concurrency / interleaving
 Probes: N-process hammering one handle; owner-process death mid-txn;
@@ -214,6 +244,26 @@ trip. Substrate: bundled SQLite THREADSAFE=1 + MUTEX_PTHREADS
 (runtime-verified) → globals mutex-protected; #1860 does NOT
 reproduce at 3.53.2. 0 findings. NOT yet DRY (one covering run; one
 more owed; AtomicPtr/close/open or hook-registration churn re-wets).
+COVERING RE-RUN (Run 17, 2026-07-19): Run 4 was PRE-churn, so this is honestly a FRESH
+covering run over the post-Run-4 code (M6 `guard_ffi_callback` on the raw progress callback,
+F-A10-2 3-tuple errors, blob rewrite/single-copy read, the 9 DirtyIo flips), not a simple
++1. All five interleaving windows re-verified at HEAD `9abf27e`: swap-then-lock /
+lock-then-load intact; the M6 wrapper only adds panic safety (progress still fires inside
+`sqlite3_step` under the conn Mutex, serialised vs register/unregister); `session_changeset`/
+`patchset` now DirtyIo fire progress from their internal SELECT but `with_session_mut` locks
+the conn Mutex FIRST (`session.rs:109-113`) — the flip changes only the scheduler thread, not
+the lock (M5 HOLDS). HARNESS MAINTENANCE forced by F-A10-2: `concurrency/probe_common.exs`
+`Probe.insert` matched the stale 2-tuple `{:database_busy_or_locked, _}`; a live BUSY now
+surfaces as the CORRECT 3-tuple `{…, 5, "database is locked"}` (ext-code 5 = SQLITE_BUSY),
+which fell through → Probe 2's CONTROL leg emitted a FALSE CORRUPTION → verdict silently
+degraded to PASS-WEAK (control teeth broken). RED captured, pattern fixed to
+`{:database_busy_or_locked, _ext, _msg}`, GREEN: control leg restored to RECOVERED_BUSY (the
+3-tuple-under-live-race confirmation). RE-RAN `concurrency/run.sh`: VERDICT PASS, 5 teeth
+tripped; hammer 4800/4800, busy 300 rows/5 busy_events, churn 601 rows/1200 opens (#1860 no
+repro), owner-death control RECOVERED_BUSY / test RECOVERED_WROTE, orphan-txn PASS. ZERO new
+CONFIRMED product findings (the fix is review-infra, not product). DRYNESS: **1 of 2
+consecutive clean covering runs, NOT DRY** (fresh covering run over post-Run-4 churn; one
+more owed). Re-wet triggers unchanged.
 
 ### A8. Durability crash-harness — crown jewel
 Probes: writer → `kill -9` the VM at random points → reopen →

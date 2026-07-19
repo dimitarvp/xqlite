@@ -95,7 +95,7 @@ defmodule Concurrency.Probe do
 
     case Xqlite.execute(conn, "INSERT INTO t(id, payload, ck) VALUES(?1, ?2, ?3)", [id, p, ck]) do
       {:ok, _n} -> :ok
-      {:error, {:database_busy_or_locked, _}} -> :busy
+      {:error, {:database_busy_or_locked, _ext_code, _msg}} -> :busy
       {:error, reason} -> {:error, reason}
     end
   end

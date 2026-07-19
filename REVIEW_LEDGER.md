@@ -3161,3 +3161,229 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   (F-A1-1 fix), `test/nif/stream_test.exs` (regression), `REVIEW_LEDGER.md`,
   `REVIEW_AXES.md`. No `BACKLOG.md` change (the finding was S0, fixed — not a
   backlog item; F-A12-3 and the other maintainer calls left untouched).
+
+---
+
+## Run 17 — 2026-07-19 — A5+A6+A7 dryness covering re-run (churn attacked)
+
+- Commit at scan: `9abf27e` (HEAD, clean, CI green). Scope: the three
+  cancellation / lifecycle / concurrency axes re-verified at HEAD, with the churn
+  since their baselines (A5 Run 6 `4253b26`, A6 Run 5 `51bbcb6`, A7 Run 4
+  `46c215c`) attacked hardest: the DirtyIo scheduler flips (Run 10, `8356dde`, 9
+  session/blob/changeset NIFs), the S0 `stream_fetch` alloc fix (Run 16,
+  `1a58bd6`), the single-copy `blob::read` + adaptive `encode_val` blob backing
+  (F-A12-2/1), the `core_query_with_changes` detector (F-A10-3, `6ec14dc`), and
+  the 3-tuple busy/readonly/schema/auth error encoders (F-A10-2). Composition:
+  single Opus pass (this agent) — source-level re-verification of every window +
+  RE-RAN all three probe harnesses (the covering evidence) + a harness-oracle
+  maintenance fix forced by the F-A10-2 churn, teeth re-proven. Did NOT
+  re-litigate settled findings; looked for NEW defects the churn could have
+  introduced at the three-axis seam.
+
+### Churn map (what actually moved in each axis's scope, `git diff` at HEAD)
+
+- **A5 cancel core is STABLE since Run 6.** `cancel.rs` / `progress_dispatch.rs`
+  / `hook_util.rs` show a ZERO diff vs `4253b26` (the M6/M7 `guard_ffi_callback`
+  hardening `7e575f7` predates the A5 baseline). The re-wetting is ADJACENT: the
+  cancellable NIF `query_with_changes_cancellable` was rewired to
+  `query::core_query_with_changes` (F-A10-3) INSIDE its `with_conn` + guard
+  closure, and the stream interrupt path (`stream_fetch`) that W1 relies on
+  churned (F-A1-1). Both re-verified below.
+- **A6 resource Drops are STABLE since Run 5.** `session.rs`/`statement.rs`/
+  `stream.rs` = ZERO diff vs `51bbcb6`; `connection.rs` = 1 line (the F-A10-6
+  `XqliteQueryResult` Encoder `err.encode` — NOT a Drop / field-order / AtomicPtr
+  change). `blob.rs` churned (single-copy read F-A12-2) but the `Drop` →
+  `close()` swap-then-lock path is byte-identical; the change is internal to the
+  read op. The 9 DirtyIo flips are ATTRIBUTE-ONLY (`#[rustler::nif]` →
+  `#[rustler::nif(schedule = "DirtyIo")]`, `git show 8356dde`) — no logic, so no
+  new Drop/leak window (a `Drop` runs on a GC/scheduler thread regardless of the
+  NIF's schedule attribute; `THREADSAFE=1` makes thread identity irrelevant).
+- **A7 substrate churned most (baseline is pre-churn).** Since Run 4:
+  `progress_dispatch.rs`/`hook_util.rs` gained the M6 `guard_ffi_callback`
+  wrapper on the raw progress callback; `error.rs` gained the F-A10-2 3-tuple
+  variants; `blob.rs`/`util.rs`/`query.rs`/`nif.rs` all moved. The 3-tuple busy
+  encoder is exactly what the busy-contention probe surfaces under a live race —
+  and it BIT the harness oracle (below).
+
+### Per-axis static re-verification at HEAD (every window HOLDS)
+
+- **A5 — all five windows HOLD.** W1 (cancel-vs-completion): the interrupt still
+  maps `SQLITE_INTERRUPT → OperationCancelled` (`error.rs`), `process_rows`/
+  `process_single_step`/`stmt_multi_step_impl` still DROP the batch on `Err` — no
+  torn result; `query_with_changes_cancellable` now runs `core_query_with_changes`
+  under the SAME conn Mutex + guard (`nif.rs:155-159`), so a mid-statement cancel
+  short-circuits to `Err` and the changes count is simply not reported (no
+  cancel-vs-changes torn window from the F-A10-3 churn). W2 (token reuse):
+  `cancel.rs` unchanged — set-once `Arc<AtomicBool>`, no reset path (single-use).
+  W3 (cancel-vs-teardown): all five guard sites (`nif.rs:157/179/196/212/953`) are
+  locals INSIDE their `with_conn`/`with_live_stmt` closure → the guard drops
+  (unregister-before-release) before the conn Mutex releases; the callback reads
+  under the same Mutex. W4/W5: guard-clone keeps the flag alive under process
+  death; the progress callback ORs the full cancels snapshot. The DirtyIo flips
+  do NOT touch the cancel path (session/blob ops register no cancel guard; the
+  cancellable query NIFs were already DirtyIo).
+- **A6 — every lifecycle window HOLDS.** Drop-once swap/`take`-to-null, raw-handle
+  locking on every SQLite-touching Drop, child-embeds-conn-`ResourceArc` immunity,
+  structural cross-handle immunity, and the aliasing census are all unchanged from
+  Run 5 (the resource `Drop` bodies did not move). The single-copy `blob::read`
+  (`blob.rs:159-179`) allocates the returned `OwnedBinary` first and fills exactly
+  `actual_len` bytes on `SQLITE_OK` (drops it on error) — no uninitialised escape,
+  balanced 1 alloc / 1 free, exercised 10^5× by the blob leak loop with zero
+  residual (below).
+- **A7 — all five interleaving windows HOLD.** Swap-then-lock (finalizers) /
+  lock-then-load (`with_live_blob`/`with_live_stmt`/`stream_fetch`) intact;
+  conn-Mutex-serialised hook COW (the M6 `guard_ffi_callback` only adds panic
+  safety — the progress callback still fires inside `sqlite3_step` under the conn
+  Mutex, serialised against register/unregister); lock-free cancel store; N-handle
+  funnel; owner-death recovery. Re-verified for the DirtyIo flips:
+  `session_changeset`/`patchset` (now DirtyIo) fire the progress callback from
+  their internal SELECT, but `with_session_mut` locks the conn Mutex FIRST
+  (`session.rs:109-113`), so that progress-list walk stays serialised against
+  cancel register/unregister — the flip changes only the scheduler thread, not the
+  lock discipline (M5 window HOLDS at HEAD).
+
+### HARNESS MAINTENANCE (forced by the F-A10-2 3-tuple churn) — RED→GREEN
+
+- **The concurrency harness's busy oracle was STALE against the 3-tuple.**
+  `concurrency/probe_common.exs` `Probe.insert/3` matched the pre-F-A10-2 shape
+  `{:error, {:database_busy_or_locked, _}}` (2-tuple). At HEAD a live BUSY
+  surfaces as the CORRECT 3-tuple `{:error, {:database_busy_or_locked,
+  extended_code, message}}` (F-A10-2 working), which the 2-tuple pattern does NOT
+  match → it fell through to the generic `{:error, reason}` arm. This is a HARNESS
+  bug, not a product defect: the product is correct; the oracle rotted.
+  - **RED (this session, `SMOKE=1 bash concurrency/run.sh`, command+output
+    captured):** Probe 2's CONTROL leg (holder alive holding `BEGIN IMMEDIATE`;
+    the verifier's `Probe.insert` blocks on `busy_timeout` then gets BUSY) emitted
+    `control (holder alive): rc=3 RESULT class=CORRUPTION detail={:write_error,
+    {:database_busy_or_locked, 5, "database is locked"}}` → verdict silently
+    degraded to **PASS-WEAK ("control did not observe BUSY contention")**. The
+    Probe 2 teeth (alive-holder must observe BUSY = the lock the dead owner held)
+    were BROKEN — a false CORRUPTION masqueraded as "no contention", and the run
+    still exited 0 because the TEST leg wrote. The 3-tuple `{…, 5, …}` (ext-code
+    5 = `SQLITE_BUSY`, `& 0xFF`) surfacing under a genuine 2-connection race is
+    the F-A10-2 CONFIRMATION the task asked for.
+  - **FIX:** `Probe.insert/3` pattern → `{:error, {:database_busy_or_locked,
+    _ext_code, _msg}}`. One line, review-infra only (CI-isolated probe file, not
+    product code).
+  - **GREEN (this session, same probe post-fix):** `control (holder alive): rc=0
+    RESULT class=RECOVERED_BUSY detail=:lock_held → PASS (death released the lock;
+    alive-holder control saw BUSY = teeth)`. Teeth restored; full PASS.
+
+### Harnesses re-run — RESULT lines captured THIS session (the covering evidence)
+
+- **`bash concurrency/run.sh` (A7) — VERDICT PASS, all 5 teeth TRIPPED.** Full
+  config (hammer w8/r6/s4/ops400, busy 150, churn 8×150).
+  - teeth: byte-smash → CORRUPTION; payload-tamper → CORRUPTION; hammer-drop →
+    WRONGRESULT; busy-drop → WRONGRESULT; sleep-forever → HANG(124). All tripped.
+  - `Probe 1 hammer: PASS RESULT class=PASS detail=%{rows: 4800, acked: 4800}`
+  - `Probe 3 busy: PASS RESULT class=PASS detail=%{rows: 300, busy_events: 5}`
+  - `Probe 4 churn: PASS RESULT class=PASS detail=%{rows: 601, opens: 1200}`
+    (#1860 does NOT reproduce at 3.53.2).
+  - `Probe 2 owner-death: control RECOVERED_BUSY / test RECOVERED_WROTE → PASS`
+    (teeth restored by the fix above).
+  - `Probe 2b orphan-txn: PASS RESULT class=PASS detail=%{recovered: true,
+    txn_state_at_death: {:ok, :write}}`.
+- **`bash cancellation/run.sh` (A5) — VERDICT PASS, all 4 teeth TRIPPED**
+  (CRASH-134, HANG-124, LATENCY-VALIDITY-124, RACE_TORN-3).
+  - `Probe 1 latency: PASS` — 40/40 cancelled, `cancel_latency_us_median: 57`,
+    p95 0.09 ms, p99/max 0.23 ms.
+  - `Probe 2 race: PASS` — `cancelled: 169, completed: 131, torn: 0` over 300
+    iters (both classes exercised, natural runtime 72.5 ms).
+  - `Probe 3 reuse: PASS` — `single_use: true, auto_reset: false,
+    stale_poisons_next: true, multi_token_or: true`; fresh + none-signalled
+    controls complete.
+  - `Probe 4 overhead: PASS [INFORMATIONAL]` — tiny +3.58%, heavy −0.21%
+    (noise-level).
+  - `Probe 5 teardown: PASS` — `cancelled: 271, conn_closed: 85,
+    stmt_finalized: 44, torn: 0` over 400 iters + ~57 GC-drop-under-cancel legs;
+    0 crash / 0 hang.
+- **`bash lifecycle/run.sh` (A6) — VERDICT PASS, all 3 teeth TRIPPED LEAK**
+  (conn-retain +413 MB / 80,229 B/iter; stmt-retain +65 MB / 3,171 B/iter;
+  blob-retain +38 MB / 1,866 B/iter).
+  - leak loops (all PASS, fd stable 19→19): conn in-mem ×100k back-half
+    **−5.59 MB**; conn file-WAL ×30k **−6.55 MB**; stmt ×100k **0.0 MB**; stream
+    ×100k **−0.64 MB**; blob ×100k **−1.86 MB** (exercises the single-copy read
+    10^5×, no leak); session ×100k **+1.09 MB** (noise).
+  - hostile drop-order matrix: PASS, `unexpected_scenarios=0`, no crash;
+    `LEAKQUANT occurrences=2000 bytes_per_occurrence=77346.8` — the DOCUMENTED
+    conn-close-with-live-child leak = one `sqlite3*` (matches the conn-retain
+    teeth 80,229 B/iter), bounded-per-occurrence, unchanged.
+
+### Cross-axis seam (the value of combining A5+A6+A7)
+
+- The three-axis seam (cancel racing teardown racing concurrent access under
+  process death) is DIRECTLY exercised by `cancellation/teardown.exs` Probe 5: an
+  in-flight `multi_step_cancellable` racing two 200-cancel storms + a rotated
+  teardown (close/finalize) + a GC-drop-under-cancel leg (holder killed mid-op →
+  conn/stmt/token destructors run while a cancel is live) + inter-iteration token
+  churn. 400 iters + ~57 GC-drop legs → 0 torn / 0 crash / 0 hang this session.
+  The DirtyIo-scheduling addition the task flagged does NOT open a new interleaving:
+  session/blob ops register no cancel guard, and any op firing the progress
+  callback holds the conn Mutex (`with_session_mut`/`with_live_blob`/`with_conn`),
+  which serialises it against cancel register/unregister — two ops on one
+  connection can never run simultaneously, so there is no novel uncovered
+  interleaving to add a probe for. No new cross-axis finding.
+
+### Findings
+
+- **A7 — one HARNESS-MAINTENANCE fix (stale busy oracle), RED→GREEN this run;
+  ZERO new CONFIRMED product findings.** The product's 3-tuple BUSY error is
+  correct; the fix restored the Probe 2 control teeth.
+- **A5 — CLEAN, zero new CONFIRMED.** **A6 — CLEAN, zero new CONFIRMED.**
+- No S0/S1/S2/S3 product defects. No BACKLOG change (the open maintainer calls
+  F-A11-4 / F-A4-1 / F-A12-3 / F-A13-1 / F-A10-9 and the A5 single-use-token S3
+  left untouched, as instructed).
+
+### Verdict — A5, A6, A7 all HOLD at HEAD
+
+- All three models are sound against the churn: the cancel primitive is stable
+  and its adjacent (changes-detector / stream) churn introduces no torn window;
+  every resource Drop is unchanged and the single-copy blob read leaks nothing;
+  every interleaving is Mutex-serialised and the 3-tuple busy error surfaces
+  correctly under a live race. Only as strong as the teeth — all twelve (5 A7 + 4
+  A5 + 3 A6) tripped on known-bad input, and the A7 control teeth were repaired
+  and re-proven this run.
+
+### Completeness critic
+
+- The covering evidence is the three re-run harnesses (RESULT lines above), not
+  session memory. The teeth prove the oracles detect crash/hang/corruption/
+  lost-write/leak/torn on known-bad input; the residual is the same as every prior
+  run — no TSan/Miri on the live NIF (Miri can't run bundled C SQLite, Run 2),
+  so the oracle is exit-code + integrity + RSS/fd trend, not a happens-before
+  detector, bounded by the `THREADSAFE=1` + single-Mutex source analysis. The
+  DirtyIo flips were verified attribute-only by `git show`, and the scheduler
+  angle (a Dirty NIF firing progress under the conn Mutex) was reasoned from the
+  lock discipline, not independently instrumented at the C level. The stale-oracle
+  catch is a reminder that a harness rots when the product's error SHAPE changes
+  even when its BEHAVIOR is correct — the F-A10-2 3-tuple is exactly that class.
+
+### Dryness
+
+- **A5 — 1 of 2 consecutive clean covering runs (NOT DRY).** Run 6 was A5's one
+  covering run; the cancel core (`cancel.rs`/`progress_dispatch.rs`) is unchanged
+  since, but the adjacent cancellable-NIF body (`core_query_with_changes` rewire)
+  and the stream interrupt path churned → conservatively RE-WET. Run 17 is the
+  first clean covering run over that churn; one more owed. Re-wet triggers
+  unchanged: `cancel.rs` / `progress_dispatch.rs` / the `ProgressHandlerGuard`
+  scoping in any cancellable NIF.
+- **A6 — 1 of 2 consecutive clean covering runs (NOT DRY).** Run 5 was A6's one
+  covering run; the strict Drop/AtomicPtr/field-order/hook-registration triggers
+  did NOT fire, but the blob resource module churned (single-copy read) and the
+  DirtyIo flips moved blob/session ops' scheduler → conservatively RE-WET. Run 17
+  is the first clean covering run over that churn; one more owed. Re-wet triggers
+  unchanged: any resource `Drop` / `AtomicPtr` swap / conn field-drop order /
+  hook-registration churn.
+- **A7 — 1 of 2 consecutive clean covering runs (NOT DRY).** Run 4 was PRE-churn,
+  so Run 17 is honestly a FRESH covering run over the post-Run-4 code (M6 progress
+  guard, 3-tuple errors, blob rewrite/read, flips), not a simple +1; it surfaced
+  ZERO new CONFIRMED product findings (the harness fix is review-infra, not
+  product), so it counts as A7's first clean covering run over that churn; one
+  more owed. Re-wet triggers unchanged: AtomicPtr/close/open or hook-registration
+  churn.
+- `mix verify` GREEN (harnesses CI-isolated; `mix format --check-formatted` still
+  passes with `concurrency/probe_common.exs` modified — the formatter `inputs`
+  glob does not match `concurrency/**`). Files changed:
+  `concurrency/probe_common.exs` (harness oracle fix), `REVIEW_LEDGER.md`,
+  `REVIEW_AXES.md`. No product code (`native/`/`lib/`/`test/`) touched; no
+  `BACKLOG.md` change.
