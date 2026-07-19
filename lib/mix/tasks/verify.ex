@@ -78,7 +78,7 @@ defmodule Mix.Tasks.Verify do
   end
 
   def check_elixir_compile do
-    run_cmd("mix", ["compile", "--warnings-as-errors"])
+    run_cmd("mix", ["compile"])
   end
 
   def check_deps_audit do

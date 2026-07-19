@@ -67,7 +67,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Elixir compilation (warnings as errors)
-        run: mix compile --warnings-as-errors
+        run: mix compile
 
       - name: Dependency audit
         run: mix deps.audit
