@@ -17,7 +17,11 @@ mix compile --warnings-as-errors
 mix dialyzer          # PLT cached in priv/plts/
 ```
 
-Always use `mix test.seq` to run tests — no arguments, always the full suite. It runs everything sequentially (one file per OS process) and takes ~25s. Never use `mix test` directly.
+Always use `mix test.seq` to run tests — no arguments, always the full suite. It runs everything sequentially (one file per OS process). Never use `mix test` directly.
+
+### Warnings-as-errors doctrine (absolute, irrevocable)
+
+Every Elixir compiler warning is an error, everywhere: `lib/` via `elixirc_options: [warnings_as_errors: true]` in `mix.exs`, and test `.exs` files via the `:test` alias (`test: "test --warnings-as-errors"`), which every `test.seq` child invocation inherits. If code fights the compiler (Elixir 1.20 type checker included), the compiler wins — satisfy it, never suppress or argue.
 Cache test output in temp files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) to avoid parsing long inline output.
 
 ### `async: false` is banned

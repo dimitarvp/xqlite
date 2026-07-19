@@ -169,7 +169,7 @@ defmodule XqlitePragmaTest do
 
               # For write-only PRAGMAs
               :ok ->
-                assert verify_fun.(test_context_tag, set_val, :ok)
+                assert verify_fun.(test_context_tag, set_val, :ok, expected_val)
 
               error ->
                 flunk(

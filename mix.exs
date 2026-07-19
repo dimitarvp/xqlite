@@ -14,6 +14,8 @@ defmodule Xqlite.MixProject do
       deps: deps(),
       compilers: Mix.compilers(),
       elixirc_paths: elixirc_paths(Mix.env()),
+      elixirc_options: [warnings_as_errors: true],
+      aliases: [test: "test --warnings-as-errors"],
 
       # hex
       description: description(),

@@ -2,9 +2,7 @@ defmodule Xqlite.NIF.LoadExtensionTest do
   use ExUnit.Case, async: true
 
   import Xqlite.ConnCase
-
-  import Xqlite.TestUtil,
-    only: [connection_openers: 0, find_opener_mfa!: 1, test_extension_path: 0]
+  import Xqlite.TestUtil, only: [test_extension_path: 0]
 
   alias XqliteNIF, as: NIF
 

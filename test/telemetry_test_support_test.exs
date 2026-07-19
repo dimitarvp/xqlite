@@ -98,6 +98,6 @@ defmodule Xqlite.Telemetry.TestSupportTest do
     # would then return false and no events would fire even though
     # we call into them.
     assert Xqlite.Telemetry.enabled?() == true
-    assert XqliteNIF != nil
+    assert Code.ensure_loaded?(XqliteNIF)
   end
 end

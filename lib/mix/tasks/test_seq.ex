@@ -7,6 +7,12 @@ defmodule Mix.Tasks.Test.Seq do
   This avoids SQLite's global VFS contention that causes spurious
   "out of memory" errors when test files run in parallel.
 
+  Every file runs with warnings-as-errors: the `:test` alias in
+  `mix.exs` adds `--warnings-as-errors` to each child `mix test`
+  invocation, so test-file compilation warnings fail that file's run.
+  `elixirc_options` only gates `lib/` — test `.exs` files compile at
+  test time, so the alias is the only place they can be enforced.
+
   ## Usage
 
       mix test.seq
