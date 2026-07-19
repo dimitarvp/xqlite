@@ -65,6 +65,34 @@ burn-down.
   atom, never `:error`" shape. Practically unreachable (BEAM `map_new`/
   `map_put` don't fail) but a latent wart — either prove it dead and drop the
   arm, or emit a plain `{:internal_encoding_error, ctx}`.
+- [S3] F-A11-4 (Run 9, A11): `set_busy_policy/2`'s `:max_elapsed_ms` is
+  anchored at the busy slot's **first installation**, not at the start of each
+  busy event, so it never resets. Once a connection has been alive (with a
+  policy installed) longer than `max_elapsed_ms`, the elapsed check trips on the
+  first callback of every subsequent busy event → the policy gives up with ZERO
+  retries, as if none were installed. Hits long-lived/pooled connections hardest
+  (default `max_elapsed_ms: 5_000` → policy stops retrying 5 s after install).
+  Behavior is DOCUMENTED ("from the busy slot's first installation",
+  `lib/xqlite.ex:1359`) and surfaces a clean `{:database_busy_or_locked, …}`
+  error (no corruption/wrong-result), so S3 — but a genuine footgun. Confirmed
+  empirically (`feature_islands/run.sh` busy-elapsed probe: aged conn gives up in
+  ~0 ms / 0 retries; young conn + huge-ceiling conn both succeed in ~150 ms).
+  Now documented user-facing in `guides/gotchas.md`. **Maintainer question:**
+  reset the elapsed clock at the start of each busy event (count == 0) so
+  `max_elapsed_ms` becomes a per-event budget (needs `start` to be interior-
+  mutable in `BusySlotState`), or keep-and-document? Repro:
+  `set_busy_policy(c, max_retries: 1000, max_elapsed_ms: 400, sleep_ms: 5)`,
+  `Process.sleep(600)`, then contend → instant give-up.
+- [S3] F-A11-5 (Run 9, A11): `error_reason/0` typespec understates
+  `:utf8_error`. `error.rs:545` encodes it as the 3-tuple `(atoms::utf8_error(),
+  column, reason)` and the Security guide documents `{:utf8_error, column,
+  reason}` (both correct), but the `@type error_reason` union
+  (`lib/xqlite.ex:180`) lists only `{:utf8_error, String.t()}` (2-tuple). A
+  caller matching the real/guide shape `{:utf8_error, col, reason}` is a dialyzer
+  contract violation against the spec. Fix: change it to `{:utf8_error,
+  non_neg_integer(), String.t()}`. Same class as F-A10-5 (do together). Repro:
+  `Xqlite.query(c, "SELECT CAST(X'ff41' AS TEXT)", [])` →
+  `{:error, {:utf8_error, 0, "invalid utf-8 sequence of 1 bytes from index 0"}}`.
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)
@@ -78,8 +106,6 @@ burn-down.
   each precompiled tarball proving SQLite 3.53.2 is statically in
   (feature-unification failure class). Cheap mechanical gate before
   the announcement. (wave-1)
-- [S3] FTS5 guide is linear-executable — wire it up as an executed
-  test so the guide can't rot. (A11 seed)
 - [S3] M10/M11 (Run 1): `explain_analyze.rs:380-490` (`map_put().unwrap()`
   ×24) and `nif.rs:2057` (`OwnedBinary::new(0).unwrap()`) use `unwrap`
   where the crate's graceful `map_err`/`ok_or_else` convention applies.
@@ -105,6 +131,11 @@ burn-down.
 
 ## Closed
 
+- 2026-07-19 (Run 9, A11) FTS5 guide is linear-executable — DONE: wired up as
+  `test/nif/fts5_guide_test.exs` (executes the guide's CREATE VIRTUAL TABLE /
+  trigger / MATCH+bm25 / highlight+snippet / match-language / rebuild /
+  integrity-check / optimize / tokenizer SQL across every connection opener, so
+  the guide fails the suite if it rots). (A11 seed)
 - 2026-07-19 (Run 7, A9) D1 — offset-preserving `DateTime` (ISO 8601
   TEXT) sorting LEXICALLY, not chronologically, under `ORDER BY` across
   mixed UTC offsets: RULED keep-and-document. The behavior is

@@ -228,8 +228,35 @@ NOT fixed. NOT yet DRY (first covering A10 run; one more owed; churn in
 Session/changesets, blob I/O, backup+progress, serialize,
 authorizer, hooks — one adversarial pass each; every guide's code
 EXECUTES (FTS5 guide is linear-executable — make it a test;
-SpatiaLite is doc-first exempt). Coverage: per-feature NIF suites
-exist; guides never executed.
+SpatiaLite is doc-first exempt). Coverage: Run 9 — first dedicated
+covering pass (adversarial static audit of all six islands from six
+stances + build-and-measure probes + guide-snippet execution). Run
+1–2 blob/session/log S0 fixes re-verified HOLDING at HEAD by reading
+the code. THREE S0-S2 CONFIRMED + FIXED (RED-then-green, regression
+tests in `test/`): F-A11-1 (S1) `backup_with_progress` looped forever
+on `pages_per_step <= 0` (`step(0)` copies nothing, reports "more") —
+pinned conn + flooded pid; now rejected `{:invalid_pages_per_step,n}`
+at the NIF boundary. F-A11-2 (S2) `changeset_apply(:replace)` returned
+`SQLITE_MISUSE` on CONSTRAINT/NOTFOUND/FK conflicts (illegal REPLACE
+return); handler now REPLACEs only DATA/CONFLICT and ABORTs otherwise
+(clean SQLITE_ABORT, no data change). F-A11-3 (S2) the Security guide's
+"NUL in SQL text is rejected, not truncated" was FALSE for
+`query`/`execute`/`execute_batch` (rusqlite prepares length-delimited,
+SQLite truncates at the NUL); `reject_interior_nul` added at the three
+`core_*` choke points so every SQL-text path now returns
+`:null_byte_in_string` (bound-value NULs still round-trip). TWO S3 →
+BACKLOG: F-A11-4 busy-policy `max_elapsed_ms` anchored at install not
+per-event (footgun on long-lived conns; documented + gotcha'd; teeth-
+proven in `feature_islands/run.sh`); F-A11-5 `error_reason/0` says
+`{:utf8_error, String.t()}` but actual/guide is the 3-tuple. Guides:
+`full_text_search.md` codified as `test/nif/fts5_guide_test.exs` (A11
+seed CLOSED); `spatialite.md` factual-skimmed (R*Tree/FTS5/API_ARMOR
+compile-options verified); every `gotchas.md`/`security.md`/
+`wiring_telemetry.md` snippet executed PASS (one security snippet was
+the F-A11-3 finding). NOT yet DRY (first covering run; one more owed).
+Churn re-wets: `nif.rs` backup guard / changeset handler, `query.rs`
+`reject_interior_nul` + `core_*`, any session/blob/backup/serialize/
+authorizer/hook code, `busy_handler.rs`, or any guide edit.
 
 ### A12. Binary crossing
 Probes: copy vs refcounted binaries across the boundary; memory

@@ -1260,3 +1260,219 @@ per-axis dryness state. Nothing found is ever silently dropped.
   `Encoder` / `From`), the raw-FFI error builders (`stream.rs` / `nif.rs` /
   `connection.rs`), `constraint_parse.rs`, the `query_with_changes` columns
   heuristic, or the `error_reason/0` typespec re-wets A10.
+
+## Run 9 — 2026-07-19 — A11 feature islands
+
+- Commit at scan: `ae7f9c5` (HEAD). Scope, HALF 1: one adversarial static pass
+  per feature island — session/changesets, blob I/O, backup+progress,
+  serialize, authorizer, hooks (update/wal/commit/rollback/log + busy
+  policy/observers) — over the Rust surface (`native/xqlitenif/src/*`), the
+  Elixir wrappers (`lib/`), and the island tests, from six stances (data-loss
+  prosecutor, UB prosecutor, assumption auditor, interleaving attacker,
+  blast-radius enumerator, cold adopter). HALF 2: guide-rot — every guide's code
+  EXECUTES against the bundled SQLite 3.53.2. Composition: single Opus pass (this
+  agent) — adversarial read + build-and-measure probes + guide-snippet
+  execution; every runtime claim RUN this session (commands + output pasted
+  below), never from memory. Did NOT re-litigate settled findings; verified the
+  Run 1–2 blob/session/log S0 fixes still hold at HEAD by READING the code.
+
+### Run 1–2 fix verification at HEAD (read, not trusted)
+
+- **blob (Run 2 `b1c60b4`) HOLDS**: `XqliteBlob` owns a raw
+  `AtomicPtr<sqlite3_blob>` (no rusqlite `Blob` wrapper), every `sqlite3_blob_*`
+  runs under the conn Mutex via `with_live_blob`/`close` (swap-then-lock),
+  `Drop` just `sqlite3_blob_close`es the raw pointer (`blob.rs:60-255`). No
+  `&Connection` deref on any teardown path. The maintainer WARNING doc-comment
+  is intact.
+- **session (Run 1 `61cf771`) HOLDS**: `close` locks conn→session, deletes only
+  while `conn_guard.is_some()`, else `mem::forget`s the session
+  (`session.rs:45-70`); `Session<'static>` sound only because rusqlite `Session`
+  is `PhantomData<&Connection>`. All ops under the conn Mutex.
+- **log (Run 1 `61cf771`) HOLDS**: `log_callback` takes `MASTER_LOCK` before the
+  snapshot read; register/unregister take the same lock across the Vec free
+  (`log_hook.rs:53,89,109`).
+
+### Per-island verdict
+
+- **session/changesets — 1 FINDING (F-A11-2, S2, FIXED).** The `changeset_apply`
+  conflict handler returned a FIXED `ConflictAction` ignoring the conflict type;
+  for `:replace` it returned `SQLITE_CHANGESET_REPLACE` unconditionally, which is
+  a C-API misuse for NOTFOUND/CONSTRAINT/FOREIGN_KEY conflicts. Everything else
+  (new/attach/changeset/patchset/invert/concat/delete, close-order, apply under
+  the conn Mutex serialising `xProgress`) HOLDS.
+- **blob I/O — CLEAN.** Run 2 refactor holds (above); raw-pointer discipline,
+  offset/length clamping, empty-on-out-of-range, idempotent close all intact.
+- **backup+progress — 1 FINDING (F-A11-1, S1, FIXED).** `backup_with_progress`
+  looped forever on `pages_per_step <= 0` (`sqlite3_backup_step(0)` copies
+  nothing, reports "more"), pinning the source conn Mutex and flooding the pid.
+  The Run 1 `msg_env`-leak fix (`send_backup_progress` frees unconditionally,
+  `nif.rs:1811`) HOLDS.
+- **serialize/deserialize — CLEAN.** `serialize` copies into an `OwnedBinary`
+  (fallible alloc guarded); `deserialize` uses `deserialize_read_exact` under the
+  conn Mutex. Snippet-verified round-trip (below).
+- **authorizer — CLEAN.** Uses rusqlite's SAFE `conn.authorizer` API (guarded
+  trampoline); the closure is a `HashSet` lookup that cannot panic; deny-list is
+  atomic (unknown atom rejects the whole list). Snippet-verified DELETE deny.
+  Action-kind granularity + deny-only are documented limits, not defects.
+- **hooks — 1 FINDING (F-A11-4, S3, footgun).** update/wal/commit/rollback/log
+  dispatch + the progress split all fire under the conn Mutex (log under
+  `MASTER_LOCK`) with `guard_ffi_callback` unwind guards on the three raw-FFI
+  callbacks — CLEAN. The busy POLICY half has a documented-but-surprising
+  `max_elapsed_ms` anchoring (below).
+
+### Findings
+
+- **F-A11-1 — S1 — CONFIRMED — FIXED (`nif.rs` guard).** `Xqlite.backup_with_
+  progress(conn, schema, dest, pid, 0, tokens)` hangs forever: `backup.step(0)`
+  returns `More` without copying, so the loop spins — pinning the source conn
+  Mutex (every other op on it blocks forever) and flooding `pid` with
+  `{:xqlite_backup_progress,…}` (unbounded mailbox growth). Empty token list =
+  unbreakable. The `@spec` says `pos_integer()` but nothing enforced it. RED
+  (pre-fix, this session): `PPS=0` under a 20 s `timeout` → **rc 124 (hang)**;
+  control `PPS=1` → `:ok` in 2 ms. FIX: reject `pages_per_step < 1` at the NIF
+  boundary with `{:error, {:invalid_pages_per_step, n}}` (atom added `lib.rs`;
+  shape added to `error_reason/0`). GREEN (post-fix): `PPS=0` →
+  `{:error, {:invalid_pages_per_step, 0}}` in 0 ms, 0 progress msgs. Regression:
+  `test/nif/backup_progress_test.exs` "non-positive pages_per_step is rejected,
+  not spun on" (0 and -1, refutes any progress msg).
+- **F-A11-2 — S2 — CONFIRMED — FIXED (`nif.rs` conflict handler).**
+  `changeset_apply(conn, cs, :replace)` returned `SQLITE_MISUSE` (21, "bad
+  parameter or other API misuse") whenever the changeset produced a CONSTRAINT,
+  NOTFOUND, or FOREIGN_KEY conflict, because the fixed handler illegally returned
+  `SQLITE_CHANGESET_REPLACE` (legal only for DATA/CONFLICT). Misleading
+  classification + divergence from the doc ("`:replace` — overwrite with the
+  changeset's values"). No corruption (SQLite savepoint-rolls-back on misuse).
+  RED (pre-fix): CONSTRAINT+replace and NOTFOUND+replace both →
+  `{:sqlite_failure, 21, 21, …}`, rows unchanged; `:omit` control → `:ok`. FIX:
+  the handler now returns `REPLACE` only for `SQLITE_CHANGESET_DATA` /
+  `SQLITE_CHANGESET_CONFLICT` and `ABORT` otherwise (imports `ConflictType`).
+  GREEN: both → `{:sqlite_failure, 4, 4, "query aborted"}` (SQLITE_ABORT, clean
+  rollback). Regression: `test/nif/session_test.exs` "replace on a
+  CONSTRAINT/NOTFOUND conflict aborts cleanly, not misuse" (asserts code==4,
+  refutes 21, asserts no data change). Legal-REPLACE (PK CONFLICT) path
+  unchanged — existing "conflict :replace overwrites" test still passes.
+- **F-A11-3 — S2 — CONFIRMED — FIXED (`query.rs` guard).** The Security guide
+  claims "NUL bytes in SQL text are rejected, not truncated … returns
+  `{:error, :null_byte_in_string}`." FALSE for `query`/`execute`/`execute_batch`:
+  rusqlite's `prepare` hands SQLite the SQL length-delimited (`as_ptr`+`len`,
+  `inner_connection.rs:216-217`), and SQLite's tokenizer STOPS at the first NUL,
+  so `"SELECT\0 1"` ran as `"SELECT"` → `{:sqlite_failure, 1, 1, "incomplete
+  input"}` (the rest silently dropped — the exact truncation the guide claims to
+  prevent). Only the raw-FFI paths (`stmt_prepare`, `stream_open`,
+  `explain_analyze`) rejected it (they build a `CString`). RED (pre-fix): query
+  interior NUL → `{:sqlite_failure,1,1,"incomplete input"}`, not
+  `:null_byte_in_string`. FIX: `reject_interior_nul/1` at the top of the three
+  `core_*` functions in `query.rs` (the single choke point all query/execute
+  entry points route through). GREEN (post-fix): query/execute/execute_batch AND
+  prepare/stream all → `{:error, :null_byte_in_string}`; a clean query still
+  works; a NUL in a BOUND VALUE still round-trips byte-exact (guard checks SQL
+  text only). Regression: `test/nif/error_input_test.exs` "interior NUL in SQL
+  text is rejected on query/execute/execute_batch".
+- **F-A11-4 — S3 — CONFIRMED — BACKLOG + gotcha.** `set_busy_policy/2`'s
+  `:max_elapsed_ms` is anchored at the busy slot's first INSTALL
+  (`busy_handler.rs` `BusySlotState.start` set in `snapshot()` when the slot is
+  null, preserved across mutations), NOT at each busy event's start. On a
+  connection older than `max_elapsed_ms`, the elapsed check trips on the first
+  callback of EVERY busy event → 0 retries (default `5_000` → policy stops
+  retrying 5 s after install; worst on long-lived pooled connections). DOCUMENTED
+  ("from the busy slot's first installation", `lib/xqlite.ex:1359`) + surfaces a
+  clean busy error → S3, not a divergence, but a real footgun. Empirical
+  (`feature_islands/run.sh`): young(age 0, ceiling 400, release 150)→SUCCEED
+  153 ms; aged+huge(age 800, ceiling 100000)→SUCCEED 153 ms [teeth]; aged(age
+  800, ceiling 400)→GAVE_UP 0 ms/0 retries [footgun]. Filed BACKLOG F-A11-4 +
+  documented in `guides/gotchas.md`; maintainer question on per-event anchoring.
+- **F-A11-5 — S3 — CONFIRMED — BACKLOG.** `error_reason/0` typespec
+  (`lib/xqlite.ex:180`) lists `{:utf8_error, String.t()}` (2-tuple) but the
+  actual encode is the 3-tuple `(utf8_error, column, reason)` (`error.rs:545`),
+  which the Security guide correctly documents. Matching the real/guide shape is
+  a dialyzer contract violation vs the spec. Fix: `{:utf8_error,
+  non_neg_integer(), String.t()}`. Same class as F-A10-5. Filed BACKLOG.
+
+### Guide-execution table (HALF 2 — every guide's code RUN this session)
+
+- **`full_text_search.md` — EXECUTED, PASS → now a permanent test.** The whole
+  linear flow runs: CREATE VIRTUAL TABLE fts5 (external content) + 3 sync
+  triggers, INSERT, MATCH+`bm25()` join (rank -1.0e-6, best-first), `highlight`/
+  `snippet` (`<b>schedulers</b>`), match language (`sched*`/`title:beam`/`AND
+  (OR)`/`NEAR` all match; absent phrase → 0), operational commands (`rebuild`/
+  `integrity-check`/`optimize`), tokenizers (`porter unicode61`, `trigram`).
+  Codified as `test/nif/fts5_guide_test.exs` (across every opener). BACKLOG A11
+  seed CLOSED.
+- **`spatialite.md` — doc-first EXEMPT, factual skim.** Its concrete falsifiable
+  claim (bundled SQLite "compiles R*Tree in") VERIFIED: `pragma_compile_options`
+  contains `ENABLE_RTREE` (+ `ENABLE_FTS5`, `ENABLE_API_ARMOR`, `THREADSAFE=1`).
+  Extension-load API names (`enable_load_extension`/`load_extension`) match code.
+  No rot.
+- **`gotchas.md` — every snippet PASS.** `1e308*10 → :positive_infinity` PASS;
+  NaN→`{"null", nil}` PASS; `length()` interior-NUL (len 1 / byte_size 5) PASS;
+  offset-DateTime lexical sort `[1,2]` PASS; cancel-token reuse →
+  `:operation_cancelled` PASS (with a REAL recursive-CTE query — a trivial query
+  finishes before the 8-VM-op progress fire; the guide's `big_table` is
+  load-bearing); stream `:emit_error` yields `{:ok, row}` PASS; invalid
+  `:on_error` → `{:error, {:invalid_on_error, :bogus}}` at stream open PASS.
+- **`security.md` — every snippet PASS (one was the F-A11-3 fix).** authorizer
+  DELETE deny → `{:authorization_denied, "not authorized"}` PASS; extension
+  enable/disable + bogus-path load → structured `{:sqlite_failure,1,1,…}` (no
+  crash) PASS; interior NUL in SQL → `:null_byte_in_string` PASS *after the
+  F-A11-3 fix* (was FALSE for query/execute — the finding); invalid-UTF-8 read →
+  3-tuple `{:utf8_error, 0, reason}` PASS (guide-correct; typespec wrong =
+  F-A11-5); binary dispatch TEXT/BLOB `["text"],["blob"]` PASS; deserialize
+  wholesale replace PASS.
+- **`wiring_telemetry.md` — every snippet PASS (compile-flag-gated).**
+  `enabled?/0` returns a boolean (dev=false, test=true) PASS; disabled-mode fires
+  no `[:xqlite,:query,:stop]` event PASS (dev); `Telemetry.bridge/2`+`unbridge/1`
+  → `:ok` when enabled (MIX_ENV=test verified + covered by the existing telemetry
+  suite), `{:error, :telemetry_disabled}` when off — behaves per the guide's own
+  "Enable telemetry" prerequisite; `OpenTelemetry.attributes/3` →
+  `%{"db.system.name"=>"sqlite","db.query.text"=>…,"db.operation.name"=>"query"}`
+  + `span_name/2` → `"query"` PASS (pure, no OTel dep, as documented).
+
+### Probes / teeth
+
+- **`feature_islands/run.sh`** (NEW, CI-isolated: not under `test/`, not in
+  `elixirc_paths`, formatter glob `{config,lib,test}/**` matches ZERO
+  `feature_islands/**` — verified via `Path.wildcard` → `[]`; `mix format
+  --check-formatted` GREEN with it present). Carries the S3 busy-elapsed footgun
+  (the three S0-S2 findings live as regression tests in `test/`). TEETH (hard
+  gate, rc 2 on failure): young + aged-huge-ceiling connections MUST succeed by
+  retrying through the lock release — proven this session (both 153 ms) — so the
+  aged+small-ceiling 0 ms/0-retry give-up is meaningful.
+- **Regression tests (teeth = revert-would-fail):** backup guard (pages 0/-1 →
+  structured error, refute progress); changeset replace (code 4 not 21, no data
+  change); interior-NUL rejection on all five SQL entry points + bound-value
+  round-trip; FTS5 guide end-to-end. Full `mix test.seq` GREEN (43 files, "All
+  tests passed!") with all four touched/added files passing.
+
+### Completeness critic
+
+- Islands covered: session/changesets, blob, backup+progress, serialize,
+  authorizer, all six hooks + busy policy/observers — all six islands passed
+  under all six stances. Guides: all five executed (FTS5 codified; spatialite
+  factual-skimmed; gotchas/security/wiring every snippet run). NOT covered /
+  honest gaps: (1) the authorizer's rusqlite trampoline `catch_unwind` posture is
+  an A1 concern, not re-audited here (the closure is panic-free by construction —
+  a `HashSet` lookup). (2) `changeset_apply`'s ABORT-vs-OMIT fallback for
+  `:replace` is a chosen semantics (loud, no silent data skip); OMIT (partial
+  apply) is a maintainer alternative, noted. (3) The busy-elapsed fix (per-event
+  anchoring) is a maintainer semantics call (F-A11-4), not made here. (4)
+  serialize/deserialize against a connection with OPEN statements/streams was not
+  stress-probed (would surface as a structured error, not UB — the conn Mutex
+  serialises it). (5) No TSan/Miri on the live NIF (Runs 2/4/5 established Miri
+  can't run the bundled C SQLite); the oracle is behavior + exit-code + the
+  source audit bounded by `THREADSAFE=1` + single-Mutex.
+
+### Disposition & dryness
+
+- **3 CONFIRMED S0-S2 all FIXED this run** (F-A11-1 S1, F-A11-2 S2, F-A11-3 S2)
+  with RED-then-GREEN repro (empirical RED pasted above) + permanent regression
+  tests; **2 S3 filed to BACKLOG** (F-A11-4 busy-elapsed footgun +
+  `guides/gotchas.md`; F-A11-5 `:utf8_error` typespec). `mix verify` GREEN.
+- **A11: guides-never-executed + per-feature-suites-only → one covering
+  adversarial+guide-execution run, 3 S0-S2 fixed + 2 S3, teeth proven.** This is
+  the FIRST dedicated A11 covering run (Run 2 touched only the blob island
+  incidentally). Per the two-consecutive-covering-runs rule A11 is NOT yet DRY;
+  one more covering run is owed. Churn re-wets it: the F-A11-1/2/3 fixes touched
+  `nif.rs` (backup guard + changeset handler), `query.rs` (`reject_interior_nul`
+  + the three `core_*`), `lib.rs` (atom), and `error_reason/0` — plus any
+  session/blob/backup/serialize/authorizer/hook code or any guide edit re-wets
+  A11.
