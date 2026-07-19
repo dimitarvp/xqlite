@@ -3585,3 +3585,212 @@ poisoned `.lock()` is mutually exclusive with any concurrent holder.
   leg), `durability/inject_tamper.exs` (NEW, typed-value teeth),
   `REVIEW_LEDGER.md`, `REVIEW_AXES.md`. No product code (`native/`/`lib/`/
   `test/`) touched; no `BACKLOG.md` change.
+
+---
+
+## Run 19 — 2026-07-19 — A4+A13+A14 dryness covering re-run (churn re-verified)
+
+- Commit at scan: `92ca3d2` (HEAD, clean, CI green). Scope: the scheduler
+  classification of all NIFs (A4), the hot-upgrade posture (A13), and a light
+  re-confirmation that the test-architecture axis stayed dry (A14), each
+  re-verified at HEAD with the churn since its baseline attacked: A4's baseline
+  is Run 10 (`2afa44e`), re-wet by the `stream_fetch` S0 fix (F-A1-1, `1a58bd6`),
+  the `core_query_with_changes` changes detector (F-A10-3, `6ec14dc`), the
+  size-adaptive `encode_blob` + single-copy `blob::read` (F-A12-1/2, `90450e9`),
+  and the 3-tuple error encoders (F-A10-2); A13's baseline is Run 12 (`fc502fb`).
+  Composition: single Opus pass (this agent) — A4 is a full census + a
+  build-and-measure gate, A13 a source-verify + empirical-probe, A14 a re-wet-
+  trigger check + a cheap spot-run; none is a fleet read. Every runtime claim
+  below was RUN this session (commands + harness RESULT lines captured). Did NOT
+  re-litigate settled findings; F-A4-1 (shared-handle Mutex readers) left OPEN
+  (maintainer call, not decided).
+
+### A4 — re-census (VERIFIED stable vs Run 10)
+
+- **Count still 96.** `rg -c '^#\[rustler::nif' native/xqlitenif/src/nif.rs` = 96;
+  zero `#[rustler::nif]` outside `nif.rs` (house rule upheld); 96 raw stubs in
+  `lib/xqlite/xqlitenif.ex` (`err()` bodies). No NIF added or removed since Run 10.
+- **Split still 71 DirtyIo / 25 normal / 0 DirtyCpu.** `rg -c 'schedule =
+  "DirtyIo"'` = 71; zero `DirtyCpu`; 96−71 = 25 normal. The 25 normal names are
+  BYTE-IDENTICAL to the Run 10 table (`db_path`/`autocommit`/`txn_state`/`changes`/
+  `total_changes`/`set_busy_policy`/`remove_busy_policy`/`register_busy_observer`/
+  `unregister_busy_observer`/`set_authorizer`/`remove_authorizer`/
+  `register_progress_hook`/`unregister_progress_hook`/`enable_load_extension`/
+  `session_new`/`session_attach`/`session_is_empty`/`blob_size`/`blob_close`/
+  `stmt_column_names`/`create_cancel_token`/`cancel_operation`/`sqlite_version`/
+  `register_log_hook`/`unregister_log_hook`) and the 71 DirtyIo bucket matches too.
+  ZERO reclassification.
+- **Churn moved NO classification (source-verified).** `git diff 2afa44e..HEAD --
+  nif.rs` shows the ONLY `#[rustler::nif]` attribute changes are the 9 flips to
+  `DirtyIo` — which ARE Run 10's own fix (commit `8356dde`, applied AFTER the
+  `2afa44e` pre-fix scan), not post-Run-10 churn. The three post-Run-10 `nif.rs`
+  commits are `8356dde` (the 9 flips), `6ec14dc` (F-A10-3, changes-counting inside
+  the already-DirtyIo `query_with_changes[_cancellable]`), `1a58bd6` (F-A1-1,
+  `stream_fetch` allocation). None of the 25 normal-reader bodies appears as a
+  changed line in any hunk (the `session_attach`/`session_is_empty`/`blob_size`
+  hunk HEADERS are diff context for the adjacent flips; the actual `+/-` lines are
+  the neighbouring NIFs' attribute flips). So no normal NIF gained new blocking
+  work or a lock, and every churned NIF was ALREADY correctly DirtyIo.
+- **The `stream_fetch` churn question — answered: correctly DirtyIo.**
+  `stream_fetch` is `#[rustler::nif(schedule = "DirtyIo")]` (`nif.rs:1221`) and was
+  DirtyIo throughout (never one of the 9 flips — the stream family was already
+  Dirty at Run 10). The F-A1-1 S0 fix is present (`nif.rs:1283`
+  `let mut fetched_rows: Vec<Vec<Term>> = Vec::new()`, grow-on-demand, replacing
+  the `Vec::with_capacity(batch_size)` that aborted the VM) — it changed only the
+  allocation strategy, NOT the scheduler. Its batch loop (`nif.rs:1317`
+  `for _ in 0..batch_size`) steps up to a caller-controlled `batch_size` rows under
+  the held conn Mutex — unbounded DB-file work, exactly what DirtyIo absorbs. The
+  gate confirms: `stream` ran 327.7 ms wall / 0 `long_schedule` hits. The premise
+  "on the normal scheduler that's user-bounded work" is moot — it is not on the
+  normal scheduler.
+
+### A4 — harness RESULT (`bash scheduler/run.sh`, RUN this session — VERDICT PASS)
+
+- `=== A4 scheduler probe === threshold=25ms schedulers=12 dirty_cpu=12 dirty_io=10
+  otp=29`; `blob=64MB session_rows=400000 hold_rows=4000000`.
+- **TEETH (fix-independent control):** `CONTROL_term_to_binary: 1876.1ms
+  long_schedule_hits=35  [monitor ARMED + DELIVERING]` — the monitor is observing,
+  so every "0 hits" below is real silence.
+- **S1 INTRINSIC discipline — every must-be-dirty family 0 hits:** `query 1384.0ms/0`
+  (the Dirty-silence proof: a 1.4 s Dirty NIF trips nothing), `execute 110.3/0`,
+  `stream 327.7/0`, `step 0.3/0`, `serialize 11.9/0`, `backup 11.4/0`,
+  `schema_columns 0.1/0`, `get_pragma 0.0/0`, `blob_open 0.0/0`, `blob_read 53.3/0`,
+  `blob_write 86.4/0`, `blob_reopen 0.0/0`, `session_changeset 203.1/0`,
+  `session_patchset 195.6/0`, `changeset_invert 28.7/0`, `changeset_concat 116.8/0`,
+  `session_delete 12.6/0` — all `ok(dirty:silent)`. `SUMMARY: control_hits=35
+  intrinsic_fail=false  VERDICT: PASS`.
+- **S2 MUTEX-CONTENTION (informational; F-A4-1, UNCHANGED):** a slow Dirty query
+  pins the conn Mutex on a SHARED handle; the trivial normal readers on another
+  process block for its whole duration — `changes 1291.6ms`, `db_path 1292.1ms`,
+  `txn_state 1288.2ms`, `total_changes 1287.7ms`, 1 `long_schedule` hit each. Same
+  class as Run 10 (measured ~1.45–1.49 s there, ~1.29 s here) — the documented
+  single-owner-handle tradeoff, NOT a gate failure. F-A4-1 stays OPEN, not decided.
+- **LAT micro-latency (uncontended, the <1ms proof):** every trivial normal reader
+  ≤ 46 µs max, sub-µs mean (`changes` 29 µs, `db_path` 4, `txn_state` 6,
+  `autocommit` 1, `blob_size` 1, `session_is_empty` 1, `stmt_column_names` 46,
+  `create_cancel_token` 121 µs).
+
+### A13 — hot-upgrade posture re-verified at HEAD
+
+- **Source gap re-confirmed at the LOCKED version.** rustler NOT bumped: `0.38.0`
+  in `mix.lock`, `Cargo.toml`, and `native/xqlitenif/Cargo.lock` (`rustler_codegen`
+  pinned `0.38.0`). `rustler_codegen-0.38.0/src/init.rs` still builds the NIF entry
+  with `reload: None` (:92), `upgrade: None` (:93), `unload: None` (:94) — only
+  `load` is wired (:69-90). The gap is unchanged; no rustler API to supply upgrade.
+- **No re-wet trigger fired since Run 12 (`fc502fb`).** (1) rustler not bumped
+  (above). (2) `on_load`/`RustlerPrecompiled` unchanged — `git log fc502fb..HEAD --
+  native/xqlitenif/src/lib.rs` is EMPTY (the `rustler::init!(… load = on_load)` at
+  `lib.rs:253` untouched); the one commit touching `xqlitenif.ex` (`90450e9`)
+  changed NO `use RustlerPrecompiled`/`on_load` line (raw-stub spec churn for the
+  extended-code error shapes only). (3) NO new resource type — all 7 `impl Resource`
+  (`XqliteConn`/`XqliteStatement`/`XqliteStream`/`XqliteBlob`/`XqliteSession`/
+  `XqliteCancelToken`/`BlobResource`) PRE-DATE Run 12: `git show
+  fc502fb:native/xqlitenif/src/util.rs` already contains `impl Resource for
+  BlobResource {}` (:18). F-A12-1 (`90450e9`) made the query-blob arm size-adaptive
+  (changed WHEN `BlobResource` is used, `>64 B`), it did not introduce the type.
+- **Harness RESULT (`bash hot_upgrade/run.sh`, RUN this session — VERDICT PASS).**
+  TEETH: the `HOTUP_MODE=teeth` child `System.halt(134)` → `teeth rc=134`, crash
+  oracle live. PROBE: baseline conn+stmt+stream+blob+session all work;
+  `:code.load_file(XqliteNIF)` → **`{:error, :on_load_failure}`** + VM log
+  `{:error, {:upgrade, ~c"Upgrade not supported by this NIF library."}}` (reload
+  refused, never a silent two-instance success); EVERY live resource still works
+  after the failed reload AND after `:code.soft_purge` (→ `true`) — conn query
+  `{:ok,…}`, `stmt_step {:row,…}`, `stream_fetch {:ok,…}`/`:done`, `blob_read
+  {:ok,<<…>>}`, `session_is_empty {:ok,true}`; direct `:erlang.load_nif` from a
+  foreign module → **`{:error, {:bad_lib, …}}`** (no back door); forced
+  `:code.delete` (→ `true`) + `:code.purge` (→ `false`) with a SECOND live resource
+  set held, then drop+GC → destructors run out of the to-be-unloaded library with
+  **NO VM abort**, and a fresh `open_in_memory` afterward succeeds `{:ok, #Ref}`.
+  It FAILS SAFE exactly as Run 12 — no crash-on-purge. The churn added no new
+  resource type, so all five SQLite-touching destructors still survive purge.
+- **Policy doc still accurate.** `guides/gotchas.md` "Deployment and releases → Hot
+  code upgrades are not supported — restart the node" (:367-415) states the exact
+  `{:error, :on_load_failure}` / `{:upgrade, "Upgrade not supported by this NIF
+  library."}` the VM returns (matches the harness verbatim), the rustler-NULL-
+  upgrade root cause, the fail-safe behaviour (old code + live handles survive, no
+  corruption, no two-instance state), and the operational guidance (node restart;
+  wrappers must not assume upgrade-in-place; exclude from `relup`s). No doc change.
+- **Grading.** 0 S0/S1/S2 (fails safe). F-A13-1 (upstream rustler-upgrade gap)
+  stays S3 tracking-only — the deliverable was the policy, which holds. CLEAN.
+
+### A14 — dry-confirmation (light; no re-wet trigger since Run 14)
+
+- **A14 remains DRY, no re-wet trigger since Run 14 (`e858fa8`).** All three
+  triggers verified NOT fired: (1) `test.seq` task unchanged — `git log
+  e858fa8..HEAD -- lib/mix/tasks/test_seq.ex` EMPTY; (2) connection openers
+  unchanged — `git log e858fa8..HEAD -- test/support/test_util.ex` EMPTY;
+  (3) bundled-SQLite / rusqlite / libsqlite3-sys versions unchanged — `Cargo.lock`
+  `rusqlite 0.40.1`, `libsqlite3-sys 0.38.1`, and the built `.so` still strings
+  `3.53.2`. This is a CONFIRMATION, not a re-derivation (Run 12 + Run 14 already
+  made A14 DRY).
+- **Spot-run corroboration (`bash test_arch/run.sh`, reduced 24×40×100, RUN this
+  session — VERDICT PASS).** SUBSTRATE `THREADSAFE=1` + `MUTEX_PTHREADS`, `sqlite
+  3.53.2`, 12 schedulers (substrate unchanged). TEETH: clean `integrity_check`
+  `["ok"]`, smashed DB → `{:sqlite_failure, 11, 11, "database disk image is
+  malformed"}` (SQLITE_CORRUPT — oracle live). WORKLOAD: parallel `ok=195360
+  nomem=0 busy=0 corruption=0` = serial control `ok=195360 … 0` (byte-for-byte
+  equal, no parallel-only anomaly). CHURN (rusqlite#1860 angle): 0 failures both
+  legs. Corroborating, not load-bearing — the re-wet-trigger check is the decider.
+
+### Teeth (this session)
+
+- **A4:** the fix-independent `term_to_binary/[:compressed]` control delivered 35
+  `long_schedule` events (monitor armed), and the pre-fixed Dirty families are
+  silent at 1.4 s wall — so a real normal-scheduler hog would show; `run.sh` aborts
+  rc 2 if the control delivers 0.
+- **A13:** the `HOTUP_MODE=teeth` `System.halt(134)` child was classified CRASH
+  (rc 134), so the main probe's crash-free delete+purge+GC traversal is real
+  silence; `run.sh` aborts rc 2 otherwise.
+- **A14:** the corruption oracle trips (smashed DB → SQLITE_CORRUPT) while a clean
+  DB passes, and the serial control equals the parallel leg — a parallel-only
+  corruption/NOMEM would diverge; `run.sh` aborts rc 2 if the oracle is dead.
+
+### Findings
+
+- **CLEAN — zero new CONFIRMED on all three axes.** No S0/S1/S2/S3. No fix, no
+  BACKLOG change. The open maintainer calls (F-A4-1 shared-handle Mutex readers,
+  F-A11-4 busy-elapsed, F-A12-3 `str::encode` OOM-panic, F-A13-1 rustler-upgrade
+  gap, F-A10-9 direct-NIF atom union, A5 single-use-token) are all left untouched.
+
+### Completeness critic
+
+- The covering evidence is the three re-run harness RESULT lines above +
+  the census/diff commands, not session memory. Honest gaps, unchanged from the
+  first covering runs: (A4) `long_schedule` observes NORMAL schedulers only — a
+  Dirty NIF saturating the 10-scheduler DirtyIo pool is a concern this gate cannot
+  see (bounded by the blanket-DirtyIo ruling); worst-case blob/changeset driven to
+  64 MB / ~16 MB, not the ~1 GB `SQLITE_MAX_LENGTH` ceiling (RAM); the Mutex-
+  contention hold measured at ~1.29 s, not pathological multi-minute. (A13) a full
+  `release_handler` `relup`/`appup` cycle was not driven end-to-end (the `:code.*`
+  sequence is its mechanism; the on_load refusal it hits is identical); Linux only.
+  (A14) the spot-run is reduced-scale corroboration; the spurious-NOMEM mechanism
+  was already CONFIRMED under a RAM cap in Run 14 (F-A14-1 CLOSED) and not re-run
+  here (no re-wet trigger to justify it).
+
+### Disposition & dryness
+
+- **A4 — 1 of 2 consecutive clean covering runs (NOT DRY), one more owed.** Run 10
+  was A4's one prior covering run but carried a CONFIRMED S2 (the 9-NIF fix), so it
+  was not a clean run; the post-Run-10 stream/changes/blob/error churn also re-wets
+  the axis. Run 19 is the FIRST clean covering run (zero new CONFIRMED) over that
+  churn — census stable (96/71/25/0, no reclassification), gate PASS with teeth,
+  F-A4-1 reproduced unchanged. One more clean covering run owed. Re-wet: any new
+  `#[rustler::nif]`, any `schedule=` change, any new blocking work / lock a normal
+  NIF does under the conn Mutex, or a `with_conn`/`with_session`/`with_live_blob`/
+  `with_live_stmt` restructure.
+- **A13 — DRY (2 of 2 consecutive clean covering runs).** Run 12 was a clean
+  covering run (0 S0/S1/S2; F-A13-1 upstream tracking-only, the documented policy
+  IS the fix). Run 19 is the second consecutive clean covering run with NO re-wet
+  trigger between (rustler not bumped, on_load/RustlerPrecompiled unchanged, no new
+  resource type — all 7 resource types predate Run 12): source gap re-verified,
+  harness PASS (fails safe), policy accurate. **A13 is DRY.** Re-wet: a rustler bump
+  (re-check `init.rs` upgrade wiring), a `RustlerPrecompiled`/on_load change, or a
+  new resource type (re-verify its destructor survives purge).
+- **A14 — stays DRY.** Made DRY at Run 14; no re-wet trigger fired since
+  (`test.seq`/opener/SQLite-version all unchanged). Confirmed light + spot-run PASS.
+  Re-wet: a bundled-SQLite version bump, a `test.seq`/opener change, or a
+  rusqlite/libsqlite3-sys bump.
+- `mix verify` GREEN (harnesses CI-isolated; the formatter `inputs` glob
+  `{config,lib,test}/**` matches ZERO `scheduler/`/`hot_upgrade/`/`test_arch/`
+  files). Files changed: `REVIEW_LEDGER.md`, `REVIEW_AXES.md` only. No product code
+  (`native/`/`lib/`/`test/`), no harness, no `BACKLOG.md` change.

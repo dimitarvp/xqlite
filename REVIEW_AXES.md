@@ -149,6 +149,29 @@ uncontended / O(1)-bounded). NOT yet DRY (first covering run; one more
 owed). Churn re-wets: any new `#[rustler::nif]`, any `schedule=` change,
 any new blocking work / lock a normal NIF does under the conn `Mutex`, or
 a `with_conn`/`with_session`/`with_live_blob`/`with_live_stmt` restructure.
+COVERING RE-RUN (Run 19, 2026-07-19): the owed re-run over the post-Run-10 churn
+(F-A1-1 `stream_fetch`, F-A10-3 changes detector, F-A12-1/2 adaptive blob +
+single-copy read, F-A10-2 3-tuple errors). RE-CENSUS at HEAD `92ca3d2`: count
+still **96** (`rg -c` on `nif.rs`; zero NIFs outside it; 96 Elixir stubs), split
+still **71 DirtyIo / 25 normal / 0 DirtyCpu** — the 25 normal names BYTE-IDENTICAL
+to the Run 10 table, ZERO reclassification. `git diff 2afa44e..HEAD -- nif.rs`
+shows the only `#[rustler::nif]` attribute changes are the 9 flips that ARE Run
+10's own fix (`8356dde`, post-scan), not new churn; the three post-Run-10 `nif.rs`
+commits (`8356dde` flips, `6ec14dc` F-A10-3, `1a58bd6` F-A1-1) touch only
+already-DirtyIo NIFs' internals — no normal-reader body changed. The `stream_fetch`
+churn question answered: it is DirtyIo (`nif.rs:1221`, never a flip — the stream
+family was Dirty at Run 10), the F-A1-1 fix changed only the allocation (`Vec::new`
+grow-on-demand, `nif.rs:1283`), its `for _ in 0..batch_size` loop steps unbounded
+user-batch DB-file work under the conn Mutex = correctly on DirtyIo (gate:
+`stream` 327.7 ms / 0 hits). RE-RAN `scheduler/run.sh`: VERDICT PASS, teeth alive
+(`term_to_binary` control 35 `long_schedule` hits), every must-be-dirty family
+0 hits (`query` 1384 ms/0 = Dirty-silence proof; the 9 flipped families all
+silent), LAT trivial readers ≤ 46 µs, S2 Mutex-contention reproduced (4 readers
+blocked ~1.29 s / 1 hit each — F-A4-1 informational, UNCHANGED, left OPEN not
+decided). CLEAN — zero new CONFIRMED. DRYNESS: Run 10 carried a CONFIRMED S2 (the
+9-NIF fix) so it was not a clean run, and the churn re-wet the axis → Run 19 is the
+**FIRST clean covering run, 1 of 2 consecutive, NOT DRY**, one more owed. Re-wet
+triggers UNCHANGED.
 
 ### A5. Cancellation semantics
 8-VM-step progress-handler cadence, un-tuned. Probes: cancel latency
@@ -556,6 +579,25 @@ upgrades are not supported — restart the node". 0 S0/S1/S2; 1 S3
 covering run; one more owed). Churn re-wets: a rustler bump (re-check the
 `init.rs` upgrade wiring), a `RustlerPrecompiled`/on_load change, or a new
 resource type (re-verify its destructor survives purge).
+COVERING RE-RUN (Run 19, 2026-07-19): the owed second covering run. NO re-wet
+trigger fired since Run 12 (`fc502fb`): rustler NOT bumped (`0.38.0` in mix.lock /
+Cargo.toml / Cargo.lock; `rustler_codegen-0.38.0/src/init.rs:92-94` still
+`reload`/`upgrade`/`unload` = None, only `load` wired); `on_load`/`RustlerPrecompiled`
+unchanged (`git log fc502fb..HEAD -- lib.rs` EMPTY; the one `xqlitenif.ex` commit
+`90450e9` changed no `use RustlerPrecompiled`/on_load line); NO new resource type —
+all 7 `impl Resource` (incl. `BlobResource`) PRE-DATE Run 12 (`git show
+fc502fb:util.rs` already has `impl Resource for BlobResource`; F-A12-1 only made the
+query-blob arm size-adaptive, it did not introduce the type). RE-RAN
+`hot_upgrade/run.sh`: VERDICT PASS, teeth alive (crash-oracle child rc 134);
+`:code.load_file` → `{:error, :on_load_failure}` + VM `{:upgrade, "Upgrade not
+supported by this NIF library."}`, all five live resources survive the failed reload
+AND soft_purge, foreign `:erlang.load_nif` → `{:bad_lib,_}` (no back door), forced
+delete+purge+GC of a live set → NO VM abort + fresh open works — FAILS SAFE exactly
+as Run 12. Policy doc (`guides/gotchas.md:367-415`) still accurate (exact VM messages
++ fail-safe guidance). 0 S0/S1/S2; F-A13-1 upstream tracking-only (unchanged). CLEAN
+— zero new CONFIRMED. DRYNESS: Run 12 (clean covering run) + Run 19 (clean, no
+re-wet between) = **two consecutive clean covering runs → A13 DRY.** Re-wet triggers
+UNCHANGED (rustler bump, `RustlerPrecompiled`/on_load change, or a new resource type).
 
 ### A14. Test-architecture load-bearer
 Re-derive gotcha #1 (parallel tests corrupt global C state → VFS/
@@ -613,6 +655,16 @@ DRYNESS: zero new CONFIRMED product defects, so this counts toward the arithmeti
 Run 12 (re-derivation) + Run 14 (constrained-RAM decider) = two consecutive clean
 covering runs → **A14 DRY**. Re-wet triggers UNCHANGED (a bundled-SQLite version
 bump, a `test.seq`/opener change, or a rusqlite/libsqlite3-sys bump).
+DRY-CONFIRMATION (Run 19, 2026-07-19): **A14 remains DRY, no re-wet trigger since
+Run 14.** Verified (not re-derived): `test.seq` task unchanged (`git log
+e858fa8..HEAD -- lib/mix/tasks/test_seq.ex` EMPTY), connection openers unchanged
+(`git log e858fa8..HEAD -- test/support/test_util.ex` EMPTY), bundled SQLite /
+rusqlite / libsqlite3-sys unchanged (`Cargo.lock` `rusqlite 0.40.1` /
+`libsqlite3-sys 0.38.1`; the built `.so` still strings `3.53.2`). Cheap spot-run
+`test_arch/run.sh` (24×40×100) corroborates: VERDICT PASS — substrate `THREADSAFE=1`
++ `MUTEX_PTHREADS` + `3.53.2`, teeth live (smashed DB → SQLITE_CORRUPT 11), parallel
+`ok=195360 nomem=0 corruption=0` = serial control identical, churn 0 failures both
+legs. Corroborating only; the re-wet-trigger check is the decider. A14 stays DRY.
 
 ## Release-readiness axis (RC gate; both repos)
 
