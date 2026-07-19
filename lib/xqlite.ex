@@ -136,6 +136,8 @@ defmodule Xqlite do
   @type error_reason ::
           :connection_closed
           | :execute_returned_results
+          | :extension_loading_disabled
+          | :invalid_conflict_strategy
           | :invalid_transaction_mode
           | :multiple_statements
           | :null_byte_in_string
@@ -1610,6 +1612,12 @@ defmodule Xqlite do
   (`query_cancellable/4`, `execute_cancellable/4`, etc.). Signalling it via
   `cancel_operation/1` from any process interrupts in-flight cancellable
   operations holding the same token.
+
+  A token is **single-use**: its flag is set once and never reset, so once
+  `cancel_operation/1` has signalled it the token stays signalled. Reusing an
+  already-signalled token cancels the next operation the moment it starts —
+  create a fresh token per cancellable operation. See the "Cancel tokens are
+  single-use" section of the Gotchas guide.
   """
   @spec create_cancel_token() :: {:ok, reference()} | error()
   def create_cancel_token do
@@ -1634,6 +1642,12 @@ defmodule Xqlite do
   Idempotent at the SQLite level — signalling twice is the same as once.
   Telemetry fires on every call, so consumers see distinct signal events
   even from repeated signals.
+
+  There is no un-signal: once signalled, the token stays cancelled for its
+  lifetime. A signalled token is spent — passing it to another cancellable
+  operation cancels that operation immediately. Create a fresh token per
+  operation; see the "Cancel tokens are single-use" section of the Gotchas
+  guide.
   """
   @spec cancel_operation(reference()) :: :ok | error()
   def cancel_operation(token) when is_reference(token) do
