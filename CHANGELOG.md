@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Raised the minimum supported Elixir to `~> 1.17`, matching the CI
+  test matrix (Elixir 1.17–1.20 × OTP 26–29). Elixir 1.15/1.16 were
+  claimed but never exercised by CI.
+
 ## [0.10.0] - 2026-07-20
 
 This release fixes several memory-safety and crash defects present in

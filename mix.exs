@@ -7,7 +7,7 @@ defmodule Xqlite.MixProject do
     [
       app: :xqlite,
       version: "0.10.0",
-      elixir: "~> 1.15",
+      elixir: "~> 1.17",
       name: @name,
       start_permanent: Mix.env() == :prod,
       docs: docs(),

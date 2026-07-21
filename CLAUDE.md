@@ -144,7 +144,7 @@ All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
 
 ## Current State (July 2026)
 
-- v0.9.0 released on Hex (2026-07-17). Elixir `~> 1.15`, OTP 26–29.
+- v0.10.0 released on Hex (2026-07-20). Elixir `~> 1.17`, OTP 26–29.
 - Rust edition 2024. Rustler 0.38, rusqlite 0.40 (bundled SQLite 3.53.2).
 - `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
 - GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).

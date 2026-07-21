@@ -27,9 +27,6 @@ burn-down.
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)
-- [S3] Elixir floor: mix.exs claims `~> 1.15`, CI floor is 1.17.
-  Add 1.15/1.16 lanes or raise the floor — floor-raise is a Dimi
-  values call. Mirrors an identical gap in xqlite_ecto3. (wave-1)
 - [probe] Docs-build telemetry-flag state: confirm what config
   hexdocs was built under for 0.9.0 (macro docs were flag-dependent
   until `51d1a17`; fix ships with the next release). (wave-1)
@@ -42,6 +39,13 @@ burn-down.
   note — the busy_handler comment claims "any thread (OTP 26.1+)".
   Reconcile the comments and confirm against an assertion-enabled ERTS.
 ## Closed
+
+- 2026-07-21 [S3] Elixir floor gap — CLOSED (maintainer ruling
+  2026-07-21: claim-what-you-test). mix.exs raised `~> 1.15` →
+  `~> 1.17`, matching the CI matrix floor exactly; CHANGELOG
+  Unreleased notes the raise; CLAUDE.md current-state line updated.
+  Same ruling applied in xqlite_ecto3 (its badge + mix.exs). No new
+  lanes — 1.15/1.16 were never exercised and are no longer claimed.
 
 - 2026-07-20 (maintainer decisions, A11) `changeset_apply(_, _, :replace)` conflict
   handling — RULED keep-abort (closes the Run 9 open question). The owner ruled the
