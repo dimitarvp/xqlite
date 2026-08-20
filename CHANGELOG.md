@@ -5,13 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-08-20
 
 ### Changed
 
 - Raised the minimum supported Elixir to `~> 1.17`, matching the CI
   test matrix (Elixir 1.17–1.20 × OTP 26–29). Elixir 1.15/1.16 were
   claimed but never exercised by CI.
+- Busy policy `:max_elapsed_ms` is now a per-contention budget, reset
+  at the start of each busy event instead of anchored at handler
+  install — long-lived and pooled connections keep retrying, where
+  previously they gave up with zero retries once the connection was
+  older than the ceiling.
+- Trivial connection-lock readers (`changes/1`, `db_path/1`,
+  `transaction_status/1`, and ~17 more) moved to dirty schedulers, so
+  a reader on a shared handle can no longer stall a normal scheduler
+  behind a concurrent slow query on the same connection. Costs
+  ~0.85µs median per call — still sub-microsecond.
+- `changeset_apply/2` documentation now states explicitly that
+  `:replace` aborts and rolls back the whole apply on a conflict
+  SQLite forbids replacing — it never silently skips a change.
+- Dependencies refreshed: rusqlite 0.40.2, libsqlite3-sys 0.38.2
+  (bundled SQLite unchanged at 3.53.2).
+
+### Fixed
+
+- Returning a TEXT value under allocation failure now yields a
+  structured `internal_encoding_error` at every site where a row
+  value or column name is encoded — matching the blob path — instead
+  of panicking through rustler's string encoder.
 
 ## [0.10.0] - 2026-07-20
 
@@ -626,6 +648,7 @@ Initial public release. The supported SQLite functionality:
   callers).
 - **SQLite introspection** — `compile_options` and `sqlite_version`.
 
+[0.11.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.11.0
 [0.10.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.10.0
 [0.9.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.9.0
 [0.8.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.8.0
