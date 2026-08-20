@@ -24,6 +24,16 @@ Always use `mix test.seq` to run tests — no arguments, always the full suite. 
 Every Elixir compiler warning is an error, everywhere: `lib/` via `elixirc_options: [warnings_as_errors: true]` in `mix.exs`, and test `.exs` files via the `:test` alias (`test: "test --warnings-as-errors"`), which every `test.seq` child invocation inherits. If code fights the compiler (Elixir 1.20 type checker included), the compiler wins — satisfy it, never suppress or argue.
 Cache test output in temp files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) to avoid parsing long inline output.
 
+### Property tests (stream_data)
+
+`max_runs` is at least **2000** per property — low hundreds is too low.
+Size-driven generators must be capped with `StreamData.scale/2`:
+`StreamData.float/0` in particular costs time quadratic in its size
+parameter, and size climbs by one per successful run, so an uncapped
+2000-run property spends its time inside the generator's power-of-two
+table instead of the test (symptom: ExUnit 60s timeouts with stacks in
+`StreamData.power_of_two/1`).
+
 ### `async: false` is banned
 
 Never use `async: false` in any test module. Grepping for `async: false` must always yield zero results. All tests must use `async: true`. If a test touches global state (e.g., the log hook), design it to be resilient to concurrent access — don't serialize. The only exception would be empirically proven flaky tests or internal SQLite state corruption, but no such case exists today.

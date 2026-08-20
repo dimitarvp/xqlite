@@ -60,26 +60,35 @@ defmodule Xqlite.SchemaDefaultValuePropertyTest do
     {:ok, conn: conn}
   end
 
+  # The house floor for property runs is 2000. StreamData.float/0 is
+  # size-driven with cost quadratic in the size parameter, and size climbs
+  # one per successful run — uncapped, a 2000-run property spends its time
+  # inside the generator's power-of-two table instead of the test. The cap
+  # keeps the value distribution wide while holding generation cost flat.
+  defp bounded_float do
+    StreamData.scale(StreamData.float(), fn size -> min(size, 50) end)
+  end
+
   property "integers round-trip through quote() and DEFAULT", %{conn: conn} do
-    check all(i <- i64()) do
+    check all(i <- i64(), max_runs: 2000) do
       assert classify_via_ddl(conn, quoted(conn, i)) == {:literal, i}
     end
   end
 
   property "floats round-trip exactly (SQLite renders shortest-exact)", %{conn: conn} do
-    check all(f <- StreamData.float()) do
+    check all(f <- bounded_float(), max_runs: 2000) do
       assert classify_via_ddl(conn, quoted(conn, f)) == {:literal, f}
     end
   end
 
   property "strings round-trip, quoting and all", %{conn: conn} do
-    check all(s <- sql_safe_string()) do
+    check all(s <- sql_safe_string(), max_runs: 2000) do
       assert classify_via_ddl(conn, quoted(conn, s)) == {:literal, s}
     end
   end
 
   property "arbitrary byte blobs round-trip", %{conn: conn} do
-    check all(b <- StreamData.binary()) do
+    check all(b <- StreamData.binary(), max_runs: 2000) do
       assert classify_via_ddl(conn, "x'" <> Base.encode16(b) <> "'") == {:blob, b}
     end
   end
@@ -88,7 +97,7 @@ defmodule Xqlite.SchemaDefaultValuePropertyTest do
     template =
       StreamData.one_of([
         StreamData.map(i64(), fn i -> {"#{i}", :literal} end),
-        StreamData.map(StreamData.float(), fn f -> {"#{f}", :literal} end),
+        StreamData.map(bounded_float(), fn f -> {"#{f}", :literal} end),
         StreamData.map(sql_safe_string(), fn s -> {quoted(conn, s), :literal} end),
         StreamData.map(StreamData.binary(), fn b ->
           {"x'" <> Base.encode16(b) <> "'", :blob}
@@ -106,7 +115,7 @@ defmodule Xqlite.SchemaDefaultValuePropertyTest do
         ])
       ])
 
-    check all({default_sql, kind} <- template) do
+    check all({default_sql, kind} <- template, max_runs: 2000) do
       result = classify_via_ddl(conn, default_sql)
 
       case kind do
