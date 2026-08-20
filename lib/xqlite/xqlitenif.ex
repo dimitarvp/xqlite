@@ -189,9 +189,12 @@ defmodule XqliteNIF do
   Executes a SQL query and returns results with the affected row count.
 
   Returns `{:ok, %{columns, rows, num_rows, changes}}` where `changes` is
-  `sqlite3_changes()` captured atomically inside the connection lock. For
-  SELECT statements (non-empty columns), `changes` is 0. For DML, it's the
-  actual affected row count.
+  `sqlite3_changes()` captured atomically inside the connection lock. The
+  count is reported only when `sqlite3_total_changes()` moved across this
+  statement, and is 0 otherwise: DML reports its real affected row count
+  (with or without `RETURNING`), while SELECT, DDL, and PRAGMA report 0
+  instead of the previous DML's sticky count. Result columns play no part
+  in the decision.
 
   This is the recommended function when you need reliable affected row counts.
   Unlike calling `query/3` then `changes/1` separately, the count is captured

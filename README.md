@@ -41,6 +41,8 @@ def deps do
 end
 ```
 
+Compatibility: the Ecto adapter (`xqlite_ecto3`) pins exactly one xqlite minor series per adapter release, because xqlite is pre-1.0 and its minor is the break slot. The current pairing is xqlite `~> 0.11.0`; the adapter's README states its own pairing.
+
 Precompiled NIF binaries are included for multiple targets -- no Rust toolchain needed. To force source compilation:
 
 ```bash
@@ -296,7 +298,7 @@ To get the actual affected row count after DML, call `changes/1` immediately aft
 
 **Important SQLite behavior:** `sqlite3_changes()` is sticky -- per [the official docs](https://www.sqlite.org/c3ref/changes.html), "executing any other type of SQL statement does not modify the value returned by these functions." This means `changes/1` after a `SELECT` returns the _previous_ DML's count, not 0. It never resets on its own.
 
-`query_with_changes/3` solves this by reading `sqlite3_changes()` inside the same `Mutex` hold as the query execution and returning 0 for non-DML statements (detected by empty result columns). This is the recommended function for callers who need reliable affected row counts -- including the `xqlite_ecto3` adapter.
+`query_with_changes/3` solves this by capturing `sqlite3_changes()` inside the same `Mutex` hold as the query execution, and reporting it only when `sqlite3_total_changes()` moved across the statement -- 0 otherwise. So DML reports its real count (with or without `RETURNING`), while SELECT, DDL, and PRAGMA report 0 instead of the previous DML's sticky count. Result columns play no part in the decision: `RETURNING` DML has columns yet changes rows, and DDL has none yet must not leak a stale count. This is the recommended function for callers who need reliable affected row counts -- including the `xqlite_ecto3` adapter.
 
 ## Roadmap
 
