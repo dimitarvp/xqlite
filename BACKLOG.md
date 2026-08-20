@@ -275,6 +275,10 @@ burn-down.
   the full matrix (ledger table). RED (8 failing assertions ×2 openers) → green;
   `test/nif/query_with_changes_test.exs` gained UPDATE/DELETE RETURNING + PRAGMA-read
   and corrected the INSERT-RETURNING + DDL cases.
+  2026-08-20 doc tail CLOSED (`b312542`): the shipped moduledoc and README still
+  taught the abandoned empty-columns rule through the 0.11.0 release; both now
+  state the total_changes-delta rule (surfaced by the adapter's cross-repo
+  review as its finding F-X1-3; CHANGELOG's historical entry left as history).
 - 2026-07-19 (S3 fix pass round 1) F-A10-5 + F-A11-5 — `error_reason/0` typespec
   gaps: FIXED together. Added `{:invalid_open_option, …}` as the precise two-map
   union (unknown_key | invalid_value shapes from `validate_open_opts`) and corrected
