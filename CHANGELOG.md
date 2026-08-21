@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Docs: `query_with_changes/3` teaches its real rule.** The 0.11.0
+  package still describes the abandoned empty-columns heuristic
+  ("for SELECT statements (non-empty columns), `changes` is 0") — the
+  shipped code reports the real count for RETURNING DML and 0 only
+  when `total_changes` did not move. The corrected text and the
+  README's compatibility statement for the Ecto adapter pairing were
+  committed right after the 0.11.0 tag and have been main-only since;
+  this release delivers them. The only code delta since the tag is
+  a clippy 1.98 lint rewrite in the blob-literal parser — no behavior
+  change.
+
 ## [0.11.0] - 2026-08-20
 
 ### Changed
