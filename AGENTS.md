@@ -101,8 +101,8 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 - Long pipe chains are idiomatic — never shorten them.
 - Short functions, low cyclomatic complexity. Split aggressively.
 - Minimal git diff is paramount. Don't touch code you weren't asked to change.
-- No noise comments ("added", "removed", "now uses"). Code is version-controlled.
-- No internal review/task nomenclature in code comments — no finding IDs (F-A10-2, M10), run numbers, axis names, or severity grades. That vocabulary lives in REVIEW_LEDGER.md/BACKLOG.md. Comments state the constraint in plain domain terms; bare commit hashes are fine.
+- **Code comments are minimized (both repos).** Every comment must fiercely justify its existence or it dies: the only survivors are (a) rare what/why explanations and (b) explanations of cryptic/non-obvious code. Anything else is presumed redundant. Never reference backlogs, finding IDs (F-A10-2, M10), run numbers, axis names, severity grades, or any internal review/task nomenclature in code comments — that vocabulary lives in REVIEW_LEDGER.md/BACKLOG.md only. Bare commit hashes are fine. Extensive `@doc`/`@moduledoc` on important public surfaces are good; inline comments are on thin ice even there.
+- Comment-line count must trend DOWN: measure with `tokei` (comments vs code split) before and after comment-touching work; scrub runs remove comments that fail the justification bar.
 - Errors must always carry the most specific, structured information possible. No bare `:error` atoms, no swallowing details into generic wrappers. This is a library — callers need maximum diagnostic information.
 - **Never assert on error message text.** xqlite's entire error system is built around structured atoms and typed fields — assert on those. If a test needs to match an error and there's no structured field to match on, that's a bug in the error struct, not a reason to regex-match a string. Fix the struct first, then write the assertion.
 
