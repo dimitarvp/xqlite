@@ -218,7 +218,7 @@ fn parse_blob_literal(t: &str) -> Option<Vec<u8>> {
     }
     let mut bytes = Vec::with_capacity(inner.len() / 2);
     let raw = inner.as_bytes();
-    for pair in raw.chunks_exact(2) {
+    for pair in raw.as_chunks::<2>().0 {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         bytes.push(((hi << 4) | lo) as u8);
