@@ -8,7 +8,6 @@ use rustler::{
 use std::fmt::{self, Display};
 use std::panic::RefUnwindSafe;
 
-// Based on libsqlite3-sys constants
 fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
     // Base constraint error code (not "primary key" — that's SQLITE_CONSTRAINT_PRIMARYKEY)
     const SQLITE_CONSTRAINT_BASE: i32 = ffi::SQLITE_CONSTRAINT;
@@ -27,10 +26,8 @@ fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
         ffi::SQLITE_CONSTRAINT_PINNED => Some(atoms::constraint_pinned()),
         ffi::SQLITE_CONSTRAINT_DATATYPE => Some(atoms::constraint_datatype()),
 
-        // Catch-all: Check if the primary code part matches SQLITE_CONSTRAINT
-        // This covers cases where SQLite might return, e.g., just 19 (SQLITE_CONSTRAINT)
-        // without a specific extended code like (19 | (5 << 8)) for NOTNULL.
-        // It also covers *future* extended constraint codes we don't know about yet.
+        // Covers a bare 19 (SQLITE_CONSTRAINT, no extended code) and any
+        // future extended constraint code this build does not know.
         code if (code & 0xff) == SQLITE_CONSTRAINT_BASE => Some(atoms::constraint_violation()),
 
         _ => None,
@@ -88,7 +85,6 @@ fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
 
 #[derive(Debug, Clone)]
 pub(crate) enum XqliteError {
-    // Input Conversion / Validation
     CannotConvertToSqliteValue {
         value_str: String,
         reason: String,
@@ -125,7 +121,6 @@ pub(crate) enum XqliteError {
     NulErrorInString,
     MultipleStatements,
 
-    // DB Open / Connection Errors
     CannotOpenDatabase {
         path: String,
         code: i32,
@@ -133,7 +128,6 @@ pub(crate) enum XqliteError {
     },
     LockError(String),
 
-    // Statement / Execution Errors
     SqlInputError {
         code: i32,
         message: String,
@@ -141,7 +135,7 @@ pub(crate) enum XqliteError {
         offset: i32,
     },
     ExecuteReturnedResults,
-    CannotExecute(String), // Generic execution error
+    CannotExecute(String),
     CannotExecutePragma {
         pragma: String,
         reason: String,
@@ -183,7 +177,6 @@ pub(crate) enum XqliteError {
         message: String,
     },
 
-    // Row / Column Errors
     InvalidColumnIndex(usize),
     InvalidColumnName(String),
     InvalidColumnType {
@@ -205,23 +198,20 @@ pub(crate) enum XqliteError {
         reason: String,
     },
 
-    // Constraint Errors (from SqliteFailure)
     ConstraintViolation {
         kind: Option<Atom>,
         message: String,
         details: Box<ConstraintDetails>,
     },
 
-    // Generic Fallback
     SqliteFailure {
         code: i32,
         extended_code: i32,
         message: Option<String>,
     },
 
-    // Errors during schema introspection NIFs
     SchemaParsingError {
-        context: String, // e.g., "Parsing type affinity for column 'foo'"
+        context: String,
         unexpected_value: String,
     },
 
@@ -229,11 +219,9 @@ pub(crate) enum XqliteError {
         reason: String,
     },
 
-    // Connection state
     ConnectionClosed,
     StatementFinalized,
 
-    // Internal
     InternalEncodingError {
         context: String,
     },
@@ -300,28 +288,28 @@ impl Display for XqliteError {
                 write!(f, "Database operation was cancelled")
             }
             XqliteError::NoSuchTable { message } => {
-                write!(f, "No such table: {message}") // Message usually includes table name
+                write!(f, "No such table: {message}")
             }
             XqliteError::NoSuchIndex { message } => {
-                write!(f, "No such index: {message}") // Message usually includes index name
+                write!(f, "No such index: {message}")
             }
             XqliteError::TableExists { message } => {
-                write!(f, "Table already exists: {message}") // Message usually includes table name
+                write!(f, "Table already exists: {message}")
             }
             XqliteError::IndexExists { message } => {
-                write!(f, "Index already exists: {message}") // Message usually includes index name
+                write!(f, "Index already exists: {message}")
             }
             XqliteError::SchemaChanged {
                 extended_code: _,
                 message,
             } => {
-                write!(f, "Database schema changed: {message}") // SQLITE_SCHEMA
+                write!(f, "Database schema changed: {message}")
             }
             XqliteError::ReadOnlyDatabase {
                 extended_code: _,
                 message,
             } => {
-                write!(f, "Database is read-only: {message}") // SQLITE_READONLY
+                write!(f, "Database is read-only: {message}")
             }
             XqliteError::AuthorizationDenied {
                 extended_code: _,
@@ -742,7 +730,6 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
                 message: message_string,
             }
         }
-        // Fallback for any other SQLite error.
         _ => XqliteError::SqliteFailure {
             code: ffi_err.extended_code & 0xFF,
             extended_code: ffi_err.extended_code,
@@ -779,7 +766,6 @@ impl From<RusqliteError> for XqliteError {
                 }
             }
 
-            // --- Other specific rusqlite::Error variants ---
             RusqliteError::ExecuteReturnedResults => XqliteError::ExecuteReturnedResults,
             RusqliteError::InvalidParameterCount(p, e) => XqliteError::InvalidParameterCount {
                 provided: p,
@@ -820,14 +806,10 @@ impl From<RusqliteError> for XqliteError {
             }
             RusqliteError::MultipleStatement => XqliteError::MultipleStatements,
 
-            // --- Final Catch-all for any other rusqlite::Error types ---
             // Only NON-`SqliteFailure`/`SqlInputError` rusqlite errors reach here
             // (both are matched above and routed through `classify_sqlite_error`).
             // A SQLite interrupt is ALWAYS a `SqliteFailure` carrying extended code
             // `SQLITE_INTERRUPT` (9), classified by code — never by message text.
-            // No rusqlite variant reachable here `Display`s as "interrupted", so
-            // the former `message == "interrupted"` string-match was dead code;
-            // classification of interrupts is purely code-driven.
             other_err => XqliteError::CannotExecute(other_err.to_string()),
         }
     }

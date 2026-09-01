@@ -121,28 +121,20 @@ fn encode_f64(env: Env<'_>, f: f64) -> Term<'_> {
 #[inline]
 pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> Term<'a> {
     match term.get_type() {
-        TermType::Atom => (atoms::atom(), term).encode(env), // e.g., {:atom, :foo}
-        TermType::Binary => {
-            match term.decode::<String>() {
-                Ok(_s_val) => {
-                    // If it's a valid Elixir string, tag as :string and pass original term
-                    (atoms::string(), term).encode(env) // e.g., {:string, "hello"}
-                }
-                _ => {
-                    // Otherwise, tag as :binary and pass original term
-                    (atoms::binary(), term).encode(env) // e.g., {:binary, <<1,2,3>>}
-                }
-            }
-        }
-        TermType::Integer => (atoms::integer(), term).encode(env), // e.g., {:integer, 123}
-        TermType::Float => (atoms::float(), term).encode(env),     // e.g., {:float, 1.23}
-        TermType::List => (atoms::list(), term).encode(env),       // e.g., {:list, [1,2]}
-        TermType::Map => (atoms::map(), term).encode(env),         // e.g., {:map, %{a: 1}}
-        TermType::Fun => (atoms::function(), term).encode(env), // e.g., {:function, &fun/0} (opaque)
-        TermType::Pid => (atoms::pid(), term).encode(env), // e.g., {:pid, #Pid<...>} (opaque)
-        TermType::Port => (atoms::port(), term).encode(env), // e.g., {:port, #Port<...>} (opaque)
-        TermType::Ref => (atoms::reference(), term).encode(env), // e.g., {:reference, #Reference<...>} (opaque)
-        TermType::Tuple => (atoms::tuple(), term).encode(env),   // e.g., {:tuple, {1,2}}
+        TermType::Atom => (atoms::atom(), term).encode(env),
+        TermType::Binary => match term.decode::<String>() {
+            Ok(_s_val) => (atoms::string(), term).encode(env),
+            _ => (atoms::binary(), term).encode(env),
+        },
+        TermType::Integer => (atoms::integer(), term).encode(env),
+        TermType::Float => (atoms::float(), term).encode(env),
+        TermType::List => (atoms::list(), term).encode(env),
+        TermType::Map => (atoms::map(), term).encode(env),
+        TermType::Fun => (atoms::function(), term).encode(env),
+        TermType::Pid => (atoms::pid(), term).encode(env),
+        TermType::Port => (atoms::port(), term).encode(env),
+        TermType::Ref => (atoms::reference(), term).encode(env),
+        TermType::Tuple => (atoms::tuple(), term).encode(env),
         TermType::Unknown => {
             (atoms::unknown(), format!("Unknown TermType: {term:?}")).encode(env)
         }
@@ -155,9 +147,7 @@ pub(crate) fn singular_ok_or_error_tuple<'a>(
     operation_result: Result<(), XqliteError>,
 ) -> Term<'a> {
     match operation_result {
-        // Returns only `:ok` to Elixir
         Ok(()) => ok().encode(env),
-        // Returns `{:error, err}` to Elixir
         Err(err) => (error(), err).encode(env),
     }
 }
@@ -188,7 +178,7 @@ pub(crate) fn process_rows<'a, 'rows>(
                 results.push(row_values);
             }
             Ok(None) => {
-                break; // End of rows
+                break;
             }
             Err(e) => return Err(e.into()),
         }
@@ -311,14 +301,13 @@ pub(crate) fn format_term_for_pragma<'a>(
                 reason: format!("{e:?}"),
             }
         }),
-        // Floats are usually not set via PRAGMA, but handle just in case
         TermType::Float => term.decode::<f64>().map(|f| f.to_string()).map_err(|e| {
             XqliteError::CannotConvertToSqliteValue {
                 value_str: format!("{term:?}"),
                 reason: format!("{e:?}"),
             }
         }),
-        // Binaries interpreted as Strings, need single quotes
+        // PRAGMA values are interpolated into SQL text — quote and escape.
         TermType::Binary => term
             .decode::<String>()
             .map(|s| format!("'{}'", s.replace('\'', "''")))
@@ -398,10 +387,8 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                     }
                 }
                 ffi::SQLITE_BLOB => {
-                    // Must copy: the raw pointer from sqlite3_column_blob is only
-                    // valid until the next sqlite3_step call. Unlike encode_val
-                    // (which receives an owned Vec<u8> and can zero-copy via
-                    // BlobResource), we must allocate an OwnedBinary and copy.
+                    // Must copy: sqlite3_column_blob's pointer is only valid
+                    // until the next sqlite3_step.
                     let b_ptr = ffi::sqlite3_column_blob(stmt_ptr, col_idx);
                     let len = ffi::sqlite3_column_bytes(stmt_ptr, col_idx) as usize;
                     if b_ptr.is_null() {
@@ -412,7 +399,6 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                                         .to_string(),
                                 }
                             })?;
-                            // For an empty OwnedBinary, no copy is needed after creation.
                             empty_bin.release(env).encode(env)
                         } else {
                             return Err(XqliteError::InternalEncodingError {
@@ -430,7 +416,6 @@ pub(crate) unsafe fn sqlite_row_to_elixir_terms(
                                 ),
                             }
                         })?;
-                        // Use deref_mut to get &mut [u8] to copy into.
                         bin.deref_mut().copy_from_slice(data_slice);
                         bin.release(env).encode(env)
                     }

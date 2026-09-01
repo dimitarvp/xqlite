@@ -151,13 +151,10 @@ pub(crate) fn read(
         // came from an i32, so both casts are lossless.
         let c_offset = offset as c_int;
         let c_len = actual_len as c_int;
-        // Read straight into the OwnedBinary we hand back — a single alloc + a
-        // single copy (was: a `vec![0; n]` staging buffer plus a second
-        // alloc+copy through `to_owned_binary`, i.e. 2 allocs / 2 memcpys and a
-        // transient 2x peak). `sqlite3_blob_read` writes exactly `actual_len`
-        // bytes on SQLITE_OK, so every byte of the freshly-allocated (and thus
-        // uninitialised) binary is filled before it can escape; on any error we
-        // drop it, never releasing it to the BEAM.
+        // Read straight into the OwnedBinary we hand back: one alloc, one copy.
+        // `sqlite3_blob_read` writes exactly `actual_len` bytes on SQLITE_OK, so
+        // every byte of the uninitialised binary is filled before it can escape;
+        // on any error we drop it, never releasing it to the BEAM.
         let mut binary = rustler::OwnedBinary::new(actual_len).ok_or_else(|| {
             XqliteError::InternalEncodingError {
                 context: "failed to allocate binary for blob read".to_string(),

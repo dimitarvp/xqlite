@@ -19,10 +19,6 @@ impl XqliteCancelToken {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ProgressHandlerGuard — RAII subscriber lifecycle on ProgressDispatch
-// ---------------------------------------------------------------------------
-//
 // The guard pushes one cancel subscriber per token onto
 // `dispatch.cancels`, holds the owning `Arc<AtomicBool>` for each
 // (so the raw pointer stored in the subscriber stays valid), and

@@ -30,10 +30,6 @@ use std::io::Cursor;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-// ---------------------------------------------------------------------------
-// Connection NIFs
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let result = Connection::open(&path);
@@ -85,10 +81,6 @@ fn db_path(handle: ResourceArc<XqliteConn>) -> Result<Option<String>, XqliteErro
         Ok(conn.path().filter(|p| !p.is_empty()).map(String::from))
     })
 }
-
-// ---------------------------------------------------------------------------
-// Query / Execute NIFs
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn query<'a>(
@@ -215,10 +207,6 @@ fn execute_batch_cancellable(
     singular_ok_or_error_tuple(env, execution_result)
 }
 
-// ---------------------------------------------------------------------------
-// EXPLAIN ANALYZE NIF
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn explain_analyze<'a>(
     env: Env<'a>,
@@ -230,10 +218,6 @@ fn explain_analyze<'a>(
         explain_analyze::core_explain_analyze(env, conn, &sql, params_term)
     })
 }
-
-// ---------------------------------------------------------------------------
-// Transaction / autocommit introspection
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn autocommit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
@@ -262,10 +246,6 @@ fn txn_state<'a>(
 
     Ok(atom.encode(env))
 }
-
-// ---------------------------------------------------------------------------
-// Busy handler
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn set_busy_policy(
@@ -321,10 +301,6 @@ fn unregister_busy_observer(
     singular_ok_or_error_tuple(env, result)
 }
 
-// ---------------------------------------------------------------------------
-// Authorizer (deny-list, single slot)
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn set_authorizer<'a>(
     env: Env<'a>,
@@ -346,10 +322,6 @@ fn remove_authorizer(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> 
     let result = connection::with_conn(&handle, authorizer::clear);
     singular_ok_or_error_tuple(env, result)
 }
-
-// ---------------------------------------------------------------------------
-// WAL checkpoint + DB status (observability)
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn wal_checkpoint<'a>(
@@ -515,10 +487,6 @@ fn connection_stats<'a>(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Cancel NIFs
-// ---------------------------------------------------------------------------
-
 #[rustler::nif]
 fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> {
     Ok(ResourceArc::new(XqliteCancelToken::new()))
@@ -529,10 +497,6 @@ fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term
     token.cancel();
     ok().encode(env)
 }
-
-// ---------------------------------------------------------------------------
-// Pragma NIFs
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn get_pragma(
@@ -590,10 +554,6 @@ fn set_pragma<'a>(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Transaction NIFs
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn begin(env: Env<'_>, handle: ResourceArc<XqliteConn>, mode: rustler::Atom) -> Term<'_> {
     let mode = match transaction::TransactionMode::from_atom(mode) {
@@ -647,10 +607,6 @@ fn release_savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String
 fn transaction_status(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
     connection::with_conn(&handle, |conn| Ok(!conn.is_autocommit()))
 }
-
-// ---------------------------------------------------------------------------
-// Schema NIFs
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_databases(
@@ -729,14 +685,6 @@ fn changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
 fn total_changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
     connection::with_conn(&handle, |conn| Ok(conn.total_changes()))
 }
-
-// ---------------------------------------------------------------------------
-// Stream NIFs
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Manual statement lifecycle NIFs (prepare / bind / step / reset / finalize)
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn stmt_prepare(
@@ -1388,10 +1336,6 @@ fn stream_fetch<'a>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Utility NIFs
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn compile_options(handle: ResourceArc<XqliteConn>) -> Result<Vec<String>, XqliteError> {
     connection::with_conn(&handle, |conn| {
@@ -1420,10 +1364,6 @@ fn sqlite_version() -> Result<String, XqliteError> {
     Ok(version_cstr.to_string_lossy().into_owned())
 }
 
-// ---------------------------------------------------------------------------
-// Log Hook NIFs (global, multi-subscriber)
-// ---------------------------------------------------------------------------
-
 #[rustler::nif]
 fn register_log_hook(env: Env<'_>, pid: rustler::LocalPid) -> Term<'_> {
     match crate::log_hook::register(pid) {
@@ -1445,10 +1385,6 @@ fn unregister_log_hook(env: Env<'_>, id: u64) -> Term<'_> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-connection multi-subscriber hooks
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn register_update_hook(
@@ -1550,10 +1486,6 @@ fn unregister_rollback_hook(
     singular_ok_or_error_tuple(env, result)
 }
 
-// ---------------------------------------------------------------------------
-// Progress hook NIFs (multi-subscriber on the progress_dispatch slot)
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn register_progress_hook(
     env: Env<'_>,
@@ -1599,10 +1531,6 @@ fn unregister_progress_hook(
     singular_ok_or_error_tuple(env, result)
 }
 
-// ---------------------------------------------------------------------------
-// Serialize / Deserialize NIFs
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn serialize<'a>(
     env: Env<'a>,
@@ -1638,10 +1566,6 @@ fn deserialize<'a>(
     });
     singular_ok_or_error_tuple(env, result)
 }
-
-// ---------------------------------------------------------------------------
-// Extension Loading NIFs
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn enable_load_extension<'a>(
@@ -1684,10 +1608,6 @@ fn load_extension<'a>(
     });
     singular_ok_or_error_tuple(env, result)
 }
-
-// ---------------------------------------------------------------------------
-// Online Backup NIFs
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn backup<'a>(
@@ -1849,10 +1769,6 @@ fn encode_query_result_with_changes<'a>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session Extension NIFs
-// ---------------------------------------------------------------------------
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn session_new<'a>(env: Env<'a>, handle: ResourceArc<XqliteConn>) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
@@ -2012,10 +1928,6 @@ fn changeset_concat<'a>(
         Err(err) => (error(), err).encode(env),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Incremental Blob I/O NIFs
-// ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn blob_open<'a>(

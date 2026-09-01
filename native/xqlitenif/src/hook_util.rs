@@ -51,10 +51,6 @@ pub(crate) unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TE
     }
 }
 
-// ---------------------------------------------------------------------------
-// Raw-FFI callback unwind guard
-// ---------------------------------------------------------------------------
-
 /// Run the body of a raw-FFI-registered SQLite C callback under
 /// `catch_unwind`, returning `fallback` if it panics.
 ///
@@ -191,10 +187,6 @@ pub(crate) fn drop_hook<T>(slot: &AtomicPtr<T>) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Multi-subscriber primitive: HookList<T>
-// ---------------------------------------------------------------------------
-
 /// One subscriber inside a `HookList<T>`. The `id` is the opaque handle
 /// returned to Elixir on register and accepted on unregister.
 #[derive(Debug)]
@@ -298,7 +290,6 @@ impl<T> HookList<T> {
             .collect();
 
         if filtered.len() == existing.len() {
-            // No matching entry; leave the list untouched.
             return false;
         }
 

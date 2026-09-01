@@ -1518,10 +1518,6 @@ defmodule XqliteNIF do
         ) :: :ok | Xqlite.error()
   def deserialize(_conn, _schema, _data, _read_only), do: err()
 
-  # ---------------------------------------------------------------------------
-  # Extension Loading
-  # ---------------------------------------------------------------------------
-
   @doc """
   Enables or disables extension loading for the given connection.
 
@@ -1548,10 +1544,6 @@ defmodule XqliteNIF do
           entry_point :: String.t() | nil
         ) :: :ok | Xqlite.error()
   def load_extension(_conn, _path, _entry_point), do: err()
-
-  # ---------------------------------------------------------------------------
-  # Online Backup
-  # ---------------------------------------------------------------------------
 
   @doc """
   Backs up the named schema to a file at `dest_path`.
@@ -1604,10 +1596,6 @@ defmodule XqliteNIF do
         ) :: :ok | Xqlite.error()
   def backup_with_progress(_conn, _schema, _dest_path, _pid, _pages_per_step, _cancel_tokens),
     do: err()
-
-  # ---------------------------------------------------------------------------
-  # Session Extension
-  # ---------------------------------------------------------------------------
 
   @doc """
   Creates a new change-tracking session on the connection.
@@ -1691,10 +1679,6 @@ defmodule XqliteNIF do
   """
   @spec changeset_concat(a :: binary(), b :: binary()) :: {:ok, binary()} | Xqlite.error()
   def changeset_concat(_a, _b), do: err()
-
-  # ---------------------------------------------------------------------------
-  # Incremental Blob I/O
-  # ---------------------------------------------------------------------------
 
   @doc """
   Opens a BLOB for incremental I/O.

@@ -35,27 +35,12 @@ defmodule Xqlite.Pragma do
   @type temp_store_key :: 0 | 1 | 2
   @type temp_store_value :: :default | :file | :memory
 
-  # ── Validation ranges ──────────────────────────────────────────────────
-
   @signed_i32 -2_147_483_648..0x7FFFFFFF
   @u32 0..0x7FFFFFFF
   @nonzero_u32 1..0x7FFFFFFF
   @bool 0..1
 
-  # ── Schema ─────────────────────────────────────────────────────────────
-  #
-  # Each pragma is described by a %PragmaSpec{} struct that carries
-  # everything needed for dispatch, validation, and post-processing:
-  #
-  #   return_type    – what GET returns (:int, :text, :bool, :list, :nothing)
-  #   read_arities   – which arities support GET ([0], [1], [0, 1], [])
-  #   schema_prefix  – whether PRAGMA db_name.pragma is allowed
-  #   writable       – whether SET is supported
-  #   valid_values   – pre-flight validation for SET (Range, list, or nil)
-  #   int_mapping    – maps raw int GET results to atoms (%{0 => :none} etc.)
-
   @schema %{
-    # ── Integer PRAGMAs ────────────────────────────────────────────────
     application_id: %PragmaSpec{
       return_type: :int,
       read_arities: [0],
@@ -164,8 +149,6 @@ defmodule Xqlite.Pragma do
       writable: true,
       valid_values: @signed_i32
     },
-
-    # ── Integer PRAGMAs with int→atom mapping ──────────────────────────
     auto_vacuum: %PragmaSpec{
       return_type: :int,
       read_arities: [0],
@@ -197,8 +180,6 @@ defmodule Xqlite.Pragma do
       valid_values: [0, 1, 2, "DEFAULT", "FILE", "MEMORY"],
       int_mapping: %{0 => :default, 1 => :file, 2 => :memory}
     },
-
-    # ── Boolean PRAGMAs ────────────────────────────────────────────────
     automatic_index: %PragmaSpec{
       return_type: :bool,
       read_arities: [0],
@@ -277,8 +258,6 @@ defmodule Xqlite.Pragma do
       writable: true,
       valid_values: @bool
     },
-
-    # ── Text PRAGMAs ──────────────────────────────────────────────────
     encoding: %PragmaSpec{
       return_type: :text,
       read_arities: [0],
@@ -311,8 +290,6 @@ defmodule Xqlite.Pragma do
       read_arities: [0, 1],
       schema_prefix: true
     },
-
-    # ── List PRAGMAs ──────────────────────────────────────────────────
     collation_list: %PragmaSpec{return_type: :list, read_arities: [0]},
     compile_options: %PragmaSpec{return_type: :list, read_arities: [0]},
     database_list: %PragmaSpec{return_type: :list, read_arities: [0]},
@@ -360,12 +337,8 @@ defmodule Xqlite.Pragma do
       read_arities: [0, 1],
       schema_prefix: true
     },
-
-    # ── Nothing PRAGMAs ───────────────────────────────────────────────
     shrink_memory: %PragmaSpec{return_type: :nothing, read_arities: [0]}
   }
-
-  # ── Derived module attributes ──────────────────────────────────────────
 
   @all @schema |> Map.keys() |> Enum.sort()
 
@@ -414,8 +387,6 @@ defmodule Xqlite.Pragma do
   @valid_write_arg_values @schema
                           |> Enum.filter(fn {_, s} -> s.writable and s.valid_values != nil end)
                           |> Map.new(fn {name, s} -> {name, s.valid_values} end)
-
-  # ── Public schema query functions ──────────────────────────────────────
 
   @doc ~S"""
   Returns a map of all supported PRAGMAs keyed by name, with `%PragmaSpec{}`
@@ -474,8 +445,6 @@ defmodule Xqlite.Pragma do
   def query_to_pragma_result({:ok, %{rows: rows}}), do: {:ok, rows}
   def query_to_pragma_result({:error, _} = err), do: err
 
-  # ── GET ────────────────────────────────────────────────────────────────
-
   @doc ~S"""
   Fetches a PRAGMA's value, optionally specifying an extra argument:
   - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra argument.
@@ -507,7 +476,6 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  # Unified dispatch: look up the spec struct, branch on its fields.
   defp do_get_no_arg(db, key, opts) do
     case Map.get(@schema, key) do
       nil -> {:error, {:unknown_pragma, key}}
@@ -515,8 +483,7 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  # int_mapping takes priority (these pragmas have return_type: :int but
-  # their raw integer result gets mapped to a descriptive atom).
+  # int_mapping wins over return_type: this clause must stay first.
   defp dispatch_get(db, key, %PragmaSpec{int_mapping: mapping}, opts) when is_map(mapping) do
     with {:ok, value} <- do_pragma_read(db, key, opts) do
       case Map.get(mapping, value) do
@@ -556,8 +523,6 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  # ── Convenience getters ────────────────────────────────────────────────
-
   @doc "Returns the list of indexes for the given table."
   @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_list(db, name, opts \\ []), do: get(db, :index_list, name, opts)
@@ -577,8 +542,6 @@ defmodule Xqlite.Pragma do
   @doc "Returns extended column information for the given table, including hidden and generated columns."
   @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_xinfo(db, name, opts \\ []), do: get(db, :table_xinfo, name, opts)
-
-  # ── PUT ────────────────────────────────────────────────────────────────
 
   @doc ~S"""
   Changes a PRAGMA's value.
@@ -623,8 +586,6 @@ defmodule Xqlite.Pragma do
       {:error, {:invalid_pragma_value, %{pragma: key_atom, value: val}}}
     end
   end
-
-  # ── Private helpers ────────────────────────────────────────────────────
 
   defp do_pragma_read(db, key, opts) do
     case Keyword.get(opts, :db_name) do
@@ -709,7 +670,7 @@ defmodule Xqlite.Pragma do
   defp format_pragma_value(:off), do: "OFF"
   defp format_pragma_value(val) when is_atom(val), do: Atom.to_string(val)
 
-  # Validates a SET value against the spec. nil spec (unknown pragma) passes through.
+  # A nil spec means an unknown pragma — pass it through unvalidated.
   defp valid_pragma_value?(nil, _val), do: true
   defp valid_pragma_value?(%PragmaSpec{valid_values: nil}, _val), do: true
 

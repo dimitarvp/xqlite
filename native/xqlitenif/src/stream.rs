@@ -9,8 +9,7 @@ use std::os::raw::c_int;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub(crate) struct XqliteStream {
-    // This AtomicPtr holds the raw SQLite statement.
-    // If it's null_mut(), the stream is considered done/closed/finalized.
+    // Null means the stream is done/closed/finalized.
     pub(crate) atomic_raw_stmt: AtomicPtr<ffi::sqlite3_stmt>,
 
     // These are immutable after stream_open completes
@@ -22,9 +21,6 @@ pub(crate) struct XqliteStream {
 impl Resource for XqliteStream {}
 
 impl XqliteStream {
-    // Helper performs the atomic swap and finalization.
-    // Called by Drop and by stream_close NIF.
-    // It is pub(crate) for use by nif.rs.
     pub(crate) fn take_and_finalize_atomic_stmt(&self) -> Result<(), XqliteError> {
         take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc)
     }
@@ -38,7 +34,6 @@ pub(crate) fn take_and_finalize_raw(
     atomic_raw_stmt: &AtomicPtr<ffi::sqlite3_stmt>,
     conn_resource_arc: &ResourceArc<XqliteConn>,
 ) -> Result<(), XqliteError> {
-    // Atomically swap the current pointer with null_mut(), getting the old pointer.
     // Ordering::AcqRel ensures that this operation synchronizes with other atomic
     // operations on other threads: acquire for the read (load of old value)
     // and release for the write (store of null_mut).
@@ -71,8 +66,6 @@ pub(crate) fn take_and_finalize_raw(
 
 impl Drop for XqliteStream {
     fn drop(&mut self) {
-        // Call the helper method to take and finalize the statement.
-        // `&mut self` allows access to `&self.atomic_raw_stmt` and `&self.conn_resource_arc`.
         if let Err(e) = self.take_and_finalize_atomic_stmt() {
             // Errors from Drop cannot be propagated. Log to stderr —
             // writeln!, never eprintln!: eprintln! panics on a broken

@@ -86,8 +86,6 @@ defmodule Xqlite.Telemetry.Bridge do
     {:noreply, state}
   end
 
-  # --- Bridge construction ----------------------------------------------------
-
   # Branch at compile time (same switch `Xqlite.Telemetry` itself uses):
   # a runtime `if Xqlite.Telemetry.enabled?()` trips Elixir 1.20's type
   # checker in disabled builds (the condition is provably false), and the
@@ -157,7 +155,6 @@ defmodule Xqlite.Telemetry.Bridge do
             {:cont, {:ok, [{hook, handle} | acc]}}
 
           {:error, _} = err ->
-            # Roll back any handles we already registered before this failure.
             Enum.each(acc, fn {h, hh} -> unregister_hook({:conn, conn}, h, hh) end)
             if Process.alive?(pid), do: GenServer.stop(pid, :normal, 1_000)
             {:halt, err}
@@ -204,8 +201,6 @@ defmodule Xqlite.Telemetry.Bridge do
     def bridge_log_global(opts) when is_list(opts), do: {:error, :telemetry_disabled}
   end
 
-  # --- Teardown --------------------------------------------------------------
-
   @doc false
   def unbridge(%__MODULE__{pid: pid, scope: scope, hook_handles: handles}) do
     Enum.each(handles, fn {hook, handle} ->
@@ -218,8 +213,6 @@ defmodule Xqlite.Telemetry.Bridge do
 
     :ok
   end
-
-  # --- Internal helpers ------------------------------------------------------
 
   defp unregister_hook({:conn, conn}, :wal, handle), do: NIF.unregister_wal_hook(conn, handle)
 
@@ -239,8 +232,6 @@ defmodule Xqlite.Telemetry.Bridge do
     do: NIF.unregister_progress_hook(conn, handle)
 
   defp unregister_hook(:log, :log, handle), do: NIF.unregister_log_hook(handle)
-
-  # --- Hook message → telemetry ---------------------------------------------
 
   defp handle_hook_message({:xqlite_wal, db_name, pages}, state) do
     Xqlite.Telemetry.emit(

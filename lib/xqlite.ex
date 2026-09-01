@@ -9,10 +9,6 @@ defmodule Xqlite do
   @type conn :: reference()
   @type stmt :: reference()
 
-  # ---------------------------------------------------------------------------
-  # Connection options (validated via NimbleOptions)
-  # ---------------------------------------------------------------------------
-
   @open_opts_schema NimbleOptions.new!(
                       journal_mode: [
                         type: {:in, [:wal, :delete, :truncate, :memory, :off]},
@@ -79,25 +75,13 @@ defmodule Xqlite do
     :mmap_size
   ]
 
-  # ---------------------------------------------------------------------------
-  # SQLite value types
-  # ---------------------------------------------------------------------------
-
   @type sqlite_value :: integer() | float() | binary() | nil
-
-  # ---------------------------------------------------------------------------
-  # Query / execute result types
-  # ---------------------------------------------------------------------------
 
   @type query_result :: %{
           columns: [String.t()],
           rows: [[sqlite_value()]],
           num_rows: non_neg_integer()
         }
-
-  # ---------------------------------------------------------------------------
-  # Error reason types (the inner value of {:error, reason})
-  # ---------------------------------------------------------------------------
 
   @type constraint_kind ::
           :constraint_check
@@ -193,10 +177,6 @@ defmodule Xqlite do
   option for the per-mode element shapes.
   """
   @type stream_on_error :: :raise | :halt | :emit_error
-
-  # ---------------------------------------------------------------------------
-  # Connection opening with validated options
-  # ---------------------------------------------------------------------------
 
   @doc """
   Opens a database connection with opinionated defaults and validated options.
@@ -432,10 +412,6 @@ defmodule Xqlite do
   defp set_pragma_value(conn, key, value),
     do: XqliteNIF.set_pragma(conn, Atom.to_string(key), value)
 
-  # ---------------------------------------------------------------------------
-  # STRICT table operations
-  # ---------------------------------------------------------------------------
-
   @doc """
   Checks an existing table for values that would violate STRICT typing rules.
 
@@ -563,8 +539,7 @@ defmodule Xqlite do
   defp rebuild_as_strict(conn, table, original_create_sql) do
     tmp_table = "#{table}_xqlite_strict_rebuild"
 
-    # The CREATE SQL from sqlite_master uses the original table name
-    # (quoted or unquoted). Replace all forms: bare, double-quoted, backtick-quoted.
+    # sqlite_master stores the table name bare, double-quoted, or backtick-quoted.
     strict_sql =
       original_create_sql
       |> String.replace(~r/\)\s*(STRICT)?\s*$/, ") STRICT")
@@ -932,10 +907,6 @@ defmodule Xqlite do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Manual statement lifecycle
-  # ---------------------------------------------------------------------------
-
   @doc """
   Prepares a manually managed statement.
 
@@ -1077,10 +1048,6 @@ defmodule Xqlite do
   @spec finalize(stmt()) :: :ok | error()
   def finalize(stmt), do: XqliteNIF.stmt_finalize(stmt)
 
-  # ---------------------------------------------------------------------------
-  # Backup / serialize / deserialize
-  # ---------------------------------------------------------------------------
-
   @doc """
   Serializes a database to a contiguous binary.
 
@@ -1208,10 +1175,6 @@ defmodule Xqlite do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Extension loading
-  # ---------------------------------------------------------------------------
-
   @doc """
   Loads a SQLite extension from the shared library at `path`.
 
@@ -1258,10 +1221,6 @@ defmodule Xqlite do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # WAL checkpoint
-  # ---------------------------------------------------------------------------
-
   @doc """
   Performs a WAL checkpoint on the connection.
 
@@ -1292,10 +1251,6 @@ defmodule Xqlite do
       end
     end
   end
-
-  # ---------------------------------------------------------------------------
-  # Pragma get / set
-  # ---------------------------------------------------------------------------
 
   @doc """
   Reads a PRAGMA value from the connection.
@@ -1344,10 +1299,6 @@ defmodule Xqlite do
         err
     end
   end
-
-  # ---------------------------------------------------------------------------
-  # Busy handler / busy timeout
-  # ---------------------------------------------------------------------------
 
   @doc """
   Sets the busy retry POLICY on the connection.
@@ -1464,10 +1415,6 @@ defmodule Xqlite do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Authorizer (deny-list, single slot)
-  # ---------------------------------------------------------------------------
-
   @doc """
   Installs a deny-list authorizer on the connection.
 
@@ -1545,10 +1492,6 @@ defmodule Xqlite do
   @spec remove_authorizer(conn()) :: :ok | error()
   def remove_authorizer(conn), do: XqliteNIF.remove_authorizer(conn)
 
-  # ---------------------------------------------------------------------------
-  # Progress hook (multi-subscriber on the progress_handler slot)
-  # ---------------------------------------------------------------------------
-
   @doc """
   Registers a progress-tick subscriber on the connection.
 
@@ -1601,10 +1544,6 @@ defmodule Xqlite do
   def unregister_progress_hook(conn, handle) when is_integer(handle) do
     XqliteNIF.unregister_progress_hook(conn, handle)
   end
-
-  # ---------------------------------------------------------------------------
-  # Cancellable wrappers — accept either a single token or a list
-  # ---------------------------------------------------------------------------
 
   @doc """
   Creates a cancellation token. Emits `[:xqlite, :cancel, :token_created]`.
@@ -1870,10 +1809,6 @@ defmodule Xqlite do
     )
   end
 
-  # ---------------------------------------------------------------------------
-  # Transactions (telemetry-instrumented thin wrappers)
-  # ---------------------------------------------------------------------------
-
   @doc """
   Begins a transaction in the given mode (`:deferred`, `:immediate`, or
   `:exclusive`). Emits `[:xqlite, :transaction, :begin]` telemetry.
@@ -2025,10 +1960,6 @@ defmodule Xqlite do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Transaction state
-  # ---------------------------------------------------------------------------
-
   @doc """
   Returns whether the connection is currently inside a transaction.
 
@@ -2062,10 +1993,6 @@ defmodule Xqlite do
           {:ok, :none | :read | :write | :unknown} | error()
   def txn_state(conn, schema \\ nil) when is_binary(schema) or is_nil(schema),
     do: XqliteNIF.txn_state(conn, schema)
-
-  # ---------------------------------------------------------------------------
-  # Connection introspection
-  # ---------------------------------------------------------------------------
 
   @doc """
   Returns the rowid of the most recent successful `INSERT` on this
@@ -2131,10 +2058,6 @@ defmodule Xqlite do
   """
   @spec sqlite_version() :: {:ok, String.t()} | error()
   def sqlite_version, do: XqliteNIF.sqlite_version()
-
-  # ---------------------------------------------------------------------------
-  # Schema introspection
-  # ---------------------------------------------------------------------------
 
   @doc """
   Lists all databases attached to the connection as
@@ -2214,10 +2137,6 @@ defmodule Xqlite do
   @spec get_create_sql(conn(), String.t()) :: {:ok, String.t() | nil} | error()
   def get_create_sql(conn, object_name) when is_binary(object_name),
     do: XqliteNIF.get_create_sql(conn, object_name)
-
-  # ---------------------------------------------------------------------------
-  # Internal helpers
-  # ---------------------------------------------------------------------------
 
   defp params_count(params) when is_list(params), do: length(params)
   defp params_count(_), do: 0

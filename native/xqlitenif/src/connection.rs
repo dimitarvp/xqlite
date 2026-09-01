@@ -190,7 +190,6 @@ pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), X
         .conn
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    // .take() drops the Connection, releasing the SQLite handle immediately.
     // Second close is a no-op — .take() on None returns None.
     conn_guard.take();
     Ok(())

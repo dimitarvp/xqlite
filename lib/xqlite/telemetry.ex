@@ -304,8 +304,9 @@ defmodule Xqlite.Telemetry do
     @doc """
     Emit a single telemetry event.
 
-    Wraps `:telemetry.execute/3`. When telemetry is compiled out,
-    expands to a no-op (the arguments are not evaluated).
+    Wraps `:telemetry.execute/3`. When telemetry is compiled out, the
+    arguments are still evaluated and then discarded — no `:telemetry`
+    call happens.
     """
     defmacro emit(event_name, measurements, metadata) do
       quote do
@@ -350,22 +351,17 @@ defmodule Xqlite.Telemetry do
       end
     end
   else
-    # Disabled-mode macros: still evaluate the AST arguments so that
-    # variables referenced in the call site stay "used" from the
-    # compiler's perspective (no unused-variable warnings on bindings
-    # that exist only to feed measurements / metadata maps). The
-    # evaluated values are immediately discarded — no `:telemetry`
-    # call ever happens. Cost: constructing the measurement / metadata
-    # maps anyway. Typical maps are small; the cost is sub-microsecond.
-    # If a future use case demands zero-cost-even-on-arg-eval, we can
-    # switch to a per-callsite `if Xqlite.Telemetry.enabled?() do`
-    # pattern. For now, this keeps call sites clean and reads nicely.
+    # Disabled-mode macros still evaluate their arguments: bindings that
+    # exist only to feed measurement / metadata maps would otherwise trip
+    # the unused-variable warning, which is an error here. The values are
+    # discarded — no `:telemetry` call ever happens.
 
     @doc """
     Emit a single telemetry event.
 
     Wraps `:telemetry.execute/3`. When telemetry is compiled out,
-    expands to a no-op (the arguments are not evaluated).
+    expands to a no-op that still evaluates the arguments and discards
+    their values.
     """
     defmacro emit(event_name, measurements, metadata) do
       quote do
@@ -423,10 +419,6 @@ defmodule Xqlite.Telemetry do
   """
   @spec monotonic_time() :: integer()
   def monotonic_time, do: System.monotonic_time(:nanosecond)
-
-  # ---------------------------------------------------------------------------
-  # Hook → telemetry bridge
-  # ---------------------------------------------------------------------------
 
   @doc """
   Bridges per-connection hook deliveries into `:telemetry` events.

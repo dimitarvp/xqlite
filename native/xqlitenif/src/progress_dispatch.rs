@@ -206,7 +206,6 @@ unsafe extern "C" fn progress_dispatch_callback(user_data: *mut c_void) -> c_int
             return 1;
         }
 
-        // Tick pass second: only if there are tick subscribers AT ALL.
         if !dispatch.ticks.is_empty() {
             // SAFETY: see above.
             unsafe {

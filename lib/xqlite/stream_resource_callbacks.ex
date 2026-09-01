@@ -2,7 +2,6 @@ defmodule Xqlite.StreamResourceCallbacks do
   @moduledoc false
 
   # Callbacks for implementing Xqlite.stream/4 via Stream.resource/3.
-  # This module is not intended for direct use.
 
   import Xqlite.Telemetry, only: [emit: 3]
 
@@ -43,19 +42,17 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp open_stream(conn, sql, params, opts, on_error) do
     case NIF.stream_open(conn, sql, params, []) do
       {:ok, handle} ->
-        # stream_open succeeded, now try to get columns.
         case NIF.stream_get_columns(handle) do
           {:ok, columns} ->
             {:ok, build_acc(handle, columns, opts, on_error)}
 
           {:error, _reason} = error ->
-            # stream_get_columns failed. We MUST close the handle we just opened.
+            # Nothing else owns the handle yet — close it or it leaks.
             NIF.stream_close(handle)
             error
         end
 
       {:error, _reason} = error ->
-        # stream_open failed. Nothing to clean up, just return the error.
         error
     end
   end
@@ -106,20 +103,15 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp shape_rows(mapped_rows, :emit_error), do: Enum.map(mapped_rows, &{:ok, &1})
   defp shape_rows(mapped_rows, _on_error), do: mapped_rows
 
-  # :raise (default) — surface the structured reason as an exception so a
-  # mid-fetch failure cannot masquerade as a completed stream.
   defp handle_fetch_error(reason, %{on_error: :raise}) do
     raise Xqlite.StreamError, reason: reason
   end
 
-  # :halt (opt-in, LOSSY) — Stream.resource/3 cannot hand the error to the
-  # consumer, so log and silently truncate the result set.
   defp handle_fetch_error(reason, %{on_error: :halt} = acc) do
     Logger.error("Error fetching from Xqlite stream: #{inspect(reason)}")
     {:halt, acc}
   end
 
-  # :emit_error — yield a terminal tagged error, then halt on the next callback.
   defp handle_fetch_error(reason, %{on_error: :emit_error} = acc) do
     {[{:error, reason}], %{acc | errored?: true}}
   end

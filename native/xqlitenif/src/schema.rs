@@ -489,10 +489,6 @@ fn int_flag_to_bool(val: i64, context: &str, name: &str) -> Result<bool, XqliteE
     }
 }
 
-// ---------------------------------------------------------------------------
-// Temporary structs for intermediate parsing results
-// ---------------------------------------------------------------------------
-
 #[derive(Debug)]
 struct TempObjectInfo {
     schema: String,
@@ -543,10 +539,6 @@ struct TempIndexColumnData {
     coll: String,
     key: i64,
 }
-
-// ---------------------------------------------------------------------------
-// Schema logic functions (called from NIF wrappers)
-// ---------------------------------------------------------------------------
 
 pub(crate) fn databases(conn: &Connection) -> Result<Vec<DatabaseInfo>, XqliteError> {
     let mut stmt = conn.prepare("PRAGMA database_list;")?;

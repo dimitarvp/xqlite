@@ -110,8 +110,6 @@ pub fn core_explain_analyze<'a>(
     }
 }
 
-// --- private ---------------------------------------------------------------
-
 /// # Safety
 /// `stmt_ptr` must be non-null and point to a prepared statement on `db_handle`.
 /// The connection Mutex must be held for the duration of this call.
@@ -384,8 +382,6 @@ impl StmtCounters {
         }
     }
 }
-
-// --- encoding to Elixir -----------------------------------------------------
 
 /// Finalizes a chained `map_put` build. A map-build failure is practically
 /// unreachable (the receiver is always a map), but degrade it to a structured
