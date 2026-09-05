@@ -1,163 +1,200 @@
 # xqlite
 
-Low-level Elixir NIF library for SQLite3 via Rust (rusqlite 0.40 + Rustler 0.38). Bundled SQLite — no native install required.
+A low-level Elixir library over SQLite. `lib/` is Elixir;
+`native/xqlitenif/` is a Rust crate Rustler compiles into a NIF library;
+SQLite itself comes bundled through rusqlite, never from the system. The
+sibling repository `xqlite_ecto3` is the Ecto adapter on top: each
+release pins one xqlite minor series at patch level (`~> X.Y.0`); xqlite
+is pre-1.0, so its minor carries the breaking changes. Versions live in
+`mix.exs` and `Cargo.toml`, the shipped binaries in `release.yml`.
 
-## Build & Test
-
-**NON-NEGOTIABLE: Run `mix verify` before every commit.** This runs all CI checks locally (formatting, compilation warnings, dependency audit, sobelow, clippy, dialyzer, tests) and stops on the first failure. Never commit without a passing `mix verify`.
+## Build and test
 
 ```bash
-mix deps.get          # fetches Elixir deps + triggers Rust NIF compilation
-mix verify            # REQUIRED before every commit: all CI checks in one command
-mix test.seq          # runs tests sequentially, one file at a time (see Gotchas)
-cargo fmt --manifest-path native/xqlitenif/Cargo.toml
-cargo clippy --manifest-path native/xqlitenif/Cargo.toml -- -D warnings
-mix format
-mix compile --warnings-as-errors
-mix dialyzer          # PLT cached in priv/plts/
+mix verify     # the whole gate; run it before every commit
+mix test.seq   # the whole suite, one OS process per test file
+mix format     # Quokka-enforced: rewrites style, not only layout
 ```
 
-Always use `mix test.seq` to run tests — no arguments, always the full suite. It runs everything sequentially (one file per OS process). Never use `mix test` directly.
+`mix verify` (`lib/mix/tasks/verify.ex`) stops at the first failure and
+runs Elixir and Rust formatting, a warnings-as-errors compile,
+`mix deps.audit`, sobelow, clippy, `cargo test`, dialyzer, `mix test.seq`
+and the verify stamp; its cargo steps run from `native/xqlitenif`, where
+cargo finds `.cargo/config.toml`.
 
-### Warnings-as-errors doctrine (absolute, irrevocable)
+**Verify, then commit, with nothing in between.** The stamp step writes
+`_build/verify.stamp`, a fingerprint over every file git tracks or does
+not ignore (`scripts/tree_fingerprint.exs`), and `git commit` is denied
+unless the tree still matches it: any edit afterwards, Markdown included,
+means verifying again. Verify is slow, so run it in a background shell
+writing its exit code to a file; the committing script's first statement
+is `[ "$(cat "$EXIT")" = 0 ] || exit 1`. Never pipe a gate through `tail`
+or `rg` — a pipeline reports only the last exit code, hiding a failure.
 
-Every Elixir compiler warning is an error, everywhere: `lib/` via `elixirc_options: [warnings_as_errors: true]` in `mix.exs`, and test `.exs` files via the `:test` alias (`test: "test --warnings-as-errors"`), which every `test.seq` child invocation inherits. If code fights the compiler (Elixir 1.20 type checker included), the compiler wins — satisfy it, never suppress or argue.
-Cache test output in temp files (e.g., `mix test.seq 2>&1 > /tmp/test_output.txt`) to avoid parsing long inline output.
+Run tests only as `mix test.seq`: no arguments, the whole suite, output
+to a file. Every compiler warning is an error — `mix.exs` sets
+`elixirc_options: [warnings_as_errors: true]` for `lib/` and a `test`
+alias adding `--warnings-as-errors`, inherited by each child run; the
+compiler always wins. `async: false` is banned (a test touching global
+state survives concurrent access instead) and no test is skipped on a
+supported platform. NIF tests go inside the compile-time `for` over
+`connection_openers()` in `test/support/`.
 
-### Property tests (stream_data)
+## Property tests: laws, not pins
 
-`max_runs` is at least **2000** per property — low hundreds is too low.
-Size-driven generators must be capped with `StreamData.scale/2`:
-`StreamData.float/0` in particular costs time quadratic in its size
-parameter, and size climbs by one per successful run, so an uncapped
-2000-run property spends its time inside the generator's power-of-two
-table instead of the test (symptom: ExUnit 60s timeouts with stacks in
-`StreamData.power_of_two/1`).
+Every invariant gets a StreamData property, not a handful of examples:
+text forms and encodings, name derivations, parsers, affinity and type
+rules, error-shape unions, schedules, value-preserving rewrites. An
+example asserts one input, a law asserts the rule over a whole generated
+domain. `max_runs` is at least 2000, and a property runs in seconds — if
+it takes minutes, shrink the domain, never the meaning. Cap size-driven
+generators with `StreamData.scale/2`: `float/0` costs time quadratic in
+the size parameter and size grows by one per run, so an uncapped one
+spends its budget inside the generator.
 
-### `async: false` is banned
+Build hostile domains on purpose — NUL bytes, invalid UTF-8, quotes,
+empty and oversized values, boundary integers — and use SQLite itself as
+the oracle where a round trip can be compared. Keep one example test
+beside each law as the anchor that fails first; golden SQL strings
+accompany a law, never replace it. No environment-specific assertions:
+wide timing windows, structured shapes over POSIX atoms, a reason on any
+exclusion.
 
-Never use `async: false` in any test module. Grepping for `async: false` must always yield zero results. All tests must use `async: true`. If a test touches global state (e.g., the log hook), design it to be resilient to concurrent access — don't serialize. The only exception would be empirically proven flaky tests or internal SQLite state corruption, but no such case exists today.
+## Elixir rules
 
-### Test pattern: compile-time `for` over connection openers
+- `XqliteNIF` holds raw NIF stub declarations only, every body `err()`;
+  helpers, defaults and wrappers live in `Xqlite`. A stub's name equals
+  the Rust function's; a convenience wrapper is its own `Xqlite` function.
+- No early returns: `case`, `with`, pattern matching, and a `with`
+  clause's right-hand side stays simple — extract anything complex.
+- `:ok` / `:error` tuples only: no raise, throw or rescue, and no
+  implicit crash either — an anonymous function that destructures
+  (`fn {k, v} -> ... end`) needs a fallthrough clause.
+- Never `elem/1` — pattern-match. Never `String.to_existing_atom` with a
+  rescue — use a compile-time map. Never `f(g(a), b)` — pipe, in chains
+  of two or more steps (`f(a, b)`, not `a |> f(b)`); long chains stay.
+- Short functions, low branching, split aggressively; and the smallest
+  diff that does the job — do not touch code you were not asked to.
+- Never assert on error message text, only on structured atoms and
+  fields; nothing structured to match on means the error struct needs
+  fixing. Parameter dispatch (keyword list versus positional) mirrors
+  `native/xqlitenif/src/util.rs:is_keyword`, never re-checked in Elixir.
 
-NIF tests use a compile-time `for` loop over `connection_openers()` so every test runs against all SQLite connection modes (in-memory, file-backed, etc.). New NIF tests **must** go inside the `for` loop's `describe` block — never as standalone top-level tests with a hardcoded `NIF.open_in_memory()`. The only exception is truly isolated edge cases that test a single narrow behavior unrelated to connection mode.
+## Structured errors
 
-## Project Structure
+Every error carries the most specific structured information available: a
+tagged tuple or a struct with typed fields, never a bare `:error`, never
+details swallowed into a generic wrapper. Out-of-range or invalid input
+from Elixir is rejected with a structured error, never clamped or
+silently defaulted.
 
-- `lib/xqlite.ex` — high-level API: every ergonomic wrapper (open/close, query/execute, transactions + state readers, statements, schema introspection, busy policy/observers, backup/serialize, strict mode, FK enforcement)
-- `lib/xqlite/xqlitenif.ex` — raw NIF stub declarations (97 stubs, body always `err()`)
-- `lib/xqlite/pragma.ex` + `pragma_spec.ex` — typed PRAGMA schema + getters/setters
-- `lib/xqlite/telemetry.ex`, `telemetry/bridge.ex`, `telemetry/open_telemetry.ex` — compile-time-gated telemetry macros, hook→telemetry bridge GenServer, OTel semantic-convention attribute mapping
-- `lib/xqlite/type_extension.ex` + `type_extension/*.ex` — bidirectional type-extension behaviour + 9 built-ins
-- `lib/xqlite/result.ex`, `explain_analyze.ex` — result structs (`Result` implements `Table.Reader`)
-- `lib/xqlite/stream_resource_callbacks.ex` — Stream.resource/3 callbacks (internal)
-- `lib/xqlite/schema/` — struct modules (ColumnInfo, DatabaseInfo, etc.)
-- `lib/mix/tasks/` — `verify` (the pre-commit gate) + `test_seq` (sequential test runner)
-- `native/xqlitenif/src/` — Rust NIF crate (25 files, ~7.7k lines):
-  - `nif.rs` (ALL 97 `#[rustler::nif]` functions, ~2100 lines), `lib.rs` (atoms, module declarations)
-  - resources: `connection.rs`, `statement.rs`, `stream.rs`, `blob.rs`, `session.rs`, `cancel.rs`
-  - hooks & callbacks: `hook_util.rs`, `update_hook.rs`, `wal_hook.rs`, `commit_hook.rs`, `rollback_hook.rs`, `log_hook.rs`, `progress_dispatch.rs`, `busy_handler.rs`, `authorizer.rs`
-  - `error.rs` + `constraint_parse.rs` (error classification), `schema.rs` (introspection + default-value classifier), `explain_analyze.rs`, `query.rs`, `pragma.rs`, `transaction.rs`, `util.rs` (param conversion, row processing)
-- `scripts/release.sh` — semi-manual version bump script (amends commits, force-updates tags)
-- The review program's records (ledger, axes, backlog, probe harnesses) live outside this repo in `~/kod/xqlite-review-ledgers/xqlite/`
+Classification never parses message text. Two exceptions: the
+constraint-message parser `native/xqlitenif/src/constraint_parse.rs`, and
+four name-prefix arms in `error.rs:classify_sqlite_error` (`no such
+table`, `no such index`, `table … already exists`, `index … already
+exists`). Both are listed in the error-text exceptions index (see
+Pointers), updated whenever an arm is added or removed.
 
-## Architecture
+## Rust rules
 
-- Thread safety: `Mutex<Connection>` per connection handle (inside `ResourceArc`, which provides `Arc` semantics). Serialized access is intentional — read concurrency belongs in the Ecto adapter layer (pool of independent handles).
-- **CRITICAL — raw handle locking rule:** Every call to a `sqlite3_*` C function — `sqlite3_step`, `sqlite3_finalize`, `sqlite3_column_*`, `sqlite3_bind_*`, `sqlite3_errmsg`, ALL of them — MUST hold the connection `Mutex` for its entire duration. `AtomicPtr` swap gives exclusive *pointer ownership* but NOT exclusive *connection access*. These are two different things. A thread can own a pointer via atomic swap while another thread is mid-`sqlite3_step` on the same connection — that's a data race and a BEAM segfault. We shipped this bug once in `take_and_finalize_atomic_stmt` (called `sqlite3_finalize` without the lock). Never again.
-- Streams: `ResourceArc` wraps struct, `AtomicPtr` manages raw `sqlite3_stmt` for lock-free batch iteration. Deliberate unsafe FFI — requires safety audits.
-- Cancellation: SQLite progress handler, checked every 8 VM steps (hardcoded, un-tuned). Token is `Arc<AtomicBool>`.
-- Error handling: comprehensive Rust→Elixir mapping. Constraint violations get specific atoms. Fallback: `{:sqlite_failure, code, extended_code, message}`.
-- **`sqlite3_changes()` is sticky.** Per SQLite docs: "Executing any other type of SQL statement does not modify the value returned by these functions." This means `changes/1` returns the last DML's count even after SELECT, DDL, or PRAGMA — it never resets to 0 on its own. The two-call pattern (`query` then `changes`) is therefore unreliable after non-DML statements. `query_with_changes/3` solves this by capturing `sqlite3_changes()` inside the Mutex hold, reporting it only when `sqlite3_total_changes()` moved across the statement and 0 otherwise (an empty-columns heuristic was wrong twice: RETURNING DML has columns yet changes rows; DDL/PRAGMA has none yet must not leak the stale count).
+- Every `#[rustler::nif]` function lives in `nif.rs`; resource structs
+  and per-topic logic live in their own module. Reach atoms through the
+  `atoms::` prefix, never imported locally; `#[inline]` on per-row helpers.
+- **Every `sqlite3_*` C call holds the connection `Mutex` for its whole
+  duration.** An `AtomicPtr` swap gives ownership of the pointer, not
+  access to the connection: another thread can be inside `sqlite3_step`
+  on it, a data race that crashes the VM. `nif.rs:stream_fetch` keeps its
+  lock across the whole batch loop.
+- Crashless Rust: no `unwrap`, `expect`, `panic!`, out-of-bounds
+  indexing, or `unwrap_or*` on a caller's number — return a structured
+  error. The crate has none today; a new one is justified in review.
+- Every `unsafe` block carries a `// SAFETY:` comment stating what makes
+  it sound (`lib.rs` warns on undocumented ones), and `clippy.toml` sets
+  `check-private-items = true`: a private `unsafe fn` needs `# Safety`.
+- Never add `sqlite3_interrupt`: cancellation runs through the progress
+  handler, so it is per operation and needs no connection handle.
+- Keep the bundled SQLite, never a system library: libsqlite3-sys's
+  bundled build always passes `-DSQLITE_ENABLE_API_ARMOR`, turning C-API
+  misuse into `SQLITE_MISUSE` instead of a crash beneath our raw
+  pointers, and a system build may lack it. Never add a flag disabling
+  it; `.cargo/config.toml` adds one flag, `SQLITE_ENABLE_STMT_SCANSTATUS`.
+- The Rust `Mutex<Connection>` and rusqlite's `SQLITE_OPEN_NO_MUTEX` are
+  complementary: `Connection` is `!Sync` so the Mutex is required anyway,
+  and dropping SQLite's own mutex is safe because it serializes calls.
 
-## Gotchas (hard-won lessons)
+## Comments, commits, pull requests
 
-1. **SQLite "out of memory" is really shared-globals contention.** `bundled` feature = statically-linked SQLite = one set of process-global C structures (VFS list, allocator, page cache, PRNG, memstatus counter, temp-file namespace) per loaded NIF library, i.e. per OS process. Parallel test processes **contend on** that shared state regardless of DB-file isolation (the openers are already isolated — private `:memory:` + per-test temp files — so the shared globals are the only common surface). The symptom is a spurious "out of memory", which is **contention / resource-exhaustion, not memory corruption** — `THREADSAFE=1` + `MUTEX_PTHREADS` mutex-protects the globals, so this is not UB (re-derived, axis A14 / Run 12; the older "corrupt global C state" phrasing overstated it). `mix test.seq` gives each test file its OWN OS process — its own SQLite globals — removing the shared surface entirely. This is the permanent solution.
-2. **Error code confusion.** `rusqlite::ffi::ErrorCode::DatabaseBusy` enum = 3, but C constant `SQLITE_BUSY` = 5. Error matching in `error.rs` must use `ffi_err.extended_code & 0xFF` against C-level constants.
-3. **Rustler zero-arity NIFs.** Rustler doesn't auto-create zero-arity Elixir wrappers for Rust NIFs with default args. Must define explicitly in Elixir (e.g., `open_in_memory/0` calling the 1-arity NIF).
-4. **GHA cache split-brain.** Each CI job must: checkout code, download artifacts, run `mix deps.get`. Passing state via artifacts alone breaks lockfile checks.
-5. **`dtonlay/rust-toolchain` defaults.** Minimal toolchain — must explicitly request `components: rustfmt, clippy`.
-6. **Version string for release tools.** Tools like `versioce` can't parse `@version` module attributes in `mix.exs`. Version must be a string literal in `project/0`.
-7. **Triple version bump.** Version must be updated in `mix.exs` (project version), `native/xqlitenif/Cargo.toml`, and `mix.exs` (`source_ref` in `docs/0`) simultaneously. Always commit them together.
-8. **No paid GHA runners.** OSS project — never use `-large`, `-xlarge`, or any paid runner labels. Use free-tier runners and cross-compile where needed (e.g., `x86_64-apple-darwin` from ARM64 `macos-15`).
-9. **Checksum generation requires `--no-config`.** `mix rustler_precompiled.download XqliteNIF --all --print --no-config` — without `--no-config`, compilation triggers the `use RustlerPrecompiled` macro which fails if the checksum file doesn't exist yet.
-10. **Local source builds via `.envrc`.** `.envrc` sets `XQLITE_BUILD=true` so `rustler_precompiled` always compiles from Rust source locally. The `.envrc` is gitignored. Version strings in `mix.exs` and `Cargo.toml` stay at the released version — only bump them on release day (see Release Checklist).
-11. **macOS `tar` doesn't support `--wildcards`.** The `philss/rustler-precompiled-action` tries to install `cross` on all runners. Use `cross-version: "from-source"` and omit `use-cross` for non-cross targets to avoid the macOS tar failure.
-12. **NIF version features in `Cargo.toml`.** Rustler (since 0.37) requires explicit cargo features (`nif_version_2_15`/`2_16`/`2_17`) for precompilation. The `rustler-precompiled-action` activates them at build time.
-13. **Delete old checksum file before regenerating.** `mix rustler_precompiled.download --all` won't overwrite stale entries from a prior version. Always `rm -f checksum-Elixir.XqliteNIF.exs` first. If `mix hex.publish` still fails with a checksum mismatch, `--only-local` can add just the local platform's entry.
-14. **rusqlite upgrades touch `error.rs` first.** Historical example: PR #1819 changed `Error::Utf8Error(err)` → `Error::Utf8Error(col, err)` and replaced `From<ValueRef> for Value` with `TryFrom` (absorbed in our 0.39 upgrade). When bumping rusqlite, expect the `From<RusqliteError>` match in `error.rs` to be the breakage point; `row.get::<_, Value>()?` call sites usually survive untouched.
-15. **Windows paths in Elixir.** `CARGO_HOME` and other env vars on Windows use backslashes. `Path.join` appends with forward slashes, producing mixed-separator paths that `Path.wildcard` cannot match. Always normalize with `String.replace("\\", "/")` before globbing. This bit us in `test_helper.exs`.
-16. **C compiler on Windows GHA runners.** `cl.exe` (MSVC) is NOT on PATH — it needs `ilammy/msvc-dev-cmd@v1` or manual `vcvarsall.bat` setup. MinGW `gcc` IS on PATH (gcc 14.2.0 at `C:\mingw64\bin`). Use `gcc -shared` for compiling SQLite extensions on Windows — proven by sqlean project. SQLite extensions use a function-pointer ABI so MinGW vs MSVC is irrelevant.
-17. **`mix clean` before checksum download after version bump.** After bumping the version in `mix.exs` and `Cargo.toml`, stale build artifacts retain the old version. `mix rustler_precompiled.download --no-config` reads the version from the compiled beam, not the source. Always run `mix clean && mix compile` before `mix rustler_precompiled.download` on release day.
-18. **Hex 2.5+ publishes need account-level 2FA.** `mix hex.user auth` is an OAuth device flow now; without TOTP 2FA enabled on the hex.pm account the granted token is silently READ-ONLY and `mix hex.publish` fails with a permissions error. Toolchain (mise) bumps reinstall hex and orphan the old credential format ("no credentials" on a machine that had them) — expect a fresh device-flow auth on the first publish after any Elixir bump. CLI key management (`mix hex.user key ...`) is gone; web dashboard + `HEX_API_KEY` is the fallback.
+A code comment survives only if it explains what the code cannot: a
+non-obvious why, or cryptic mechanics. Never name a backlog item, task
+id, run number or severity grade in one; a bare commit hash is fine.
+Generous `@doc` and `@moduledoc` are good, inline comments are on thin
+ice, and the comment count trends down — measure it with `tokei`.
 
-## Elixir Code Style
+Commits: 50-character subject, body wrapped at 72, lowercase except
+identifiers like `SQLite` or `NIF`; what changed and sometimes why, never
+how; no trailers. Pull requests: a short lowercase title and a checklist
+of `- [x] did a thing`, nothing else — the reader is a dev skimming.
 
-- Formatting is Quokka-enforced (`plugins: [Quokka]` in `.formatter.exs`): `mix format` rewrites style (directive order, pipe idioms, default-arg elision), not just layout. Credo-rule rewrite recipes are deliberately NOT wired up yet.
-- No early returns. Flow control via `case`, `with`, pattern matching.
-- `:ok`/`:error` tuples only. No raise/throw. No `rescue`. No implicit crashes either — anonymous function clause patterns (`fn {k, v} -> ...`) MUST have a fallthrough clause or the caller must guarantee the shape. A `MatchError` from a destructuring `fn` is an implicit raise.
-- `with <- ` right-hand side: no complex expressions. Extract to private functions.
-- Never `elem/1` — always pattern-match. Never `String.to_existing_atom` + `rescue` — use compile-time maps instead.
-- Never `func1(func2(a), b)` — use pipes. Minimum 2 pipes (never single `a |> f(b)`, write `f(a, b)` instead).
-- Long pipe chains are idiomatic — never shorten them.
-- Short functions, low cyclomatic complexity. Split aggressively.
-- Minimal git diff is paramount. Don't touch code you weren't asked to change.
-- **Code comments are minimized (both repos).** Every comment must fiercely justify its existence or it dies: the only survivors are (a) rare what/why explanations and (b) explanations of cryptic/non-obvious code. Anything else is presumed redundant. Never reference backlogs, finding IDs (F-A10-2, M10), run numbers, axis names, severity grades, or any internal review/task nomenclature in code comments — that vocabulary lives only in the review ledgers, outside this repo (`~/kod/xqlite-review-ledgers/`). Bare commit hashes are fine. Extensive `@doc`/`@moduledoc` on important public surfaces are good; inline comments are on thin ice even there.
-- Comment-line count must trend DOWN: measure with `tokei` (comments vs code split) before and after comment-touching work; scrub runs remove comments that fail the justification bar.
-- Errors must always carry the most specific, structured information possible. No bare `:error` atoms, no swallowing details into generic wrappers. This is a library — callers need maximum diagnostic information.
-- **Never assert on error message text.** xqlite's entire error system is built around structured atoms and typed fields — assert on those. If a test needs to match an error and there's no structured field to match on, that's a bug in the error struct, not a reason to regex-match a string. Fix the struct first, then write the assertion.
+## Gotchas while coding
 
-## Rust Code Style
+- **One OS process per test file.** The bundled SQLite is one statically
+  linked copy per loaded NIF library, so parallel test processes contend
+  on its process-global C structures even with separate databases and
+  report a spurious "out of memory" — exhaustion, not corruption, since
+  the build is thread-safe. `mix test.seq` gives each file its own process.
+- **Mask the extended code.** rusqlite's `ErrorCode::DatabaseBusy` is 3
+  while C's `SQLITE_BUSY` is 5, so `error.rs` compares
+  `extended_code & 0xFF` against SQLite's C constants.
+- **`sqlite3_changes()` is sticky**: SELECT, DDL and PRAGMA leave it
+  alone, so use `query_with_changes`, which reads it in the same Mutex
+  hold and reports it only when `sqlite3_total_changes()` moved.
+- **Zero-arity NIFs.** Rustler generates no Elixir wrapper for a Rust
+  default argument, so `Xqlite.open_in_memory/0` is written by hand as
+  `open_in_memory(opts \\ [])`; `XqliteNIF` declares zero-arity stubs
+  only for Rust functions that really take none — `open_temporary/0`,
+  `create_cancel_token/0`, `sqlite_version/0`.
+- **Cancellation** is checked every 8 SQLite VM operations
+  (`PROGRESS_NUM_OPS` in `progress_dispatch.rs`); quote it from there only.
+- **rusqlite upgrades break `error.rs` first**, its error enum being the
+  recurring breakage point; `UPGRADE_PLAYBOOK.md` is the checklist for a
+  bundled SQLite, rusqlite or rustler bump.
+- **Windows path separators.** `CARGO_HOME` holds backslashes there while
+  `Path.join` appends forward slashes, so normalize with
+  `String.replace("\\", "/")` before globbing (`test/test_helper.exs`).
+- **Local builds are source builds:** the gitignored `.envrc` exports
+  `XQLITE_BUILD=true`, so the crate is compiled, never downloaded.
 
-- **All `#[rustler::nif]` functions live in `nif.rs`.** Resource structs, helpers, and module-specific logic go in their own modules (e.g., `session.rs`, `stream.rs`, `connection.rs`). Never put NIF functions outside `nif.rs`.
-- All Rustler atoms must be referenced via the `atoms::` module prefix (e.g., `atoms::columns()`, `atoms::error()`). Never import atoms into local scope with bare `use crate::{columns, ...}`.
-- Every `unsafe` block must have a `// SAFETY:` comment explaining the invariant that makes it safe.
-- Use `#[inline]` on hot-path helpers called per-row or per-NIF-invocation.
-- Elixir-side parameter dispatch (keyword vs positional) must mirror the Rust NIF's head-check routing in `util.rs`. Do not add redundant O(N) validation in Elixir when Rust already validates structure at the NIF boundary.
+## Project structure
 
-## Commit Style
+- `lib/xqlite.ex` — the public API: connections, query, execute, stream,
+  statements, transactions, PRAGMAs, introspection, busy policy, backup.
+- `lib/xqlite/` — `xqlitenif.ex` (raw stubs), `pragma{.ex,_spec.ex}`
+  (typed PRAGMAs), `type_extension{.ex,/}` (`encode/1` / `decode/1` and
+  its built-ins), `telemetry{.ex,/}` (gated macros, the hook-to-telemetry
+  GenServer, OpenTelemetry names), `result.ex`, `explain_analyze.ex`,
+  `schema/`, and the two stream modules.
+- `lib/mix/tasks/` — `verify.ex` (the gate), `test_seq.ex` (the runner);
+  `scripts/` — `release.sh` (version bump), `tree_fingerprint.exs`.
+- `native/xqlitenif/src/` — `nif.rs` holds every `#[rustler::nif]`
+  function and `lib.rs` the atoms and module list; the rest is one module
+  per topic: the resources (`connection.rs`, `statement.rs`, `stream.rs`,
+  `blob.rs`, `session.rs`, `cancel.rs`), the hooks and callbacks
+  (`hook_util.rs`, the per-hook modules, `progress_dispatch.rs`,
+  `busy_handler.rs`, `authorizer.rs`), `error.rs` with
+  `constraint_parse.rs`, and `query.rs`, `util.rs`, `schema.rs`,
+  `pragma.rs`, `transaction.rs`, `explain_analyze.rs`.
 
-- 50-char subject line, 72-char body wrap.
-- All lowercase except technical identifiers (e.g., `SQLite`, `NIF`, `OTP`).
-- Explain the *what*, occasionally the *why*. Never the *how* — that's the code's job.
-- Never include `Co-Authored-By` or any signature/trailer lines.
+## Pointers
 
-## PR Descriptions
-
-- Brief lowercase title summarizing the change.
-- Checklist format: `- [x] done a thing` for each item.
-- No "tests passing", no internal TODOs, no fluff.
-- Audience: tired devs who skim.
-
-## Reference Projects for `rustler_precompiled` Patterns
-
-- **Explorer** (`elixir-explorer/explorer`) — large-scale usage, variants, `macos-15` runners, NIF 2.15.
-- **Tokenizers** (`elixir-nx/tokenizers`) — simpler setup, `-dev` suffix for force-build, RISC-V target via `cross`.
-- **MDEx** (`leandrocp/mdex`) — similar to Explorer, uses reusable GHA workflows.
-
-All three use `<PROJECT>_BUILD` env var pattern for `force_build:`.
-
-## Release Checklist
-
-1. Audit `README.md` top to bottom. Installation instructions, version numbers, feature claims, and roadmap must reflect reality.
-2. Bump version in all three places: `mix.exs` (project version), `Cargo.toml`, `mix.exs` (`source_ref` in `docs/0`).
-3. Commit, push, tag `vX.Y.Z`, push tag. Wait for release workflow to finish.
-4. `rm -f checksum-Elixir.XqliteNIF.exs` — stale entries from prior versions won't be overwritten.
-5. `mix rustler_precompiled.download XqliteNIF --all --print --no-config`
-6. `mix hex.publish`
-7. No post-release local version bump needed — `.envrc` handles source builds via `XQLITE_BUILD=true`.
-
-## Design Tradeoffs
-
-- **Cancellation over interrupt.** xqlite uses progress-handler cancellation (`Arc<AtomicBool>` checked every 8 VM instructions) instead of `sqlite3_interrupt()`. Interrupt is fire-and-forget, per-connection, and known to let slow operations run to completion before being noticed (reported on ElixirForum and in exqlite issues). Our approach is per-operation, fine-grained, and any process can cancel without needing the conn handle — strictly better for DBConnection/Ecto timeout wiring. Never add `sqlite3_interrupt()`.
-- **Our Mutex vs NOMUTEX.** rusqlite defaults to `SQLITE_OPEN_NO_MUTEX` (disables SQLite's internal mutex). Our `Mutex<Connection>` is still required by Rust's type system (`Connection` is `!Sync`). The two are complementary, not redundant: NOMUTEX is safe *because* our Mutex serializes access.
-- **API_ARMOR as defense-in-depth.** `ENABLE_API_ARMOR` adds NULL-pointer and invalid-argument checks at every SQLite C API entry point. Our Rust layer (Mutex, Option, AtomicPtr) already guards against most misuse, but API_ARMOR is the safety net beneath our raw FFI paths in `stream.rs` and `util.rs` — where we call `sqlite3_step`, `sqlite3_column_*`, `sqlite3_bind_*`, and `sqlite3_finalize` on raw pointers. Without it, a bug in our unsafe code would segfault; with it, we get `SQLITE_MISUSE`. Negligible performance cost. Never remove it.
-
-## Current State (July 2026)
-
-- v0.10.0 released on Hex (2026-07-20). Elixir `~> 1.17`, OTP 26–29.
-- Rust edition 2024. Rustler 0.38, rusqlite 0.40 (bundled SQLite 3.53.2).
-- `rustler_precompiled` done. 8 targets, NIF 2.17, `cross` for Linux ARM/musl/RISC-V.
-- GHA release workflow (`.github/workflows/release.yml`) builds precompiled NIFs on tag push (`v*`).
-- CI: `.github/workflows/ci.yml` — format+lint, dialyzer, test matrix (Ubuntu/macOS/Windows × Elixir 1.17–1.20 × OTP 26–29), Coveralls coverage job. Uses `XQLITE_BUILD=true` to force source compilation.
-- Windows support: best-effort, untested locally, relies on community reports.
+- `ARCHITECTURE.md` — the map of the current code: module by module, the
+  data flows, the state machines, the facts several places depend on.
+- `RELEASING.md` — the release procedure, CI and precompiled binary
+  constraints. `UPGRADE_PLAYBOOK.md` — bumping bundled SQLite, rusqlite
+  or rustler. `guides/` — gotchas, security, telemetry wiring, full-text
+  search, SpatiaLite.
+- The review program's records — ledger, backlog, probe scripts and
+  `ERROR_TEXT_EXCEPTIONS.csv`, the index of sanctioned message-text
+  parses — live outside this repository in
+  `~/kod/xqlite-review-ledgers/xqlite/`; that vocabulary never enters
+  code, commits or public docs. `CLAUDE.md` stays a one-line pointer to
+  this file and is never edited.
