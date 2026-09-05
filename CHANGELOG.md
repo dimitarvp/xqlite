@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Docs: the guides run as written.** A cold run of every guide
+  snippet against the 0.11.0 package found six that did not: the
+  security guide (and the README's feature list) still showed the
+  old two-element `{:authorization_denied, message}` — it has been
+  `{:authorization_denied, extended_code, message}` since the
+  3-tuple change — and its authorizer example deleted from a table
+  it never created; the telemetry guide's Honeycomb section called an
+  `:opentelemetry_telemetry.attach/2` that does not exist (replaced
+  by the real path: the shipped attribute mapping plus that
+  package's span helpers) and its Logger sample lacked
+  `require Logger`; the gotchas guide's `:emit_error` sample piped
+  the `{:error, reason}` that `Xqlite.stream/4` returns on a setup
+  failure straight into `Enum`. Two placeholder names are now
+  labelled as such.
+
 - **Docs: `query_with_changes/3` teaches its real rule.** The 0.11.0
   package still describes the abandoned empty-columns heuristic
   ("for SELECT statements (non-empty columns), `changes` is 0") — the

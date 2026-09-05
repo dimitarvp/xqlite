@@ -155,16 +155,24 @@ the `:on_error` option. The choice also fixes the stream's **element shape**:
 pipeline rather than with a `try`:
 
 ```elixir
-conn
-|> Xqlite.stream("SELECT id, name FROM users", [], on_error: :emit_error)
-|> Enum.reduce_while([], fn
-  {:ok, row}, acc -> {:cont, [row | acc]}
-  {:error, reason}, acc -> {:halt, {:error, reason, Enum.reverse(acc)}}
-end)
+case Xqlite.stream(conn, "SELECT id, name FROM users", [], on_error: :emit_error) do
+  {:error, reason} ->
+    {:error, reason}
+
+  stream ->
+    Enum.reduce_while(stream, [], fn
+      {:ok, row}, acc -> {:cont, [row | acc]}
+      {:error, reason}, acc -> {:halt, {:error, reason, Enum.reverse(acc)}}
+    end)
+end
 ```
 
-An unsupported `:on_error` value returns `{:error, {:invalid_on_error, value}}`
-at stream open — before any row is fetched — like any other setup failure.
+The `case` matters: when the statement cannot be prepared (a missing
+table, an unsupported option) `Xqlite.stream/4` returns a plain
+`{:error, reason}` instead of a stream, so piping straight into `Enum`
+would raise. An unsupported `:on_error` value returns
+`{:error, {:invalid_on_error, value}}` at stream open — before any row is
+fetched — like any other setup failure.
 
 ## Resource lifecycle
 
@@ -176,6 +184,9 @@ and it stays that way for the life of the token — signalling twice is
 idempotent, but there is no un-signal. So a token you have already signalled is
 *spent*: hand it to another cancellable operation and that operation is
 cancelled the moment it starts stepping, before it does any real work.
+(`big_table` below stands for a real table; against a missing table the
+prepare error comes first, because cancellation is only checked while
+stepping.)
 
 ```elixir
 {:ok, token} = Xqlite.create_cancel_token()

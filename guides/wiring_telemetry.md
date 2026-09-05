@@ -144,30 +144,26 @@ Every mapped name is cited to its spec page in that module's docs.
 
 ### Honeycomb / OpenTelemetry
 
-Use `:opentelemetry_telemetry` — it's the standard bridge. xqlite
-emits clean spans (start/stop with `telemetry_span_context`) so the
-bridge can reconstruct OTel spans automatically:
-
-```elixir
-# In application.ex:
-:opentelemetry_telemetry.attach(:xqlite_otel, [
-  [:xqlite, :query],
-  [:xqlite, :execute],
-  [:xqlite, :execute_batch],
-  [:xqlite, :explain_analyze]
-])
-```
-
-xqlite does NOT depend on `:opentelemetry` directly — that's a
-downstream concern.
+xqlite does NOT depend on `:opentelemetry` — that's a downstream
+concern. What it ships is the mapping: `Xqlite.Telemetry.OpenTelemetry`
+turns an event into the stable OpenTelemetry database attributes (the
+`handle_event` above), and its span events carry a stable
+`telemetry_span_context` in their metadata (see `Xqlite.Telemetry`).
+To turn those into OTel spans, write a handler that calls the
+`opentelemetry_telemetry` package's `:otel_telemetry.start_telemetry_span/4`
+on `:start` and `:otel_telemetry.end_telemetry_span/2` on `:stop` and
+`:exception`. That package is a toolkit for handlers you write; it has
+no attach call that subscribes on its own.
 
 ### Logger
 
 ```elixir
+require Logger
+
 :telemetry.attach(
   "xqlite-log",
   [:xqlite, :cancel, :honored],
-  fn _, %{monotonic_time: t}, %{operation: op, tokens: tokens}, _ ->
+  fn _, _measurements, %{operation: op, tokens: tokens}, _ ->
     Logger.warning("xqlite #{op} cancelled, tokens: #{inspect(tokens)}")
   end,
   nil

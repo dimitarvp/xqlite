@@ -101,7 +101,8 @@ This is the single most consequential capability in the library.
 Because of that, extension loading is off by default and gated twice: the
 SQLite build has the capability compiled in, but it stays disabled until
 you explicitly turn it on with `Xqlite.enable_load_extension/2`, and the
-recommended pattern is to disable it again immediately after loading:
+recommended pattern is to disable it again immediately after loading (the
+path below is a placeholder — point it at an extension you actually ship):
 
 ```elixir
 {:ok, conn} = Xqlite.open("app.db")
@@ -122,10 +123,11 @@ When you must run SQL you did not write — a reporting console, a
 user-supplied filter — install a deny-list authorizer. SQLite consults it
 while *preparing* every statement, before any row is touched, and xqlite
 turns a denied action into a structured `{:error, {:authorization_denied,
-message}}`:
+extended_code, message}}`:
 
 ```elixir
 {:ok, conn} = Xqlite.open_in_memory()
+{:ok, _} = XqliteNIF.execute(conn, "CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT)", [])
 
 # A read-only console: forbid every mutating and structural action.
 :ok =
@@ -139,7 +141,7 @@ message}}`:
     :pragma
   ])
 
-{:error, {:authorization_denied, _}} =
+{:error, {:authorization_denied, _, _}} =
   XqliteNIF.execute(conn, "DELETE FROM audit_log", [])
 ```
 
@@ -197,7 +199,8 @@ behavior, and xqlite relies on it.)
 Second, and distinct from panics: xqlite's own *expected* failures are
 never raised and never panics. They come back as structured `{:error,
 reason}` tuples — `:connection_closed`, `{:utf8_error, column, reason}`,
-`{:authorization_denied, message}`, and the rest of the error vocabulary.
+`{:authorization_denied, extended_code, message}`, and the rest of the
+error vocabulary.
 A panic means "a bug reached a place it shouldn't"; an `{:error, _}` tuple
 means "a thing you asked for could not be done." They are not the same
 channel, and you should match on the tuples.
