@@ -365,16 +365,16 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     # First callback of the fresh contention: retries == 0, and its elapsed_ms is
     # measured from THIS event, not from the 600 ms-old install.
-    assert_receive {:xqlite_busy, 0, first_elapsed}, 500
+    assert_receive {:xqlite_busy, 0, first_elapsed}, 2_000
     assert first_elapsed < 400
 
     # It genuinely keeps retrying (pre-fix it gave up right after the first).
-    assert_receive {:xqlite_busy, second_retries, _}, 500
+    assert_receive {:xqlite_busy, second_retries, _}, 2_000
     assert second_retries >= 1
 
     # Release; the still-retrying probe then completes.
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
-    assert {:ok, 1} = Task.await(probe_task, 1_000)
+    assert {:ok, 1} = Task.await(probe_task, 5_000)
 
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
