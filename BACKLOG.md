@@ -27,13 +27,16 @@ burn-down.
 - [S3] `cargo test` runs only in the Linux lint job — Rust unit
   tests never execute on macOS/Windows. Add lanes or justify.
   (wave-1 recon)
-- [probe] Docs-build telemetry-flag state: confirm what config
-  hexdocs was built under for 0.9.0 (macro docs were flag-dependent
-  until `51d1a17`; fix ships with the next release). (wave-1)
-- [probe] Bundled-SQLite-in-artifact check: strings/symbol scan of
-  each precompiled tarball proving SQLite 3.53.2 is statically in
-  (feature-unification failure class). Cheap mechanical gate before
-  the announcement. (wave-1)
+- [probe] DONE (superseded 2026-09-05): the docs-build telemetry-flag
+  question concerned 0.9.0; `51d1a17` shipped in 0.10.0 and the
+  2026-09-05 Gate 3 hexdocs builds (0.11.0 tree) render the macro
+  docs flag-independently with zero warnings. (wave-1)
+- [probe] DONE 2026-09-05 (Gate 3 prep): every precompiled 0.11.0
+  tarball (8 of 8) carries the "3.53.2" version string and the
+  2026-06-03 d6e03d8c source id — `strings` over each extracted
+  binary; the aarch64-apple-darwin one needs a loose match because
+  `strings` glues a byte onto it. Recorded in REVIEW_AXES (RC axis).
+  (wave-1)
 - [probe] M5 sub-issue (Run 1): `enif_send(NULL,…)` from a NORMAL
   scheduler (session_changeset/patchset path) vs the repo's dirty-only
   note — the busy_handler comment claims "any thread (OTP 26.1+)".
