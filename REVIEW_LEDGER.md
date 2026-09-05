@@ -4642,3 +4642,131 @@ diff), `with_live_stmt` (statement.rs, unchanged), `with_live_blob` (blob.rs:284
   finding to fix); no `BACKLOG.md` change.
 
 ---
+
+## Run 23 — 2026-09-05 — A10+A3 covering re-run (this cycle's error and busy churn + the dependency bumps)
+
+- Commit at scan: `4a003cb` (HEAD, clean, verify + CI green). Scope: A10
+  (structured-error contract) + A3 (UB tooling), the re-runs owed since Runs 13
+  and 20 and re-wet by `0f81e75..4a003cb`: rusqlite 0.40.1→0.40.2 +
+  libsqlite3-sys 0.38.1→0.38.2, the comment scrub (`ca14876`), the rowid parse arm
+  (`019388a`), the blob-literal `as_chunks` rewrite (`9f2e278`), and this session's
+  three fixes (busy-slot fallback `2f3973f`, no-statement refusal + shared
+  prepare-error builder `c85d0ae`, the busy-pin rider `4a003cb`). Composition: one
+  Opus reviewer (7 Elixir probes under `a10a3_cover/`, a throwaway Tree Borrows
+  crate with 7 models + 6 teeth, an ASan probe crate; the harness first,
+  unmodified); the orchestrator gated the one finding through an implementer +
+  the standard gate (entry below). Toolchain: nightly installed for Miri/ASan and
+  REMOVED — `rustup toolchain list` back to the single stable line; repo untouched.
+
+### A10
+
+- Harness `bash error_contract/run.sh` at HEAD, unmodified: PASS (teeth gate 11
+  controls; 70 pins `OK | contract held`; no oracle patch needed — no contract
+  movement).
+- No-statement refusal (`c85d0ae`): 8 spellings (empty, spaces, `--`, `/* */`,
+  comment+whitespace, BOM+whitespace, bare `;`, whitespace+`;`) × 9 paths = 72
+  cells: `query`/`execute`/`query_with_changes`/`query_cancellable`/
+  `execute_cancellable`/`prepare` all `{:cannot_execute, "SQL contains no
+  statement"}`; `stream_open`/`explain_analyze`/`execute_batch` accept all 8; the
+  `"  "` + `[1]` leg identical (refusal precedes binding). Control: 14 real
+  zero-column zero-parameter statements (DDL, transaction control, DML, ANALYZE,
+  VACUUM…) all run — the pre-filter is not over-applied.
+- Prepare-error agreement (`c85d0ae`): 11 error cases × 5 compile paths = 55
+  cells identical; syntax / no-such-column / ambiguous column / wrong-arg-count /
+  no-such-function → `{:sql_input_error, %{code: 1, offset: …}}`; no-such-table /
+  no-such-index / table-exists / index-exists keep their prefix arms; `sql`
+  byte-exact everywhere; `"SELECT 'é' FROMM t"` → offset 18 on all five (a BYTE
+  offset: 19 bytes, 18 chars); a closed connection → `:connection_closed` on all
+  five (the `rc & 0xFF == SQLITE_ERROR` guard swallows nothing).
+- Rowid arm (`019388a`): fires only on `SQLITE_CONSTRAINT_ROWID` (table + `rowid`
+  column, incl. a spaced table name); named-`id` and rowid-alias IPKs →
+  `:constraint_primary_key` (1555); WITHOUT ROWID → primary key; a column literally
+  named `rowid` under UNIQUE → `:constraint_unique`; FTS5 duplicate rowid → bare
+  "constraint failed" with empty-but-structured details. `cargo test` 28/28.
+- Busy fallback (`2f3973f`), real two-connection contention: `:database_busy_or_locked`
+  3-tuple with extended code 5, 302 ms vs SQLite's own handler 301 ms (control A),
+  13 observer messages, pragma 0 while held → 300 after unregister; control B
+  (timeout 0 → 0 ms, one callback).
+- Run 13's `changes()` matrix re-pinned 14/14 HELD; plus a new cell: the
+  observer's internal `PRAGMA busy_timeout` read leaves the sticky counter alone.
+- Union census: 43 Encoder arms + 3 direct `atoms::error()` sites in nif.rs = 46
+  shapes, all in `@type error_reason` (F-A10-9's two re-pinned present); the union's
+  extra members are Elixir-produced. `constraint_details/0` and `sql_input_error/0`
+  cover every inner key.
+- Blob-literal defaults after `as_chunks`: byte-exact on 10 literals incl. empty and
+  lowercase `x`; odd-length / non-hex never reach the classifier (SQLite rejects
+  the DDL first).
+- **F-A10-10 (S2, CONFIRMED, FIXED in the gate below).** `busy_timeout/2` =
+  `remove_busy_policy` + raw `PRAGMA busy_timeout`; with an observer registered
+  the slot stays held after the policy removal, the PRAGMA installs SQLite's own
+  handler OVER ours at the C level (observers go silent), the slot still remembers
+  the OLD `fallback_timeout_ms`, and unregistering the last observer restores that
+  old value: `100 → observer → busy_timeout(7777) → 7777 → unregister → 100`
+  (p5). `busy_timeout/2`'s doc claimed it "keeps both sides consistent". Control:
+  the same sequence without an observer round-trips (p4 legs 3/4).
+- Unproven residual (recorded, not filed as a finding): `sqlite3_expanded_sql`
+  also returns NULL when the expansion would exceed `SQLITE_LIMIT_LENGTH`, so a
+  real zero-column zero-parameter statement that long would be misread by
+  `reject_no_statement` as "no statement"; no cheap way to probe without a limit
+  setter. Also noted: `swap_in`'s empty branch propagates a `sqlite3_busy_handler`
+  error before `restore_busy_timeout` — unreachable (that call cannot fail in
+  current SQLite).
+
+### A3
+
+- Census vs Run 20 (`8ba4456`, reproduced exactly from `git archive`): 131→137
+  `unsafe` occurrences, 102→106 blocks, 89→114 `// SAFETY:` (21 from the F-A3-1
+  fix + 4 new), 22→23 `unsafe fn`, 4 `unsafe impl`. The four new blocks and the
+  one new `unsafe fn` (`error::prepare_failure`; `busy_handler::restore_busy_timeout`)
+  all carry TRUE SAFETY claims: every call site sits inside `with_conn` with the
+  same locked handle (`nif.rs:721`, `:1033`, `explain_analyze.rs:84`; the four busy
+  NIF entry points). No `unwrap`/`expect`/`panic!` in the new busy code; the
+  `Cell<Instant>` reset discipline untouched.
+- Dependency bumps: rusqlite's three changed files and libsqlite3-sys's `build.rs`
+  differ only by a locally defined `cfg_select!` macro (MSRV); `sqlite3.c` and the
+  bindings byte-identical (md5). The FFI-boundary set is unchanged.
+- `ca14876` touched zero SAFETY lines (the modality-(3) premise did not hold; the
+  four new lines audited instead).
+- Tree Borrows + strict provenance on 7 reconstructed models (A–E disciplines, the
+  `Session<'a>→'static` transmute, the leak-on-closed-connection path): 7/7 clean;
+  6/6 teeth trip with the expected class (double-free, dangling after off-lock
+  free — needed `-Zmiri-many-seeds`, dangling `&AtomicBool`, COW UAF, published
+  reclaimed box, escaped erased borrow). Model-vs-code correction: a first model F
+  holding a real `&'a` reference was flagged by Tree Borrows on `Option::take`;
+  rusqlite's `Session<'conn>` holds `PhantomData` + a raw pointer (`session.rs:25-29`),
+  so the code is sound and the model was stricter — a real design constraint
+  (recorded in UPGRADE_PLAYBOOK.md: a rusqlite that stores `&'conn Connection`
+  turns the leak path into UB).
+- ASan: `-Zsanitizer=address` + `-fsanitize=address` on a throwaway crate linking
+  bundled libsqlite3-sys 0.38.2: 24.7 s build, 103 `__asan_` symbols in the test
+  binary and 30 in `sqlite3.o`, `SELECT 1` through prepare/step/finalize clean, a
+  planted use-after-free reported precisely, a finalized-statement step reported
+  as SEGV (weaker C-side signal). Stock sys flags, not xqlite's `[env]` — the
+  toolchain is proven, the shipped build is not yet ASan-covered.
+
+### Disposition & dryness
+
+- **A10: a finding (F-A10-10, S2, fixed the same day) — 0 of 2, NOT DRY.** Re-wets
+  ALSO on: `busy_handler::set_timeout` / `fallback_timeout_ms` writers,
+  `reject_no_statement`, `prepare_failure`.
+- **A3: CLEAN — 1 of 2 consecutive clean covering runs, one more owed.** Next-pass
+  modalities: ASan with the crate's own flags driving the real NIF; the clean Tree
+  Borrows models under many seeds; the `SQLITE_LIMIT_LENGTH` leg once a limit
+  setter exists; SQLITE_SCHEMA (17) and the OOM encoder fallbacks still have no
+  runtime reproduction (Run 13's honest gaps, still open).
+
+### F-A10-10 gate (same day)
+
+- Implemented by an Opus implementer with a RED-first brief: `busy_handler::set_timeout`
+  + the `set_busy_timeout` NIF; `Xqlite.busy_timeout/2` is one NIF call; docs on
+  both wrappers and the observer warning rewritten to the new truth; CHANGELOG
+  Fixed. Pins (busy_handler_test): through-the-slot wait (~300 ms measured 302,
+  observer fed, pragma 300 after unregister), the no-observer control (pragma reads
+  the value), the zero-timeout leg (1 ms, observer fed, pragma 0 after unregister).
+  Predicted RED = the observer receives nothing (the PRAGMA had stolen the C slot)
+  — observed on both contention pins; orchestrator stash-RED 2/2 by identity, green
+  22/22. Docs sweep: README + gotchas claims now literally true. AGENTS.md stub
+  counts 96 → 97.
+- `mix verify` GREEN (exit file 0) on the committed tree.
+
+---

@@ -216,6 +216,30 @@ strings) still auto-encode via rustler — not the ~1 GB payload, and the Run-1 
 `catch_unwind` still nets any OOM (→ `:nif_panicked`). Panic surface NARROWED, not widened; the
 owed A1 clean covering run should re-confirm no panic-capable `.encode` remains on the row-value
 return path. No new `unsafe` (Decision 2's `Cell` is safe).
+COVERING RE-RUN (Run 23, 2026-09-05 — the owed clean run over `0f81e75..4a003cb`):
+CLEAN. Census delta vs Run 20: +4 `unsafe {}` blocks (137/106/114/23/4 = occurrences /
+blocks / SAFETY / `unsafe fn` / `unsafe impl`), all four in this cycle's fixes
+(`error::prepare_failure`'s errmsg / CStr / `sqlite3_error_offset` trio and
+`busy_handler::restore_busy_timeout`'s `sqlite3_busy_timeout`) — every SAFETY claim
+verified TRUE at every call site (all inside `with_conn`, the same locked handle).
+The rusqlite 0.40.1→0.40.2 and libsqlite3-sys 0.38.1→0.38.2 bumps change nothing at
+the FFI boundary (a local `cfg_select!` macro only; `sqlite3.c` and the bindings
+byte-identical, md5-proven). The comment scrub (`ca14876`) touched ZERO SAFETY lines.
+Tree Borrows (`-Zmiri-tree-borrows -Zmiri-strict-provenance`) on seven models
+reconstructed from the CURRENT code — the five Run-20 disciplines plus the
+`Session<'a>→'static` transmute and the leak-on-closed-connection path — all clean;
+every teeth variant trips with the expected UB class (model B needed
+`-Zmiri-many-seeds`). ASan: feasible and cheap (24.7 s build; `__asan_` symbols in
+both the Rust binary and `sqlite3.o`; a planted use-after-free reported precisely;
+a finalized-statement step reports as SEGV, a weaker C-side signal) — with stock
+libsqlite3-sys flags, not xqlite's. Model-vs-code correction on record: the
+leak-on-closed-connection path (`session.rs`) is sound ONLY because rusqlite's
+`Session<'conn>` holds `PhantomData`, not a live `&'conn Connection` — added to
+UPGRADE_PLAYBOOK.md. Toolchain restored (one stable line). DRYNESS: **A3 at 1 of 2,
+NOT DRY** — one more clean covering run owed. Next-pass modalities: ASan with the
+crate's own `[env]` flags driving the real NIF; the clean Tree Borrows models under
+many seeds; `SQLITE_LIMIT_LENGTH` lowered to test `expanded_sql() == None` on a real
+statement once a limit setter exists.
 
 ### A4. Scheduler discipline
 NIFs must be <1ms proven or Dirty (CPU vs IO correctly chosen).
@@ -564,6 +588,34 @@ RE-WET (S3 fix pass round 3, 2026-07-20): F-A10-9 fixed — added
 union (`lib/xqlite.ex`). The union is in this axis's re-wet list; the owed covering
 re-run should re-pin it against the direct `(atoms::error(), <atom>)` returns in
 `nif.rs`. A10 was already NOT DRY (Run 13 surfaced F-A10-9); this keeps it so.
+COVERING RE-RUN (Run 23, 2026-09-05 — over `0f81e75..4a003cb`: the rowid parse arm,
+the busy-slot fallback, the no-statement refusal, the shared prepare-error builder,
+the comment scrub, the dependency bumps): the harness `error_contract/run.sh` PASSES
+unmodified (11-control teeth, 70 pins); no-statement SQL 8 spellings × 9 paths = 72
+cells, every refusing path exactly `{:cannot_execute, "SQL contains no statement"}`,
+every accepting path (`stream_open`, `explain_analyze`, `execute_batch`) accepting,
+14 zero-column zero-parameter real statements NOT over-applied; prepare errors 11
+cases × 5 compile paths = 55 cells identical (syntax / no-such-column / ambiguous /
+wrong-arg-count / no-such-function → `sql_input_error`; the four message-prefix
+arms still win; `sql` byte-exact; the byte offset proven a BYTE offset — 18 on a
+19-byte/18-char string); the rowid arm fires only on `SQLITE_CONSTRAINT_ROWID`
+(named-`id` and rowid-alias IPKs stay `:constraint_primary_key`, WITHOUT ROWID,
+a column literally named `rowid`, a spaced table name, FTS5's bare "constraint
+failed" all correct); the busy fallback = SQLite's own handler to the millisecond
+(302 vs 301 ms), extended code 5, observers fed, pragma restored; Run 13's 14-cell
+`changes()` matrix HELD (+ the observer's internal PRAGMA read leaves the sticky
+counter alone); the 46-shape Rust→Elixir union census complete (F-A10-9 re-pinned).
+ONE new finding — **F-A10-10 (S2)**: `busy_timeout/2` with an observer registered
+lets the raw PRAGMA steal the C slot while the slot keeps the OLD remembered
+timeout, so unregistering the last observer reverts the value the caller set
+(100 → 7777 → 100). Fixed the same day: `busy_timeout/2` now sets the timeout
+THROUGH the slot (new `set_busy_timeout` NIF; observers keep receiving, the
+requested wait applies, unregister keeps it). Unproven residual on record:
+`sqlite3_expanded_sql` also returns NULL past `SQLITE_LIMIT_LENGTH`, so a real
+zero-column zero-parameter statement that long would be misread as "no statement"
+(no limit setter to probe it cheaply). DRYNESS: a finding — **A10 stays 0 of 2,
+NOT DRY**; re-wets ALSO on: `busy_handler::set_timeout` / `fallback_timeout_ms`
+writers, `reject_no_statement`, `prepare_failure`.
 
 ### A11. Feature islands
 Session/changesets, blob I/O, backup+progress, serialize,

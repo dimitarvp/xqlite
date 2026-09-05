@@ -7,6 +7,34 @@ burn-down.
 
 ## Open
 
+- [F-A10-10] (S2, FIXED, from Run 23) `busy_timeout/2` was
+  `remove_busy_policy` + a raw `PRAGMA busy_timeout`: with a busy
+  observer registered the slot stayed held, the PRAGMA installed
+  SQLite's own handler over ours at the C level (observers went
+  silent), the slot kept the OLD remembered timeout, and unregistering
+  the last observer restored that old value — `100 → observer →
+  busy_timeout(7777) → unregister → 100`. FIX: `busy_timeout/2` sets
+  the timeout THROUGH the slot (`set_busy_timeout` NIF): observers keep
+  receiving, the requested wait applies via the emulation, and
+  unregistering keeps it; with no observers SQLite's own handler is
+  installed as before. Pinned in busy_handler_test.
+- [A10 residual, unproven] (S3 probe, from Run 23) `sqlite3_expanded_sql`
+  returns NULL not only for a NULL statement but also when the
+  expansion would exceed `SQLITE_LIMIT_LENGTH` (or on OOM), so a real
+  zero-column zero-parameter statement that long would be misread by
+  `reject_no_statement` (query.rs) as "SQL contains no statement".
+  Probe it the day a `sqlite3_limit` setter is exposed (lower the
+  limit, prepare a long DDL); until then the mechanism is recorded,
+  not observed. Same file: `swap_in`'s empty branch propagates a
+  `sqlite3_busy_handler` failure before `restore_busy_timeout` —
+  unreachable today (that call cannot fail in current SQLite).
+- [A3 seed] (S3, from Run 23) An ASan lane is feasible and cheap
+  (nightly `-Zsanitizer=address` + `-fsanitize=address` on bundled
+  libsqlite3-sys: 25 s build, both sides instrumented, a planted
+  use-after-free reported precisely; a finalized-statement step
+  reports as SEGV). Worth running only with the crate's own `[env]`
+  flags (`API_ARMOR`, `STMT_SCANSTATUS`) and driving the real NIF —
+  A3's next covering run. No persistent nightly (maintainer rule).
 - [S3] F-A13-1 (Run 12, A13): hot code upgrade of the xqlite NIF is unsupported
   because rustler 0.38's init codegen hardcodes the `ErlNifEntry`
   `upgrade`/`reload`/`unload` callbacks to `None`

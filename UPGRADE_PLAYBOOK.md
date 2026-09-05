@@ -30,7 +30,13 @@ here is optional on a bump that changes the bundled SQLite version.
    historical breakage point (e.g. `Error::Utf8Error` gaining a
    field, `From<ValueRef>` becoming `TryFrom`). Fix the
    `From<RusqliteError>` match; `row.get::<_, Value>()` call sites
-   usually survive untouched.
+   usually survive untouched. Also re-read `rusqlite::session::Session`'s
+   fields: xqlite erases its lifetime and, on a closed connection,
+   leaks the session instead of deleting it (`session.rs`). That is
+   sound only while `Session<'conn>` holds `PhantomData<&'conn
+   Connection>` plus a raw pointer and never a live reference — a
+   rusqlite that stores `&'conn Connection` turns that leak path into
+   undefined behaviour.
 4. **Re-check the compile-option contract.** Tests and docs depend on
    exact build flags; run a connection and read
    `PRAGMA compile_options`, then confirm:
