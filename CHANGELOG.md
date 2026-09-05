@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Xqlite.busy_timeout/2` no longer loses its value when busy
+  observers are registered.** It set the timeout with a raw
+  `PRAGMA busy_timeout`, which hands SQLite's single busy callback to
+  SQLite's own handler: the observers went silent, and the busy slot —
+  still held, still remembering the timeout from before the call —
+  put that older value back when the last observer was unregistered.
+  Setting 7777 ms and then unregistering left the connection at
+  whatever it had been before. The timeout now goes through the busy
+  slot, so observers keep receiving `{:xqlite_busy, …}` messages, the
+  requested wait applies, and unregistering the last observer keeps
+  it. With no observers registered, SQLite's own handler takes over
+  exactly as before.
+
 - **SQL that is only whitespace or comments is now refused by `query/3`
   and `execute/3`, instead of failing as a misuse of the C API.** SQLite
   compiles such input to no statement at all, and running it came back as

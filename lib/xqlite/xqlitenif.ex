@@ -1021,6 +1021,23 @@ defmodule XqliteNIF do
   def unregister_busy_observer(_conn, _handle), do: err()
 
   @doc """
+  Sets the connection's busy timeout through the busy slot (raw NIF).
+
+  Most users want `Xqlite.busy_timeout/2`.
+
+  Removes the retry policy first. With busy observers registered, the
+  slot stays theirs and carries the new timeout: observers keep
+  receiving `{:xqlite_busy, …}` messages, and unregistering the last
+  one keeps this timeout. With no observers, SQLite's own timeout
+  handler takes the slot. `0` disables waiting.
+
+  Returns `:ok`.
+  """
+  @spec set_busy_timeout(conn :: Xqlite.conn(), ms :: non_neg_integer()) ::
+          :ok | Xqlite.error()
+  def set_busy_timeout(_conn, _ms), do: err()
+
+  @doc """
   Installs a deny-list authorizer on the connection (raw NIF).
 
   Most users want `Xqlite.set_authorizer/2`.

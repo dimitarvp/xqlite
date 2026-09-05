@@ -489,6 +489,73 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
+  test "busy_timeout applies through the slot while an observer is registered",
+       %{path: path} do
+    test_pid = self()
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.busy_timeout(probe, 100)
+    {:ok, handle} = Xqlite.register_busy_observer(probe, test_pid)
+    :ok = Xqlite.busy_timeout(probe, 300)
+
+    before_ms = System.monotonic_time(:millisecond)
+    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    elapsed = System.monotonic_time(:millisecond) - before_ms
+
+    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+
+    assert elapsed >= 250 and elapsed < 2_500,
+           "waited #{elapsed} ms, expected about 300"
+
+    assert_receive {:xqlite_busy, _, _}, 200
+
+    :ok = Xqlite.unregister_busy_observer(probe, handle)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "busy_timeout with no observers reads back through the pragma", %{path: path} do
+    {:ok, probe} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(probe, 300)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    :ok = NIF.close(probe)
+  end
+
+  test "a zero busy_timeout through the slot gives up at once and keeps observing",
+       %{path: path} do
+    test_pid = self()
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    {:ok, handle} = Xqlite.register_busy_observer(probe, test_pid)
+    :ok = Xqlite.busy_timeout(probe, 0)
+
+    before_ms = System.monotonic_time(:millisecond)
+    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    elapsed = System.monotonic_time(:millisecond) - before_ms
+
+    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert elapsed < 100, "waited #{elapsed} ms, expected no wait at all"
+    assert_receive {:xqlite_busy, _, _}, 200
+
+    :ok = Xqlite.unregister_busy_observer(probe, handle)
+    assert {:ok, 0} = NIF.get_pragma(probe, "busy_timeout")
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------

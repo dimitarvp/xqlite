@@ -302,6 +302,14 @@ fn unregister_busy_observer(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn set_busy_timeout(env: Env<'_>, handle: ResourceArc<XqliteConn>, ms: u64) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| {
+        busy_handler::set_timeout(conn, &handle.busy_handler, ms)
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn set_authorizer<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,

@@ -45,7 +45,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 ## Project Structure
 
 - `lib/xqlite.ex` — high-level API: every ergonomic wrapper (open/close, query/execute, transactions + state readers, statements, schema introspection, busy policy/observers, backup/serialize, strict mode, FK enforcement)
-- `lib/xqlite/xqlitenif.ex` — raw NIF stub declarations (96 stubs, body always `err()`)
+- `lib/xqlite/xqlitenif.ex` — raw NIF stub declarations (97 stubs, body always `err()`)
 - `lib/xqlite/pragma.ex` + `pragma_spec.ex` — typed PRAGMA schema + getters/setters
 - `lib/xqlite/telemetry.ex`, `telemetry/bridge.ex`, `telemetry/open_telemetry.ex` — compile-time-gated telemetry macros, hook→telemetry bridge GenServer, OTel semantic-convention attribute mapping
 - `lib/xqlite/type_extension.ex` + `type_extension/*.ex` — bidirectional type-extension behaviour + 9 built-ins
@@ -54,7 +54,7 @@ NIF tests use a compile-time `for` loop over `connection_openers()` so every tes
 - `lib/xqlite/schema/` — struct modules (ColumnInfo, DatabaseInfo, etc.)
 - `lib/mix/tasks/` — `verify` (the pre-commit gate) + `test_seq` (sequential test runner)
 - `native/xqlitenif/src/` — Rust NIF crate (25 files, ~7.7k lines):
-  - `nif.rs` (ALL 96 `#[rustler::nif]` functions, ~2100 lines), `lib.rs` (atoms, module declarations)
+  - `nif.rs` (ALL 97 `#[rustler::nif]` functions, ~2100 lines), `lib.rs` (atoms, module declarations)
   - resources: `connection.rs`, `statement.rs`, `stream.rs`, `blob.rs`, `session.rs`, `cancel.rs`
   - hooks & callbacks: `hook_util.rs`, `update_hook.rs`, `wal_hook.rs`, `commit_hook.rs`, `rollback_hook.rs`, `log_hook.rs`, `progress_dispatch.rs`, `busy_handler.rs`, `authorizer.rs`
   - `error.rs` + `constraint_parse.rs` (error classification), `schema.rs` (introspection + default-value classifier), `explain_analyze.rs`, `query.rs`, `pragma.rs`, `transaction.rs`, `util.rs` (param conversion, row processing)

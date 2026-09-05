@@ -1402,9 +1402,9 @@ defmodule Xqlite do
   > Running `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
   > "busy_timeout", ms)`) as raw SQL replaces our C callback with
   > SQLite's built-in one, and every observer silently stops receiving
-  > `{:xqlite_busy, …}` messages. `busy_timeout/2` replaces it the same
-  > way (its docs say so): unregister your observers before switching
-  > to a plain timeout.
+  > `{:xqlite_busy, …}` messages. `busy_timeout/2` goes through the
+  > slot instead: it keeps your observers and applies the new timeout
+  > through them.
   """
   @spec register_busy_observer(conn(), pid()) :: {:ok, non_neg_integer()} | error()
   def register_busy_observer(conn, pid) when is_pid(pid) do
@@ -1422,29 +1422,36 @@ defmodule Xqlite do
   end
 
   @doc """
-  Sets a plain `sqlite3_busy_timeout` on the connection, replacing the
-  xqlite busy slot cleanly.
+  Sets how long the connection waits on a locked database, going
+  through the xqlite busy slot.
 
-  Calls `remove_busy_policy/1` first, then sets
-  `PRAGMA busy_timeout = ms`. Note that the raw PRAGMA replaces the
-  whole C callback: any registered busy observers stop receiving
-  `{:xqlite_busy, …}` messages too — unregister them first if you want
-  their state reclaimed eagerly rather than at connection close.
+  Removes the busy retry policy first (as `remove_busy_policy/1`
+  does), then applies `ms`:
 
-  Prefer this helper over reaching for `PRAGMA busy_timeout` directly:
-  the raw PRAGMA silently replaces the callback at the SQLite level
-  without clearing our internal slot. This function keeps both sides
-  consistent.
+    * With busy observers registered, the slot stays theirs and the
+      timeout applies through it: observers keep receiving
+      `{:xqlite_busy, …}` messages, the connection waits up to `ms` on
+      SQLite's own retry schedule, and unregistering the last observer
+      keeps this timeout. While the slot is held, `PRAGMA busy_timeout`
+      reads `0` — SQLite zeroes it whenever a callback is installed —
+      even though the wait still applies.
+    * With no observers, SQLite's own timeout handler takes the slot
+      and `PRAGMA busy_timeout` reads `ms` back.
 
   `ms` is the timeout in milliseconds. `0` disables the timeout entirely
   (SQLite returns `SQLITE_BUSY` immediately on contention).
+
+  > #### Warning — a raw PRAGMA busy_timeout still steals the slot {: .warning}
+  >
+  > Running `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
+  > "busy_timeout", ms)`) as raw SQL replaces our C callback with
+  > SQLite's built-in one without going through the slot, and every
+  > registered observer silently stops receiving `{:xqlite_busy, …}`
+  > messages. This function is the safe path.
   """
   @spec busy_timeout(conn(), non_neg_integer()) :: :ok | error()
   def busy_timeout(conn, ms) when is_integer(ms) and ms >= 0 do
-    with :ok <- XqliteNIF.remove_busy_policy(conn),
-         {:ok, _} <- XqliteNIF.set_pragma(conn, "busy_timeout", ms) do
-      :ok
-    end
+    XqliteNIF.set_busy_timeout(conn, ms)
   end
 
   @doc """

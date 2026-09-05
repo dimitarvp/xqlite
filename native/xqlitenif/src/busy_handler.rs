@@ -149,13 +149,9 @@ fn read_busy_timeout(conn: &Connection) -> u64 {
         .unwrap_or(0)
 }
 
-/// Put back the timeout the slot displaced, so emptying the slot undoes
-/// taking it. Callers must hold the connection Mutex.
-fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
-    if timeout_ms == 0 {
-        return Ok(());
-    }
-
+/// Hand the C slot to SQLite's own timeout handler at `timeout_ms`.
+/// Callers must hold the connection Mutex.
+fn apply_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
     let ms = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
     // SAFETY: caller holds the connection Mutex; `conn.handle()` yields
     // the raw db pointer for that locked connection.
@@ -165,6 +161,16 @@ fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), Xqlite
     } else {
         Err(ffi_rc_to_error(conn, "sqlite3_busy_timeout", rc))
     }
+}
+
+/// Put back the timeout the slot displaced, so emptying the slot undoes
+/// taking it. Callers must hold the connection Mutex.
+fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
+    if timeout_ms == 0 {
+        return Ok(());
+    }
+
+    apply_busy_timeout(conn, timeout_ms)
 }
 
 /// Send `{:xqlite_busy, retries, elapsed_ms}` to `pid`. Fire-and-forget.
@@ -214,6 +220,29 @@ pub(crate) fn remove_policy(
     let mut next = snapshot(slot);
     next.policy = None;
     swap_in(conn, slot, next)
+}
+
+/// Set how long the connection waits on a locked database, removing
+/// any retry policy first. With observers still registered the slot
+/// keeps our callback and carries the new timeout; with none left the
+/// slot empties and SQLite's own handler takes the C slot at `ms`.
+/// Callers must hold the connection Mutex.
+pub(crate) fn set_timeout(
+    conn: &Connection,
+    slot: &AtomicPtr<BusySlotState>,
+    timeout_ms: u64,
+) -> Result<(), XqliteError> {
+    let mut next = snapshot(slot);
+    next.policy = None;
+
+    if next.observers.is_empty() {
+        // `swap_in` puts back the displaced timeout; overwrite it after.
+        swap_in(conn, slot, next)?;
+        apply_busy_timeout(conn, timeout_ms)
+    } else {
+        next.fallback_timeout_ms = timeout_ms;
+        swap_in(conn, slot, next)
+    }
 }
 
 /// Register an observer pid; returns its unregistration handle.
