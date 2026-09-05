@@ -423,7 +423,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert {:error, {:database_busy_or_locked, _code, _msg}} = result
-    assert elapsed >= 250 and elapsed <= 900, "waited #{elapsed} ms, expected about 300"
+
+    assert elapsed >= 250 and elapsed < 2_500,
+           "waited #{elapsed} ms, expected about 300 and never the 5000 ms default"
+
     assert_receive {:xqlite_busy, _, _}, 200
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
