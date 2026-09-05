@@ -174,6 +174,17 @@ would raise. An unsupported `:on_error` value returns
 `{:error, {:invalid_on_error, value}}` at stream open — before any row is
 fetched — like any other setup failure.
 
+### A stream needs exactly one statement
+
+`Xqlite.stream/4` compiles its SQL by the same rule as `Xqlite.prepare/2`
+and `Xqlite.query/4`. SQL that holds no statement at all — an empty
+string, whitespace, only comments — is a setup failure,
+`{:error, {:cannot_execute, "SQL contains no statement"}}`, not a stream
+that yields nothing. Build the string dynamically and it can come out
+empty, so match the result rather than assuming an enumerable. A second
+statement after the first is `{:error, :multiple_statements}`; a trailing
+comment, extra semicolons and whitespace are fine.
+
 ## Resource lifecycle
 
 ### Cancel tokens are single-use

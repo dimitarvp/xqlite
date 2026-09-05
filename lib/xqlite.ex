@@ -590,31 +590,6 @@ defmodule Xqlite do
   end
 
   @doc """
-  Enables strict mode only for the lifetime of the given database connection.
-
-  In strict mode, SQLite is less forgiving. For example, an attempt to insert
-  a string into an INTEGER column of a `STRICT` table will result in an error,
-  whereas in normal mode it might be coerced or stored as text.
-  This setting only affects tables declared with the `STRICT` keyword.
-
-  See: [STRICT Tables](https://www.sqlite.org/stricttables.html)
-  """
-  @spec enable_strict_mode(conn()) :: {:ok, term()} | error()
-  def enable_strict_mode(conn) do
-    XqliteNIF.set_pragma(conn, "strict", :on)
-  end
-
-  @doc """
-  Disables strict mode only for the lifetime given database connection (SQLite's default).
-
-  See `enable_strict_mode/1` for details.
-  """
-  @spec disable_strict_mode(conn()) :: {:ok, term()} | error()
-  def disable_strict_mode(conn) do
-    XqliteNIF.set_pragma(conn, "strict", :off)
-  end
-
-  @doc """
   Enables foreign key constraint enforcement for the given database connection.
 
   By default, SQLite parses foreign key constraints but does not enforce them.
@@ -789,6 +764,11 @@ defmodule Xqlite do
   and a wall-clock measurement around the execution. See
   `Xqlite.ExplainAnalyze` for the field layout and how to interpret it.
 
+  The SQL must hold exactly one statement, the same rule `prepare/2` and
+  `query/3` apply: SQL holding no statement at all is
+  `{:error, {:cannot_execute, _}}` rather than a report of zeroes, and a
+  second statement after the first is `{:error, :multiple_statements}`.
+
   ## Examples
 
       iex> {:ok, conn} = Xqlite.open_in_memory()
@@ -873,6 +853,13 @@ defmodule Xqlite do
   as returning a stream that silently errors on first consume would hide
   setup failures (e.g., invalid SQL, closed connection).
 
+  The SQL must hold exactly one statement, the same rule `prepare/2` and
+  `query/3` apply: SQL holding no statement at all — empty, whitespace or
+  comments — is `{:error, {:cannot_execute, _}}` rather than a stream with
+  no rows, and a second statement after the first is
+  `{:error, :multiple_statements}` rather than a stream over the first one.
+  A trailing comment, extra semicolons and whitespace are accepted.
+
   Errors that occur *during* stream consumption (e.g. an invalid-UTF-8 value,
   or the connection being lost mid-stream) are surfaced according to the
   `:on_error` option above — by default they raise `Xqlite.StreamError`.
@@ -915,12 +902,15 @@ defmodule Xqlite do
   SQL parsing/planning on every iteration — the reason prepared statements
   exist. For one-shot calls, `query/3` and `execute/3` remain simpler.
 
-  Exactly ONE statement is compiled: whitespace/comment-only SQL returns
-  `{:error, {:cannot_execute, reason}}` and trailing statements after the
-  first return `{:error, :multiple_statements}` — nothing is silently
-  dropped. A syntax error returns `{:error, {:sql_input_error, %{sql: _,
-  offset: _, code: _, message: _}}}`, carrying the byte offset SQLite
-  reports — the same shape `query/3` returns for the same SQL.
+  Exactly ONE statement is compiled: SQL holding no statement at all
+  returns `{:error, {:cannot_execute, reason}}` and a second statement
+  after the first returns `{:error, :multiple_statements}` — nothing is
+  silently dropped. Text after the first statement counts as a second
+  statement only when it compiles to one, so a trailing comment, extra
+  semicolons and whitespace are accepted. A syntax error returns
+  `{:error, {:sql_input_error, %{sql: _, offset: _, code: _, message: _}}}`,
+  carrying the byte offset SQLite reports — the same shape `query/3`
+  returns for the same SQL.
 
   Finalize statements before closing their connection: a connection closed
   while statements are outstanding keeps the underlying SQLite handle alive
@@ -1237,9 +1227,14 @@ defmodule Xqlite do
   `schema` is the attached-database name (default `"main"`).
 
   Returns `{:ok, %{log_pages, checkpointed_pages, busy?}}` on success.
+
+  Any other `mode`, and any `schema` that is not a string, returns
+  `{:error, {:cannot_execute, reason}}` naming the accepted values.
   """
-  @spec wal_checkpoint(conn(), atom(), String.t()) :: {:ok, map()} | error()
+  @spec wal_checkpoint(conn(), term(), term()) :: {:ok, map()} | error()
   def wal_checkpoint(conn, mode \\ :passive, schema \\ "main")
+
+  def wal_checkpoint(conn, mode, schema)
       when mode in [:passive, :full, :restart, :truncate] and is_binary(schema) do
     start_md = %{conn: conn, mode: mode, schema: schema}
 
@@ -1259,6 +1254,18 @@ defmodule Xqlite do
           {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
       end
     end
+  end
+
+  def wal_checkpoint(_conn, mode, _schema)
+      when mode not in [:passive, :full, :restart, :truncate] do
+    {:error,
+     {:cannot_execute,
+      "invalid wal_checkpoint mode #{inspect(mode)}; expected :passive, :full, :restart, or :truncate"}}
+  end
+
+  def wal_checkpoint(_conn, _mode, schema) do
+    {:error,
+     {:cannot_execute, "invalid wal_checkpoint schema #{inspect(schema)}; expected a string"}}
   end
 
   @doc """
@@ -1854,9 +1861,14 @@ defmodule Xqlite do
   @doc """
   Begins a transaction in the given mode (`:deferred`, `:immediate`, or
   `:exclusive`). Emits `[:xqlite, :transaction, :begin]` telemetry.
+
+  Any other term in the `mode` position returns
+  `{:error, :invalid_transaction_mode}` and starts nothing.
   """
-  @spec begin(conn(), :deferred | :immediate | :exclusive) :: :ok | error()
-  def begin(conn, mode \\ :deferred) when mode in [:deferred, :immediate, :exclusive] do
+  @spec begin(conn(), term()) :: :ok | error()
+  def begin(conn, mode \\ :deferred)
+
+  def begin(conn, mode) when mode in [:deferred, :immediate, :exclusive] do
     case XqliteNIF.begin(conn, mode) do
       :ok = ok ->
         emit(
@@ -1874,6 +1886,8 @@ defmodule Xqlite do
         err
     end
   end
+
+  def begin(_conn, _mode), do: {:error, :invalid_transaction_mode}
 
   @doc """
   Commits the current transaction. Emits `[:xqlite, :transaction, :commit]`.
@@ -2030,11 +2044,21 @@ defmodule Xqlite do
   `schema` defaults to `nil`, meaning `"main"`. Wraps
   `XqliteNIF.txn_state/2` (see it for why there is no full five-state
   lock ladder). No telemetry is emitted.
+
+  A `schema` that is neither a string nor `nil` returns
+  `{:error, {:cannot_execute, reason}}`.
   """
-  @spec txn_state(conn(), String.t() | nil) ::
+  @spec txn_state(conn(), term()) ::
           {:ok, :none | :read | :write | :unknown} | error()
-  def txn_state(conn, schema \\ nil) when is_binary(schema) or is_nil(schema),
+  def txn_state(conn, schema \\ nil)
+
+  def txn_state(conn, schema) when is_binary(schema) or is_nil(schema),
     do: XqliteNIF.txn_state(conn, schema)
+
+  def txn_state(_conn, schema) do
+    {:error,
+     {:cannot_execute, "invalid txn_state schema #{inspect(schema)}; expected a string or nil"}}
+  end
 
   @doc """
   Returns the rowid of the most recent successful `INSERT` on this

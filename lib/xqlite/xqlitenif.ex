@@ -1111,6 +1111,12 @@ defmodule XqliteNIF do
 
   Returns `{:ok, stream_handle_resource}` or `{:error, reason}`.
   The `stream_handle_resource` is an opaque reference.
+
+  Compiles exactly ONE SQL statement, by the same rule as `stmt_prepare/2`:
+  SQL holding no statement at all is `{:cannot_execute, _}` and a second
+  statement after the first is `:multiple_statements`, so no stream is ever
+  opened over half a string. A trailing comment, extra semicolons and
+  whitespace are accepted.
   """
   @spec stream_open(
           conn :: Xqlite.conn(),
@@ -1175,12 +1181,16 @@ defmodule XqliteNIF do
   Prepares a manually managed statement (raw NIF).
 
   Most users want `Xqlite.prepare/2`. Compiles exactly ONE SQL statement:
-  whitespace/comment-only SQL and trailing statements after the first are
+  SQL holding no statement at all and a second statement after the first are
   structured errors (`{:cannot_execute, _}` / `:multiple_statements`), and a
   syntax error is `{:sql_input_error, %{sql: _, offset: _, code: _, message:
   _}}` carrying the byte offset SQLite reports — no silent partial
-  compilation. The returned handle must eventually be finalized via
-  `stmt_finalize/1` (garbage collection also finalizes abandoned handles).
+  compilation. Text after the first statement counts as a second statement
+  only when it compiles to one, so a trailing comment, extra semicolons and
+  whitespace are accepted; `query/3`, `execute/3`, `stream_open/4` and
+  `explain_analyze/3` apply the same rule. The returned handle must
+  eventually be finalized via `stmt_finalize/1` (garbage collection also
+  finalizes abandoned handles).
   """
   @spec stmt_prepare(conn :: Xqlite.conn(), sql :: String.t()) ::
           {:ok, Xqlite.stmt()} | Xqlite.error()

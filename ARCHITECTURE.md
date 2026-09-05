@@ -115,6 +115,9 @@ swaps the pointer to null and finalizes there and then, replying `:done`
 or `{:error, reason}`. `next_fun/1` maps rows to `%{column => value}`
 after `TypeExtension.decode_rows/2` and shapes each element per
 `:on_error`; `after_fun/1` calls the idempotent `stream_close`.
+`stream_open` compiles through `statement.rs:prepare_one`, so SQL holding
+no statement and SQL holding a second one are refused at open rather than
+becoming an empty stream or a stream over the first statement alone.
 
 ### 2.4 Hooks and callbacks
 
@@ -196,6 +199,7 @@ and every extra a call records arrives in the metadata map.
 | State | Event | Next | Function |
 |---|---|---|---|
 | — | `stream_open` | open | `nif.rs:stream_open` |
+| — | `stream_open` with no statement, or with a second one | — | refused by `statement.rs:prepare_one`, no handle |
 | open | `stream_fetch` → rows | open | `nif.rs:stream_fetch` |
 | open | `stream_fetch` exhausts | closed | swap + finalize in place |
 | open | `stream_fetch` errors | closed | swap + finalize, then error |
@@ -243,7 +247,7 @@ pins to `test/`.
 | `default-value-classification` | A column default arrives as `:none`, `{:literal, v}`, `{:blob, bytes}`, `{:current, :time \| :date \| :timestamp}` or `{:expr, sql}`; nothing is constant-folded, and an integer past 64 bits or a non-finite float falls back to `{:expr, _}`. | `schema.rs:classify_default` | `schema_default_value_test.exs: "the full default-value matrix classifies as designed"`, plus the grammar property in `schema_default_value_property_test.exs` |
 | `non-finite-floats-become-atoms` | A REAL that is not finite reads back as `:positive_infinity` or `:negative_infinity`, and NaN as `nil`, because the BEAM cannot hold a non-finite double. | `util.rs:encode_f64` | `nif/query_test.exs: "query/3 reads non-finite floats as sentinel atoms and stays usable"` |
 | `blob-encoding-threshold-64-bytes` | On the query path a BLOB over 64 bytes comes back as a zero-copy resource binary and one of 64 bytes or fewer is copied onto the process heap; the stream and `blob_read` paths always copy. | `util.rs:HEAP_BINARY_THRESHOLD` and `encode_blob` | unpinned |
-| `sql-input-rejections` | SQL is refused, never truncated or half-run: an interior NUL byte is `:null_byte_in_string` on every entry point; on query, execute and prepare, whitespace- or comment-only SQL is `{:cannot_execute, "SQL contains no statement"}` and a trailing second statement is `:multiple_statements`. | `query.rs:reject_interior_nul`, `reject_no_statement`, `nif.rs:stmt_prepare` | `nif/error_input_test.exs: "interior NUL in SQL text is rejected on query/execute/execute_batch"` |
+| `sql-input-rejections` | SQL is refused, never truncated or half-run: an interior NUL byte is `:null_byte_in_string` on every entry point; on query, execute, prepare, stream and explain_analyze, SQL holding no statement (empty, whitespace, comments, bare semicolons) is `{:cannot_execute, "SQL contains no statement"}` and a second statement after the first is `:multiple_statements`. Text after the first statement counts as a second statement only when re-compiling it yields one, so a trailing comment, extra semicolons and whitespace are accepted. | `query.rs:reject_interior_nul`, `reject_no_statement`, `statement.rs:prepare_one` | `nif/prepare_tail_law_test.exs: "the four prepare paths classify one SQL string identically"`, `nif/error_input_test.exs: "interior NUL in SQL text is rejected on query/execute/execute_batch"` |
 | `batch-size-and-step-count-floors` | A batch size below 1 is `{:invalid_batch_size, %{provided: v, minimum: 1}}`, `every_n` below 1 is `{:cannot_execute, _}`, `pages_per_step` below 1 is `{:invalid_pages_per_step, v}`; none is clamped. The two `:invalid_batch_size` sites disagree on `provided`: `stmt_multi_step_impl` puts the bare integer, `stream_fetch` a tagged pair such as `{:integer, 0}`. | `nif.rs:stmt_multi_step_impl`, `stream_fetch`, `register_progress_hook`, `backup_with_progress` | `nif/statement_test.exs: "multi_step rejects a batch size below one"`, with one twin per floor in `nif/stream_test.exs`, `nif/progress_hook_test.exs` and `nif/backup_progress_test.exs` |
 | `stream-on-error-modes` | `:raise` (the default) yields row maps and raises `Xqlite.StreamError`; `:halt` yields row maps, logs the reason and stops; `:emit_error` yields `{:ok, row}` then one terminal `{:error, reason}`; anything else is `{:error, {:invalid_on_error, value}}` at open. | `stream_resource_callbacks.ex:validate_on_error/1` and `handle_fetch_error/2` | `xqlite_test.exs: "stream/4 rejects an unsupported :on_error mode at open"`, plus one test per mode there |
 | `statement-column-names-fall-back-after-finalize` | `stmt_column_names` reads live column metadata so automatic re-prepare is reflected, and serves the prepare-time snapshot only once the statement is finalized or the connection closed. | `nif.rs:stmt_column_names` | `nif/statement_test.exs: "operations after finalize report :statement_finalized; names stay cached"` |

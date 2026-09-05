@@ -110,25 +110,28 @@ defmodule Xqlite.NIF.StreamTest do
         assert String.contains?(msg_str, "no such table")
       end
 
-      test "stream_open/4 with empty SQL string returns handle, empty columns, and is done", %{
+      test "stream_open/4 with empty SQL string reports that there is no statement", %{
         conn: conn
       } do
-        sql = ""
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
-        assert is_reference(stream_handle)
-        assert {:ok, []} == NIF.stream_get_columns(stream_handle)
-        assert :done == NIF.stream_fetch(stream_handle, 1)
-        assert :ok == NIF.stream_close(stream_handle)
+        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, "", [], [])
+        assert is_binary(reason)
       end
 
-      test "stream_open/4 with comments-only SQL returns handle, empty columns, and is done",
+      test "stream_open/4 with comments-only SQL reports that there is no statement",
            %{conn: conn} do
         sql = "-- This is just a comment;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
-        assert is_reference(stream_handle)
-        assert {:ok, []} == NIF.stream_get_columns(stream_handle)
-        assert :done == NIF.stream_fetch(stream_handle, 1)
-        assert :ok == NIF.stream_close(stream_handle)
+
+        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, sql, [], [])
+        assert is_binary(reason)
+      end
+
+      test "stream_open/4 refuses a second statement instead of streaming the first",
+           %{conn: conn} do
+        assert {:error, :multiple_statements} =
+                 NIF.stream_open(conn, "SELECT 1; DROP TABLE stream_items", [], [])
+
+        assert {:ok, %{rows: [[12]]}} =
+                 NIF.query(conn, "SELECT count(*) FROM stream_items", [])
       end
 
       test "stream_open/4 with invalid parameter name (named params) returns an error", %{

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`Xqlite.enable_strict_mode/1` and `Xqlite.disable_strict_mode/1`
+  are gone.** Both ran `PRAGMA strict`, and SQLite has no pragma by
+  that name — an unknown pragma is parsed and ignored, so the calls
+  returned success and changed nothing while their docs promised a
+  stricter connection. STRICT tables are the real mechanism and are
+  untouched: declare a new table with `CREATE TABLE … STRICT`, or
+  convert an existing one with `Xqlite.enable_strict_table/2`.
+
 ### Changed
 
 - **The crate declares its Rust floor: `rust-version = "1.91"`.**
@@ -23,6 +33,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for contributors.
 
 ### Fixed
+
+- **Every entry point that compiles SQL now accepts and refuses the same
+  strings.** `prepare/2`, `stream/4`, `explain_analyze/3` and `query/3` /
+  `execute/3` each decided for themselves what to do with text after the
+  first statement and with input holding no statement at all, and all
+  three answers differed. `stream/4` compiled only the first statement
+  and streamed it, so `"SELECT 1; DROP TABLE t"` returned rows and never
+  said half the string had been dropped, and comment-only or empty SQL
+  gave back a stream with no rows; `explain_analyze/3` reported a
+  successful empty run for the same input; `prepare/2` refused a trailing
+  comment or a doubled semicolon (`"SELECT 1;;"`) that `query/3` accepts.
+  All four now share one rule, rusqlite's: input holding no statement is
+  `{:cannot_execute, "SQL contains no statement"}`, and what follows the
+  first statement is a second statement — `:multiple_statements` — only
+  when re-compiling it yields one, so a trailing comment, extra
+  semicolons and trailing whitespace pass everywhere. Two behaviour
+  changes to note: `Xqlite.stream(conn, "")` returns
+  `{:error, {:cannot_execute, _}}` instead of an enumerable with no
+  elements, so a dynamically built string that can come out empty now
+  needs an `{:error, _}` branch; and `explain_analyze/3` on the same
+  input returns that error instead of a report of zeroes.
 
 - **`Xqlite.busy_timeout/2` refuses a value past SQLite's 32-bit
   limit instead of clamping it.** A timeout above `2_147_483_647`
@@ -56,9 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:cannot_execute, "SQL contains no statement"}` — the error `prepare/2`
   has always returned for it. Passing parameters used to fail even
   earlier, as a wrong parameter count; the new check runs before any
-  binding. `execute_batch/2`, `stream/4` and `explain_analyze/3` accept
-  the input exactly as before: nothing to run, an empty stream, an empty
-  report.
+  binding. `stream/4` and `explain_analyze/3` refuse it too, as the entry
+  below describes; `execute_batch/2` accepts it exactly as before, with
+  nothing to run.
 
 - **`prepare/2`, `stream/4` and `explain_analyze/3` now report a syntax
   error the way `query/3` does.** These three compile their SQL through

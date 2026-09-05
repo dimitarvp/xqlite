@@ -7,9 +7,8 @@ use rusqlite::ffi;
 use rusqlite::types::Value;
 use rustler::types::atom::nil;
 use rustler::{Encoder, Env, Term, TermType, types::map::map_new};
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::c_int;
-use std::ptr::NonNull;
 use std::time::Instant;
 
 /// Result of running an EXPLAIN ANALYZE on a SQL statement.
@@ -67,42 +66,14 @@ pub fn core_explain_analyze<'a>(
     // no concurrent BEAM thread can step the same connection.
     unsafe {
         let db_handle = conn.handle();
-        let c_sql = CString::new(sql).map_err(|_| XqliteError::NulErrorInString)?;
-        let sql_len = c_int::try_from(c_sql.as_bytes().len())
-            .map_err(|_| XqliteError::CannotExecute("SQL too long".to_string()))?;
+        let stmt_ptr = crate::statement::prepare_one(db_handle, sql)?;
 
-        let mut raw_stmt_ptr: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
-        let prepare_rc = ffi::sqlite3_prepare_v2(
-            db_handle,
-            c_sql.as_ptr(),
-            sql_len,
-            &mut raw_stmt_ptr,
-            std::ptr::null_mut(),
-        );
-
-        if prepare_rc != ffi::SQLITE_OK {
-            return Err(crate::error::prepare_failure(db_handle, prepare_rc, sql));
-        }
-
-        let stmt_ptr = match NonNull::new(raw_stmt_ptr) {
-            Some(p) => p,
-            None => {
-                // Whitespace-only / comment-only SQL. Return an empty report
-                // without attempting EXPLAIN QUERY PLAN (which would choke on
-                // the same input).
-                return Ok(ExplainAnalyze {
-                    wall_time_ns: 0,
-                    rows_produced: 0,
-                    stmt_counters: StmtCounters::zero(),
-                    scans: Vec::new(),
-                    query_plan: Vec::new(),
-                });
+        let result = match collect_query_plan(conn, sql) {
+            Ok(query_plan) => {
+                run_and_collect(env, stmt_ptr.as_ptr(), db_handle, params_term, query_plan)
             }
+            Err(e) => Err(e),
         };
-
-        let query_plan = collect_query_plan(conn, sql)?;
-        let result =
-            run_and_collect(env, stmt_ptr.as_ptr(), db_handle, params_term, query_plan);
 
         ffi::sqlite3_finalize(stmt_ptr.as_ptr());
 
@@ -365,22 +336,6 @@ unsafe fn ffi_error(db_handle: *mut ffi::sqlite3, code: c_int) -> XqliteError {
     let ffi_err = ffi::Error::new(code);
     let rusqlite_err = rusqlite::Error::SqliteFailure(ffi_err, Some(message));
     XqliteError::from(rusqlite_err)
-}
-
-impl StmtCounters {
-    fn zero() -> Self {
-        Self {
-            fullscan_step: 0,
-            sort: 0,
-            autoindex: 0,
-            vm_step: 0,
-            reprepare: 0,
-            run: 0,
-            filter_miss: 0,
-            filter_hit: 0,
-            memused_bytes: 0,
-        }
-    }
 }
 
 /// Finalizes a chained `map_put` build. A map-build failure is practically

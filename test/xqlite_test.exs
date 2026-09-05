@@ -110,9 +110,9 @@ defmodule XqliteTest do
         assert {:error, {:sql_input_error, %{code: 1, sql: ^sql, offset: 0}}} = result
       end
 
-      test "stream created with empty SQL results in an empty stream", %{conn: conn} do
-        stream = Xqlite.stream(conn, "")
-        assert Enum.to_list(stream) == []
+      test "stream/4 refuses SQL that holds no statement", %{conn: conn} do
+        assert {:error, {:cannot_execute, reason}} = Xqlite.stream(conn, "")
+        assert is_binary(reason)
       end
 
       # --- on_error option: happy-path element shape follows the mode ---
@@ -191,30 +191,6 @@ defmodule XqliteTest do
         assert {:error, {:invalid_on_error, :bogus}} =
                  Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], on_error: :bogus)
       end
-    end
-  end
-
-  describe "disable_strict_mode/1" do
-    setup do
-      {:ok, conn} = NIF.open_in_memory(":memory:")
-      on_exit(fn -> NIF.close(conn) end)
-      {:ok, conn: conn}
-    end
-
-    test "allows type coercion after disabling strict mode", %{conn: conn} do
-      assert {:ok, _} = Xqlite.enable_strict_mode(conn)
-      assert {:ok, _} = Xqlite.disable_strict_mode(conn)
-
-      :ok =
-        NIF.execute_batch(conn, "CREATE TABLE ds_test (id INTEGER PRIMARY KEY, val INTEGER);")
-
-      # In non-strict mode, inserting a string into an INTEGER column succeeds
-      # (SQLite stores it as-is due to type affinity being flexible)
-      assert {:ok, 1} =
-               NIF.execute(conn, "INSERT INTO ds_test (id, val) VALUES (1, 'hello')", [])
-
-      assert {:ok, %{rows: [[1, "hello"]], num_rows: 1}} =
-               NIF.query(conn, "SELECT * FROM ds_test", [])
     end
   end
 

@@ -154,11 +154,9 @@ defmodule Xqlite.NIF.ExplainAnalyzeTest do
         assert report.rows_produced == 0
       end
 
-      test "empty SQL (whitespace only) returns an empty report", %{conn: conn} do
-        assert {:ok, report} = NIF.explain_analyze(conn, "   ", [])
-        assert report.wall_time_ns == 0
-        assert report.rows_produced == 0
-        assert report.scans == []
+      test "SQL that holds no statement is refused, not reported as empty", %{conn: conn} do
+        assert {:error, {:cannot_execute, reason}} = NIF.explain_analyze(conn, "   ", [])
+        assert is_binary(reason)
       end
     end
   end

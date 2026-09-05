@@ -4,7 +4,7 @@ use crate::blob::{self, XqliteBlob};
 use crate::busy_handler;
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{self, XqliteConn, XqliteQueryResult};
-use crate::error::{self, XqliteError};
+use crate::error::XqliteError;
 use crate::explain_analyze::{self, ExplainAnalyze};
 use crate::pragma;
 use crate::query;
@@ -12,7 +12,7 @@ use crate::schema::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, SchemaObjectInfo,
 };
 use crate::session::{self, XqliteSession};
-use crate::statement::XqliteStatement;
+use crate::statement::{self, XqliteStatement};
 use crate::stream::XqliteStream;
 use crate::transaction;
 use crate::util::singular_ok_or_error_tuple;
@@ -27,7 +27,6 @@ use rustler::{
     },
 };
 use std::io::Cursor;
-use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -708,47 +707,7 @@ fn stmt_prepare(
         // error path before returning.
         unsafe {
             let db_handle = conn.handle();
-            let mut raw_stmt_ptr: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
-            let mut tail_ptr: *const std::os::raw::c_char = std::ptr::null();
-            let c_sql = std::ffi::CString::new(sql.as_str())
-                .map_err(|_| XqliteError::NulErrorInString)?;
-
-            let prepare_rc = ffi::sqlite3_prepare_v2(
-                db_handle,
-                c_sql.as_ptr(),
-                std::os::raw::c_int::try_from(c_sql.as_bytes().len()).map_err(|_| {
-                    XqliteError::CannotExecute(
-                        "SQL string length exceeds c_int range".to_string(),
-                    )
-                })?,
-                &mut raw_stmt_ptr,
-                &mut tail_ptr,
-            );
-
-            if prepare_rc != ffi::SQLITE_OK {
-                return Err(error::prepare_failure(db_handle, prepare_rc, &sql));
-            }
-
-            // Null with SQLITE_OK means the SQL was whitespace/comments only.
-            // A manual statement must be exactly one real statement.
-            let non_null_raw_stmt = match NonNull::new(raw_stmt_ptr) {
-                Some(ptr) => ptr,
-                None => {
-                    return Err(XqliteError::CannotExecute(
-                        "SQL contains no statement".to_string(),
-                    ));
-                }
-            };
-
-            // Reject trailing SQL after the first statement instead of
-            // silently compiling only the first one.
-            if !tail_ptr.is_null() {
-                let tail = std::ffi::CStr::from_ptr(tail_ptr).to_string_lossy();
-                if !tail.trim().is_empty() {
-                    ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
-                    return Err(XqliteError::MultipleStatements);
-                }
-            }
+            let non_null_raw_stmt = statement::prepare_one(db_handle, &sql)?;
 
             let column_count =
                 ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
@@ -1016,44 +975,12 @@ fn stream_open<'a>(
     connection::with_conn(&conn_handle, |conn| {
         // SAFETY: with_conn holds the connection mutex for the duration of
         // this closure. All FFI calls below operate on the db_handle and
-        // raw_stmt_ptr owned by this connection. Statement ownership is
-        // transferred to XqliteStream's AtomicPtr on success, or finalized
-        // on error before returning.
+        // the statement prepare_one returned, both owned by this connection.
+        // Statement ownership is transferred to XqliteStream's AtomicPtr on
+        // success, or finalized on error before returning.
         unsafe {
             let db_handle = conn.handle();
-            let mut raw_stmt_ptr: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
-            let c_sql = std::ffi::CString::new(sql.as_str())
-                .map_err(|_| XqliteError::NulErrorInString)?;
-
-            let prepare_rc = ffi::sqlite3_prepare_v2(
-                db_handle,
-                c_sql.as_ptr(),
-                std::os::raw::c_int::try_from(c_sql.as_bytes().len()).map_err(|_| {
-                    XqliteError::CannotExecute(
-                        "SQL string length exceeds c_int range".to_string(),
-                    )
-                })?,
-                &mut raw_stmt_ptr,
-                std::ptr::null_mut(),
-            );
-
-            if prepare_rc != ffi::SQLITE_OK {
-                return Err(error::prepare_failure(db_handle, prepare_rc, &sql));
-            }
-
-            // SAFETY: raw_stmt_ptr was just returned by sqlite3_prepare_v2
-            // which succeeded (prepare_rc == SQLITE_OK). A null return with
-            // SQLITE_OK means the input was whitespace/comments only.
-            let non_null_raw_stmt = match NonNull::new(raw_stmt_ptr) {
-                Some(ptr) => ptr,
-                None => {
-                    return Ok(XqliteStream {
-                        atomic_raw_stmt: AtomicPtr::new(std::ptr::null_mut()),
-                        conn_resource_arc: conn_resource_arc_clone,
-                        column_names: Vec::new(),
-                    });
-                }
-            };
+            let non_null_raw_stmt = statement::prepare_one(db_handle, &sql)?;
 
             let bind_result: Result<(), XqliteError> = match params_term.get_type() {
                 TermType::List => {
