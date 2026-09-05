@@ -18,6 +18,8 @@ defmodule Mix.Tasks.Verify do
   7. Rust unit tests (`cargo test`)
   8. Dialyzer type checks
   9. Full Elixir test suite (`mix test.seq`)
+  10. Verify stamp (`scripts/tree_fingerprint.exs --stamp` records the
+      fingerprint of the tree that passed, for the commit hook)
 
   ## Usage
 
@@ -37,7 +39,8 @@ defmodule Mix.Tasks.Verify do
     {"Rust clippy", &__MODULE__.check_rust_clippy/0},
     {"Rust tests", &__MODULE__.check_rust_tests/0},
     {"Dialyzer", &__MODULE__.check_dialyzer/0},
-    {"Elixir tests", &__MODULE__.check_tests/0}
+    {"Elixir tests", &__MODULE__.check_tests/0},
+    {"Verify stamp", &__MODULE__.write_stamp/0}
   ]
 
   def run(_args) do
@@ -103,6 +106,10 @@ defmodule Mix.Tasks.Verify do
 
   def check_tests do
     run_cmd("mix", ["test.seq"])
+  end
+
+  def write_stamp do
+    run_cmd("elixir", ["scripts/tree_fingerprint.exs", "--stamp"])
   end
 
   defp run_cmd(cmd, args) do
