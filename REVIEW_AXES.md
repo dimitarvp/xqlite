@@ -855,3 +855,26 @@ open); MSRV stated; license consistency; cargo audit + deps.audit;
 CHANGELOGs honest; README quickstart cold-run; guides execute;
 release.sh rehearsed (audited wave 1: safe, dirty-tree-gated, no
 force-push); announcement fact-check claim by claim.
+
+Status 2026-09-05 (Gate 3 prep; detail in the adapter ledger's
+"Gate 3 RC prep" entry): hexdocs + typespecs + dialyzer DONE both
+repos (zero docs warnings; public-function census clean; one
+justified dialyzer ignore in the adapter); accidental-public audit
+DONE (adapter G1 closed; both Hex packages stop shipping
+`lib/mix/tasks/`); precompiled honesty DONE for 0.11.0 (8 release
+assets ≡ 8 checksum entries, NIF 2.17 only ⇒ OTP 26 floor, now
+stated in the README; the per-artifact strings check passed 8/8 —
+every binary carries "3.53.2" and the 2026-06-03 d6e03d8c source
+id); CI-matrix-vs-floors DONE since 2026-07-21
+(Elixir ~> 1.17 both repos) and re-checked; MSRV DONE (`rust-version
+= "1.91"`, measured: 1.90.0 refuses, 1.91.0 builds); license
+consistency DONE (MIT both; every crate in the resolved NIF graph
+permissive); deps.audit runs in both verify gates; cargo audit DONE
+(2026-09-05: 57 crates against 1239 advisories, clean — not yet a
+CI lane); CHANGELOG honesty DONE for the
+adapter's Unreleased section (168 claims audited, 7 corrected) —
+xqlite's sections were written at release time and re-read by Runs
+40/49, not claim-audited; README quickstart cold-run DONE (one
+defect fixed: `ecto_repos` placement); guides execute — open;
+release.sh rehearsed — done wave 1; announcement fact-check — Gate 4,
+maintainer.
