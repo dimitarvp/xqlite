@@ -4770,3 +4770,104 @@ diff), `with_live_stmt` (statement.rs, unchanged), `with_live_blob` (blob.rs:284
 - `mix verify` GREEN (exit file 0) on the committed tree.
 
 ---
+
+## Run 24 — 2026-09-05 — A1+A2 covering re-run (this cycle's busy-handler and prepare-error churn)
+
+- Commit at scan: `248e840` (HEAD, clean, verify + CI green). Scope: the two
+  PRIORITY-1 axes over `0f81e75..248e840` — re-wet by the busy-slot fallback
+  (`2f3973f`: a new subscript pair, subtraction and multiplication in
+  `fallback_delay_ms`, the changed `busy_callback` body), the `as_chunks::<2>()`
+  rewrite (`9f2e278`), `prepare_failure` + `reject_no_statement` (`c85d0ae`), and
+  `set_timeout` (`b486a28`). Composition: one Opus reviewer (read-only; 4 Elixir
+  probes + a standalone overflow-checked Rust sweep under `a1a2_cover/`); the
+  one finding gated by the orchestrator (entry below). Churn classification: the
+  six lock helpers' files changed ZERO non-comment lines (per-file counts);
+  `util.rs`'s 36 lines cosmetic (`encode_text` untouched); real code churn
+  confined to `busy_handler.rs`, `error.rs`, `constraint_parse.rs` (one arm),
+  `schema.rs` (two lines), `query.rs`, `nif.rs`, `explain_analyze.rs`.
+
+### A1 census (Run 22 → HEAD)
+
+- `unwrap`/`expect` non-test 0 → 0; panic macros non-test 0 → 0 (the 49
+  `assert*!` hits are the two test modules); data subscripts 1 pair → 2 pairs
+  (`schema.rs` pair now `as_chunks::<2>()` array-typed, in-bounds by type;
+  `busy_handler.rs:128` `DELAYS[index]`/`TOTALS[index]` under `index <= LAST`);
+  subtraction 1 → 3 (`const LAST = len - 1` const-evaluated; `index - LAST` in the
+  `else` branch only); multiplication 0 → 1 (`DELAYS[LAST] * (index - LAST) as u64`,
+  ≤ 4.3e11 at `u32::MAX`); `with_capacity` 13 → 13 all bounded (F-A1-1's
+  `Vec::new` intact); `impl Drop` 7 → 7; raw `unsafe extern "C"` 3 → 3
+  (`busy_callback` body changed: `fallback_delay_ms` + `thread::sleep`, neither
+  panics, still inside `guard_ffi_callback`); release profile unchanged (wraps).
+  Overflow-checked standalone sweep of `fallback_delay_ms` (64 × 7 cases incl.
+  `u32::MAX`, `-1i32 as u32`, `i32::MIN as u32`): no panic; a negative SQLite
+  `count` would wrap into the `else` branch and yield `None`/`Some(100)` — moot.
+  The `index > LAST` branch exercised live (14 retries, indices 0-13).
+  `prepare_failure`: errmsg null-checked, `ffi::Error::new` total, the `c_int`
+  offset passed uncast. `reject_no_statement`: safe API only. 400 malformed-SQL
+  calls over prepare/stream/explain_analyze/query on live + closed connections:
+  zero crashes; every closed-connection call `{:error, :connection_closed}`.
+- **F-A1-2 (S2, CONFIRMED, FIXED — same day).** `apply_busy_timeout` did
+  `c_int::try_from(timeout_ms).unwrap_or(c_int::MAX)`: `busy_timeout(conn,
+  2_147_483_648)` returned `:ok` and read back `2_147_483_647` (probe1: exact at
+  0 / 1 / `c_int::MAX`, clamped at `+1`, `3e9`, `u64::MAX`; `2**64` refused loudly
+  by rustler's decode) while the doc promised the value reads back. FIX:
+  `busy_timeout_c_int/1` — a `{:cannot_execute, "busy_timeout N ms exceeds
+  SQLite's limit of 2147483647 ms"}` refusal (the SQL-length guard's shape),
+  checked in `set_timeout` before any slot mutation; docs state the ceiling;
+  CHANGELOG Fixed. PIN (busy_handler_test): the ceiling reads back, `+1` is
+  refused and the pragma keeps the ceiling. Predicted RED = `:ok` — observed.
+  Orchestrator stash-RED 1/1 by identity; cargo fmt/clippy/test green.
+  Attribution: arguably A10's (doc divergence, never a panic) — taken
+  conservatively as A1's census product.
+
+### A2 call-site table (mechanical diff of `ffi::sqlite3_*`)
+
+- Entire delta: `+1 sqlite3_busy_timeout` (`busy_handler.rs:158`, under the
+  `set_busy_timeout` NIF's `with_conn` via `set_timeout`/`restore_busy_timeout`/
+  `swap_in`), `+1 sqlite3_error_offset` and `sqlite3_errmsg` 8 → 7 (hoisted into
+  `error::prepare_failure`; callers `nif.rs` `stmt_prepare`/`stream_open` and
+  `explain_analyze.rs`, each inside a `with_conn` closure with the same locked
+  handle; the two hand-built blocks removed, nothing else referenced them);
+  every other site identical in count and in a comment-only-churn file. The
+  indirect FFI via `reject_no_statement` (`column_count`/`parameter_count`/
+  `expanded_sql`) from `core_query`/`core_execute` — all six NIF callers under
+  `with_conn`.
+- `thread::sleep` inside the busy callback: runs inside `sqlite3_step` under the
+  held Mutex — a longer hold satisfies the law; identical to the displaced
+  SQLite handler. Measured: `register_busy_observer` issued 80 ms into a 630 ms
+  contended write blocked 549 ms (returned when the writer released) vs a 0 ms
+  uncontended control; 15 observer messages, retries 0-14 contiguous, no
+  duplicates.
+- `swap_in`'s `read_busy_timeout` (a PRAGMA statement under the lock): runs only
+  when the slot is null and BEFORE `install_hook` swaps — our callback is not
+  installed at that instant, no stale pointee, no re-acquired lock; an authorizer
+  veto of the pragma degrades to a 0 ms fallback (430 ms → 0 ms, one observer
+  message) — structured, documented, no panic.
+- ZERO new CONFIRMED on A2.
+
+### Handoffs
+
+- `stream/4` and `explain_analyze/3` accept no-statement SQL while
+  `query`/`execute`/`prepare` refuse it — deliberate, undocumented on the
+  wrappers (A10 docs seed, S3).
+- `reject_no_statement`'s `expanded_sql() == None` also covers OOM (and the
+  `SQLITE_LIMIT_LENGTH` case already on the backlog) — source-only, recorded.
+- The `c_int` ceiling: explicit on the open path (`:infinity` mapping), now
+  explicit on the runtime path too.
+
+### Disposition & dryness
+
+- **A1: a finding (F-A1-2, S2, fixed the same day) — 0 of 2, NOT DRY**; two clean
+  runs owed. Completeness critic: allocation failure remains source-only
+  (`encode_text`, `expanded_sql`, `to_string` in the parser); read SQLite's
+  `sqlite3InvokeBusyHandler` for the counter's sign if the stronger claim is
+  wanted.
+- **A2: CLEAN — 2 of 2 consecutive clean covering runs → DRY.** Oracle unchanged:
+  source-level lock scoping + `THREADSAFE=1`; the 549 ms measurement observes
+  serialization, not the absence of a race. The `set_timeout` empty branch
+  performs two `sqlite3_busy_timeout` effects where one would do — correct,
+  noted.
+- `mix verify` GREEN (exit file 0) on the committed tree (the F-A1-2 fix + pin +
+  docs + CHANGELOG).
+
+---

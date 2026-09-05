@@ -7,6 +7,21 @@ burn-down.
 
 ## Open
 
+- [F-A1-2] (S2, FIXED, from Run 24) `busy_timeout/2` silently clamped
+  a value above SQLite's 32-bit limit (`c_int::try_from(...)
+  .unwrap_or(c_int::MAX)`) while its doc promised the value reads
+  back; `busy_timeout(2_147_483_648)` read back `2_147_483_647`. FIX:
+  a structured refusal `{:cannot_execute, "busy_timeout N ms exceeds
+  SQLite's limit of 2147483647 ms"}` (the SQL-length guard's shape),
+  checked before any slot mutation; the open path's explicit
+  `:infinity → 2_147_483_647` mapping unchanged. Pinned
+  (busy_handler_test). Attribution: arguably A10's (doc divergence,
+  no panic) — recorded under A1 conservatively.
+- [A10 docs seed] (S3, from Run 24) `stream/4` and
+  `explain_analyze/3` ACCEPT whitespace/comment-only SQL (an empty
+  stream, an empty report — deliberate, the CHANGELOG says so) while
+  `query`/`execute`/`prepare` refuse it; neither wrapper's docs state
+  the acceptance. One sentence each.
 - [F-A10-10] (S2, FIXED, from Run 23) `busy_timeout/2` was
   `remove_busy_policy` + a raw `PRAGMA busy_timeout`: with a busy
   observer registered the slot stayed held, the PRAGMA installed

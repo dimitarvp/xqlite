@@ -99,6 +99,22 @@ OOM-`panic!`ing `str::encode` on the three value-return TEXT sites). `mix verify
 had NEVER had a clean covering run (Run 16 found F-A1-1 S0) and was re-wet by the maintainer pass →
 Run 22 is A1's **first clean covering run, 1 of 2 consecutive, NOT DRY**, one more owed. Re-wet
 triggers UNCHANGED.
+COVERING RE-RUN (Run 24, 2026-09-05 — over `0f81e75..248e840`, re-wet by the busy-handler
+fallback (new subscript pair + subtraction + multiplication in `fallback_delay_ms`, the changed
+`busy_callback` body), the `as_chunks::<2>()` rewrite, `prepare_failure`, and `set_timeout`):
+the full census reproduced at HEAD — zero `unwrap`/`expect`, zero panic macros outside the two
+test modules, `DELAYS[index]`/`TOTALS[index]` in-bounds under `index <= LAST`, the else-branch
+`TOTALS[LAST] + DELAYS[LAST] * (index - LAST)` overflow-free even at `u32::MAX` (proven with
+overflow-checks ON, incl. the wrapped values a negative `count` would produce → clean `None`),
+`as_chunks::<2>()` strictly stronger than `chunks_exact(2)` (array-typed pairs), 13 bounded
+`with_capacity`, 7 Drop impls unchanged, the 3 raw callbacks still guarded; the `index > LAST`
+branch exercised live (14 retries, indices 0-13); 400 malformed-SQL calls over four prepare paths
+on live and closed connections crash-free. ONE finding — **F-A1-2 (S2)**: `busy_timeout/2`
+silently clamped values above `c_int::MAX` (`unwrap_or`) while its doc promised the value reads
+back; fixed the same day (a structured `{:cannot_execute, reason}` refusal, the SQL-length guard's
+shape; the open path's explicit `:infinity` mapping unchanged). Attribution note on record: read
+narrowly the finding is A10's (a doc divergence, no panic); taken conservatively as A1's census
+product → **A1 at 0 of 2, NOT DRY**. Re-wet triggers UNCHANGED.
 
 ### A2. The locking law — PRIORITY 1
 Every `sqlite3_*` call must hold the connection Mutex for its full
@@ -153,6 +169,23 @@ the **first clean covering run over that churn, 1 of 2 consecutive, NOT DRY**, o
 does NOT go DRY.** Re-wet: any new `sqlite3_*`/`ffi::` site, a `with_*`/`take_and_finalize_raw`
 restructure, a new AtomicPtr/interior-mutable-under-lock construct, or a cancel-path/hook-
 registration change.
+COVERING RE-RUN (Run 24, 2026-09-05 — over `0f81e75..248e840`, re-wet by two new `ffi::sqlite3_*`
+sites and one moved): the whole `ffi::sqlite3_*` enumeration diffed mechanically between the two
+revisions — the entire delta is `+sqlite3_busy_timeout` (`apply_busy_timeout` ← `set_timeout` /
+`restore_busy_timeout` ← `swap_in` ← the `set_busy_timeout` NIF's `with_conn`),
+`+sqlite3_error_offset` and `sqlite3_errmsg` hoisted into `error::prepare_failure` (three callers,
+each inside a `with_conn` closure with the same locked handle), the two hand-built blocks removed;
+every lock helper (`with_conn`/`with_conn_mut`/`with_live_stmt`/`with_live_blob`/`with_session`/
+`take_and_finalize_raw`/`guard_ffi_callback`/`ProgressHandlerGuard`) byte-identical code
+(comment-only churn proven by per-file non-comment line counts); the two indirect FFI paths
+(`reject_no_statement`, `prepare_failure`) under `with_conn`. The busy callback's
+`std::thread::sleep` runs inside `sqlite3_step` under the held Mutex — a LONGER hold, satisfying
+the law, identical to the displaced SQLite handler; measured: a mutator issued mid-wait blocked
+549 ms vs 0 ms uncontended, no observer message lost or duplicated. `swap_in`'s
+`read_busy_timeout` runs BEFORE `install_hook` swaps and only on a null slot (no re-entry into
+our callback, no stale pointee); proven with teeth by an authorizer veto (430 ms → 0 ms). ZERO
+new CONFIRMED. DRYNESS: **A2 — 2 of 2 consecutive clean covering runs → DRY** (the first xqlite
+axis dry this cycle). Re-wet triggers UNCHANGED; the next `sqlite3_*` site re-opens it.
 
 ### A3. UB tooling
 Sources: Miri/ASan/TSan/cargo-careful docs. Probes: separability of
