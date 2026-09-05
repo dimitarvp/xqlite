@@ -882,7 +882,10 @@ README, the uncreatable-table authorizer example, the nonexistent
 `:opentelemetry_telemetry.attach/2` section, the Logger sample's
 missing `require`, the `:emit_error` sample's blindness to the
 setup-failure tuple, two placeholders labelled; the five SpatiaLite
-snippets NOT RUN — system library absent here), adapter guides in
-flight;
+snippets NOT RUN — system library absent here); adapter guides DONE
+the same day (13 snippets vs main: one S2 product defect —
+`:binary_id_storage :binary` never stored bytes for `:binary_id`
+fields — fixed RED→green in adapter `7d840f1`, seven doc defects
+fixed in `08b8f69`; detail in the adapter ledger's Gate 3 addendum);
 release.sh rehearsed — done wave 1; announcement fact-check — Gate 4,
 maintainer.
