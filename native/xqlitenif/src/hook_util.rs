@@ -33,12 +33,20 @@ use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
+/// # Safety
+///
+/// `env` must be a live environment (a message env the caller owns for the
+/// duration of the call); the returned term belongs to it.
 #[inline]
 pub(crate) unsafe fn make_atom(env: *mut ErlNifEnv, name: &[u8]) -> ERL_NIF_TERM {
     // SAFETY: env is a valid msg_env; name is a valid byte slice.
     unsafe { enif_make_atom_len(env, name.as_ptr().cast(), name.len()) }
 }
 
+/// # Safety
+///
+/// `env` must be a live environment (a message env the caller owns for the
+/// duration of the call); the returned term and its buffer belong to it.
 #[inline]
 pub(crate) unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TERM {
     // SAFETY: env is valid; enif_make_new_binary returns a buffer of

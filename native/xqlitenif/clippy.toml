@@ -1,0 +1,3 @@
+# Private `unsafe fn`s need a `# Safety` section too (clippy's
+# missing_safety_doc covers only public items by default).
+check-private-items = true
