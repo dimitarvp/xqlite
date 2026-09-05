@@ -979,7 +979,8 @@ defmodule XqliteNIF do
   Removes the busy retry policy from the connection.
 
   Observers keep receiving `{:xqlite_busy, …}` messages; without a
-  policy SQLite surfaces `SQLITE_BUSY` immediately after they fire.
+  policy the connection waits up to the `busy_timeout` that was in
+  effect when the busy slot was taken, then surfaces `SQLITE_BUSY`.
   Safe to call when no policy is installed.
 
   Returns `:ok`.
@@ -996,8 +997,11 @@ defmodule XqliteNIF do
 
   to `pid`. Any number of observers can be registered; each returns a
   handle for `unregister_busy_observer/2`. Observers fire whether or
-  not a retry policy is installed (with no policy, `SQLITE_BUSY`
-  surfaces to the caller right after the fan-out).
+  not a retry policy is installed. With no policy, the connection waits
+  up to the `busy_timeout` that was in effect when the busy slot was
+  taken (5000 ms unless you set it) before surfacing `SQLITE_BUSY`;
+  unregistering the last observer puts that timeout back. See
+  `Xqlite.register_busy_observer/2` for the full slot rules.
 
   Returns `{:ok, handle}`.
   """

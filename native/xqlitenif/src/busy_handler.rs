@@ -38,6 +38,9 @@ pub(crate) struct BusySlotState {
     observers: Vec<(u64, LocalPid)>,
     next_handle: u64,
     start: Cell<Instant>,
+    /// The `busy_timeout` this slot displaced when it took SQLite's single
+    /// busy callback (`sqlite3_busy_handler` zeroes it); 0 when there was none.
+    fallback_timeout_ms: u64,
 }
 
 impl std::fmt::Debug for BusySlotState {
@@ -52,7 +55,8 @@ impl std::fmt::Debug for BusySlotState {
 /// The C callback SQLite invokes on SQLITE_BUSY. Fans
 /// `{:xqlite_busy, retries, elapsed_ms}` out to every observer, then
 /// applies the policy: retry (1) or surface SQLITE_BUSY (0). With no
-/// policy installed the answer is always 0 — pure observation.
+/// policy installed it falls back to emulating the `busy_timeout` the
+/// slot displaced, which is 0 (give up at once) unless one was set.
 ///
 /// # Safety
 ///
@@ -90,7 +94,13 @@ unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_in
         }
 
         match &state.policy {
-            None => 0,
+            None => match fallback_delay_ms(retries, state.fallback_timeout_ms) {
+                None => 0,
+                Some(delay_ms) => {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    1
+                }
+            },
             Some(policy) => {
                 if retries >= policy.max_retries || elapsed_ms >= policy.max_elapsed_ms {
                     return 0; // surface SQLITE_BUSY to the caller
@@ -104,6 +114,57 @@ unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_in
             }
         }
     })
+}
+
+/// The sleep before retry `retries`, or `None` once `timeout_ms` is spent:
+/// `sqliteDefaultBusyCallback`'s tables and clipping, verbatim.
+fn fallback_delay_ms(retries: u32, timeout_ms: u64) -> Option<u64> {
+    const DELAYS: [u64; 12] = [1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100];
+    const TOTALS: [u64; 12] = [0, 1, 3, 8, 18, 33, 53, 78, 103, 128, 178, 228];
+    const LAST: usize = DELAYS.len() - 1;
+
+    let index = retries as usize;
+    let (delay, prior) = if index <= LAST {
+        (DELAYS[index], TOTALS[index])
+    } else {
+        (
+            DELAYS[LAST],
+            TOTALS[LAST] + DELAYS[LAST] * (index - LAST) as u64,
+        )
+    };
+
+    if prior + delay > timeout_ms {
+        timeout_ms.checked_sub(prior).filter(|clipped| *clipped > 0)
+    } else {
+        Some(delay)
+    }
+}
+
+/// Read the connection's current `busy_timeout`. An unreadable value
+/// (an authorizer can veto the PRAGMA) degrades to "none to displace".
+fn read_busy_timeout(conn: &Connection) -> u64 {
+    conn.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
+        .ok()
+        .and_then(|ms| u64::try_from(ms).ok())
+        .unwrap_or(0)
+}
+
+/// Put back the timeout the slot displaced, so emptying the slot undoes
+/// taking it. Callers must hold the connection Mutex.
+fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
+    if timeout_ms == 0 {
+        return Ok(());
+    }
+
+    let ms = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
+    // SAFETY: caller holds the connection Mutex; `conn.handle()` yields
+    // the raw db pointer for that locked connection.
+    let rc = unsafe { ffi::sqlite3_busy_timeout(conn.handle(), ms) };
+    if rc == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(ffi_rc_to_error(conn, "sqlite3_busy_timeout", rc))
+    }
 }
 
 /// Send `{:xqlite_busy, retries, elapsed_ms}` to `pid`. Fire-and-forget.
@@ -202,6 +263,7 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
             observers: Vec::new(),
             next_handle: 0,
             start: Cell::new(Instant::now()),
+            fallback_timeout_ms: 0,
         }
     } else {
         // SAFETY: non-null slot pointers always point to a live
@@ -212,19 +274,28 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
             observers: state.observers.clone(),
             next_handle: state.next_handle,
             start: Cell::new(state.start.get()),
+            fallback_timeout_ms: state.fallback_timeout_ms,
         }
     }
 }
 
-/// Swap the derived state in: empty states clear the C callback and the
-/// slot; non-empty states (re-)register the callback pointing at the new
-/// allocation. Both paths reclaim the previous allocation.
+/// Swap the derived state in: empty states clear the C callback, restore
+/// the displaced timeout and clear the slot; non-empty states (re-)register
+/// the callback pointing at the new allocation, remembering the timeout
+/// they displace when the slot was empty. Both paths reclaim the previous
+/// allocation.
 fn swap_in(
     conn: &Connection,
     slot: &AtomicPtr<BusySlotState>,
-    next: BusySlotState,
+    mut next: BusySlotState,
 ) -> Result<(), XqliteError> {
     if next.policy.is_none() && next.observers.is_empty() {
+        // Nothing of ours is installed, so the C slot holds SQLite's own
+        // timeout handler (or nothing): clearing it would destroy that.
+        if slot.load(Ordering::Acquire).is_null() {
+            return Ok(());
+        }
+
         hook_util::uninstall_hook(slot, || {
             // SAFETY: caller holds the connection Mutex. Passing None+null
             // clears any registered handler; calling with no handler
@@ -233,11 +304,17 @@ fn swap_in(
                 ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut())
             };
             if rc != ffi::SQLITE_OK {
-                return Err(ffi_rc_to_error(conn, rc));
+                return Err(ffi_rc_to_error(conn, "sqlite3_busy_handler", rc));
             }
             Ok(())
-        })
+        })?;
+
+        restore_busy_timeout(conn, next.fallback_timeout_ms)
     } else {
+        if slot.load(Ordering::Acquire).is_null() {
+            next.fallback_timeout_ms = read_busy_timeout(conn);
+        }
+
         hook_util::install_hook(slot, next, |new_ptr| {
             // SAFETY: caller holds the connection Mutex; `conn.handle()`
             // yields the raw db pointer for that locked connection.
@@ -249,24 +326,70 @@ fn swap_in(
                 )
             };
             if rc != ffi::SQLITE_OK {
-                return Err(ffi_rc_to_error(conn, rc));
+                return Err(ffi_rc_to_error(conn, "sqlite3_busy_handler", rc));
             }
             Ok(())
         })
     }
 }
 
-fn ffi_rc_to_error(conn: &Connection, rc: c_int) -> XqliteError {
+fn ffi_rc_to_error(conn: &Connection, what: &str, rc: c_int) -> XqliteError {
     // SAFETY: callers already hold the connection Mutex (public functions
     // document this); `conn.handle()` is valid for the duration of this read.
     let msg = unsafe {
         let ptr = ffi::sqlite3_errmsg(conn.handle());
         if ptr.is_null() {
-            format!("sqlite3_busy_handler failed (code {rc})")
+            format!("{what} failed (code {rc})")
         } else {
             std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
     };
     let ffi_err = ffi::Error::new(rc);
     XqliteError::from(rusqlite::Error::SqliteFailure(ffi_err, Some(msg)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fallback_delay_ms;
+
+    fn schedule(timeout_ms: u64) -> Vec<u64> {
+        let mut delays = Vec::new();
+        let mut retries = 0;
+
+        while let Some(delay) = fallback_delay_ms(retries, timeout_ms) {
+            delays.push(delay);
+            retries += 1;
+        }
+
+        delays
+    }
+
+    #[test]
+    fn no_remembered_timeout_gives_up_at_once() {
+        assert_eq!(fallback_delay_ms(0, 0), None);
+        assert_eq!(fallback_delay_ms(11, 0), None);
+        assert_eq!(fallback_delay_ms(9_999, 0), None);
+    }
+
+    #[test]
+    fn the_schedule_matches_sqlites_and_the_last_delay_is_clipped() {
+        assert_eq!(
+            schedule(300),
+            vec![1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 72]
+        );
+    }
+
+    #[test]
+    fn total_sleep_never_exceeds_the_remembered_timeout() {
+        for timeout_ms in [1, 2, 3, 7, 40, 228, 229, 300, 1_000, 5_000] {
+            let total: u64 = schedule(timeout_ms).iter().sum();
+            assert_eq!(total, timeout_ms, "timeout {timeout_ms}");
+        }
+    }
+
+    #[test]
+    fn past_the_table_the_last_delay_repeats() {
+        assert_eq!(fallback_delay_ms(12, 100_000), Some(100));
+        assert_eq!(fallback_delay_ms(500, 100_000), Some(100));
+    }
 }

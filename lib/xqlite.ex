@@ -1203,6 +1203,13 @@ defmodule Xqlite do
 
   Defaults to `true`. Wraps `XqliteNIF.enable_load_extension/2` and emits
   `[:xqlite, :extension, :enable]` telemetry.
+
+  > #### Warning — enabling has no automatic undo {: .warning}
+  >
+  > There is no automatic disable. Once enabled, the SQL-level
+  > `load_extension()` function stays callable for the rest of the
+  > connection's life — including from SQL you did not write — until
+  > you call this function with `false` yourself.
   """
   @spec enable_load_extension(conn(), boolean()) :: :ok | error()
   def enable_load_extension(conn, enabled \\ true) when is_boolean(enabled) do
@@ -1354,9 +1361,10 @@ defmodule Xqlite do
   Removes the busy retry policy from the connection.
 
   Observers registered with `register_busy_observer/2` keep receiving
-  `{:xqlite_busy, …}` messages; without a policy SQLite surfaces
-  `SQLITE_BUSY` immediately after they fire. Safe to call when no
-  policy is installed.
+  `{:xqlite_busy, …}` messages; without a policy the connection waits
+  up to the `busy_timeout` that was in effect when the busy slot was
+  taken, then surfaces `SQLITE_BUSY`. Safe to call when no policy is
+  installed.
   """
   @spec remove_busy_policy(conn()) :: :ok | error()
   def remove_busy_policy(conn), do: XqliteNIF.remove_busy_policy(conn)
@@ -1373,6 +1381,28 @@ defmodule Xqlite do
   or not a retry policy is installed. `Xqlite.Telemetry.bridge/2` can
   subscribe with `hooks: [:busy]` to re-emit deliveries as
   `[:xqlite, :hook, :busy]` telemetry.
+
+  > #### Note — an observer takes the connection's single busy slot {: .info}
+  >
+  > SQLite gives a connection one busy callback, and an observer takes
+  > it. Observing does not change how long the connection waits: with
+  > no policy installed, the callback keeps waiting up to the
+  > `busy_timeout` that was in effect when the slot was taken (5000 ms
+  > on a connection whose timeout you never set), and unregistering the
+  > last observer puts that timeout back. The value is read through
+  > `PRAGMA busy_timeout` as the slot is taken; if an authorizer denies
+  > that read, no timeout is remembered. While the slot is held,
+  > `PRAGMA busy_timeout` reads `0` — SQLite zeroes it whenever a
+  > callback is installed — even though the wait still applies.
+
+  > #### Warning — PRAGMA busy_timeout silently replaces the callback {: .warning}
+  >
+  > Running `PRAGMA busy_timeout = N` (or `XqliteNIF.set_pragma(conn,
+  > "busy_timeout", ms)`) as raw SQL replaces our C callback with
+  > SQLite's built-in one, and every observer silently stops receiving
+  > `{:xqlite_busy, …}` messages. `busy_timeout/2` replaces it the same
+  > way (its docs say so): unregister your observers before switching
+  > to a plain timeout.
   """
   @spec register_busy_observer(conn(), pid()) :: {:ok, non_neg_integer()} | error()
   def register_busy_observer(conn, pid) when is_pid(pid) do

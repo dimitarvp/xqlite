@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Registering a busy observer no longer silently disables the
+  connection's `busy_timeout`.** SQLite gives a connection one busy
+  callback, and installing ours zeroes any timeout already set — so
+  `Xqlite.register_busy_observer/2` used to turn a waiting connection
+  into one that gave up on the first busy event, and unregistering did
+  not put the timeout back. The busy slot now remembers the timeout in
+  effect when it takes over, waits it out on SQLite's own retry
+  schedule while observers are installed without a policy, and restores
+  it when the slot empties. A retry policy still governs whenever one
+  is installed. Note that a connection you never configured already
+  carries a 5000 ms timeout (rusqlite sets it on open), so observing
+  contention on one now waits where it used to fail at once.
 - **Docs: the guides run as written.** A cold run of every guide
   snippet against the 0.11.0 package found six that did not: the
   security guide (and the README's feature list) still showed the

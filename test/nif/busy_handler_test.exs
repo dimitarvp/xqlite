@@ -17,6 +17,9 @@ defmodule Xqlite.NIF.BusyHandlerTest do
   # - holder opens the file and grabs a write intent (RESERVED lock)
   # - probe opens the same file with a retry policy and an observer
   #   pointed at `self()`
+  #
+  # The probe's busy timeout is zeroed first (rusqlite opens every
+  # connection with 5_000 ms), so only the policy governs the wait.
   defp prime_contention(path, policy_opts) do
     test_pid = self()
     {:ok, holder} = NIF.open(path)
@@ -25,6 +28,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
+    :ok = Xqlite.busy_timeout(probe, 0)
     :ok = Xqlite.set_busy_policy(probe, policy_opts)
     {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
 
@@ -94,7 +98,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
-  test "observers fire without any policy installed; caller sees immediate busy",
+  test "observers fire over a zero busy timeout; caller sees immediate busy",
        %{path: path} do
     test_pid = self()
     {:ok, holder} = NIF.open(path)
@@ -102,6 +106,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
+    :ok = Xqlite.busy_timeout(probe, 0)
     {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
 
     before_ms = System.monotonic_time(:millisecond)
@@ -148,6 +153,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
+    :ok = Xqlite.busy_timeout(probe, 0)
     :ok = Xqlite.set_busy_policy(probe, max_retries: 5, sleep_ms: 5)
     {:ok, handle} = Xqlite.register_busy_observer(probe, test_pid)
     :ok = Xqlite.remove_busy_policy(probe)
@@ -395,6 +401,85 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     detach(handler_id)
     :ok = Xqlite.Telemetry.unbridge(bridge)
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "an observer keeps the busy_timeout that was in effect when it took the slot",
+       %{path: path} do
+    test_pid = self()
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.busy_timeout(probe, 300)
+    {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
+
+    before_ms = System.monotonic_time(:millisecond)
+    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    elapsed = System.monotonic_time(:millisecond) - before_ms
+
+    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert elapsed >= 250 and elapsed <= 900, "waited #{elapsed} ms, expected about 300"
+    assert_receive {:xqlite_busy, _, _}, 200
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "unregistering the last observer restores the busy_timeout", %{path: path} do
+    {:ok, probe} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(probe, 300)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    {:ok, handle} = Xqlite.register_busy_observer(probe, self())
+    :ok = Xqlite.unregister_busy_observer(probe, handle)
+
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    :ok = NIF.close(probe)
+  end
+
+  test "emptying an already-empty slot leaves the busy_timeout alone", %{path: path} do
+    {:ok, probe} = NIF.open(path)
+    :ok = Xqlite.busy_timeout(probe, 300)
+
+    :ok = Xqlite.remove_busy_policy(probe)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    :ok = Xqlite.unregister_busy_observer(probe, 4_242)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    :ok = NIF.close(probe)
+  end
+
+  test "a policy governs even when a busy_timeout was set before the slot was taken",
+       %{path: path} do
+    test_pid = self()
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.busy_timeout(probe, 300)
+
+    :ok =
+      Xqlite.set_busy_policy(probe, max_retries: 1_000, max_elapsed_ms: 60, sleep_ms: 5)
+
+    {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
+
+    before_ms = System.monotonic_time(:millisecond)
+    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    elapsed = System.monotonic_time(:millisecond) - before_ms
+
+    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert elapsed >= 30 and elapsed < 250, "waited #{elapsed} ms, expected about 60"
+    assert_receive {:xqlite_busy, _, _}, 200
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
