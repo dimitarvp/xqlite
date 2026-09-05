@@ -155,7 +155,8 @@ defmodule Xqlite.MixProject do
         "README.md",
         "CHANGELOG.md",
         "LICENSE.md"
-      ]
+      ],
+      exclude_patterns: [~r"^lib/mix/tasks/"]
     ]
   end
 

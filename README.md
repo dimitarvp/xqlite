@@ -43,7 +43,7 @@ end
 
 Compatibility: the Ecto adapter (`xqlite_ecto3`) pins exactly one xqlite minor series per adapter release, because xqlite is pre-1.0 and its minor is the break slot. The current pairing is xqlite `~> 0.11.0`; the adapter's README states its own pairing.
 
-Precompiled NIF binaries are included for multiple targets -- no Rust toolchain needed. To force source compilation:
+Precompiled NIF binaries are included for macOS, Linux (glibc and musl, including ARM and RISC-V), and Windows -- no Rust toolchain needed for them. They are built for NIF API 2.17, so the runtime floor is OTP 26 with Elixir 1.17 or newer, which is exactly the CI matrix: Elixir 1.17-1.20 against OTP 26-29. A source build -- forced with `XQLITE_BUILD=true`, or unavoidable on a platform without a binary -- needs Rust 1.91 or newer, the floor that rustler 0.38 declares. To force source compilation:
 
 ```bash
 XQLITE_BUILD=true mix deps.compile xqlite

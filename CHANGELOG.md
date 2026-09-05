@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The crate declares its Rust floor: `rust-version = "1.91"`.**
+  Source builds have required Rust 1.91 since 0.11.0: rustler 0.38.0
+  declares that floor, and cargo enforces a dependency's floor. So
+  nothing that built before stops building. What is new is that the
+  requirement is stated up front — cargo's own error names it on an
+  older toolchain, and the README states it beside the OTP 26 floor
+  of the precompiled binaries (NIF API 2.17).
+- **`mix verify` and `mix test.seq` are no longer part of the Hex
+  package.** They are development tasks for this repository, and
+  shipping them put a `mix verify` task under a generic name into
+  every dependent project's task list. They stay in the repository
+  for contributors.
+
 ### Fixed
 
 - **Docs: `query_with_changes/3` teaches its real rule.** The 0.11.0

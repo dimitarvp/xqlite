@@ -3,6 +3,7 @@ name = "xqlitenif"
 version = "0.11.0"
 authors = ["Dimitar Panayotov <mitko.p@gmail.com>"]
 edition = "2024"
+rust-version = "1.91"
 
 [lib]
 name = "xqlitenif"
