@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Xqlite.busy_timeout/2` refuses a value past SQLite's 32-bit
+  limit instead of clamping it.** A timeout above `2_147_483_647`
+  milliseconds was silently stored as that ceiling while the docs
+  promised the value would read back unchanged; it now returns
+  `{:error, {:cannot_execute, reason}}` naming the limit, the same
+  refusal the SQL-length guard uses. The `busy_timeout:` open option
+  already mapped `:infinity` to that ceiling explicitly and is
+  unchanged.
+
 - **`Xqlite.busy_timeout/2` no longer loses its value when busy
   observers are registered.** It set the timeout with a raw
   `PRAGMA busy_timeout`, which hands SQLite's single busy callback to

@@ -151,8 +151,17 @@ fn read_busy_timeout(conn: &Connection) -> u64 {
 
 /// Hand the C slot to SQLite's own timeout handler at `timeout_ms`.
 /// Callers must hold the connection Mutex.
+fn busy_timeout_c_int(timeout_ms: u64) -> Result<c_int, XqliteError> {
+    c_int::try_from(timeout_ms).map_err(|_| {
+        XqliteError::CannotExecute(format!(
+            "busy_timeout {timeout_ms} ms exceeds SQLite's limit of {} ms",
+            c_int::MAX
+        ))
+    })
+}
+
 fn apply_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
-    let ms = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
+    let ms = busy_timeout_c_int(timeout_ms)?;
     // SAFETY: caller holds the connection Mutex; `conn.handle()` yields
     // the raw db pointer for that locked connection.
     let rc = unsafe { ffi::sqlite3_busy_timeout(conn.handle(), ms) };
@@ -232,6 +241,7 @@ pub(crate) fn set_timeout(
     slot: &AtomicPtr<BusySlotState>,
     timeout_ms: u64,
 ) -> Result<(), XqliteError> {
+    busy_timeout_c_int(timeout_ms)?;
     let mut next = snapshot(slot);
     next.policy = None;
 

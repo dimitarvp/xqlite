@@ -529,6 +529,18 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
+  test "busy_timeout refuses a value past SQLite's 32-bit limit", %{path: path} do
+    {:ok, probe} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(probe, 2_147_483_647)
+    assert {:ok, 2_147_483_647} = NIF.get_pragma(probe, "busy_timeout")
+
+    assert {:error, {:cannot_execute, _}} = Xqlite.busy_timeout(probe, 2_147_483_648)
+    assert {:ok, 2_147_483_647} = NIF.get_pragma(probe, "busy_timeout")
+
+    :ok = NIF.close(probe)
+  end
+
   test "a zero busy_timeout through the slot gives up at once and keeps observing",
        %{path: path} do
     test_pid = self()

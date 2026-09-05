@@ -1439,7 +1439,10 @@ defmodule Xqlite do
       and `PRAGMA busy_timeout` reads `ms` back.
 
   `ms` is the timeout in milliseconds. `0` disables the timeout entirely
-  (SQLite returns `SQLITE_BUSY` immediately on contention).
+  (SQLite returns `SQLITE_BUSY` immediately on contention). SQLite stores
+  the timeout as a 32-bit integer, so values above `2_147_483_647` (about
+  24.8 days) are refused with `{:error, {:cannot_execute, reason}}`
+  rather than silently clamped.
 
   > #### Warning — a raw PRAGMA busy_timeout still steals the slot {: .warning}
   >
