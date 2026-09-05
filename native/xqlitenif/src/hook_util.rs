@@ -215,7 +215,6 @@ pub(crate) struct HookEntry<T> {
 /// up as a hot-path bottleneck in benchmarks, candidates to evaluate
 /// are intrusive linked lists (no per-fire snapshot allocation),
 /// `arc-swap` for cleaner semantics, or bounded SPSC ring buffers.
-/// See `project_hook_subscriber_perf_followup` memory.
 #[derive(Debug)]
 pub(crate) struct HookList<T> {
     head: AtomicPtr<Vec<HookEntry<T>>>,
