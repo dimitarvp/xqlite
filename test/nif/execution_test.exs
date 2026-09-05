@@ -305,6 +305,42 @@ defmodule Xqlite.NIF.ExecutionTest do
                  NIF.execute(conn, "INSERT INTO #{table_name} VALUES (2, 5);", [])
       end
 
+      test "execute/3 returns parsed details for constraint violation (ROWID)", %{conn: conn} do
+        table_name = "rowid_test_exec"
+        assert {:ok, 0} = NIF.execute(conn, "CREATE TABLE #{table_name} (a TEXT);", [])
+
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO #{table_name} (rowid, a) VALUES (1, 'x');", [])
+
+        assert {:error,
+                {:constraint_violation, :constraint_rowid,
+                 %{table: ^table_name, columns: ["rowid"]}}} =
+                 NIF.execute(conn, "INSERT INTO #{table_name} (rowid, a) VALUES (1, 'x');", [])
+      end
+
+      test "execute/3 returns empty details for a bare virtual-table constraint failure",
+           %{conn: conn} do
+        table_name = "fts_test_exec"
+
+        assert {:ok, 1} =
+                 NIF.execute(conn, "CREATE VIRTUAL TABLE #{table_name} USING fts5(x);", [])
+
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO #{table_name} (rowid, x) VALUES (1, 'a');", [])
+
+        assert {:error,
+                {:constraint_violation, :constraint_primary_key,
+                 %{
+                   table: nil,
+                   columns: [],
+                   index_name: nil,
+                   constraint_name: nil,
+                   source_type: nil,
+                   target_type: nil
+                 }}} =
+                 NIF.execute(conn, "INSERT INTO #{table_name} (rowid, x) VALUES (1, 'a');", [])
+      end
+
       test "execute/3 returns error for incorrect parameter count", %{conn: conn} do
         setup_named_table(conn)
         sql = "INSERT INTO exec_test (id, name) VALUES (?1, ?2);"

@@ -50,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a clippy 1.98 lint rewrite in the blob-literal parser — no behavior
   change.
 
+- **Rowid-uniqueness violations carry the parsed table and column.**
+  A duplicate explicit `rowid` on a table with no `INTEGER PRIMARY
+  KEY` fails as `:constraint_rowid`, and SQLite spells the cause out
+  ("UNIQUE constraint failed: t.rowid") — but the message parser had
+  no arm for that code, so the details map arrived with `table: nil`
+  and `columns: []`. It now reads the message the same way
+  `:constraint_unique` does. SQLite's virtual tables report a
+  violation with the bare text "constraint failed" instead (an FTS5
+  duplicate rowid, for one), which names neither table nor column;
+  that shape keeps returning empty details and is now pinned by
+  tests so it cannot start guessing.
+
 ## [0.11.0] - 2026-08-20
 
 ### Changed

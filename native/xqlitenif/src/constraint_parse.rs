@@ -39,6 +39,7 @@ pub(crate) struct ConstraintDetails {
 pub(crate) fn parse_details(extended_code: i32, message: &str) -> ConstraintDetails {
     match extended_code {
         ffi::SQLITE_CONSTRAINT_UNIQUE => parse_unique(message),
+        ffi::SQLITE_CONSTRAINT_ROWID => parse_unique(message),
         ffi::SQLITE_CONSTRAINT_PRIMARYKEY => {
             // SQLite emits "UNIQUE constraint failed: ..." for PK violations on
             // rowid tables and "PRIMARY KEY constraint failed: ..." for WITHOUT
@@ -218,6 +219,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_details_rowid_routes_through_unique_parser() {
+        let d = parse_details(
+            ffi::SQLITE_CONSTRAINT_ROWID,
+            "UNIQUE constraint failed: t.rowid",
+        );
+        assert_eq!(d.table.as_deref(), Some("t"));
+        assert_eq!(d.columns, vec!["rowid".to_string()]);
+    }
+
+    #[test]
     fn parse_details_foreign_key_yields_empty() {
         let d = parse_details(
             ffi::SQLITE_CONSTRAINT_FOREIGNKEY,
@@ -283,5 +294,56 @@ mod tests {
         assert_eq!(d.table.as_deref(), Some("mc"));
         assert_eq!(d.source_type, Some(Type::Text));
         assert_eq!(d.target_type, Some(Type::Integer));
+    }
+
+    // SQLite's virtual tables (FTS5 among them) report constraint failures with
+    // the bare message "constraint failed" — no table, no columns. Every arm
+    // must degrade to empty-but-well-formed details rather than guess.
+    #[test]
+    fn bare_constraint_failed_yields_empty_details_for_unique() {
+        assert_eq!(
+            parse_details(ffi::SQLITE_CONSTRAINT_UNIQUE, "constraint failed"),
+            ConstraintDetails::default()
+        );
+    }
+
+    #[test]
+    fn bare_constraint_failed_yields_empty_details_for_rowid() {
+        assert_eq!(
+            parse_details(ffi::SQLITE_CONSTRAINT_ROWID, "constraint failed"),
+            ConstraintDetails::default()
+        );
+    }
+
+    #[test]
+    fn bare_constraint_failed_yields_empty_details_for_primary_key() {
+        assert_eq!(
+            parse_details(ffi::SQLITE_CONSTRAINT_PRIMARYKEY, "constraint failed"),
+            ConstraintDetails::default()
+        );
+    }
+
+    #[test]
+    fn bare_constraint_failed_yields_empty_details_for_not_null() {
+        assert_eq!(
+            parse_details(ffi::SQLITE_CONSTRAINT_NOTNULL, "constraint failed"),
+            ConstraintDetails::default()
+        );
+    }
+
+    #[test]
+    fn bare_constraint_failed_yields_empty_details_for_check() {
+        assert_eq!(
+            parse_details(ffi::SQLITE_CONSTRAINT_CHECK, "constraint failed"),
+            ConstraintDetails::default()
+        );
+    }
+
+    #[test]
+    fn bare_constraint_failed_yields_empty_details_for_datatype() {
+        assert_eq!(
+            parse_details(ffi::SQLITE_CONSTRAINT_DATATYPE, "constraint failed"),
+            ConstraintDetails::default()
+        );
     }
 }
