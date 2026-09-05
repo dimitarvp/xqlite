@@ -106,18 +106,22 @@ connection lock, finalize, discard the return code.
 ### 2.3 Streams
 
 `xqlite.ex:stream/4` → `stream_resource_callbacks.ex:start_fun/1`
-(validate `:on_error`, `nif.rs:stream_open`, `stream_get_columns`,
-closing the handle if that fails) → `next_fun/1` → `nif.rs:stream_fetch`,
-which locks the connection once and steps up to `batch_size` rows in a
-single hold, growing the row vector on demand because pre-sizing to an
-unvalidated `batch_size` could abort the VM. On exhaustion or error it
-swaps the pointer to null and finalizes there and then, replying `:done`
-or `{:error, reason}`. `next_fun/1` maps rows to `%{column => value}`
-after `TypeExtension.decode_rows/2` and shapes each element per
-`:on_error`; `after_fun/1` calls the idempotent `stream_close`.
-`stream_open` compiles through `statement.rs:prepare_one`, so SQL holding
-no statement and SQL holding a second one are refused at open rather than
-becoming an empty stream or a stream over the first statement alone.
+(validate `:on_error` and `:cancel_tokens`, `nif.rs:stream_open`,
+`stream_get_columns`, closing the handle if that fails) → `next_fun/1` →
+`nif.rs:stream_fetch_cancellable`, which locks the connection once and
+steps up to `batch_size` rows in a single hold, growing the row vector on
+demand because pre-sizing to an unvalidated `batch_size` could abort the
+VM. On exhaustion or error it swaps the pointer to null and finalizes
+there and then, replying `:done` or `{:error, reason}`. `next_fun/1` maps
+rows to `%{column => value}` after `TypeExtension.decode_rows/2` and
+shapes each element per `:on_error`; `after_fun/1` calls the idempotent
+`stream_close`. `stream_open` compiles through
+`statement.rs:prepare_one`, so SQL holding no statement and SQL holding a
+second one are refused at open rather than becoming an empty stream or a
+stream over the first statement alone. `build_acc/5` keeps the connection
+and the wrapped `:cancel_tokens` in the accumulator, so every fetch
+carries the same token list; an empty list makes the cancellable fetch
+byte-for-byte the plain one.
 
 ### 2.4 Hooks and callbacks
 
@@ -152,6 +156,15 @@ SQLite aborts with `SQLITE_INTERRUPT`, which
 `error.rs:classify_sqlite_error` maps to `{:error, :operation_cancelled}`.
 Dropping the guard unregisters before releasing the `Arc`s. Tick
 subscribers share the callback, each with its own counter.
+
+`nif.rs:stream_fetch_impl` is the one that does not use `with_conn`: it
+declares the guard after its own connection lock guard and after the
+connection is proved open, so reverse declaration order drops the guard
+while the Mutex is still held. A cancelled fetch goes through the same
+`Err` arm as any other fetch error — swap the pointer, finalize, return —
+so the stream is closed and `next_fun/1` emits
+`[:xqlite, :cancel, :honored]` with `operation: :stream_fetch` before
+routing `{:error, :operation_cancelled}` through the `:on_error` mode.
 
 ### 2.6 The remaining flows
 
@@ -203,6 +216,7 @@ and every extra a call records arrives in the metadata map.
 | open | `stream_fetch` → rows | open | `nif.rs:stream_fetch` |
 | open | `stream_fetch` exhausts | closed | swap + finalize in place |
 | open | `stream_fetch` errors | closed | swap + finalize, then error |
+| open | `stream_fetch_cancellable` with a signalled token | closed | swap + finalize, then `{:error, :operation_cancelled}` |
 | any | `stream_close` or GC | closed | `take_and_finalize_atomic_stmt` |
 | closed | `stream_fetch` | closed | `:done` |
 
@@ -231,7 +245,7 @@ pins to `test/`.
 | `changes-reported-on-total-delta` | `query_with_changes` reports `sqlite3_changes()` only when `sqlite3_total_changes()` moved across the statement, else 0; the counter itself is sticky across SELECT, DDL and PRAGMA. | `query.rs:core_query_with_changes` | `nif/query_with_changes_test.exs: "DDL after DML returns changes 0 (no sticky leak)"` |
 | `conn-mutex-covers-every-sqlite-call` | Every `sqlite3_*` C call holds the connection `Mutex` for its whole duration; an `AtomicPtr` swap gives pointer ownership, not connection access. | `connection.rs:with_conn` | unpinned |
 | `cancel-check-every-8-vm-ops` | The progress handler fires every 8 SQLite VM instructions; that is both the cancellation-latency bound and the unit `every_n` counts. | `progress_dispatch.rs:PROGRESS_NUM_OPS` | unpinned |
-| `cancel-token-single-use` | A token's flag is set once and never reset; a cancellable call takes a list and any set token aborts it. | `cancel.rs:XqliteCancelToken::cancel` | `nif/statement_cancel_test.exs: "an already-signalled token cancels before any stepping"` |
+| `cancel-token-single-use` | A token's flag is set once and never reset; a cancellable call takes a list and any set token aborts it. A stream hands its `:cancel_tokens` to every fetch, so a signalled token ends that stream and every later stream it is handed to. | `cancel.rs:XqliteCancelToken::cancel` | `nif/statement_cancel_test.exs: "an already-signalled token cancels before any stepping"`, `nif/stream_cancel_test.exs: "after a cancel the connection is clean and the token stays spent"` |
 | `wal-hook-and-autocheckpoint-share-one-slot` | Holding the WAL hook disables SQLite's autocheckpoint, so the master callback checkpoints itself from a threshold starting at SQLite's own 1000 pages; `set_pragma` reinstalls the callback and `get_pragma` reports the emulated value. | `wal_hook.rs:wal_hook_callback`, `DEFAULT_WAL_AUTOCHECKPOINT_PAGES` | `nif/wal_hook_test.exs: "emulated autocheckpoint defaults to SQLite's stock 1000 pages"` |
 | `busy-slot-policy-single-observers-many` | One retry policy (replaced on re-set) and any number of observer pids share one C callback; observers fire with or without a policy. | `busy_handler.rs:BusySlotState` | `nif/busy_handler_test.exs: "re-setting the policy replaces the previous one"` |
 | `busy-slot-restores-displaced-timeout` | Taking the slot records the current `busy_timeout` and emptying it puts that back; a policy-less slot emulates the timeout with SQLite's own delay schedule. | `busy_handler.rs:swap_in` | `nif/busy_handler_test.exs: "unregistering the last observer restores the busy_timeout"` |
@@ -248,7 +262,7 @@ pins to `test/`.
 | `non-finite-floats-become-atoms` | A REAL that is not finite reads back as `:positive_infinity` or `:negative_infinity`, and NaN as `nil`, because the BEAM cannot hold a non-finite double. | `util.rs:encode_f64` | `nif/query_test.exs: "query/3 reads non-finite floats as sentinel atoms and stays usable"` |
 | `blob-encoding-threshold-64-bytes` | On the query path a BLOB over 64 bytes comes back as a zero-copy resource binary and one of 64 bytes or fewer is copied onto the process heap; the stream and `blob_read` paths always copy. | `util.rs:HEAP_BINARY_THRESHOLD` and `encode_blob` | unpinned |
 | `sql-input-rejections` | SQL is refused, never truncated or half-run: an interior NUL byte is `:null_byte_in_string` on every entry point; on query, execute, prepare, stream and explain_analyze, SQL holding no statement (empty, whitespace, comments, bare semicolons) is `{:cannot_execute, "SQL contains no statement"}` and a second statement after the first is `:multiple_statements`. Text after the first statement counts as a second statement only when re-compiling it yields one, so a trailing comment, extra semicolons and whitespace are accepted. | `query.rs:reject_interior_nul`, `reject_no_statement`, `statement.rs:prepare_one` | `nif/prepare_tail_law_test.exs: "the four prepare paths classify one SQL string identically"`, `nif/error_input_test.exs: "interior NUL in SQL text is rejected on query/execute/execute_batch"` |
-| `batch-size-and-step-count-floors` | A batch size below 1 is `{:invalid_batch_size, %{provided: v, minimum: 1}}`, `every_n` below 1 is `{:cannot_execute, _}`, `pages_per_step` below 1 is `{:invalid_pages_per_step, v}`; none is clamped. The two `:invalid_batch_size` sites disagree on `provided`: `stmt_multi_step_impl` puts the bare integer, `stream_fetch` a tagged pair such as `{:integer, 0}`. | `nif.rs:stmt_multi_step_impl`, `stream_fetch`, `register_progress_hook`, `backup_with_progress` | `nif/statement_test.exs: "multi_step rejects a batch size below one"`, with one twin per floor in `nif/stream_test.exs`, `nif/progress_hook_test.exs` and `nif/backup_progress_test.exs` |
+| `batch-size-and-step-count-floors` | A batch size below 1 is `{:invalid_batch_size, %{provided: v, minimum: 1}}`, `every_n` below 1 is `{:cannot_execute, _}`, `pages_per_step` below 1 is `{:invalid_pages_per_step, v}`; none is clamped. The two `:invalid_batch_size` sites disagree on `provided`: `stmt_multi_step_impl` puts the bare integer, `stream_fetch_impl` a tagged pair such as `{:integer, 0}`. | `nif.rs:stmt_multi_step_impl`, `stream_fetch_impl`, `register_progress_hook`, `backup_with_progress` | `nif/statement_test.exs: "multi_step rejects a batch size below one"`, with one twin per floor in `nif/stream_test.exs`, `nif/progress_hook_test.exs` and `nif/backup_progress_test.exs` |
 | `stream-on-error-modes` | `:raise` (the default) yields row maps and raises `Xqlite.StreamError`; `:halt` yields row maps, logs the reason and stops; `:emit_error` yields `{:ok, row}` then one terminal `{:error, reason}`; anything else is `{:error, {:invalid_on_error, value}}` at open. | `stream_resource_callbacks.ex:validate_on_error/1` and `handle_fetch_error/2` | `xqlite_test.exs: "stream/4 rejects an unsupported :on_error mode at open"`, plus one test per mode there |
 | `statement-column-names-fall-back-after-finalize` | `stmt_column_names` reads live column metadata so automatic re-prepare is reflected, and serves the prepare-time snapshot only once the statement is finalized or the connection closed. | `nif.rs:stmt_column_names` | `nif/statement_test.exs: "operations after finalize report :statement_finalized; names stay cached"` |
 | `authorizer-validates-the-whole-list-first` | An unrecognised action atom returns `{:invalid_authorizer_action, atom}` and installs nothing; the authorizer is one slot that a second call replaces. | `authorizer.rs:parse_denied` | `nif/authorizer_test.exs: "unrecognized atom is a structured error and installs nothing"` |

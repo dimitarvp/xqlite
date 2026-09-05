@@ -208,11 +208,35 @@ Xqlite.query_cancellable(conn, "SELECT * FROM big_table", [], token)
 #=> {:error, :operation_cancelled}
 ```
 
+A stream makes this louder, because `Xqlite.stream/4`'s `:cancel_tokens` are
+handed to *every* fetch the stream makes, not just the first. So a signal ends
+whichever batch it lands in — the stream stops there and its statement is
+finalized — and a token you have already signalled kills the *next* stream on
+its very first fetch, before a single row comes back. A `Repo.stream` retry
+that reuses one token looks like an empty result set with no obvious cause.
+
+```elixir
+{:ok, token} = Xqlite.create_cancel_token()
+:ok = Xqlite.cancel_operation(token)
+
+conn
+|> Xqlite.stream("SELECT * FROM big_table", [], cancel_tokens: token)
+|> Enum.to_list()
+#=> raises Xqlite.StreamError with reason: :operation_cancelled
+```
+
 The rule is simple: **create a fresh token per cancellable operation.** A token
 is cheap; do not cache one and reuse it across calls. (Passing a *list* of
 tokens to one cancellable op is a separate, supported feature — OR-semantics
 across several live tokens — and unrelated to reuse; each token in the list is
 still single-use.)
+
+One thing xqlite cannot check for you: a cancel token *is* an Erlang reference,
+and so is any other reference, so `:cancel_tokens` can only be validated as
+"a reference or a list of references". Anything else — `:cancel_tokens: :bogus`
+— is `{:error, {:invalid_cancel_tokens, value}}` at stream open, but a plain
+`make_ref()` gets through and raises `ArgumentError` on the first fetch, which
+is what every other cancellable entry point does with one too.
 
 ### Close child handles before the connection
 

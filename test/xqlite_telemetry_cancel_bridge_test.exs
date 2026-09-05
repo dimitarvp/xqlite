@@ -122,6 +122,28 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
 
       detach(handler_id)
     end
+
+    test "a cancelled stream fetch fires :honored with operation: :stream_fetch",
+         %{conn: conn} do
+      {:ok, token} = Xqlite.create_cancel_token()
+      :ok = Xqlite.cancel_operation(token)
+
+      handler_id = attach_capture([[:xqlite, :cancel, :honored]])
+
+      slow =
+        "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT x FROM n"
+
+      stream = Xqlite.stream(conn, slow, [], on_error: :emit_error, cancel_tokens: token)
+
+      assert Enum.to_list(stream) == [{:error, :operation_cancelled}]
+
+      assert_receive {:telemetry_event, [:xqlite, :cancel, :honored], _, metadata}
+      assert metadata.conn == conn
+      assert metadata.operation == :stream_fetch
+      assert token in metadata.tokens
+
+      detach(handler_id)
+    end
   end
 
   describe "Xqlite.Telemetry.bridge/2" do

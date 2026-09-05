@@ -11,8 +11,10 @@ defmodule Xqlite.StreamResourceCallbacks do
 
   @type acc :: %{
           handle: reference(),
+          conn: Xqlite.conn(),
           columns: [String.t()],
           batch_size: pos_integer(),
+          cancel_tokens: [reference()],
           type_extensions: [module()],
           original_opts: keyword(),
           rows_total: non_neg_integer(),
@@ -26,9 +28,9 @@ defmodule Xqlite.StreamResourceCallbacks do
   @spec start_fun({Xqlite.conn(), String.t(), list() | keyword(), keyword()}) ::
           {:ok, acc()} | {:error, Xqlite.error_reason()}
   def start_fun({conn, sql, params, opts}) do
-    case validate_on_error(opts) do
-      {:ok, on_error} -> open_stream(conn, sql, params, opts, on_error)
-      {:error, _reason} = error -> error
+    with {:ok, on_error} <- validate_on_error(opts),
+         :ok <- validate_cancel_tokens(opts) do
+      open_stream(conn, sql, params, opts, on_error)
     end
   end
 
@@ -39,12 +41,30 @@ defmodule Xqlite.StreamResourceCallbacks do
     end
   end
 
+  # A cancel token IS a reference, and so is any other reference, so this can
+  # only check the container; a reference that is not a token raises
+  # ArgumentError at the first fetch, like every cancellable NIF call.
+  defp validate_cancel_tokens(opts) do
+    case Keyword.get(opts, :cancel_tokens, []) do
+      token when is_reference(token) -> :ok
+      tokens when is_list(tokens) -> validate_token_list(tokens)
+      other -> {:error, {:invalid_cancel_tokens, other}}
+    end
+  end
+
+  defp validate_token_list(tokens) do
+    case Enum.all?(tokens, &is_reference/1) do
+      true -> :ok
+      false -> {:error, {:invalid_cancel_tokens, tokens}}
+    end
+  end
+
   defp open_stream(conn, sql, params, opts, on_error) do
     case NIF.stream_open(conn, sql, params, []) do
       {:ok, handle} ->
         case NIF.stream_get_columns(handle) do
           {:ok, columns} ->
-            {:ok, build_acc(handle, columns, opts, on_error)}
+            {:ok, build_acc(conn, handle, columns, opts, on_error)}
 
           {:error, _reason} = error ->
             # Nothing else owns the handle yet — close it or it leaks.
@@ -57,11 +77,18 @@ defmodule Xqlite.StreamResourceCallbacks do
     end
   end
 
-  defp build_acc(handle, columns, opts, on_error) do
+  defp build_acc(conn, handle, columns, opts, on_error) do
+    cancel_tokens =
+      opts
+      |> Keyword.get(:cancel_tokens, [])
+      |> List.wrap()
+
     %{
       handle: handle,
+      conn: conn,
       columns: columns,
       batch_size: Keyword.get(opts, :batch_size, 500),
+      cancel_tokens: cancel_tokens,
       type_extensions: Keyword.get(opts, :type_extensions, []),
       original_opts: opts,
       rows_total: 0,
@@ -82,7 +109,7 @@ defmodule Xqlite.StreamResourceCallbacks do
   def next_fun(acc) do
     fetch_started_at = Xqlite.Telemetry.monotonic_time()
 
-    case NIF.stream_fetch(acc.handle, acc.batch_size) do
+    case NIF.stream_fetch_cancellable(acc.handle, acc.batch_size, acc.cancel_tokens) do
       {:ok, %{rows: rows}} ->
         mapped_rows = map_rows_to_maps(rows, acc.columns, acc.type_extensions)
         rows_count = length(mapped_rows)
@@ -93,6 +120,11 @@ defmodule Xqlite.StreamResourceCallbacks do
       :done ->
         emit_fetch_telemetry(fetch_started_at, 0, acc.handle, true)
         {:halt, acc}
+
+      {:error, :operation_cancelled} ->
+        emit_fetch_telemetry(fetch_started_at, 0, acc.handle, true)
+        Xqlite.emit_cancel_honored(acc.conn, :stream_fetch, acc.cancel_tokens)
+        handle_fetch_error(:operation_cancelled, acc)
 
       {:error, reason} ->
         emit_fetch_telemetry(fetch_started_at, 0, acc.handle, true)

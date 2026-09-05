@@ -111,6 +111,16 @@ task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) e
 {:error, :operation_cancelled} = Task.await(task)
 ```
 
+A stream takes the same tokens and hands them to every batch it fetches,
+so a signal ends the batch it lands in and closes the stream:
+
+```elixir
+{:ok, token} = Xqlite.create_cancel_token()
+stream = Xqlite.stream(conn, slow_sql, [], cancel_tokens: token, on_error: :emit_error)
+# from anywhere: :ok = Xqlite.cancel_operation(token)
+[{:error, :operation_cancelled}] = Enum.to_list(stream)
+```
+
 ### Receive per-connection change notifications
 
 ```elixir

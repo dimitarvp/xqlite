@@ -1079,6 +1079,27 @@ fn stream_fetch<'a>(
     stream_handle: ResourceArc<XqliteStream>,
     batch_size_term: Term<'a>,
 ) -> Term<'a> {
+    stream_fetch_impl(env, stream_handle, batch_size_term, Vec::new())
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn stream_fetch_cancellable<'a>(
+    env: Env<'a>,
+    stream_handle: ResourceArc<XqliteStream>,
+    batch_size_term: Term<'a>,
+    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+) -> Term<'a> {
+    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        tokens.iter().map(|t| t.0.clone()).collect();
+    stream_fetch_impl(env, stream_handle, batch_size_term, token_bools)
+}
+
+fn stream_fetch_impl<'a>(
+    env: Env<'a>,
+    stream_handle: ResourceArc<XqliteStream>,
+    batch_size_term: Term<'a>,
+    token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Term<'a> {
     use crate::stream::process_single_step;
     use crate::util::term_to_tagged_elixir_value;
 
@@ -1168,6 +1189,21 @@ fn stream_fetch<'a>(
     // SAFETY: conn_ref is valid (checked above). The handle is used only
     // for sqlite3_errmsg within process_single_step.
     let db_handle_for_errors = unsafe { conn_ref.handle() };
+
+    // Registers the cancel tokens on the connection's progress dispatch for
+    // the whole batch loop (RAII; an empty list is a no-op guard).
+    //
+    // SAFETY: the declaration order is load-bearing. Rust drops locals in
+    // reverse declaration order, so declaring the guard after conn_lock_guard
+    // drops it while the connection Mutex is still held, which is the guard's
+    // contract: HookList frees the old subscriber vector right after its
+    // atomic swap, while the C progress callback reads that vector without a
+    // lock. Unregistering with the Mutex released would be a use-after-free
+    // inside the callback.
+    let _progress_guard = crate::cancel::ProgressHandlerGuard::new(
+        &stream_handle.conn_resource_arc.progress_dispatch,
+        token_bools,
+    );
 
     for _ in 0..batch_size {
         current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);

@@ -1144,22 +1144,59 @@ defmodule XqliteNIF do
   Fetches a batch of rows from an active stream handle.
 
   `stream_handle` is the opaque resource obtained from `stream_open/4`.
-  `batch_size` indicates the maximum number of rows to fetch in this call.
-  A `batch_size` of `0` will return an empty list of rows without advancing
-  the stream, unless the stream is already exhausted (in which case it returns `:done`).
+  `batch_size` is the largest number of rows this call may read; it must be
+  at least 1. Anything else is rejected with
+  `{:error, {:invalid_batch_size, %{provided: tagged_value, minimum: 1}}}`
+  before the stream is touched, and is never clamped.
 
   Returns:
-    - `{:ok, %{rows: [[term()]]}}` if rows are fetched. The inner list represents a row,
-      and the outer list is the batch of rows. The list of rows may be empty if
-      `batch_size` was `0` and the stream is not yet done, or if the query itself
-      yielded results but this particular fetch point encountered no more rows before
-      hitting `SQLITE_DONE` or an error within the batch limit.
-    - `:done` to indicate the end of the stream (all rows have been consumed).
-    - `{:error, reason}` if an error occurs during fetching from SQLite.
+    - `{:ok, %{rows: [[term()]]}}` when rows were read. The inner list is one
+      row, the outer list the batch.
+    - `:done` once the stream is exhausted. The underlying SQLite statement
+      is finalized at that moment, so every later fetch also answers `:done`.
+    - `{:error, reason}` when a read fails. Rows already read in the same
+      batch are discarded with it. Such a failure finalizes the statement
+      too, so the fetch after it is `:done` — except `:connection_closed`,
+      which leaves the stream open and repeats on every fetch until
+      `stream_close/1`.
+
+  `Xqlite.stream/4` drives all of this; use it unless you are stepping the
+  stream by hand.
   """
   @spec stream_fetch(stream_handle :: reference(), batch_size :: pos_integer()) ::
           {:ok, stream_fetch_ok_result()} | :done | Xqlite.error()
   def stream_fetch(_stream_handle, _batch_size), do: err()
+
+  @doc """
+  Fetches a batch of rows from an active stream handle, cancellable (raw NIF).
+
+  Takes the same arguments as `stream_fetch/2` plus a list of cancellation
+  tokens from `create_cancel_token/0`, and has the same return shapes, the
+  same batch-size rejection (checked first, before any token is registered)
+  and the same `:connection_closed` behaviour. The tokens are registered for
+  this one batch only and unregistered before the call returns.
+
+  Any signalled token in the list ends the fetch with
+  `{:error, :operation_cancelled}` — OR-semantics across the list — and
+  finalizes the statement, so the next fetch is `:done` and
+  `stream_close/1` still answers `:ok`. Rows read before the cancel in the
+  same batch are discarded, exactly as any mid-batch error discards them.
+  A token signalled before the call cancels during the first batch. Tokens
+  are single-use, so a signalled token ends every stream it is handed to.
+
+  An empty list behaves exactly like `stream_fetch/2`.
+
+  Cancellation is checked every 8 SQLite VM instructions, so a statement
+  whose whole run is cheaper than that finishes before the first check.
+
+  Most users want `Xqlite.stream/4` and its `:cancel_tokens` option.
+  """
+  @spec stream_fetch_cancellable(
+          stream_handle :: reference(),
+          batch_size :: pos_integer(),
+          tokens :: [reference()]
+        ) :: {:ok, stream_fetch_ok_result()} | :done | Xqlite.error()
+  def stream_fetch_cancellable(_stream_handle, _batch_size, _tokens), do: err()
 
   @doc """
   Closes an active stream and releases its underlying SQLite statement resources.

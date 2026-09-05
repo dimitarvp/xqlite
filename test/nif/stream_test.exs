@@ -343,7 +343,7 @@ defmodule Xqlite.NIF.StreamTest do
   end
 
   # --- Edge case: stream after connection close ---
-  test "isolated: stream still works after connection close (AtomicPtr holds stmt)" do
+  test "isolated: a fetch after the connection closed is :connection_closed" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE sc_t (id INTEGER)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO sc_t VALUES (1)", [])

@@ -143,6 +143,8 @@ defmodule Xqlite do
           | {:integral_value_out_of_range, non_neg_integer(), integer()}
           | {:internal_encoding_error, String.t()}
           | {:invalid_authorizer_action, atom()}
+          | {:invalid_batch_size, %{provided: term(), minimum: 1}}
+          | {:invalid_cancel_tokens, term()}
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
@@ -839,6 +841,19 @@ defmodule Xqlite do
           each row, followed by a terminal `{:error, reason}` on failure.
       An unsupported value returns `{:error, {:invalid_on_error, value}}` at
       stream open.
+    * `:cancel_tokens` (a token or a list of them, default: `[]`) - Tokens
+      from `create_cancel_token/0`, handed to *every* fetch this stream
+      makes. Signalling any one of them ends the fetch it lands in with
+      `{:error, :operation_cancelled}` and closes the stream; that error
+      then follows the `:on_error` mode above, like any other fetch error.
+      Rows already read in the same batch are discarded with it. Tokens are
+      single-use, so a token you have already signalled kills the next
+      stream you hand it to on its first fetch — create a fresh one per
+      stream. A value that is neither a reference nor a list of references
+      returns `{:error, {:invalid_cancel_tokens, value}}` at stream open;
+      a reference that is not a cancel token cannot be told apart in
+      Elixir and raises `ArgumentError` at the first fetch, as every other
+      cancellable entry point does.
 
   ## Examples
 
@@ -871,11 +886,17 @@ defmodule Xqlite do
     encoded_params = Xqlite.TypeExtension.encode_params(params, type_extensions)
     batch_size = Keyword.get(opts, :batch_size, 500)
 
+    cancel_tokens =
+      opts
+      |> Keyword.get(:cancel_tokens, [])
+      |> List.wrap()
+
     start_md = %{
       conn: conn,
       sql: sql,
       batch_size: batch_size,
-      type_extensions_count: length(type_extensions)
+      type_extensions_count: length(type_extensions),
+      cancellable?: cancel_tokens != []
     }
 
     start_fun = &Xqlite.StreamResourceCallbacks.start_fun/1
@@ -2207,7 +2228,11 @@ defmodule Xqlite do
   defp params_count(params) when is_list(params), do: length(params)
   defp params_count(_), do: 0
 
-  defp emit_cancel_honored(conn, operation, tokens) do
+  @doc false
+  # Public so the stream callbacks module emits this event through the same
+  # producer, keeping one shape.
+  @spec emit_cancel_honored(conn(), atom(), [reference()]) :: :ok
+  def emit_cancel_honored(conn, operation, tokens) do
     emit(
       [:xqlite, :cancel, :honored],
       %{monotonic_time: Xqlite.Telemetry.monotonic_time()},

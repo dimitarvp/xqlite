@@ -10,6 +10,12 @@ defmodule XqliteTest do
 
   @record_count 20
 
+  # A recursive CTE costs far more than one progress-callback interval on its
+  # very first step, so a signalled token cancels the first fetch with no rows
+  # delivered — unlike a plain scan, whose rows are cheap enough that a couple
+  # can slip through before the check comes round.
+  @cancel_subject "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<200) SELECT x FROM n"
+
   # Use the multi-DB test pattern
   for {type_tag, prefix, _opener_mfa} <- TestUtil.connection_openers() do
     describe "Xqlite.stream/4 using #{prefix}" do
@@ -190,6 +196,64 @@ defmodule XqliteTest do
       test "stream/4 rejects an unsupported :on_error mode at open", %{conn: conn} do
         assert {:error, {:invalid_on_error, :bogus}} =
                  Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], on_error: :bogus)
+      end
+
+      # --- cancel_tokens option: a cancel is one more error routed by the mode ---
+
+      test "cancel_tokens: on_error: :raise raises with :operation_cancelled", %{conn: conn} do
+        {:ok, token} = Xqlite.create_cancel_token()
+        :ok = Xqlite.cancel_operation(token)
+
+        stream =
+          Xqlite.stream(conn, @cancel_subject, [], on_error: :raise, cancel_tokens: token)
+
+        error = assert_raise(Xqlite.StreamError, fn -> Enum.to_list(stream) end)
+        assert error.reason == :operation_cancelled
+      end
+
+      test "cancel_tokens: on_error: :halt truncates the stream at the cancel", %{conn: conn} do
+        {:ok, token} = Xqlite.create_cancel_token()
+        :ok = Xqlite.cancel_operation(token)
+
+        stream =
+          Xqlite.stream(conn, @cancel_subject, [], on_error: :halt, cancel_tokens: [token])
+
+        {rows, _log} = with_log(fn -> Enum.to_list(stream) end)
+        assert rows == []
+      end
+
+      test "cancel_tokens: on_error: :emit_error ends with a terminal error", %{conn: conn} do
+        {:ok, token} = Xqlite.create_cancel_token()
+        :ok = Xqlite.cancel_operation(token)
+
+        stream =
+          Xqlite.stream(conn, @cancel_subject, [],
+            on_error: :emit_error,
+            cancel_tokens: [token]
+          )
+
+        assert Enum.to_list(stream) == [{:error, :operation_cancelled}]
+      end
+
+      test "cancel_tokens: a live token leaves the stream alone", %{conn: conn} do
+        {:ok, token} = Xqlite.create_cancel_token()
+
+        stream =
+          Xqlite.stream(conn, "SELECT id FROM stream_test_users ORDER BY id;", [],
+            cancel_tokens: token
+          )
+
+        assert Enum.map(stream, & &1["id"]) == Enum.to_list(1..@record_count)
+      end
+
+      test "stream/4 rejects a cancel_tokens value that is not references", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users;"
+
+        assert {:error, {:invalid_cancel_tokens, :bogus}} =
+                 Xqlite.stream(conn, sql, [], cancel_tokens: :bogus)
+
+        assert {:error, {:invalid_cancel_tokens, [:bogus]}} =
+                 Xqlite.stream(conn, sql, [], cancel_tokens: [:bogus])
       end
     end
   end

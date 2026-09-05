@@ -103,8 +103,8 @@ Pointers), updated whenever an arm is added or removed.
 - **Every `sqlite3_*` C call holds the connection `Mutex` for its whole
   duration.** An `AtomicPtr` swap gives ownership of the pointer, not
   access to the connection: another thread can be inside `sqlite3_step`
-  on it, a data race that crashes the VM. `nif.rs:stream_fetch` keeps its
-  lock across the whole batch loop.
+  on it, a data race that crashes the VM. `nif.rs:stream_fetch_impl` keeps
+  its lock across the whole batch loop.
 - Crashless Rust: no `unwrap`, `expect`, `panic!`, out-of-bounds
   indexing, or `unwrap_or*` on a caller's number — return a structured
   error. The crate has none today; a new one is justified in review.

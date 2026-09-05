@@ -118,7 +118,8 @@ defmodule Xqlite.Telemetry do
 
       [:xqlite, :stream, :open, :start | :stop | :exception]
         measurements: %{monotonic_time, duration}
-        metadata:     %{conn, sql, batch_size, type_extensions_count}
+        metadata:     %{conn, sql, batch_size, type_extensions_count,
+                        cancellable?}
 
       [:xqlite, :stream, :fetch]
         measurements: %{monotonic_time, duration, rows_returned}
@@ -215,8 +216,8 @@ defmodule Xqlite.Telemetry do
   `:lag` is the duration in nanoseconds between
   `[:xqlite, :cancel, :signalled]` and `[:xqlite, :cancel, :honored]`
   for the same token. `:operation` is the operation that the cancel
-  signal interrupted: `:query`, `:execute`, `:execute_batch`, or
-  `:backup_with_progress`.
+  signal interrupted: `:query`, `:execute`, `:execute_batch`,
+  `:query_with_changes`, or `:stream_fetch`.
 
   ## Event surface — hook bridge events (opt-in registration)
 

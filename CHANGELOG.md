@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Streams can be cancelled.** `Xqlite.stream/4` takes
+  `:cancel_tokens` — one token from `create_cancel_token/0` or a list of
+  them — and hands them to every batch it fetches, so signalling any one
+  of them from any process ends the batch it lands in with
+  `{:error, :operation_cancelled}` and closes the stream. That error
+  then follows the `:on_error` mode like any other fetch error, and
+  `[:xqlite, :cancel, :honored]` fires with `operation: :stream_fetch`.
+  The raw NIF is `XqliteNIF.stream_fetch_cancellable/3`, the twin of
+  `stream_fetch/2`; an empty token list makes the two identical.
+  Before this, a fetch could spend the whole cost of an unindexed
+  `ORDER BY`, an aggregate or a recursive CTE inside one dirty NIF call
+  with no way to stop it.
+
 ### Removed
 
 - **`Xqlite.enable_strict_mode/1` and `Xqlite.disable_strict_mode/1`
