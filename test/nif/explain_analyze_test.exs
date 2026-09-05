@@ -129,6 +129,22 @@ defmodule Xqlite.NIF.ExplainAnalyzeTest do
         assert {:error, _} = NIF.explain_analyze(conn, "SELECT * FROM does_not_exist", [])
       end
 
+      test "reports a syntax error with the offending SQL and byte offset", %{conn: conn} do
+        assert {:error, {:sql_input_error, %{code: 1, sql: "SELCT 1", offset: 0}}} =
+                 NIF.explain_analyze(conn, "SELCT 1", [])
+      end
+
+      test "classifies rejected SQL exactly like query/3 does", %{conn: conn} do
+        for sql <- [
+              "SELCT 1",
+              "SELECT * FROM no_such_table_xyz",
+              "SELECT nope FROM sqlite_master"
+            ] do
+          assert {:error, query_reason} = NIF.query(conn, sql, [])
+          assert {:error, ^query_reason} = NIF.explain_analyze(conn, sql, [])
+        end
+      end
+
       test "DML without RETURNING reports rows_produced: 0", %{conn: conn} do
         setup_t(conn)
 

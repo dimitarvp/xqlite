@@ -4,7 +4,7 @@ use crate::util::{
     decode_exec_keyword_params, decode_plain_list_params, is_keyword, process_rows,
 };
 use rusqlite::types::Value;
-use rusqlite::{Connection, ToSql};
+use rusqlite::{Connection, Statement, ToSql};
 use rustler::types::atom::nil;
 use rustler::{Env, Term, TermType};
 
@@ -25,6 +25,21 @@ fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
     }
 }
 
+/// SQLite answers whitespace- or comment-only SQL with SQLITE_OK and a NULL
+/// statement — no columns, no parameters, no SQL text — which rusqlite hands
+/// back as a `Statement` that steps straight into SQLITE_MISUSE.
+#[inline]
+fn reject_no_statement(stmt: &Statement<'_>) -> Result<(), XqliteError> {
+    if stmt.column_count() == 0 && stmt.parameter_count() == 0 && stmt.expanded_sql().is_none()
+    {
+        Err(XqliteError::CannotExecute(
+            "SQL contains no statement".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn core_query<'a>(
     env: Env<'a>,
     conn: &Connection,
@@ -33,6 +48,7 @@ pub(crate) fn core_query<'a>(
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
     reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
+    reject_no_statement(&stmt)?;
     let column_names: Vec<String> =
         stmt.column_names().iter().map(|s| s.to_string()).collect();
     let column_count = column_names.len();
@@ -110,6 +126,7 @@ pub(crate) fn core_execute<'a>(
 ) -> Result<usize, XqliteError> {
     reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
+    reject_no_statement(&stmt)?;
 
     let affected_rows = match params_term.get_type() {
         TermType::List => {

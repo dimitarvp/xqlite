@@ -81,7 +81,7 @@ pub fn core_explain_analyze<'a>(
         );
 
         if prepare_rc != ffi::SQLITE_OK {
-            return Err(ffi_error(db_handle, prepare_rc));
+            return Err(crate::error::prepare_failure(db_handle, prepare_rc, sql));
         }
 
         let stmt_ptr = match NonNull::new(raw_stmt_ptr) {

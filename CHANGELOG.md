@@ -24,6 +24,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SQL that is only whitespace or comments is now refused by `query/3`
+  and `execute/3`, instead of failing as a misuse of the C API.** SQLite
+  compiles such input to no statement at all, and running it came back as
+  `{:sqlite_failure, 21, 21, _}` — code 21 is `SQLITE_MISUSE`, which says
+  "the caller broke the library", not "your SQL was empty". Both
+  functions, and the `_with_changes` and `_cancellable` variants that go
+  through the same code, now return
+  `{:cannot_execute, "SQL contains no statement"}` — the error `prepare/2`
+  has always returned for it. Passing parameters used to fail even
+  earlier, as a wrong parameter count; the new check runs before any
+  binding. `execute_batch/2`, `stream/4` and `explain_analyze/3` accept
+  the input exactly as before: nothing to run, an empty stream, an empty
+  report.
+
+- **`prepare/2`, `stream/4` and `explain_analyze/3` now report a syntax
+  error the way `query/3` does.** These three compile their SQL through
+  SQLite directly and each built its error by hand, so one bad SQL string
+  got two different answers: `query/3` returned
+  `{:sql_input_error, %{sql: _, offset: _, code: _, message: _}}`, whose
+  `offset` is the byte in the SQL that SQLite points at, while the other
+  three flattened it to `{:sqlite_failure, 1, 1, message}` and dropped the
+  offset. All four now build the error the same way. Errors SQLite names
+  precisely — a missing table, for one — already matched on every path and
+  still do.
+
 - **Registering a busy observer no longer silently disables the
   connection's `busy_timeout`.** SQLite gives a connection one busy
   callback, and installing ours zeroes any timeout already set — so

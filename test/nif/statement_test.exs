@@ -180,6 +180,22 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:error, :multiple_statements} = Xqlite.prepare(conn, "SELECT 1; SELECT 2")
     end
 
+    test "prepare reports a syntax error with the offending SQL and byte offset", %{conn: conn} do
+      assert {:error, {:sql_input_error, %{code: 1, sql: "SELCT 1", offset: 0}}} =
+               Xqlite.prepare(conn, "SELCT 1")
+    end
+
+    test "prepare and query/3 classify rejected SQL identically", %{conn: conn} do
+      for sql <- [
+            "SELCT 1",
+            "SELECT * FROM no_such_table_xyz",
+            "SELECT nope FROM sqlite_master"
+          ] do
+        assert {:error, query_reason} = NIF.query(conn, sql, [])
+        assert {:error, ^query_reason} = Xqlite.prepare(conn, sql)
+      end
+    end
+
     # -------------------------------------------------------------------
     # Use-after-finalize
     # -------------------------------------------------------------------

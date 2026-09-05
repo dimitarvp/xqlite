@@ -104,9 +104,10 @@ defmodule XqliteTest do
 
       test "returns an error tuple for invalid SQL", %{conn: conn} do
         # This tests the `case start_fun` logic in Xqlite.stream/4
-        result = Xqlite.stream(conn, "SELEKT * FROM stream_test_users;")
+        sql = "SELEKT * FROM stream_test_users;"
+        result = Xqlite.stream(conn, sql)
 
-        assert {:error, {:sqlite_failure, _, _, _}} = result
+        assert {:error, {:sql_input_error, %{code: 1, sql: ^sql, offset: 0}}} = result
       end
 
       test "stream created with empty SQL results in an empty stream", %{conn: conn} do

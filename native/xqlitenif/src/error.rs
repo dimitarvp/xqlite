@@ -5,7 +5,9 @@ use rustler::{
     Atom, Encoder, Env, Term, TermType,
     types::{atom::nil, map::map_new},
 };
+use std::ffi::CStr;
 use std::fmt::{self, Display};
+use std::os::raw::c_int;
 use std::panic::RefUnwindSafe;
 
 fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
@@ -666,6 +668,49 @@ pub(crate) fn is_sqlite_auth(err: &RusqliteError) -> bool {
         _ => return false,
     };
     (extended_code & 0xFF) == ffi::SQLITE_AUTH
+}
+
+/// Classify a failed `sqlite3_prepare_v2` the way rusqlite's own `prepare`
+/// does, so the raw-FFI prepare sites and `query`/`execute` agree on one SQL
+/// string.
+///
+/// # Safety
+/// The caller must hold the connection Mutex, and `db` must be the live handle
+/// the failing `sqlite3_prepare_v2` ran on.
+pub(crate) unsafe fn prepare_failure(
+    db: *mut ffi::sqlite3,
+    rc: c_int,
+    sql: &str,
+) -> XqliteError {
+    // SAFETY: `db` is a live handle and the Mutex is held (fn contract).
+    let msg_ptr = unsafe { ffi::sqlite3_errmsg(db) };
+    let msg = if msg_ptr.is_null() {
+        format!("SQLite preparation error (code {rc}) but no message available. SQL: {sql}")
+    } else {
+        // SAFETY: non-null here, and SQLite's error string stays valid while
+        // the Mutex is held.
+        unsafe { CStr::from_ptr(msg_ptr) }
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let error = ffi::Error::new(rc);
+
+    // SQLite reports a byte offset into the SQL only for a plain SQLITE_ERROR.
+    if rc & 0xFF == ffi::SQLITE_ERROR {
+        // SAFETY: `db` is a live handle and the Mutex is held (fn contract).
+        let offset = unsafe { ffi::sqlite3_error_offset(db) };
+        if offset >= 0 {
+            return XqliteError::from(RusqliteError::SqlInputError {
+                error,
+                msg,
+                sql: sql.to_owned(),
+                offset,
+            });
+        }
+    }
+
+    XqliteError::from(RusqliteError::SqliteFailure(error, Some(msg)))
 }
 
 fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteError {

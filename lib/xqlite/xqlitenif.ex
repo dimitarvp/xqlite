@@ -1159,10 +1159,11 @@ defmodule XqliteNIF do
 
   Most users want `Xqlite.prepare/2`. Compiles exactly ONE SQL statement:
   whitespace/comment-only SQL and trailing statements after the first are
-  structured errors (`{:cannot_execute, _}` / `:multiple_statements`) — no
-  silent partial compilation. The returned handle must eventually be
-  finalized via `stmt_finalize/1` (garbage collection also finalizes
-  abandoned handles).
+  structured errors (`{:cannot_execute, _}` / `:multiple_statements`), and a
+  syntax error is `{:sql_input_error, %{sql: _, offset: _, code: _, message:
+  _}}` carrying the byte offset SQLite reports — no silent partial
+  compilation. The returned handle must eventually be finalized via
+  `stmt_finalize/1` (garbage collection also finalizes abandoned handles).
   """
   @spec stmt_prepare(conn :: Xqlite.conn(), sql :: String.t()) ::
           {:ok, Xqlite.stmt()} | Xqlite.error()

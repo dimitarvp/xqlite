@@ -120,6 +120,28 @@ defmodule Xqlite.NIF.ErrorInputTest do
         assert {:error, :multiple_statements} = NIF.query(conn, sql, [])
       end
 
+      test "query/3 and execute/3 reject SQL that contains no statement", %{conn: conn} do
+        assert {:error, {:cannot_execute, _}} = NIF.query(conn, "   ", [])
+        assert {:error, {:cannot_execute, _}} = NIF.query(conn, "-- only a comment\n", [])
+        assert {:error, {:cannot_execute, _}} = NIF.query(conn, "/* c */", [])
+        assert {:error, {:cannot_execute, _}} = NIF.execute(conn, "", [])
+        assert {:error, {:cannot_execute, _}} = NIF.query_with_changes(conn, "  ", [])
+      end
+
+      test "SQL that contains no statement is rejected before binding", %{conn: conn} do
+        assert {:error, {:cannot_execute, _}} = NIF.query(conn, "  ", [1])
+      end
+
+      test "query/3 and prepare/2 reject no-statement SQL identically", %{conn: conn} do
+        assert {:error, reason} = Xqlite.prepare(conn, "/* c */")
+        assert {:error, ^reason} = NIF.query(conn, "/* c */", [])
+      end
+
+      test "no-statement SQL still runs on execute_batch/2", %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, "-- nothing")
+        assert {:ok, _} = NIF.query(conn, "SELECT 1", [])
+      end
+
       # --- DB State / Execution Error Tests ---
 
       test "execute/3 returns :no_such_index when dropping non-existent index", %{conn: conn} do

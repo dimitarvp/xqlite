@@ -78,12 +78,27 @@ defmodule Xqlite.NIF.StreamTest do
 
       test "stream_open/4 with invalid SQL (syntax error) returns an error", %{conn: conn} do
         sql = "SELEKT id FROM stream_items;"
-        assert {:error, error_details} = NIF.stream_open(conn, sql, [], [])
 
-        assert {:sqlite_failure, _, _, msg_str} = error_details
-        assert is_binary(msg_str)
-        assert String.contains?(msg_str, "syntax error")
-        assert String.contains?(msg_str, "SELEKT")
+        assert {:error, {:sql_input_error, %{code: 1, sql: ^sql, offset: 0}}} =
+                 NIF.stream_open(conn, sql, [], [])
+      end
+
+      test "Xqlite.stream/4 reports a syntax error at open, with the byte offset", %{
+        conn: conn
+      } do
+        assert {:error, {:sql_input_error, %{code: 1, sql: "SELCT 1", offset: 0}}} =
+                 Xqlite.stream(conn, "SELCT 1")
+      end
+
+      test "stream_open/4 and query/3 classify rejected SQL identically", %{conn: conn} do
+        for sql <- [
+              "SELCT 1",
+              "SELECT * FROM no_such_table_xyz",
+              "SELECT nope FROM sqlite_master"
+            ] do
+          assert {:error, query_reason} = NIF.query(conn, sql, [])
+          assert {:error, ^query_reason} = NIF.stream_open(conn, sql, [], [])
+        end
       end
 
       test "stream_open/4 with SQL for non-existent table returns an error", %{conn: conn} do

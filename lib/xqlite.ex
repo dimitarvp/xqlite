@@ -918,7 +918,9 @@ defmodule Xqlite do
   Exactly ONE statement is compiled: whitespace/comment-only SQL returns
   `{:error, {:cannot_execute, reason}}` and trailing statements after the
   first return `{:error, :multiple_statements}` — nothing is silently
-  dropped.
+  dropped. A syntax error returns `{:error, {:sql_input_error, %{sql: _,
+  offset: _, code: _, message: _}}}`, carrying the byte offset SQLite
+  reports — the same shape `query/3` returns for the same SQL.
 
   Finalize statements before closing their connection: a connection closed
   while statements are outstanding keeps the underlying SQLite handle alive

@@ -4,7 +4,7 @@ use crate::blob::{self, XqliteBlob};
 use crate::busy_handler;
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{self, XqliteConn, XqliteQueryResult};
-use crate::error::XqliteError;
+use crate::error::{self, XqliteError};
 use crate::explain_analyze::{self, ExplainAnalyze};
 use crate::pragma;
 use crate::query;
@@ -718,22 +718,7 @@ fn stmt_prepare(
             );
 
             if prepare_rc != ffi::SQLITE_OK {
-                let error_message = {
-                    let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
-                    if err_msg_ptr.is_null() {
-                        format!(
-                            "SQLite preparation error (code {prepare_rc}) but no message available. SQL: {sql}"
-                        )
-                    } else {
-                        std::ffi::CStr::from_ptr(err_msg_ptr)
-                            .to_string_lossy()
-                            .into_owned()
-                    }
-                };
-                let ffi_err = ffi::Error::new(prepare_rc);
-                let rusqlite_err =
-                    rusqlite::Error::SqliteFailure(ffi_err, Some(error_message));
-                return Err(XqliteError::from(rusqlite_err));
+                return Err(error::prepare_failure(db_handle, prepare_rc, &sql));
             }
 
             // Null with SQLITE_OK means the SQL was whitespace/comments only.
@@ -1045,20 +1030,7 @@ fn stream_open<'a>(
             );
 
             if prepare_rc != ffi::SQLITE_OK {
-                let error_message = {
-                    let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
-                    if err_msg_ptr.is_null() {
-                        format!("SQLite preparation error (code {prepare_rc}) but no message available. SQL: {sql}")
-                    } else {
-                        std::ffi::CStr::from_ptr(err_msg_ptr)
-                            .to_string_lossy()
-                            .into_owned()
-                    }
-                };
-                let ffi_err = ffi::Error::new(prepare_rc);
-                let rusqlite_err =
-                    rusqlite::Error::SqliteFailure(ffi_err, Some(error_message));
-                return Err(XqliteError::from(rusqlite_err));
+                return Err(error::prepare_failure(db_handle, prepare_rc, &sql));
             }
 
             // SAFETY: raw_stmt_ptr was just returned by sqlite3_prepare_v2
