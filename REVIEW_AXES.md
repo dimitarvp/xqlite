@@ -875,6 +875,14 @@ CI lane); CHANGELOG honesty DONE for the
 adapter's Unreleased section (168 claims audited, 7 corrected) —
 xqlite's sections were written at release time and re-read by Runs
 40/49, not claim-audited; README quickstart cold-run DONE (one
-defect fixed: `ecto_repos` placement); guides execute — open;
+defect fixed: `ecto_repos` placement); guides execute — xqlite DONE
+2026-09-05 (31 snippets cold-run against Hex 0.11.0: six defects
+fixed in-run — the stale authorizer 2-tuple in the security guide and
+README, the uncreatable-table authorizer example, the nonexistent
+`:opentelemetry_telemetry.attach/2` section, the Logger sample's
+missing `require`, the `:emit_error` sample's blindness to the
+setup-failure tuple, two placeholders labelled; the five SpatiaLite
+snippets NOT RUN — system library absent here), adapter guides in
+flight;
 release.sh rehearsed — done wave 1; announcement fact-check — Gate 4,
 maintainer.
