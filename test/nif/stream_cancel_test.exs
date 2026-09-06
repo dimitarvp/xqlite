@@ -184,14 +184,16 @@ defmodule Xqlite.NIF.StreamCancelTest do
       assert :ok = NIF.close(conn)
 
       # The connection check runs before any token is registered, so the
-      # signalled token never gets a say, and this is the one fetch error
-      # that leaves the stream open until stream_close/1.
+      # signalled token never gets a say. Closing the connection finalized
+      # this stream, so stream_close/1 afterwards is a no-op `:ok` — and a
+      # fetch still reports the closed connection rather than `:done`,
+      # because that check comes first.
       assert {:error, :connection_closed} = NIF.stream_fetch_cancellable(stream, 10, [token])
       assert {:error, :connection_closed} = NIF.stream_fetch_cancellable(stream, 10, [token])
       assert {:error, :connection_closed} = NIF.stream_fetch_cancellable(stream, 10, [])
 
       assert :ok = NIF.stream_close(stream)
-      assert :done = NIF.stream_fetch_cancellable(stream, 10, [token])
+      assert {:error, :connection_closed} = NIF.stream_fetch_cancellable(stream, 10, [token])
     end
 
     test "a cancelled fetch frees the statement it was stepping", %{conn: conn} do

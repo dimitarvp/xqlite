@@ -1,10 +1,11 @@
-use crate::connection::{self, XqliteConn};
+use crate::connection::{self, ChildHandle, XqliteConn};
 use crate::error::XqliteError;
 use crate::session::to_owned_binary;
 use rusqlite::ffi;
 use rustler::{Resource, ResourceArc, resource_impl};
 use std::io::Write;
 use std::os::raw::c_int;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// An open incremental-BLOB handle, owned as a RAW `*mut sqlite3_blob`.
@@ -30,9 +31,9 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// and rustler 0.38 resource destructors have no `catch_unwind`, so that panic
 /// unwinds into C and crashes the BEAM.
 ///
-/// The C `sqlite3*` itself never dangles: an open blob registers an internal
-/// Vdbe (`pBlob->pStmt`), so `sqlite3_close` (v1) sees `connectionIsBusy`,
-/// returns `SQLITE_BUSY`, and leaves the db alive (SQLite amalgamation fact; see
+/// The C `sqlite3*` itself never dangles: this blob's pointer cell is shared
+/// with the connection's child registry, so closing the connection closes the
+/// blob first, under the connection Mutex, before the `sqlite3*` is freed (see
 /// `close`). ONLY the Rust `&Connection` wrapper was ever left dangling.
 ///
 /// A Miri pattern-model demonstrated the UB: a `&T` into an `Option<T>` slot,
@@ -50,14 +51,14 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// connection. That is a fragile distinction — do NOT "unify" the two resources
 /// by giving `XqliteSession` a real wrapper.
 ///
-/// The pointer lives in an `AtomicPtr` (null == closed/finalized), mirroring
-/// `XqliteStream`/`XqliteStatement`. Every `sqlite3_blob_*` call holds the
-/// connection `Mutex` for its whole duration (the raw-handle locking rule) via
-/// `with_live_blob`/`close`; `conn_resource_arc` keeps the `XqliteConn`
-/// *resource* alive so the Mutex is always lockable, even after the inner
-/// `Connection` is gone.
+/// The pointer lives in a shared `AtomicPtr` (null == closed/finalized),
+/// mirroring `XqliteStream`/`XqliteStatement`. Every `sqlite3_blob_*` call
+/// holds the connection `Mutex` for its whole duration (the raw-handle locking
+/// rule) via `with_live_blob`/`close`; `conn_resource_arc` keeps the
+/// `XqliteConn` *resource* alive so the Mutex is always lockable, even after
+/// the inner `Connection` is gone.
 pub(crate) struct XqliteBlob {
-    pub(crate) blob: AtomicPtr<ffi::sqlite3_blob>,
+    pub(crate) blob: Arc<AtomicPtr<ffi::sqlite3_blob>>,
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
 }
 
@@ -119,10 +120,19 @@ pub(crate) fn open(
             // SAFETY: raw_db is valid while the connection Mutex is held.
             return Err(unsafe { blob_error(raw_db, rc) });
         }
-        Ok(ResourceArc::new(XqliteBlob {
-            blob: AtomicPtr::new(blob_ptr),
-            conn_resource_arc: handle.clone(),
-        }))
+        let cell = Arc::new(AtomicPtr::new(blob_ptr));
+        match handle.register_child(ChildHandle::Blob(Arc::clone(&cell))) {
+            Ok(()) => Ok(ResourceArc::new(XqliteBlob {
+                blob: cell,
+                conn_resource_arc: handle.clone(),
+            })),
+            Err(e) => {
+                // SAFETY: the connection Mutex is held and `blob_ptr` is the
+                // handle just opened above, owned here and closed exactly once.
+                let _ = unsafe { ffi::sqlite3_blob_close(blob_ptr) };
+                Err(e)
+            }
+        }
     })
 }
 
@@ -234,40 +244,33 @@ pub(crate) fn reopen(
     })
 }
 
-/// Close the `sqlite3_blob` under the connection Mutex. Shared by the
-/// `blob_close` NIF and `Drop`; idempotent (a null pointer means already
-/// closed).
+/// Close the `sqlite3_blob` under the connection Mutex and drop it from the
+/// connection's child registry. Shared by the `blob_close` NIF and `Drop`;
+/// idempotent (a null pointer means already closed).
 ///
-/// Mirrors `stream::take_and_finalize_raw`: atomically swap the pointer to null
-/// (exclusive ownership, no racing close), then close under the connection
-/// Mutex so no concurrent `sqlite3_*` runs on the same NOMUTEX connection.
+/// Mirrors `stream::take_and_finalize_raw`: take the connection Mutex first,
+/// then claim the pointer under it, so no concurrent `sqlite3_*` runs on the
+/// same NOMUTEX connection and the connection's own close — which drains these
+/// same cells under that lock — can never free the db from under this call.
 ///
-/// Closing is sound even after the connection was explicitly closed. An open
-/// blob registers an internal Vdbe (`pBlob->pStmt`, on `db->pVdbe`), so
-/// `connectionIsBusy` is true and `sqlite3_close` (v1) returns `SQLITE_BUSY`
-/// without freeing `db` — rusqlite's `Connection` Drop discards that result, so
-/// the `sqlite3*` is leaked-but-alive. `sqlite3_blob_close` therefore operates
-/// on a valid db either way, unlike the old rusqlite-`Blob` teardown that
-/// dereferenced a possibly moved-from `&Connection`. On a poisoned connection
-/// lock we must not touch SQLite state, so we leak the blob instead.
+/// Closing after the connection was explicitly closed is a no-op: that close
+/// already closed this blob and nulled the cell. On a poisoned connection lock
+/// we must not touch SQLite state, so we leak the blob instead.
 pub(crate) fn close(blob_handle: &XqliteBlob) -> Result<(), XqliteError> {
-    let old_ptr = blob_handle
-        .blob
-        .swap(std::ptr::null_mut(), Ordering::AcqRel);
-    if !old_ptr.is_null() {
+    if blob_handle.blob.load(Ordering::Acquire).is_null() {
+        Ok(())
+    } else {
         let _conn_guard = blob_handle
             .conn_resource_arc
             .conn
             .lock()
             .map_err(|e| XqliteError::LockError(e.to_string()))?;
-        // SAFETY: `old_ptr` came from the atomic swap, so we exclusively own it
-        // and no other close can race it. The connection Mutex is held, so no
-        // concurrent `sqlite3_*` runs on this db, and the open blob kept the db
-        // alive (see the doc comment). `sqlite3_blob_close`'s flush result is
-        // discarded — the blob is destroyed regardless, per SQLite.
-        let _ = unsafe { ffi::sqlite3_blob_close(old_ptr) };
+        let child = ChildHandle::Blob(Arc::clone(&blob_handle.blob));
+        // SAFETY: the connection Mutex is held for the whole release, so no
+        // concurrent `sqlite3_*` runs on this db, and the cell holds a blob
+        // opened on it.
+        unsafe { blob_handle.conn_resource_arc.release_child(&child) }
     }
-    Ok(())
 }
 
 /// Runs `f` with the connection Mutex held, the connection proven open, and the

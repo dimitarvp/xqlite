@@ -442,9 +442,9 @@ defmodule Xqlite.NIF.BlobTest do
   # Regression: a blob handle whose *connection* is closed while the blob is
   # still live. Every op must hold the connection Mutex, see it closed, and
   # fail cleanly rather than touch the torn-down connection; explicit close
-  # after the fact must not crash the VM (the open blob kept the db alive via
-  # SQLITE_BUSY, so sqlite3_blob_close finalizes it safely). Guards the A2
-  # locking-law fix for blob I/O.
+  # after the fact must not crash the VM (that close already closed the blob,
+  # so this one finds a null pointer). Guards the A2 locking-law fix for blob
+  # I/O.
   test "blob ops on a connection closed after open fail cleanly and teardown is safe" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
 
@@ -470,10 +470,10 @@ defmodule Xqlite.NIF.BlobTest do
   # (`blob::close`) runs while the connection slot is already `None`. Pre-fix
   # this dereferenced a moved-from `&Connection` inside the rusqlite `Blob`
   # wrapper (a use-after-move; see the `XqliteBlob` doc comment in
-  # native/xqlitenif/src/blob.rs). Post-fix the blob
-  # owns only a raw `sqlite3_blob*` and closing it is sound (the open blob kept
-  # the db alive via SQLITE_BUSY). The assertion is survival: the VM must still
-  # be running afterward.
+  # native/xqlitenif/src/blob.rs). Post-fix the blob owns only a raw
+  # `sqlite3_blob*`, the connection's close already closed it, and the `Drop`
+  # finds a null pointer. The assertion is survival: the VM must still be
+  # running afterward.
   test "a blob abandoned after its connection is closed is torn down crash-free" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
 

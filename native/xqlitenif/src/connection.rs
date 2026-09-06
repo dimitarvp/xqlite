@@ -8,16 +8,82 @@ use crate::rollback_hook::{self, RollbackSubscriber};
 use crate::update_hook::{self, UpdateSubscriber};
 use crate::util::encode_text;
 use crate::wal_hook::{self, WalDispatch};
+use rusqlite::ffi;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicPtr;
+use std::sync::atomic::Ordering;
+
+/// One raw handle xqlite opened on a connection: a prepared statement (a
+/// stream owns one of those too) or an incremental blob. The cell is shared
+/// with the resource that owns the handle, so whoever reaches it first —
+/// the owner's finalize, its `Drop`, or the connection's own close — swaps
+/// it to null and hands the handle back to SQLite exactly once.
+#[derive(Debug)]
+pub(crate) enum ChildHandle {
+    Stmt(Arc<AtomicPtr<ffi::sqlite3_stmt>>),
+    Blob(Arc<AtomicPtr<ffi::sqlite3_blob>>),
+}
+
+impl ChildHandle {
+    fn key(&self) -> usize {
+        match self {
+            ChildHandle::Stmt(cell) => Arc::as_ptr(cell) as usize,
+            ChildHandle::Blob(cell) => Arc::as_ptr(cell) as usize,
+        }
+    }
+
+    /// Takes the raw handle out of the cell and gives it back to SQLite.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the owning connection's `Mutex` for the whole call —
+    /// or holds it poisoned, which keeps every other thread out of SQLite on
+    /// that connection — and the cell holds null or a handle SQLite created
+    /// on that same connection.
+    unsafe fn release(&self) {
+        match self {
+            ChildHandle::Stmt(cell) => {
+                let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                if !ptr.is_null() {
+                    // SAFETY: the swap gives exclusive ownership of `ptr`, and the
+                    // connection Mutex is held (fn contract). `sqlite3_finalize`
+                    // echoes the statement's last evaluation error and destroys it
+                    // either way; that error already reached the caller at step
+                    // time, so it is deliberately discarded here.
+                    let _ = unsafe { ffi::sqlite3_finalize(ptr) };
+                }
+            }
+            ChildHandle::Blob(cell) => {
+                let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                if !ptr.is_null() {
+                    // SAFETY: as above; `sqlite3_blob_close`'s flush result is
+                    // discarded for the same reason — the blob is destroyed
+                    // whatever it returns.
+                    let _ = unsafe { ffi::sqlite3_blob_close(ptr) };
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
+
+    // Every statement, stream and blob xqlite opened on this connection and
+    // has not released yet, keyed by its cell's address. `close_connection`
+    // drains it before dropping the `Connection`, so `sqlite3_close` finds
+    // no Vdbe of ours and frees the handle instead of answering SQLITE_BUSY.
+    // Statements a virtual-table module owns are not in here: SQLite
+    // disconnects those itself during close. Lock order is always the
+    // connection Mutex first, this one second.
+    pub(crate) children: Mutex<HashMap<usize, ChildHandle>>,
+
     pub(crate) extensions_enabled: AtomicBool,
 
     // The busy slot: a single-slot retry POLICY (a policy cannot
@@ -54,6 +120,55 @@ pub(crate) struct XqliteConn {
 
 #[resource_impl]
 impl Resource for XqliteConn {}
+
+impl XqliteConn {
+    /// Records a child handle. The caller holds the connection Mutex, which
+    /// is also what close takes, so no close can slip between opening the
+    /// handle and registering it.
+    pub(crate) fn register_child(&self, child: ChildHandle) -> Result<(), XqliteError> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        children.insert(child.key(), child);
+        Ok(())
+    }
+
+    /// Releases one child handle and forgets it.
+    ///
+    /// # Safety
+    ///
+    /// As `ChildHandle::release`: the caller holds this connection's Mutex
+    /// for the whole call, or holds it poisoned.
+    pub(crate) unsafe fn release_child(&self, child: &ChildHandle) -> Result<(), XqliteError> {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { child.release() };
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        children.remove(&child.key());
+        Ok(())
+    }
+
+    /// Releases every child handle still registered on this connection.
+    ///
+    /// # Safety
+    ///
+    /// As `ChildHandle::release`: the caller holds this connection's Mutex
+    /// for the whole call.
+    unsafe fn release_children(&self) -> Result<(), XqliteError> {
+        let mut children = self
+            .children
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        for (_key, child) in children.drain() {
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { child.release() };
+        }
+        Ok(())
+    }
+}
 
 impl Drop for XqliteConn {
     fn drop(&mut self) {
@@ -125,6 +240,7 @@ pub(crate) fn handle_open_result(
 
             let handle = ResourceArc::new(XqliteConn {
                 conn: Mutex::new(Some(conn)),
+                children: Mutex::new(HashMap::new()),
                 extensions_enabled: AtomicBool::new(false),
                 busy_handler: AtomicPtr::new(std::ptr::null_mut()),
                 wal_hook: WalDispatch::new(),
@@ -190,9 +306,21 @@ pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), X
         .conn
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
-    // Second close is a no-op — .take() on None returns None.
-    conn_guard.take();
-    Ok(())
+
+    match conn_guard.as_ref() {
+        // Second close is a no-op: the first one emptied the registry.
+        None => Ok(()),
+        Some(_) => {
+            // SAFETY: the connection Mutex is held for the whole drain, so no
+            // other thread is inside a `sqlite3_*` call on this handle, and
+            // every registered cell holds null or a handle opened on it.
+            unsafe { handle.release_children()? };
+            // Dropping the Connection runs `sqlite3_close`, which now finds no
+            // statement of ours outstanding and frees the handle.
+            conn_guard.take();
+            Ok(())
+        }
+    }
 }
 
 #[inline]

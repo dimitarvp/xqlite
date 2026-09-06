@@ -1,5 +1,6 @@
 defmodule Xqlite.StrictTableTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias XqliteNIF, as: NIF
 
@@ -235,5 +236,282 @@ defmodule Xqlite.StrictTableTest do
       {:ok, result} = NIF.query(conn, "SELECT * FROM loose", [])
       assert result.rows == [[1, "text"]]
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # names SQLite accepts but that need quoting, and the four spellings a stored
+  # CREATE TABLE statement can carry
+  # ---------------------------------------------------------------------------
+
+  describe "hostile names and stored spellings" do
+    for {label, rendered} <- [
+          {"double-quoted", ~s|"users"|},
+          {"backtick-quoted", "`users`"},
+          {"bracket-quoted", "[users]"}
+        ] do
+      test "a table stored #{label} converts", %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, "CREATE TABLE #{unquote(rendered)} (id INTEGER);")
+        assert {:ok, 1} = NIF.execute(conn, "INSERT INTO users VALUES (?)", [1])
+
+        assert {:ok, []} = Xqlite.check_strict_violations(conn, "users")
+        assert :ok = Xqlite.enable_strict_table(conn, "users")
+
+        assert strict?(conn, "users")
+        assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT id FROM users", [])
+      end
+    end
+
+    test "a bare name whose characters are regex syntax converts", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE t$x (id INTEGER);")
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t$x")
+      assert strict?(conn, "t$x")
+    end
+
+    test "a table and a column holding quote characters convert", %{conn: conn} do
+      table = ~s|we"ird|
+      column = "it's"
+
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TABLE #{quoted(table)} (#{quoted(column)} INTEGER);"
+               )
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO #{quoted(table)} VALUES (?)", [1])
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, table)
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO #{quoted(table)} VALUES (?)", ["oops"])
+      assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, table)
+      assert violation.column == column
+      assert violation.actual_type == "text"
+
+      assert {:ok, 1} =
+               NIF.execute(
+                 conn,
+                 "DELETE FROM #{quoted(table)} WHERE typeof(#{quoted(column)}) = 'text'"
+               )
+
+      assert :ok = Xqlite.enable_strict_table(conn, table)
+      assert strict?(conn, table)
+    end
+
+    test "converting a table twice is idempotent", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE plain (id INTEGER);")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO plain VALUES (?)", [1])
+
+      assert :ok = Xqlite.enable_strict_table(conn, "plain")
+      assert :ok = Xqlite.enable_strict_table(conn, "plain")
+
+      assert strict?(conn, "plain")
+      assert tables(conn) == ["plain"]
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT id FROM plain", [])
+    end
+
+    test "a WITHOUT ROWID table is refused by both helpers", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TABLE wr (id INTEGER PRIMARY KEY) WITHOUT ROWID;"
+               )
+
+      assert {:error, {:without_rowid_unsupported, "wr"}} =
+               Xqlite.check_strict_violations(conn, "wr")
+
+      assert {:error, {:without_rowid_unsupported, "wr"}} =
+               Xqlite.enable_strict_table(conn, "wr")
+
+      refute strict?(conn, "wr")
+      assert tables(conn) == ["wr"]
+    end
+
+    test "a name holding a NUL byte is refused by both helpers", %{conn: conn} do
+      name = "bad" <> <<0>> <> "name"
+
+      assert {:error, :null_byte_in_string} = Xqlite.check_strict_violations(conn, name)
+      assert {:error, :null_byte_in_string} = Xqlite.enable_strict_table(conn, name)
+    end
+
+    property "any name SQLite accepts round-trips through both helpers" do
+      check all(scenario <- scenario(), max_runs: 2000) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+        run_scenario(conn, scenario)
+        assert :ok = NIF.close(conn)
+      end
+    end
+  end
+
+  defp quoted(name), do: ~s|"| <> String.replace(name, ~s|"|, ~s|""|) <> ~s|"|
+
+  defp strict?(conn, table) do
+    assert {:ok, objects} = Xqlite.schema_list_objects(conn, "main")
+
+    Enum.any?(objects, fn
+      %Xqlite.Schema.SchemaObjectInfo{name: ^table, strict: strict} -> strict
+      _other -> false
+    end)
+  end
+
+  defp tables(conn) do
+    sql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    assert {:ok, %{rows: rows}} = NIF.query(conn, sql, [])
+
+    Enum.map(rows, fn
+      [name] -> name
+      other -> other
+    end)
+  end
+
+  defp row_count(conn, table) do
+    assert {:ok, %{rows: [[n]]}} = NIF.query(conn, "SELECT count(*) FROM #{quoted(table)}", [])
+    n
+  end
+
+  defp name_char do
+    StreamData.member_of([
+      ?a,
+      ?b,
+      ?t,
+      ?X,
+      ?Z,
+      ?0,
+      ?9,
+      ?_,
+      ?\s,
+      ?",
+      ?',
+      ?`,
+      ?[,
+      ?],
+      ?.,
+      ?-,
+      ?+,
+      ?(,
+      ?),
+      ?*,
+      ?\\,
+      ?é,
+      ?ß
+    ])
+  end
+
+  defp hostile_name do
+    name_char()
+    |> StreamData.list_of(min_length: 1, max_length: 20)
+    |> StreamData.map(&List.to_string/1)
+  end
+
+  defp spellings(name) do
+    [:double_quote, :backtick] ++ bracket_spelling(name) ++ bare_spelling(name)
+  end
+
+  defp bracket_spelling(name) do
+    case String.contains?(name, "]") do
+      true -> []
+      false -> [:bracket]
+    end
+  end
+
+  defp bare_spelling(name) do
+    case Regex.match?(~r/^t[A-Za-z0-9_]*$/, name) do
+      true -> [:bare]
+      false -> []
+    end
+  end
+
+  defp render(name, :double_quote), do: quoted(name)
+  defp render(name, :backtick), do: "`" <> String.replace(name, "`", "``") <> "`"
+  defp render(name, :bracket), do: "[" <> name <> "]"
+  defp render(name, :bare), do: name
+
+  defp scenario do
+    gen all(
+          table <- hostile_name(),
+          column <- hostile_name(),
+          spelling <- StreamData.member_of(spellings(table)),
+          rows <- StreamData.list_of(StreamData.integer(), max_length: 3),
+          dirty <- StreamData.boolean(),
+          without_rowid <-
+            StreamData.frequency([
+              {7, StreamData.constant(false)},
+              {1, StreamData.constant(true)}
+            ])
+        ) do
+      %{
+        table: table,
+        column: column,
+        spelling: spelling,
+        rows: rows,
+        dirty: dirty,
+        without_rowid: without_rowid
+      }
+    end
+  end
+
+  defp create_table(conn, %{without_rowid: true} = scenario) do
+    sql =
+      "CREATE TABLE #{render(scenario.table, scenario.spelling)} " <>
+        "(#{quoted(scenario.column)} INTEGER PRIMARY KEY) WITHOUT ROWID;"
+
+    assert :ok = NIF.execute_batch(conn, sql)
+  end
+
+  defp create_table(conn, scenario) do
+    sql =
+      "CREATE TABLE #{render(scenario.table, scenario.spelling)} " <>
+        "(#{quoted(scenario.column)} INTEGER);"
+
+    assert :ok = NIF.execute_batch(conn, sql)
+  end
+
+  defp insert_rows(conn, scenario) do
+    Enum.each(scenario.rows, fn value ->
+      assert {:ok, 1} =
+               NIF.execute(conn, "INSERT INTO #{quoted(scenario.table)} VALUES (?)", [value])
+    end)
+  end
+
+  defp run_scenario(conn, %{without_rowid: true} = scenario) do
+    create_table(conn, scenario)
+    table = scenario.table
+
+    assert {:error, {:without_rowid_unsupported, ^table}} =
+             Xqlite.check_strict_violations(conn, table)
+
+    assert {:error, {:without_rowid_unsupported, ^table}} =
+             Xqlite.enable_strict_table(conn, table)
+
+    refute strict?(conn, table)
+  end
+
+  defp run_scenario(conn, %{dirty: true} = scenario) do
+    create_table(conn, scenario)
+    insert_rows(conn, scenario)
+
+    assert {:ok, 1} =
+             NIF.execute(conn, "INSERT INTO #{quoted(scenario.table)} VALUES (?)", ["oops"])
+
+    assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, scenario.table)
+    assert violation.column == scenario.column
+    assert violation.actual_type == "text"
+
+    assert {:error, {:strict_violations, [_]}} =
+             Xqlite.enable_strict_table(conn, scenario.table)
+
+    refute strict?(conn, scenario.table)
+    assert row_count(conn, scenario.table) == length(scenario.rows) + 1
+  end
+
+  defp run_scenario(conn, scenario) do
+    create_table(conn, scenario)
+    insert_rows(conn, scenario)
+
+    assert {:ok, []} = Xqlite.check_strict_violations(conn, scenario.table)
+    assert :ok = Xqlite.enable_strict_table(conn, scenario.table)
+    assert :ok = Xqlite.enable_strict_table(conn, scenario.table)
+
+    assert strict?(conn, scenario.table)
+    assert tables(conn) == [scenario.table]
+    assert row_count(conn, scenario.table) == length(scenario.rows)
   end
 end

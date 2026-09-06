@@ -39,11 +39,12 @@ Elixir paths are relative to `lib/`, Rust paths to
   (cargo runs with cwd set to the crate directory) and the test runner.
 - `lib.rs` — atoms, module list, `rustler::init!`; `nif.rs` — all 97
   `#[rustler::nif]` functions, 92 of them `DirtyIo`; `connection.rs` —
-  the `XqliteConn` resource (a `Mutex<Option<Connection>>` plus every
-  hook slot), `with_conn`, `with_conn_mut`, open/close, result encoding.
+  the `XqliteConn` resource (a `Mutex<Option<Connection>>`, the child
+  registry, and every hook slot), `with_conn`, `with_conn_mut`,
+  open/close, result encoding.
 - `statement.rs`, `stream.rs`, `blob.rs` — the three raw-pointer
-  resources (`AtomicPtr` plus `with_live_*`), `take_and_finalize_raw`,
-  `process_single_step`, the raw binders.
+  resources (a shared `AtomicPtr` plus `with_live_*`),
+  `take_and_finalize_raw`, `process_single_step`, the raw binders.
 - `session.rs`, `cancel.rs` — `XqliteSession` with its
   leak-rather-than-dangle `close`; `XqliteCancelToken` with the RAII
   `ProgressHandlerGuard`.
@@ -100,8 +101,9 @@ because the finalizer can null the pointer at any moment but cannot call
 `sqlite3_finalize` without the same Mutex. Stepping goes through
 `stream.rs:process_single_step`, which reads the column count *after* the
 step so automatic re-prepare is reflected. `stmt_finalize` and `Drop`
-both call `stream.rs:take_and_finalize_raw`: swap to null, take the
-connection lock, finalize, discard the return code.
+both call `stream.rs:take_and_finalize_raw`: take the connection lock,
+swap the shared pointer cell to null, finalize, drop the connection's
+registry entry, discard the return code.
 
 ### 2.3 Streams
 
@@ -190,9 +192,17 @@ and every extra a call records arrives in the metadata map.
 |---|---|---|---|
 | — | any `open*` NIF | open | `handle_open_result` |
 | open | any NIF | open | `with_conn` / `with_conn_mut` |
-| open | `close` | closed | `close_connection` (`Option::take`) |
+| open | `close` | closed | `close_connection`: drain the child registry, then `Option::take` |
 | closed | `close` | closed | `close_connection` → `:ok` |
 | closed | anything else | closed | `{:error, :connection_closed}` |
+
+`XqliteConn.children` holds one shared pointer cell per prepared
+statement, stream and blob xqlite opened on the connection.
+`close_connection` finalizes them all under the connection `Mutex` before
+dropping the `Connection`, so `sqlite3_close` frees the handle instead of
+answering `SQLITE_BUSY`. Statements a virtual-table module owns are not in
+the registry — SQLite disconnects those itself during close. A session
+registers nothing and is still leaked by an explicit close.
 
 ### Prepared statement (`statement.rs`)
 
@@ -203,6 +213,7 @@ and every extra a call records arrives in the metadata map.
 | live | `stmt_step` → `{:row, _}` | live | `process_single_step` |
 | live | `stmt_step` → `:done` | live | auto-resets on next step |
 | live | `stmt_finalize` or GC | final | `take_and_finalize_raw` |
+| live | the connection is closed | final | `close_connection` drains the registry |
 | final | any step or bind | final | `{:error, :statement_finalized}` |
 | final | `stmt_column_names` | final | prepare-time snapshot |
 | final | `stmt_finalize` | final | `:ok` |
@@ -218,7 +229,12 @@ and every extra a call records arrives in the metadata map.
 | open | `stream_fetch` errors | closed | swap + finalize, then error |
 | open | `stream_fetch_cancellable` with a signalled token | closed | swap + finalize, then `{:error, :operation_cancelled}` |
 | any | `stream_close` or GC | closed | `take_and_finalize_atomic_stmt` |
+| open | the connection is closed | closed | `close_connection` drains the registry |
 | closed | `stream_fetch` | closed | `:done` |
+
+`stream_fetch` proves the connection open before it reads the statement
+pointer: after a close both are gone, and the caller must still hear
+`{:error, :connection_closed}` rather than `:done`.
 
 The busy slot's own transitions are in section 4
 (`busy-slot-policy-single-observers-many` and
@@ -226,7 +242,8 @@ The busy slot's own transitions are in section 4
 policy, observers and both, restoring the displaced `busy_timeout` on
 every transition into empty and recording the current one on the way out.
 
-Blobs and sessions share the stream's two-state shape. A poisoned
+Blobs share the stream's two-state shape, closing on the connection's
+close as well; a session does not, and an explicit close leaks it. A poisoned
 `Mutex` is terminal everywhere: `{:error, {:lock_error, _}}`.
 `nif.rs:txn_state` maps rusqlite's `TransactionState` to `:none`,
 `:read`, `:write`, or `:unknown`; `transaction_status/1` and
@@ -272,7 +289,8 @@ pins to `test/`.
 | `db-path-is-nil-without-a-file` | In-memory and temporary databases report `{:ok, nil}`; SQLite's empty filename is normalised away. | `nif.rs:db_path` | `nif/connection_test.exs: "db_path returns nil (no backing file)"` |
 | `api-armor-and-threadsafe-are-compiled-in` | The bundled SQLite always reports `ENABLE_API_ARMOR` and a `THREADSAFE=` entry in `PRAGMA compile_options`. | `libsqlite3-sys`'s bundled build (section 5) | `nif/connection_test.exs: "compile_options returns known flags"` |
 | `bare-ok-shares-one-encoder` | Every NIF whose success carries no value encodes its result through one helper, so success is the bare atom `:ok`, never `{:ok, _}`, and failure is `{:error, reason}` from the same reason set. | `util.rs:singular_ok_or_error_tuple` | `nif/connection_test.exs: "close is idempotent"` |
-| `identifiers-are-double-quoted` | Identifiers interpolated into SQL are wrapped in double quotes, with embedded double quotes doubled; the STRICT-table helpers in `xqlite.ex` interpolate the same quoted form without doubling. | `util.rs:quote_identifier`, `xqlite/pragma.ex:quote_name/1` | `nif/transaction_test.exs: "isolated: savepoint with double quotes in name"` |
+| `identifiers-are-double-quoted` | Identifiers that reach SQL as text are wrapped in double quotes with embedded double quotes doubled, by `quote_identifier` in Rust and `Xqlite.Pragma.quote_name/1` in Elixir; string values are bound as parameters, or, where SQL forbids a parameter (PRAGMA), quoted with the quote doubled by `Xqlite.Pragma.format_pragma_value/1`. | `util.rs:quote_identifier`, `xqlite/pragma.ex:quote_name/1` | `nif/transaction_test.exs: "isolated: savepoint with double quotes in name"` |
+| `strict-rebuild-renames-by-token` | `enable_strict_table/2` rewrites the stored `CREATE TABLE` statement by its own name token, whatever its quoting style (double quotes, backticks, brackets, bare), and never compiles the caller's name into a pattern. | `xqlite.ex:rebuild_as_strict/3` | `strict_table_test.exs: "a table stored double-quoted converts"` |
 
 ## 5. Build facts
 

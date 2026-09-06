@@ -1,4 +1,4 @@
-use crate::connection::XqliteConn;
+use crate::connection::{ChildHandle, XqliteConn};
 use crate::error::XqliteError;
 use crate::util::sqlite_row_to_elixir_terms;
 use rusqlite::ffi;
@@ -6,11 +6,14 @@ use rusqlite::types::Value;
 use rustler::{Env, Resource, ResourceArc, Term};
 use std::io::Write;
 use std::os::raw::c_int;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub(crate) struct XqliteStream {
-    // Null means the stream is done/closed/finalized.
-    pub(crate) atomic_raw_stmt: AtomicPtr<ffi::sqlite3_stmt>,
+    // Null means the stream is done/closed/finalized. Shared with the
+    // connection's child registry, which finalizes it if the connection is
+    // closed first.
+    pub(crate) atomic_raw_stmt: Arc<AtomicPtr<ffi::sqlite3_stmt>>,
 
     // These are immutable after stream_open completes
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
@@ -26,42 +29,52 @@ impl XqliteStream {
     }
 }
 
-/// Atomically takes a raw statement pointer and finalizes it under the
-/// connection Mutex. Shared by every resource that owns a raw
+/// Finalizes a raw statement under the connection Mutex and drops it from the
+/// connection's child registry. Shared by every resource that owns a raw
 /// `sqlite3_stmt` (`XqliteStream`, `XqliteStatement`) — their Drop impls
 /// and explicit close/finalize NIFs all funnel here.
+///
+/// The connection lock comes first and the cell is claimed under it: the
+/// connection's own close drains these same cells while holding that lock, so
+/// locking first is what keeps a finalize from running against a handle close
+/// has already freed. It also keeps any other thread out of `sqlite3_step` on
+/// this connection while the statement goes away.
 pub(crate) fn take_and_finalize_raw(
-    atomic_raw_stmt: &AtomicPtr<ffi::sqlite3_stmt>,
+    atomic_raw_stmt: &Arc<AtomicPtr<ffi::sqlite3_stmt>>,
     conn_resource_arc: &ResourceArc<XqliteConn>,
 ) -> Result<(), XqliteError> {
-    // Ordering::AcqRel ensures that this operation synchronizes with other atomic
-    // operations on other threads: acquire for the read (load of old value)
-    // and release for the write (store of null_mut).
-    let old_ptr = atomic_raw_stmt.swap(std::ptr::null_mut(), Ordering::AcqRel);
-
-    if !old_ptr.is_null() {
-        // Acquire the connection lock before finalizing. This ensures no other
-        // thread is currently inside sqlite3_step on this connection. Without
-        // this lock, a concurrent step could be mid-flight when we finalize
-        // the statement out from under it.
+    // A null cell means the statement is already gone — finalized by an
+    // earlier call, by the stream's own exhaustion, or by the connection's
+    // close — and its registry entry went with it.
+    if atomic_raw_stmt.load(Ordering::Acquire).is_null() {
+        Ok(())
+    } else {
         let _conn_guard = conn_resource_arc
             .conn
             .lock()
             .map_err(|e| XqliteError::LockError(e.to_string()))?;
-
-        // SAFETY: old_ptr was obtained via atomic swap, guaranteeing exclusive
-        // ownership. The connection lock is held, ensuring no concurrent sqlite3_step.
-        //
-        // sqlite3_finalize echoes the statement's most recent EVALUATION
-        // error (e.g. SQLITE_INTERRUPT after a cancelled step) — but the
-        // statement is destroyed regardless, per the SQLite docs. That
-        // error was already surfaced to the caller at step time, so
-        // reporting it again here would turn successful cleanup into a
-        // phantom failure. Deliberately discarded.
-        let _ = unsafe { ffi::sqlite3_finalize(old_ptr) };
+        let child = ChildHandle::Stmt(Arc::clone(atomic_raw_stmt));
+        // SAFETY: the connection Mutex is held for the whole release, so no
+        // other thread is inside a `sqlite3_*` call on this connection, and
+        // the cell holds a statement prepared on it.
+        unsafe { conn_resource_arc.release_child(&child) }
     }
-    // If old_ptr was null, it was already finalized by another call or was never set.
-    Ok(())
+}
+
+/// Finalizes a stream's statement with the connection Mutex already held by
+/// the caller, and drops it from the child registry. `stream_fetch` uses this
+/// when a batch exhausts or fails mid-loop.
+///
+/// # Safety
+///
+/// The caller holds the connection's Mutex for the whole call — or holds it
+/// poisoned, which keeps every other thread out of SQLite on that connection.
+pub(crate) unsafe fn finalize_stream_stmt_locked(
+    stream: &XqliteStream,
+) -> Result<(), XqliteError> {
+    let child = ChildHandle::Stmt(Arc::clone(&stream.atomic_raw_stmt));
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { stream.conn_resource_arc.release_child(&child) }
 }
 
 impl Drop for XqliteStream {

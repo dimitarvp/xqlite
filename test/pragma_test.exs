@@ -1,5 +1,6 @@
 defmodule XqlitePragmaTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil
 
@@ -220,6 +221,19 @@ defmodule XqlitePragmaTest do
       assert is_list(rows)
       refute Enum.empty?(rows)
     end
+
+    # A PRAGMA takes no bound parameter, so its string value is quoted in the
+    # statement text; the quote inside the value has to be doubled or the
+    # statement ends early.
+    test "put quotes a string value holding a single quote", %{db: db} do
+      assert {:ok, nil} = P.put(db, :not_a_pragma, "a'b", db_name: "main")
+    end
+
+    property "put accepts a string value whatever characters it holds", %{db: db} do
+      check all(value <- pragma_string_value(), max_runs: 2000) do
+        assert {:ok, nil} = P.put(db, :not_a_pragma, value, db_name: "main")
+      end
+    end
   end
 
   describe "unknown pragma" do
@@ -240,6 +254,13 @@ defmodule XqlitePragmaTest do
       assert {:error, {:invalid_pragma_name, "never_atomized_pragma_xyz"}} =
                P.put(db, "never_atomized_pragma_xyz", 1)
     end
+  end
+
+  defp pragma_string_value do
+    [?a, ?9, ?', ?", ?`, ?\\, ?;, ?-, ?\s, ?\n, ?é]
+    |> StreamData.member_of()
+    |> StreamData.list_of(max_length: 12)
+    |> StreamData.map(&List.to_string/1)
   end
 
   defp valid_get_result({:error, _, _}), do: false

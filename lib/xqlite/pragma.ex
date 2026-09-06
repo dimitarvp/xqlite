@@ -622,7 +622,9 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  defp quote_name(name) do
+  @doc false
+  @spec quote_name(String.t() | atom()) :: String.t()
+  def quote_name(name) do
     "\"#{String.replace(to_string(name), "\"", "\"\"")}\""
   end
 
@@ -662,7 +664,10 @@ defmodule Xqlite.Pragma do
     end)
   end
 
-  defp format_pragma_value(val) when is_binary(val), do: "'#{val}'"
+  # A PRAGMA takes no bound parameter, so a string value is quoted into the
+  # statement text; the quote inside it has to be doubled or the value ends
+  # the literal early.
+  defp format_pragma_value(val) when is_binary(val), do: "'#{String.replace(val, "'", "''")}'"
   defp format_pragma_value(val) when is_integer(val), do: Integer.to_string(val)
   defp format_pragma_value(true), do: "1"
   defp format_pragma_value(false), do: "0"

@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.ConnectionTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
@@ -209,6 +210,81 @@ defmodule Xqlite.NIF.ConnectionTest do
     end
   end
 
+  describe "close with live child handles" do
+    property "close finalizes every child of the connection and frees the handle" do
+      path = Xqlite.TestUtil.tmp_db_path("close_children_law")
+
+      check all(
+              statements <- StreamData.list_of(statement_state(), max_length: 4),
+              streams <- StreamData.list_of(stream_state(), max_length: 2),
+              blobs <- StreamData.list_of(blob_state(), max_length: 2),
+              max_runs: 2000
+            ) do
+        # One path, one database per run: a run that leaked would otherwise
+        # keep the file open and fail the runs after it instead of itself.
+        for ext <- ["", "-wal", "-shm"], do: File.rm(path <> ext)
+        conn = open_wal_db(path)
+
+        children =
+          Enum.map(statements, &open_statement(conn, &1)) ++
+            Enum.map(streams, &open_stream(conn, &1)) ++
+            Enum.map(blobs, &open_blob(conn, &1))
+
+        assert :ok = NIF.close(conn)
+        refute File.exists?(path <> "-wal")
+
+        Enum.each(children, &assert_child_after_close/1)
+
+        assert :ok = NIF.close(conn)
+        assert {:error, :connection_closed} = NIF.query(conn, "SELECT 1", [])
+      end
+    end
+
+    test "an unstepped prepared statement does not keep the handle open" do
+      assert_close_frees(fn conn -> [open_statement(conn, :unstepped)] end)
+    end
+
+    test "a stepped prepared statement does not keep the handle open" do
+      assert_close_frees(fn conn -> [open_statement(conn, :stepped)] end)
+    end
+
+    test "an undrained stream does not keep the handle open" do
+      assert_close_frees(fn conn -> [open_stream(conn, :undrained)] end)
+    end
+
+    test "an open incremental blob does not keep the handle open" do
+      assert_close_frees(fn conn -> [open_blob(conn, :open)] end)
+    end
+
+    test "a statement, a stream and a blob together do not keep the handle open" do
+      assert_close_frees(fn conn ->
+        [
+          open_statement(conn, :stepped),
+          open_stream(conn, :undrained),
+          open_blob(conn, :open)
+        ]
+      end)
+    end
+
+    test "the statements an FTS5 table owns do not keep the handle open" do
+      path = Xqlite.TestUtil.tmp_db_path("close_children_fts5")
+      conn = open_wal_db(path)
+
+      assert :ok = NIF.execute_batch(conn, "CREATE VIRTUAL TABLE docs USING fts5(body);")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO docs (body) VALUES ('hello')", [])
+
+      assert {:ok, %{num_rows: 1}} =
+               NIF.query(conn, "SELECT body FROM docs WHERE docs MATCH 'hello'", [])
+
+      children = [open_statement(conn, :stepped)]
+
+      assert :ok = NIF.close(conn)
+      refute File.exists?(path <> "-wal")
+
+      Enum.each(children, &assert_child_after_close/1)
+    end
+  end
+
   describe "shared memory DB" do
     setup do
       assert {:ok, conn1} = NIF.open(@shared_mem_db_uri)
@@ -239,5 +315,94 @@ defmodule Xqlite.NIF.ConnectionTest do
       assert {:error, {:cannot_open_database, "http://invalid", _code, _reason}} =
                NIF.open_in_memory("http://invalid")
     end
+  end
+
+  # A WAL database keeps its -wal sidecar for exactly as long as a connection
+  # holds the database open, and SQLite deletes it when the last connection
+  # really closes. That makes the file the portable oracle for "the SQLite
+  # handle was freed", which is what these helpers assert around close/1.
+  defp open_wal_db(path) do
+    assert {:ok, conn} = NIF.open(path)
+    assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "WAL")
+    assert :ok = NIF.execute_batch(conn, "PRAGMA synchronous=OFF;")
+
+    assert :ok =
+             NIF.execute_batch(
+               conn,
+               "CREATE TABLE IF NOT EXISTS kids (id INTEGER PRIMARY KEY, data BLOB);"
+             )
+
+    assert {:ok, 1} =
+             NIF.execute(conn, "INSERT OR REPLACE INTO kids VALUES (1, zeroblob(16))", [])
+
+    assert File.exists?(path <> "-wal")
+    conn
+  end
+
+  defp assert_close_frees(build) do
+    path = Xqlite.TestUtil.tmp_db_path("close_children")
+    conn = open_wal_db(path)
+    children = build.(conn)
+
+    assert :ok = NIF.close(conn)
+    refute File.exists?(path <> "-wal")
+
+    Enum.each(children, &assert_child_after_close/1)
+
+    assert :ok = NIF.close(conn)
+    assert {:error, :connection_closed} = NIF.query(conn, "SELECT 1", [])
+  end
+
+  defp statement_state, do: StreamData.member_of([:unstepped, :stepped, :finalized])
+  defp stream_state, do: StreamData.member_of([:undrained, :drained, :closed])
+  defp blob_state, do: StreamData.member_of([:open, :closed])
+
+  defp open_statement(conn, state) do
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT id FROM kids")
+    apply_statement_state(stmt, state)
+    {:statement, stmt}
+  end
+
+  defp apply_statement_state(_stmt, :unstepped), do: :ok
+  defp apply_statement_state(stmt, :stepped), do: assert({:row, [1]} = NIF.stmt_step(stmt))
+  defp apply_statement_state(stmt, :finalized), do: assert(:ok = NIF.stmt_finalize(stmt))
+
+  defp open_stream(conn, state) do
+    assert {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM kids", [], [])
+    apply_stream_state(stream, state)
+    {:stream, stream}
+  end
+
+  defp apply_stream_state(_stream, :undrained), do: :ok
+
+  defp apply_stream_state(stream, :drained) do
+    assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream, 10)
+    assert :done = NIF.stream_fetch(stream, 10)
+  end
+
+  defp apply_stream_state(stream, :closed), do: assert(:ok = NIF.stream_close(stream))
+
+  defp open_blob(conn, state) do
+    assert {:ok, blob} = NIF.blob_open(conn, "main", "kids", "data", 1, false)
+    apply_blob_state(blob, state)
+    {:blob, blob}
+  end
+
+  defp apply_blob_state(_blob, :open), do: :ok
+  defp apply_blob_state(blob, :closed), do: assert(:ok = NIF.blob_close(blob))
+
+  defp assert_child_after_close({:statement, stmt}) do
+    assert {:error, :connection_closed} = NIF.stmt_step(stmt)
+    assert :ok = NIF.stmt_finalize(stmt)
+  end
+
+  defp assert_child_after_close({:stream, stream}) do
+    assert {:error, :connection_closed} = NIF.stream_fetch(stream, 1)
+    assert :ok = NIF.stream_close(stream)
+  end
+
+  defp assert_child_after_close({:blob, blob}) do
+    assert {:error, :connection_closed} = NIF.blob_size(blob)
+    assert :ok = NIF.blob_close(blob)
   end
 end

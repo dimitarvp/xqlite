@@ -238,31 +238,27 @@ and so is any other reference, so `:cancel_tokens` can only be validated as
 `make_ref()` gets through and raises `ArgumentError` on the first fetch, which
 is what every other cancellable entry point does with one too.
 
-### Close child handles before the connection
+### Delete sessions before the connection
 
 Prepared statements, streams, incremental blobs, and sessions each hold a handle
-*into* their connection's SQLite state. Closing the connection while one of them
-is still live does not crash and does not corrupt anything — but it **leaks**:
+*into* their connection's SQLite state. Closing the connection first is fine for
+the first three: `Xqlite.close/1` finalizes every statement, stream and blob
+still open on the connection and then frees the `sqlite3` handle. Afterwards
+those handles answer `{:error, :connection_closed}` to any operation, and
+`Xqlite.finalize/1`, `XqliteNIF.stream_close/1` and `XqliteNIF.blob_close/1`
+answer `:ok`.
 
-- A live incremental blob keeps an internal statement open, so `Xqlite.close/1`
-  cannot free the connection; that connection's `sqlite3` handle stays resident
-  until the OS process exits. Prepared statements and streams behave the same
-  way.
-- A live session leaks the (small) session object, because xqlite will not risk
-  tearing it down against a database that has already been freed.
-
-Neither leak grows without bound — it is one leaked object per mis-ordered
-teardown, reclaimed when the OS process exits — but in a long-lived system that
-churns connections it is a slow drip worth designing out. The fix is ordering:
-finalize statements (`Xqlite.finalize/1`), drain or close streams, close blobs
-(`XqliteNIF.blob_close/1`), and delete sessions (`XqliteNIF.session_delete/1`)
-*before* `Xqlite.close/1`.
+A live **session** is the one exception: closing the connection while a session
+handle is still referenced leaks the (small) session object, because xqlite will
+not risk tearing it down against a database that has already been freed. That
+leak does not grow without bound — it is one object per mis-ordered teardown,
+reclaimed when the OS process exits — but in a long-lived system that churns
+connections it is a slow drip worth designing out. Call
+`XqliteNIF.session_delete/1` before `Xqlite.close/1`.
 
 This is the DX face of a lifecycle rule the [Security](security.md) guide covers
-in full under "Resource lifecycle: close raw handles before the connection" —
-see there for the mechanism (why an open blob makes `sqlite3_close` return
-`SQLITE_BUSY`, why the session teardown is skipped) and the surrounding trust
-model.
+in full under "Resource lifecycle: what close cleans up, and what it cannot" —
+see there for the mechanism and the surrounding trust model.
 
 ## Concurrency and busy handling
 

@@ -47,31 +47,24 @@ committing thread while the mutex is held. Neither is a bug (it is simply
 where SQLite invokes the callback), but both make other operations on the
 *same* connection wait. Other connections are never affected.
 
-One rule the mutex cannot enforce for you: **a raw handle must not
-outlive the connection it came from.** Prepared statements, streams, and
-incremental-blob handles all hold a pointer into their connection's
-SQLite state. Closing the connection while one of them is live is a
-usage pattern to avoid — not because it will crash (it won't; see the
-next section) but because it leaks. Finalize statements, drain or close
-streams, close blobs, and delete sessions *before* `Xqlite.close/1`.
+Prepared statements, streams, and incremental-blob handles all hold a
+pointer into their connection's SQLite state, and closing the connection
+first is safe: `Xqlite.close/1` finalizes them itself, under the same
+mutex, before it frees the handle. Sessions are the exception — delete
+those *before* `Xqlite.close/1` (see the next section).
 
-## Resource lifecycle: close raw handles before the connection
+## Resource lifecycle: what close cleans up, and what it cannot
 
-These are the "hold it wrong" edges. All of them are **safe** — no
-crash, no corruption, no undefined behavior — but each leaks a resource
-that a small change to your teardown order avoids. Do the first thing,
-not the second.
-
-**Close incremental blobs before the connection.** An open blob (from
-`XqliteNIF.blob_open/6`) registers an internal statement inside SQLite, so
-`sqlite3_close` on a connection with a live blob returns `SQLITE_BUSY` and
-SQLite refuses to free the connection. xqlite does not force the issue, so
-that connection's `sqlite3` handle stays resident until the OS process
-exits. Call `XqliteNIF.blob_close/1` (or let the blob be garbage-collected)
-*before* closing the connection, and the handle frees normally. Prepared
-statements and streams behave the same way — `Xqlite.close/1` documents
-that a connection closed with statements outstanding keeps its handle
-alive until the process exits, so `Xqlite.finalize/1` first.
+**Statements, streams and blobs are closed for you.** The connection
+keeps a registry of every prepared statement, stream and incremental blob
+xqlite opened on it. `Xqlite.close/1` finalizes each of them while holding
+the connection mutex and only then frees the `sqlite3` handle, so the
+handle is freed whatever order you tore things down in — and a WAL
+database's `-wal` sidecar disappears with it. The handles stay usable as
+terms afterwards: an operation on one returns
+`{:error, :connection_closed}`, and finalizing or closing one returns
+`:ok`. Doing it yourself first is still tidier, and it frees the SQLite
+memory earlier.
 
 **Delete sessions before the connection.** A session object
 (`XqliteNIF.session_new/1`) is torn down under the connection mutex. If
@@ -80,10 +73,10 @@ referenced, xqlite cannot safely run the session's teardown against a
 freed database, so it leaks the (small) session object rather than risk a
 use-after-free. Call `XqliteNIF.session_delete/1` before `Xqlite.close/1`.
 
-Neither leak grows without bound during normal use — it is one leaked
-object per mis-ordered teardown, reclaimed when the OS process exits. But
-in a long-lived system that opens and closes many connections, mis-ordered
-teardown is a slow leak worth designing out.
+That leak does not grow without bound — it is one small object per
+mis-ordered teardown, reclaimed when the OS process exits. But in a
+long-lived system that opens and closes many connections it is a slow
+leak worth designing out.
 
 ## Loading an extension runs native code in your process
 

@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::raw::{c_char, c_int};
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Compiles exactly one SQL statement and hands the raw statement to the
@@ -145,15 +146,16 @@ unsafe fn tail_holds_statement(
 /// A manually managed prepared statement: prepare → (bind → step /
 /// multi_step → reset)* → finalize.
 ///
-/// The raw `sqlite3_stmt` lives in an `AtomicPtr` (null ⇒ finalized). The
-/// owning connection's `ResourceArc` keeps the connection *resource* alive —
-/// not the SQLite handle itself — so every statement operation, including
-/// the GC-driven `Drop`, can always lock the connection Mutex per the
-/// raw-handle locking rule. If the connection is explicitly closed first,
-/// statement operations fail with `ConnectionClosed` and finalization stays
-/// safe (the Mutex outlives the `Option<Connection>` it guards).
+/// The raw `sqlite3_stmt` lives in an `AtomicPtr` (null ⇒ finalized), shared
+/// with the connection's child registry. The owning connection's
+/// `ResourceArc` keeps the connection *resource* alive — not the SQLite
+/// handle itself — so every statement operation, including the GC-driven
+/// `Drop`, can always lock the connection Mutex per the raw-handle locking
+/// rule. Closing the connection first finalizes this statement through the
+/// registry: its operations then fail with `ConnectionClosed` and its
+/// `finalize` finds a null cell and answers `:ok`.
 pub(crate) struct XqliteStatement {
-    pub(crate) atomic_raw_stmt: AtomicPtr<ffi::sqlite3_stmt>,
+    pub(crate) atomic_raw_stmt: Arc<AtomicPtr<ffi::sqlite3_stmt>>,
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
     /// Prepare-time snapshot, served by `stmt_column_names` only after
     /// finalization; live statements read column metadata directly so

@@ -3,7 +3,7 @@ use crate::authorizer;
 use crate::blob::{self, XqliteBlob};
 use crate::busy_handler;
 use crate::cancel::XqliteCancelToken;
-use crate::connection::{self, XqliteConn, XqliteQueryResult};
+use crate::connection::{self, ChildHandle, XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
 use crate::explain_analyze::{self, ExplainAnalyze};
 use crate::pragma;
@@ -13,7 +13,7 @@ use crate::schema::{
 };
 use crate::session::{self, XqliteSession};
 use crate::statement::{self, XqliteStatement};
-use crate::stream::XqliteStream;
+use crate::stream::{XqliteStream, finalize_stream_stmt_locked};
 use crate::transaction;
 use crate::util::singular_ok_or_error_tuple;
 use rusqlite::Connection;
@@ -27,6 +27,7 @@ use rustler::{
     },
 };
 use std::io::Cursor;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -729,8 +730,16 @@ fn stmt_prepare(
                 column_names.push(name_c_str.to_string_lossy().into_owned());
             }
 
+            let cell = Arc::new(AtomicPtr::new(non_null_raw_stmt.as_ptr()));
+            let registration =
+                conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)));
+            if let Err(e) = registration {
+                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                return Err(e);
+            }
+
             Ok(XqliteStatement {
-                atomic_raw_stmt: AtomicPtr::new(non_null_raw_stmt.as_ptr()),
+                atomic_raw_stmt: cell,
                 conn_resource_arc: conn_resource_arc_clone,
                 column_names,
             })
@@ -1040,8 +1049,16 @@ fn stream_open<'a>(
                 }
             }
 
+            let cell = Arc::new(AtomicPtr::new(non_null_raw_stmt.as_ptr()));
+            let registration =
+                conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)));
+            if let Err(e) = registration {
+                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
+                return Err(e);
+            }
+
             Ok(XqliteStream {
-                atomic_raw_stmt: AtomicPtr::new(non_null_raw_stmt.as_ptr()),
+                atomic_raw_stmt: cell,
                 conn_resource_arc: conn_resource_arc_clone,
                 column_names,
             })
@@ -1147,11 +1164,11 @@ fn stream_fetch_impl<'a>(
         }
     };
 
-    let mut current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
-    if current_stmt_ptr.is_null() {
-        return atoms::done().encode(env);
-    }
-
+    // The connection is proven open before the statement pointer is read: a
+    // connection that was closed finalized this stream on its way out, so a
+    // null pointer alone can no longer tell an exhausted stream from a closed
+    // connection, and the caller must still hear `:connection_closed`.
+    //
     // Do NOT pre-size to `batch_size`: it is an unvalidated user integer, and
     // `Vec::with_capacity(huge)` aborts the VM via `handle_alloc_error` before a
     // single row is read (a pathological value requests petabytes up front).
@@ -1163,16 +1180,10 @@ fn stream_fetch_impl<'a>(
     let conn_lock_guard = match stream_handle.conn_resource_arc.conn.lock() {
         Ok(guard) => guard,
         Err(p_err_conn) => {
-            let old_ptr = stream_handle
-                .atomic_raw_stmt
-                .swap(std::ptr::null_mut(), Ordering::AcqRel);
-            if !old_ptr.is_null() {
-                // SAFETY: old_ptr was obtained via atomic swap, guaranteeing exclusive
-                // ownership. The mutex is poisoned so no other thread can use the connection.
-                unsafe {
-                    ffi::sqlite3_finalize(old_ptr);
-                }
-            }
+            // SAFETY: the Mutex is poisoned, so no other thread can enter
+            // SQLite on this connection. The registry result is dropped: the
+            // poisoning is what the caller has to hear about.
+            let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
             return (
                 error(),
                 XqliteError::LockError(format!(
@@ -1206,7 +1217,7 @@ fn stream_fetch_impl<'a>(
     );
 
     for _ in 0..batch_size {
-        current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
+        let current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
         if current_stmt_ptr.is_null() {
             stream_definitively_exhausted = true;
             break;
@@ -1220,28 +1231,17 @@ fn stream_fetch_impl<'a>(
             }
             Ok(None) => {
                 stream_definitively_exhausted = true;
-                let ptr_to_finalize = stream_handle
-                    .atomic_raw_stmt
-                    .swap(std::ptr::null_mut(), Ordering::AcqRel);
-                if !ptr_to_finalize.is_null() {
-                    // SAFETY: Atomic swap guarantees exclusive ownership of the pointer.
-                    unsafe {
-                        ffi::sqlite3_finalize(ptr_to_finalize);
-                    }
-                }
+                // SAFETY: conn_lock_guard is held for the whole loop. The
+                // registry result is dropped: the caller is being told the
+                // stream is done, which is the answer that matters here.
+                let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
                 break;
             }
             Err(e) => {
                 stream_definitively_exhausted = true;
-                let ptr_to_finalize = stream_handle
-                    .atomic_raw_stmt
-                    .swap(std::ptr::null_mut(), Ordering::AcqRel);
-                if !ptr_to_finalize.is_null() {
-                    // SAFETY: Atomic swap guarantees exclusive ownership of the pointer.
-                    unsafe {
-                        ffi::sqlite3_finalize(ptr_to_finalize);
-                    }
-                }
+                // SAFETY: conn_lock_guard is held for the whole loop. The
+                // registry result is dropped in favour of the step error.
+                let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
                 an_error_occurred = Some(e);
                 break;
             }

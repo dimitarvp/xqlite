@@ -366,10 +366,15 @@ defmodule XqliteNIF do
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_tokens), do: err()
 
   @doc """
-  Conceptually closes the database connection.
+  Closes the database connection and frees its SQLite handle.
 
-  After a connection is closed, any further attempts to use its resource handle
-  with other NIF functions will likely result in errors.
+  Closing first finalizes every prepared statement, stream and incremental
+  blob still open on the connection, so the handle is freed whatever order
+  the caller tore things down in. Those child handles stay usable as terms:
+  an operation on one returns `{:error, :connection_closed}`, and
+  `stmt_finalize/1`, `stream_close/1` and `blob_close/1` return `:ok`. A
+  session is not covered — call `session_delete/1` before closing.
+
   It is safe to call `close/1` multiple times on the same connection resource;
   subsequent calls are no-ops and will also return `:ok`.
 
@@ -378,10 +383,7 @@ defmodule XqliteNIF do
 
   `conn` is the database connection resource.
 
-  Returns `:ok`. This function is designed to always succeed from the Elixir perspective
-  once a valid connection resource has been established, even if the underlying
-  SQLite close operation might encounter an issue (which is rare and typically
-  handled internally by `rusqlite`).
+  Returns `:ok`.
   """
   @spec close(conn :: Xqlite.conn()) :: :ok
   def close(_conn), do: err()

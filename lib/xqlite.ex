@@ -171,6 +171,7 @@ defmodule Xqlite do
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
           | {:utf8_error, non_neg_integer(), String.t()}
+          | {:without_rowid_unsupported, String.t()}
 
   @type error :: {:error, error_reason()}
 
@@ -305,10 +306,12 @@ defmodule Xqlite do
   operation on a closed connection returns
   `{:error, :connection_closed}`.
 
-  Finalize outstanding prepared statements before closing — a
-  connection closed while statements are outstanding keeps the
-  underlying SQLite handle alive until the owning process exits (see
-  `prepare/2`).
+  Closing finalizes any prepared statement, stream or incremental blob
+  still open on the connection and then frees the SQLite handle. Those
+  handles stay usable as terms: an operation on one returns
+  `{:error, :connection_closed}`, and finalizing or closing one returns
+  `:ok`. A session is not covered — delete sessions before closing (see
+  `XqliteNIF.session_delete/1`).
 
   Emits `[:xqlite, :close, :start | :stop]` telemetry.
   """
@@ -420,41 +423,73 @@ defmodule Xqlite do
   Returns `{:ok, []}` if the table is clean, or `{:ok, violations}` where each
   violation is a map with `:rowid`, `:column`, `:actual_type`, and `:expected_type`.
 
+  Any name SQLite accepts works: the table and column names are quoted for
+  you, and the reported column name is bound as a parameter rather than
+  written into the SQL.
+
+  `WITHOUT ROWID` tables are not supported — the check reads each row's
+  `rowid`, which such a table does not have — and return
+  `{:error, {:without_rowid_unsupported, table}}`.
+
   This is a read-only check — it does not modify the table.
   """
   @spec check_strict_violations(conn(), String.t()) ::
           {:ok, [map()]} | error()
   def check_strict_violations(conn, table) when is_binary(table) do
-    with {:ok, columns} <- get_typed_columns(conn, table) do
-      violation_queries =
-        columns
-        |> Enum.map(fn {col_name, col_type} ->
-          allowed = strict_allowed_types(col_type)
-          type_list = Enum.map_join(allowed, ", ", &"'#{&1}'")
-
-          "SELECT rowid, '#{col_name}' AS col, typeof(\"#{col_name}\") AS actual_type, " <>
-            "'#{String.upcase(Atom.to_string(col_type))}' AS expected_type " <>
-            "FROM \"#{table}\" WHERE typeof(\"#{col_name}\") NOT IN (#{type_list})"
-        end)
-
-      case violation_queries do
-        [] ->
-          {:ok, []}
-
-        queries ->
-          union_sql = Enum.join(queries, " UNION ALL ")
-
-          with {:ok, result} <- XqliteNIF.query(conn, union_sql, []) do
-            violations =
-              Enum.map(result.rows, fn [rowid, col, actual, expected] ->
-                %{rowid: rowid, column: col, actual_type: actual, expected_type: expected}
-              end)
-
-            {:ok, violations}
-          end
-      end
+    with {:ok, columns} <- get_typed_columns(conn, table),
+         :ok <- reject_without_rowid(conn, table) do
+      run_violation_queries(conn, table, columns)
     end
   end
+
+  defp run_violation_queries(_conn, _table, []), do: {:ok, []}
+
+  defp run_violation_queries(conn, table, columns) do
+    {queries, params} =
+      columns
+      |> Enum.map(&violation_query(&1, table))
+      |> Enum.unzip()
+
+    union_sql = Enum.join(queries, " UNION ALL ")
+
+    with {:ok, result} <- XqliteNIF.query(conn, union_sql, List.flatten(params)) do
+      {:ok, Enum.map(result.rows, &to_violation/1)}
+    end
+  end
+
+  defp violation_query({col_name, col_type}, table) do
+    type_list =
+      col_type
+      |> strict_allowed_types()
+      |> Enum.map_join(", ", &"'#{&1}'")
+
+    quoted_col = Xqlite.Pragma.quote_name(col_name)
+    expected = col_type |> Atom.to_string() |> String.upcase()
+
+    sql =
+      "SELECT rowid, ? AS col, typeof(#{quoted_col}) AS actual_type, ? AS expected_type " <>
+        "FROM #{Xqlite.Pragma.quote_name(table)} " <>
+        "WHERE typeof(#{quoted_col}) NOT IN (#{type_list})"
+
+    {sql, [col_name, expected]}
+  end
+
+  defp to_violation([rowid, col, actual, expected]) do
+    %{rowid: rowid, column: col, actual_type: actual, expected_type: expected}
+  end
+
+  defp reject_without_rowid(conn, table) do
+    with {:ok, objects} <- schema_list_objects(conn) do
+      objects
+      |> Enum.find(&(&1.name == table))
+      |> without_rowid_verdict(table)
+    end
+  end
+
+  defp without_rowid_verdict(%Xqlite.Schema.SchemaObjectInfo{is_without_rowid: true}, table),
+    do: {:error, {:without_rowid_unsupported, table}}
+
+  defp without_rowid_verdict(_object, _table), do: :ok
 
   @doc """
   Converts an existing table to STRICT mode via table rebuild.
@@ -465,6 +500,14 @@ defmodule Xqlite do
   If existing data violates STRICT typing rules, the operation fails with
   `{:error, {:strict_violations, violations}}` where `violations` is a list
   of maps from `check_strict_violations/2`. The original table is left untouched.
+
+  Any name SQLite accepts works, whatever quoting the stored `CREATE TABLE`
+  statement uses: the rebuild rewrites that statement's own name token and
+  quotes every name it emits. Converting a table that is already STRICT is
+  `:ok`.
+
+  `WITHOUT ROWID` tables are not supported and return
+  `{:error, {:without_rowid_unsupported, table}}`.
 
   ## Options
 
@@ -499,7 +542,9 @@ defmodule Xqlite do
   end
 
   defp get_typed_columns(conn, table) do
-    case XqliteNIF.query(conn, "PRAGMA table_info(\"#{table}\")", []) do
+    sql = "PRAGMA table_info(#{Xqlite.Pragma.quote_name(table)})"
+
+    case XqliteNIF.query(conn, sql, []) do
       {:ok, %{rows: []}} ->
         {:error, {:no_such_table, table}}
 
@@ -539,23 +584,16 @@ defmodule Xqlite do
   defp strict_allowed_types(:any), do: ["integer", "real", "text", "blob", "null"]
 
   defp rebuild_as_strict(conn, table, original_create_sql) do
-    tmp_table = "#{table}_xqlite_strict_rebuild"
-
-    # sqlite_master stores the table name bare, double-quoted, or backtick-quoted.
-    strict_sql =
-      original_create_sql
-      |> String.replace(~r/\)\s*(STRICT)?\s*$/, ") STRICT")
-      |> String.replace(
-        ~r/\bCREATE TABLE\s+(?:"#{table}"|`#{table}`|#{table})\b/,
-        "CREATE TABLE \"#{tmp_table}\""
-      )
+    quoted_table = Xqlite.Pragma.quote_name(table)
+    quoted_tmp = Xqlite.Pragma.quote_name("#{table}_xqlite_strict_rebuild")
+    strict_sql = strict_create_sql(original_create_sql, quoted_tmp)
 
     with {:ok, index_sqls} <- get_index_sqls(conn, table),
          :ok <- exec(conn, "BEGIN IMMEDIATE"),
          :ok <- exec(conn, strict_sql),
-         :ok <- exec(conn, "INSERT INTO \"#{tmp_table}\" SELECT * FROM \"#{table}\""),
-         :ok <- exec(conn, "DROP TABLE \"#{table}\""),
-         :ok <- exec(conn, "ALTER TABLE \"#{tmp_table}\" RENAME TO \"#{table}\""),
+         :ok <- exec(conn, "INSERT INTO #{quoted_tmp} SELECT * FROM #{quoted_table}"),
+         :ok <- exec(conn, "DROP TABLE #{quoted_table}"),
+         :ok <- exec(conn, "ALTER TABLE #{quoted_tmp} RENAME TO #{quoted_table}"),
          :ok <- recreate_indexes(conn, index_sqls),
          :ok <- exec(conn, "COMMIT") do
       :ok
@@ -565,6 +603,90 @@ defmodule Xqlite do
         err
     end
   end
+
+  defp strict_create_sql(create_sql, quoted_tmp) do
+    create_sql
+    |> String.replace(~r/\)\s*(STRICT)?\s*$/, ") STRICT")
+    |> rename_table_token(quoted_tmp)
+  end
+
+  # sqlite_master keeps the CREATE TABLE statement exactly as it was written,
+  # so the table's own name token can be bare, "double-quoted", `backticked`
+  # or [bracketed], and may carry a schema qualifier. The row was selected by
+  # name, so that token is this table's by construction: replacing it needs no
+  # pattern built from the caller's name.
+  defp rename_table_token(create_sql, quoted_tmp) do
+    case Regex.run(~r/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?/i, create_sql) do
+      [prefix] -> replace_name_token(create_sql, byte_size(prefix), quoted_tmp)
+      _no_match -> create_sql
+    end
+  end
+
+  defp replace_name_token(create_sql, prefix_len, quoted_tmp) do
+    prefix = binary_part(create_sql, 0, prefix_len)
+    rest = binary_part(create_sql, prefix_len, byte_size(create_sql) - prefix_len)
+
+    case name_token_length(rest) do
+      :error -> create_sql
+      {:ok, len} -> prefix <> quoted_tmp <> binary_part(rest, len, byte_size(rest) - len)
+    end
+  end
+
+  defp name_token_length(rest), do: scan_name_token(rest, 0)
+
+  defp scan_name_token(rest, taken) do
+    case take_identifier(rest) do
+      :error ->
+        :error
+
+      {:ok, len} ->
+        rest
+        |> binary_part(len, byte_size(rest) - len)
+        |> scan_dotted(taken + len)
+    end
+  end
+
+  defp scan_dotted("." <> tail, taken), do: scan_name_token(tail, taken + 1)
+  defp scan_dotted(_rest, taken), do: {:ok, taken}
+
+  defp take_identifier("\"" <> tail), do: take_double_quoted(tail, 1)
+  defp take_identifier("`" <> tail), do: take_backticked(tail, 1)
+  defp take_identifier("[" <> tail), do: take_bracketed(tail, 1)
+  defp take_identifier(rest), do: take_bare(rest, 0)
+
+  defp take_double_quoted("\"\"" <> tail, len), do: take_double_quoted(tail, len + 2)
+  defp take_double_quoted("\"" <> _tail, len), do: {:ok, len + 1}
+  defp take_double_quoted("", _len), do: :error
+
+  defp take_double_quoted(<<_byte::binary-size(1), tail::binary>>, len),
+    do: take_double_quoted(tail, len + 1)
+
+  defp take_backticked("``" <> tail, len), do: take_backticked(tail, len + 2)
+  defp take_backticked("`" <> _tail, len), do: {:ok, len + 1}
+  defp take_backticked("", _len), do: :error
+
+  defp take_backticked(<<_byte::binary-size(1), tail::binary>>, len),
+    do: take_backticked(tail, len + 1)
+
+  # Bracket quoting has no escape: the first ] ends the name.
+  defp take_bracketed("]" <> _tail, len), do: {:ok, len + 1}
+  defp take_bracketed("", _len), do: :error
+
+  defp take_bracketed(<<_byte::binary-size(1), tail::binary>>, len),
+    do: take_bracketed(tail, len + 1)
+
+  defp take_bare("", 0), do: :error
+  defp take_bare("", len), do: {:ok, len}
+
+  defp take_bare(<<byte::binary-size(1), tail::binary>>, len) do
+    case ends_bare_name?(byte) do
+      true -> take_bare("", len)
+      false -> take_bare(tail, len + 1)
+    end
+  end
+
+  defp ends_bare_name?(byte),
+    do: byte in [" ", "\t", "\n", "\r", "\f", "\v", "(", ")", ",", "."]
 
   defp get_index_sqls(conn, table) do
     sql = "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL"
@@ -933,11 +1055,11 @@ defmodule Xqlite do
   carrying the byte offset SQLite reports — the same shape `query/3`
   returns for the same SQL.
 
-  Finalize statements before closing their connection: a connection closed
-  while statements are outstanding keeps the underlying SQLite handle alive
-  until the process exits (abandoned statements are still finalized by
-  garbage collection, and every operation on them after an explicit
-  `Xqlite.close/1` returns `{:error, :connection_closed}`).
+  Closing the connection finalizes any statement still outstanding on it, so
+  the SQLite handle is freed either way; an abandoned statement is finalized
+  by garbage collection. After an explicit `Xqlite.close/1` every operation
+  on such a statement returns `{:error, :connection_closed}` and
+  `finalize/1` returns `:ok`.
 
   Steps are not cancellable; for cancellation use `query_cancellable/4` and
   friends. No telemetry is emitted for statement-lifecycle operations.

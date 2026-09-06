@@ -49,6 +49,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Closing a connection no longer leaks its SQLite handle.** A
+  connection closed while a prepared statement, a stream or an
+  incremental blob was still open answered `:ok` while `sqlite3_close`
+  refused to free the handle, so that connection's memory, file
+  descriptors and WAL state stayed resident for the life of the OS
+  process — one leak per mis-ordered teardown, unbounded over time.
+  `Xqlite.close/1` now finalizes every statement, stream and blob it
+  opened on the connection, under the same mutex, before freeing the
+  handle: a WAL database's `-wal` sidecar is gone once close returns.
+  Those handles stay usable as terms — an operation on one is
+  `{:error, :connection_closed}`, and finalizing or closing one is
+  `:ok` — and close stays idempotent. Sessions are still not covered:
+  delete them before closing.
+
+- **`Xqlite.enable_strict_table/2` works on tables whose stored
+  `CREATE TABLE` quotes the name.** The rebuild looked for the table
+  name in the stored statement with a pattern that could never match a
+  quoted one, so every table an Ecto migration creates —
+  `CREATE TABLE "users" (…)` — failed with
+  `{:error, {:table_exists, _}}` and was left unconverted; backticked
+  and bracketed spellings failed the same way, and so did a second
+  conversion of a table the helper itself had already converted. The
+  rebuild now rewrites the statement's own name token, whatever its
+  spelling, so all four spellings convert and converting twice is `:ok`.
+
+- **The STRICT-table helpers quote every name and bind every value.**
+  `check_strict_violations/2` and `enable_strict_table/2` wrote table
+  and column names into SQL without doubling an embedded double quote,
+  and wrote the reported column name and expected type in as string
+  literals without doubling an embedded single quote, so a table named
+  `we"ird` or a column named `it's` failed with a SQL syntax error.
+  Names now go through the library's one quoting function and the two
+  labels are bound as parameters. `Xqlite.Pragma.put/4` doubles an
+  embedded quote in a string value the same way — a PRAGMA takes no
+  bound parameter, so its value has to be quoted into the statement.
+  `WITHOUT ROWID` tables, which the helpers cannot check because they
+  read each row's `rowid`, are now refused with
+  `{:error, {:without_rowid_unsupported, table}}` instead of a raw SQL
+  error.
+
 - **Every entry point that compiles SQL now accepts and refuses the same
   strings.** `prepare/2`, `stream/4`, `explain_analyze/3` and `query/3` /
   `execute/3` each decided for themselves what to do with text after the
