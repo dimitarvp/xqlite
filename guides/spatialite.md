@@ -29,7 +29,7 @@ Elixir-side opt-in and SQLite's own flag):
 {:ok, conn} = Xqlite.open("geo.db")
 
 :ok = Xqlite.enable_load_extension(conn, true)
-{:ok, _} = Xqlite.load_extension(conn, "mod_spatialite")
+:ok = Xqlite.load_extension(conn, "mod_spatialite")
 # Windows or non-standard paths: pass the full path to the library.
 :ok = Xqlite.enable_load_extension(conn, false)
 ```

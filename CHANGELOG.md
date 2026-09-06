@@ -57,6 +57,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Fourteen documentation claims now match the code.** Every number
+  below was counted from the source it describes.
+
+  - The README said "30+ typed reason variants"; `Xqlite.error_reason`
+    has 51 members, and one of them was shown as the two-tuple
+    `{:read_only_database, msg}` where it is
+    `{:read_only_database, code, message}`.
+  - The README said "13 SQLite constraint subtypes" in the error
+    paragraph and again in the FAQ. Twelve are named subtypes; the
+    thirteenth slot is the generic fallback, not a subtype of its own.
+  - The README said "68 typed PRAGMAs" in two places. `Xqlite.Pragma`
+    carries 57, of which 34 are writable.
+  - The README's type-extension feature bullet listed seven built-ins
+    and omitted `Instant` and `Duration`. All nine are listed now.
+  - The README's runtime floor read as if CI ran all sixteen Elixir/OTP
+    combinations from 1.17-1.20 against 26-29. Ten of them run; the
+    README names which, and the floor is the oldest of those pairs.
+  - The README's `busy_timeout` warning covered one direction only.
+    Taking the busy slot zeroes SQLite's own `busy_timeout`, and the
+    slot emulates the timeout it displaced rather than dropping it.
+  - `guides/security.md` and `guides/spatialite.md` wrote
+    `{:ok, _} = Xqlite.load_extension(…)`; it returns `:ok`. The
+    security guide's snippet now runs in the suite, so it cannot rot
+    again.
+  - `guides/gotchas.md` named `execute` among the paths that hand back
+    a large blob without copying it. `execute/3` returns no column
+    values at all.
+  - `guides/wiring_telemetry.md` omitted `:conn` from the metadata of
+    `[:xqlite, :cancel, :honored]`.
+  - `XqliteNIF.register_progress_hook/4` said "~64 SQLite VM
+    instructions", which holds only at `every_n: 8`. The subscriber
+    hears from it every `8 × every_n` instructions.
+  - `XqliteNIF.stream_fetch/2` now names 0 among the rejected batch
+    sizes instead of leaving it to "anything else".
+  - `XqliteNIF.session_is_empty/1` had `@spec … :: boolean()` while it
+    returns `{:ok, boolean()}`.
+  - `Xqlite.step/1`'s docs named `query_cancellable/4` as the only way
+    to cancel. `multi_step_cancellable/3` and `stream/4`'s
+    `:cancel_tokens` are named beside it now.
+  - `Xqlite.Telemetry.bridge/2` said busy handling is not bridged. Busy
+    observation is bridged as `[:xqlite, :hook, :busy]`; only the retry
+    policy is not, and `:busy` was also missing from the `:hooks`
+    example.
+
 - **Span events now measure in nanoseconds, like every other event.**
   `:start`, `:stop` and `:exception` came from `:telemetry.span/3`,
   which reads the clock in the VM's native time unit. Every other

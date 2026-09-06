@@ -378,8 +378,8 @@ workload. A `BLOB` column value crosses the NIF boundary as one of two kinds of
 binary, chosen by size so each stays on its leaner backing:
 
 - a blob **larger than 64 bytes** returned through `query` /
-  `query_with_changes` / `execute` is handed back as a *reference-counted
-  resource binary* that wraps SQLite's already-copied bytes with no further copy
+  `query_with_changes` is handed back as a *reference-counted resource
+  binary* that wraps SQLite's already-copied bytes with no further copy
   — leanest for large blobs. The `stream` / prepared `step` / `blob_read` paths
   instead *copy* it into a fresh reference-counted binary (they work from a
   transient SQLite pointer and so cannot wrap it in place);

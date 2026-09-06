@@ -84,7 +84,7 @@ measurement and metadata key. A `:*` below stands for the span's
 | `[:xqlite, :pragma, :get / :set]` | `Xqlite.get_pragma/2`, `Xqlite.set_pragma/3` | `:name`, `:value` (on set) |
 | `[:xqlite, :cancel, :token_created]` | `Xqlite.create_cancel_token/0` | `:token` |
 | `[:xqlite, :cancel, :signalled]` | `Xqlite.cancel_operation/1` | `:token` |
-| `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:operation`, `:tokens` |
+| `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:conn`, `:operation`, `:tokens` |
 
 `Xqlite.backup_with_progress/6` is not in the list: it reports its
 progress to a pid and emits no telemetry.

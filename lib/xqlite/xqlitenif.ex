@@ -1157,7 +1157,7 @@ defmodule XqliteNIF do
 
   `stream_handle` is the opaque resource obtained from `stream_open/4`.
   `batch_size` is the largest number of rows this call may read; it must be
-  at least 1. Anything else is rejected with
+  at least 1. Anything else, including 0, is rejected with
   `{:error, {:invalid_batch_size, %{provided: tagged_value, minimum: 1}}}`
   before the stream is touched, and is never clamped.
 
@@ -1515,8 +1515,8 @@ defmodule XqliteNIF do
   @doc """
   Registers a progress-tick subscriber on the connection.
 
-  After every ~64 SQLite VM instructions (8 ops × `every_n` callback
-  invocations), forwards
+  After every `8 × every_n` SQLite VM instructions (the handler runs every
+  8 of them, and one message goes out per `every_n` runs), forwards
 
       {:xqlite_progress, count, elapsed_ms}              # tag = nil
       {:xqlite_progress, tag, count, elapsed_ms}         # tag != nil
@@ -1715,9 +1715,9 @@ defmodule XqliteNIF do
   def session_patchset(_session), do: err()
 
   @doc """
-  Returns true if the session has recorded no changes.
+  Returns `{:ok, true}` if the session has recorded no changes.
   """
-  @spec session_is_empty(session :: reference()) :: boolean()
+  @spec session_is_empty(session :: reference()) :: {:ok, boolean()} | Xqlite.error()
   def session_is_empty(_session), do: err()
 
   @doc """

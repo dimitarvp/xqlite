@@ -28,7 +28,7 @@ Xqlite is inspired by [exqlite](https://github.com/elixir-sqlite/exqlite), which
 - **Incremental blob I/O.** Read and write multi-GB column values without loading them into memory.
 - **Online backup with progress and cancellation.** Single-call backup API to a file path, progress messages to a PID, canceling respected even mid-backup.
 - **Structured schema introspection.** `PRAGMA table_list`, `table_xinfo`, `index_list`, `index_xinfo`, `foreign_key_list`, and others are all converted and returned as struct-shaped data -- generated columns, STRICT/WITHOUT ROWID markers, collation per index column, FK match clauses all included. Column defaults arrive classified into typed Elixir values (`{:literal, 42}`, `{:blob, ...}`, `{:current, :timestamp}`, `{:expr, "datetime('now')"}`) instead of raw SQL text.
-- **68 typed PRAGMAs** with validated get/set.
+- **57 typed PRAGMAs** with validated get/set; 34 of them are writable.
 - **Deep observability.** Multi-subscriber hooks for every SQLite-visible lifecycle event (update / commit / rollback / WAL / progress ticks / busy retries / global log), transaction-state and per-connection counters, a structured `wal_checkpoint` wrapper -- plus opt-in, compile-time-eliminated `:telemetry` instrumentation across the whole API. I hate black boxes with a passion; this library lets you poke into the guts of your SQLite databases without introducing quantum uncertainty or cryptic crashes.
 
 ## Installation
@@ -43,7 +43,7 @@ end
 
 Compatibility: the Ecto adapter (`xqlite_ecto3`) pins exactly one xqlite minor series per adapter release, because xqlite is pre-1.0 and its minor is the break slot. The current pairing is xqlite `~> 0.11.0`; the adapter's README states its own pairing.
 
-Precompiled NIF binaries are included for macOS, Linux (glibc and musl, including ARM and RISC-V), and Windows -- no Rust toolchain needed for them. They are built for NIF API 2.17, so the runtime floor is OTP 26 with Elixir 1.17 or newer, which is exactly the CI matrix: Elixir 1.17-1.20 against OTP 26-29. A source build -- forced with `XQLITE_BUILD=true`, or unavoidable on a platform without a binary -- needs Rust 1.91 or newer, the floor that rustler 0.38 declares. To force source compilation:
+Precompiled NIF binaries are included for macOS, Linux (glibc and musl, including ARM and RISC-V), and Windows -- no Rust toolchain needed for them. They are built for NIF API 2.17, so the runtime floor is OTP 26 with Elixir 1.17 -- the oldest pair CI actually runs. CI covers 10 of the 16 combinations of Elixir 1.17-1.20 with OTP 26-29, on Linux, macOS and Windows: Elixir 1.17 and 1.18 on OTP 26-27, Elixir 1.19 on OTP 26-28, Elixir 1.20 on OTP 27-29. A source build -- forced with `XQLITE_BUILD=true`, or unavoidable on a platform without a binary -- needs Rust 1.91 or newer, the floor that rustler 0.38 declares. To force source compilation:
 
 ```bash
 XQLITE_BUILD=true mix deps.compile xqlite
@@ -69,8 +69,8 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Transactions:** `:deferred`/`:immediate`/`:exclusive` modes, savepoints with release and rollback-to
 - **Cancellation:** per-operation, progress-handler-based, any process can cancel
 - **Schema introspection:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
-- **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 68 PRAGMAs
-- **Type extensions:** bidirectional encode/decode; `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), and `Decimal` (encode-only, needs the optional `:decimal` dep) built-in
+- **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 57 PRAGMAs, 34 of them writable
+- **Type extensions:** bidirectional encode/decode; nine built in -- `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), `Instant` and `Duration` (int64 nanoseconds, encode-only), and `Decimal` (encode-only, needs the optional `:decimal` dep)
 - **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy retry policy (`set_busy_policy/2`) plus any number of busy observers receiving `{:xqlite_busy, ...}`
 - **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, extended_code, msg}`
 - **Manual statement lifecycle:** `prepare/2`, `bind/2` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
@@ -83,7 +83,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Diagnostics & connection state:** `compile_options/1`, `sqlite_version/0`, `connection_stats/1` (per-connection `sqlite3_db_status` counters), `autocommit/1`, `txn_state/2`, structured `wal_checkpoint/3`
 - **Result integration:** `Xqlite.Result` implements `Table.Reader` (works with Explorer, Kino, VegaLite)
 
-Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, msg}}`, etc. 30+ typed reason variants including all 13 SQLite constraint subtypes.
+Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 51 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
 
 ## Focused examples
 
@@ -183,6 +183,11 @@ observation is fan-out, and the telemetry bridge re-emits it as
 > No memory is leaked (state is reclaimed on the next slot mutation or
 > connection close). Use `Xqlite.busy_timeout/2` — it clears the policy
 > cleanly first, then installs the plain timeout.
+>
+> The other direction is handled for you. Installing a policy or a busy
+> observer takes SQLite's single busy callback, which zeroes whatever
+> `busy_timeout` was set. The slot remembers that timeout and, whenever
+> no policy is installed, emulates it instead of dropping it.
 
 ### Online backup with progress and cancellation
 
@@ -232,7 +237,7 @@ Different from `backup_with_progress/6`, which streams page by page while the so
 ## FAQ
 
 **Why Rust and not C?**
-For me the choice came down to _not panicking_ and never bringing down the BEAM VM. Rust's exhaustive pattern matching on tagged unions (`enum`s) means the compiler will not let me forget a case -- all 13 SQLite constraint subtypes, every error variant, and every storage class get a dedicated code branch. The code refuses to compile if one is missing. C gives me none of that, and I don't trust myself (or decades of accreted C and `sqlite3_*` idioms) to avoid footguns when every NULL check and every `free` is a decision I make by hand.
+For me the choice came down to _not panicking_ and never bringing down the BEAM VM. Rust's exhaustive pattern matching on tagged unions (`enum`s) means the compiler will not let me forget a case -- all twelve SQLite constraint subtypes, every error variant, and every storage class get a dedicated code branch. The code refuses to compile if one is missing. C gives me none of that, and I don't trust myself (or decades of accreted C and `sqlite3_*` idioms) to avoid footguns when every NULL check and every `free` is a decision I make by hand.
 
 The cost is of course real: the stack is C -> `libsqlite3-sys` -> `rusqlite` -> `rustler` -> Elixir, and architecturally I don't like it. In practice, every benchmark I've run shows the overhead is anywhere from minuscule to invisible. In return I get a pure-Rust error list/taxonomy, `ResourceArc` + `Mutex<Connection>` + `Drop` as first-class citizens rather than convention-driven discipline (no resource leaks due to human forgetfulness), and the exhaustiveness guarantee mentioned above. The tradeoff has been worth it so far. I am very happy with the Rust code, even its ugly parts -- they are needed to get the job done and fulfill the promises that this library makes.
 

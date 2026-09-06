@@ -211,6 +211,12 @@ pub(crate) struct HookEntry<T> {
 /// Vec, mutate the clone, and atomic-swap the pointer; the previous
 /// Vec is reclaimed.
 ///
+/// Two subscriber sets do not get this treatment. The log hook is
+/// process-global (`sqlite3_config`) and fires with no connection Mutex
+/// held, so `log_hook.rs` takes `MASTER_LOCK` around every snapshot
+/// read. Busy observers are a plain Vec built and swapped under the
+/// connection Mutex (`busy_handler.rs`), not a HookList at all.
+///
 /// Vec is a deliberate proof-of-concept choice. If hook firings show
 /// up as a hot-path bottleneck in benchmarks, candidates to evaluate
 /// are intrusive linked lists (no per-fire snapshot allocation),

@@ -1067,8 +1067,11 @@ defmodule Xqlite do
   on such a statement returns `{:error, :connection_closed}` and
   `finalize/1` returns `:ok`.
 
-  Steps are not cancellable; for cancellation use `query_cancellable/4` and
-  friends. No telemetry is emitted for statement-lifecycle operations.
+  `step/1` and `multi_step/2` are not cancellable. The cancellable forms
+  are `multi_step_cancellable/3` for a prepared statement,
+  `query_cancellable/4` and friends for one-shot SQL, and `stream/4` with
+  its `:cancel_tokens` option for a stream. No telemetry is emitted for
+  statement-lifecycle operations.
 
   ## Examples
 

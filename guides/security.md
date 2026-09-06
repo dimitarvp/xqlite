@@ -101,7 +101,7 @@ path below is a placeholder — point it at an extension you actually ship):
 {:ok, conn} = Xqlite.open("app.db")
 
 :ok = Xqlite.enable_load_extension(conn, true)
-{:ok, _} = Xqlite.load_extension(conn, "/opt/ext/mod_spatialite")
+:ok = Xqlite.load_extension(conn, "/opt/ext/mod_spatialite")
 :ok = Xqlite.enable_load_extension(conn, false)
 ```
 

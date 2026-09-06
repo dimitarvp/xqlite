@@ -575,8 +575,8 @@ defmodule Xqlite.Telemetry do
   ## Options
 
     * `:hooks` — list of hook kinds to subscribe to. Either an explicit
-      list (`[:wal, :commit, :rollback, :update, :progress]`) or `:all`
-      (default) for every per-connection hook.
+      list (`[:wal, :commit, :rollback, :update, :progress, :busy]`) or
+      `:all` (default) for every per-connection hook.
     * `:tag` — arbitrary term forwarded as `:tag` in every
       `[:xqlite, :hook, :*]` event's metadata. Useful when one
       handler receives bridged events from multiple connections.
@@ -587,12 +587,14 @@ defmodule Xqlite.Telemetry do
   compile-disabled — the bridge would otherwise install hooks that
   produce nothing.
 
-  > #### Note on busy_handler {: .info}
+  > #### Note on busy handling {: .info}
   >
-  > `busy_handler` is single-subscriber and not part of the per-conn
-  > bridge. To get busy events as telemetry, register your own busy
-  > handler with a forwarder pid that emits the desired event.
-  > See `Xqlite.Telemetry.Bridge` for the rationale.
+  > Busy observation is part of the per-conn bridge: pass `hooks: [:busy]`
+  > (or the default `:all`) and every contention callback re-emits as
+  > `[:xqlite, :hook, :busy]`. The retry policy is the half that is not
+  > bridged — it stays a single slot per connection, set with
+  > `Xqlite.set_busy_policy/2`. See `Xqlite.Telemetry.Bridge` for the
+  > rationale.
   """
   @spec bridge(reference(), keyword()) :: {:ok, struct()} | {:error, term()}
   def bridge(conn, opts \\ []) when is_reference(conn) do
