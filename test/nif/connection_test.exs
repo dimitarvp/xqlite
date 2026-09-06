@@ -211,19 +211,17 @@ defmodule Xqlite.NIF.ConnectionTest do
   end
 
   describe "close with live child handles" do
-    property "close finalizes every child of the connection and frees the handle" do
-      path = Xqlite.TestUtil.tmp_db_path("close_children_law")
-
+    # In memory, one database per run: this pins what every child and the
+    # connection answer after a close, and the file-based examples below own
+    # the filesystem oracle for the handle itself being freed.
+    property "close finalizes every child of the connection" do
       check all(
               statements <- StreamData.list_of(statement_state(), max_length: 4),
               streams <- StreamData.list_of(stream_state(), max_length: 2),
               blobs <- StreamData.list_of(blob_state(), max_length: 2),
               max_runs: 2000
             ) do
-        # One path, one database per run: a run that leaked would otherwise
-        # keep the file open and fail the runs after it instead of itself.
-        for ext <- ["", "-wal", "-shm"], do: File.rm(path <> ext)
-        conn = open_wal_db(path)
+        conn = open_memory_db()
 
         children =
           Enum.map(statements, &open_statement(conn, &1)) ++
@@ -231,7 +229,6 @@ defmodule Xqlite.NIF.ConnectionTest do
             Enum.map(blobs, &open_blob(conn, &1))
 
         assert :ok = NIF.close(conn)
-        refute File.exists?(path <> "-wal")
 
         Enum.each(children, &assert_child_after_close/1)
 
@@ -263,6 +260,16 @@ defmodule Xqlite.NIF.ConnectionTest do
           open_stream(conn, :undrained),
           open_blob(conn, :open)
         ]
+      end)
+    end
+
+    # The largest population the property above can generate, on a file
+    # database, so the handle-freed oracle covers it too.
+    test "four statements, two streams and two blobs do not keep the handle open" do
+      assert_close_frees(fn conn ->
+        Enum.map([:unstepped, :stepped, :finalized, :stepped], &open_statement(conn, &1)) ++
+          Enum.map([:undrained, :drained], &open_stream(conn, &1)) ++
+          Enum.map([:open, :closed], &open_blob(conn, &1))
       end)
     end
 
@@ -325,7 +332,18 @@ defmodule Xqlite.NIF.ConnectionTest do
     assert {:ok, conn} = NIF.open(path)
     assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "WAL")
     assert :ok = NIF.execute_batch(conn, "PRAGMA synchronous=OFF;")
+    seed_children_table(conn)
 
+    assert File.exists?(path <> "-wal")
+    conn
+  end
+
+  defp open_memory_db do
+    assert {:ok, conn} = NIF.open_in_memory(":memory:")
+    seed_children_table(conn)
+  end
+
+  defp seed_children_table(conn) do
     assert :ok =
              NIF.execute_batch(
                conn,
@@ -335,7 +353,6 @@ defmodule Xqlite.NIF.ConnectionTest do
     assert {:ok, 1} =
              NIF.execute(conn, "INSERT OR REPLACE INTO kids VALUES (1, zeroblob(16))", [])
 
-    assert File.exists?(path <> "-wal")
     conn
   end
 
