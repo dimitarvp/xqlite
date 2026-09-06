@@ -424,6 +424,17 @@ defmodule Xqlite.StrictTableTest do
       assert strict?(conn, "t$x")
     end
 
+    test "a table whose name is empty converts", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, ~s|CREATE TABLE "" (id INTEGER);|)
+      assert {:ok, 1} = NIF.execute(conn, ~s|INSERT INTO "" VALUES (?)|, [1])
+
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "")
+      assert :ok = Xqlite.enable_strict_table(conn, "")
+
+      assert strict?(conn, "")
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, ~s|SELECT id FROM ""|, [])
+    end
+
     test "a table and a column holding quote characters convert", %{conn: conn} do
       table = ~s|we"ird|
       column = "it's"
@@ -1012,6 +1023,56 @@ defmodule Xqlite.StrictTableTest do
                NIF.query(conn, ~s|SELECT "rowid", "_rowid_", "oid" FROM t ORDER BY 1|, [])
     end
 
+    test "all three names shadowed beside the rowid alias keeps the index and the values",
+         %{conn: conn} do
+      columns = ~s|"rowid" TEXT, "_rowid_" TEXT, "oid" TEXT, id INTEGER PRIMARY KEY|
+
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (#{columns});
+               CREATE INDEX t_i ON t("oid");
+               INSERT INTO t VALUES ('a', 'b', 'c', 7), ('d', 'e', 'f', 9);
+               """)
+
+      before = master_rows(conn, "main")
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "t")
+
+      assert master_rows(conn, "main") ==
+               Enum.map(
+                 before,
+                 &strict_master_row(&1, "t", ~s|CREATE TABLE "t" (| <> columns <> ")")
+               )
+
+      assert {:ok, %{rows: [["a", "b", "c", 7], ["d", "e", "f", 9]]}} =
+               NIF.query(conn, ~s|SELECT "rowid", "_rowid_", "oid", id FROM t ORDER BY id|, [])
+    end
+
+    for {label, declaration} <- [
+          {"a descending primary key", "id INTEGER PRIMARY KEY DESC"},
+          {"a primary key declared INT", "id INT PRIMARY KEY"}
+        ] do
+      test "all three names shadowed beside #{label} is refused", %{conn: conn} do
+        assert :ok =
+                 NIF.execute_batch(conn, """
+                 CREATE TABLE t ("rowid" TEXT, "_rowid_" TEXT, "oid" TEXT, #{unquote(declaration)});
+                 INSERT INTO t VALUES ('a', 'b', 'c', 7);
+                 """)
+
+        before = master_rows(conn, "main")
+
+        assert {:error, {:rowid_shadowed, "t"}} = Xqlite.enable_strict_table(conn, "t")
+
+        refute strict?(conn, "t")
+        assert master_rows(conn, "main") == before
+
+        assert {:ok, %{rows: [["a", "b", "c", 7]]}} =
+                 NIF.query(conn, ~s|SELECT "rowid", "_rowid_", "oid", id FROM t|, [])
+      end
+    end
+
     test "the pragmas the rebuild switches are restored after a failure", %{conn: conn} do
       assert :ok =
                NIF.execute_batch(
@@ -1026,6 +1087,33 @@ defmodule Xqlite.StrictTableTest do
       assert pragma_flag(conn, "legacy_alter_table") == 0
       assert {:ok, false} = Xqlite.transaction_status(conn)
       assert tables(conn) == ["g"]
+    end
+
+    test "a stored index statement the rewrite cannot parse is refused", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER);
+               CREATE INDEX i ON t(c);
+               INSERT INTO t VALUES (1), (2);
+               """)
+
+      unparsable = "CREATE /* note */ INDEX i ON t(c)"
+      plant_index_sql(conn, unparsable)
+      before = master_rows(conn, "main")
+
+      assert {:error,
+              {:schema_parsing_error, "sqlite_master", {:unexpected_value, ^unparsable}}} =
+               Xqlite.enable_strict_table(conn, "t")
+
+      refute strict?(conn, "t")
+      assert master_rows(conn, "main") == before
+
+      assert {:ok, %{rows: [[1, 1], [2, 2]]}} =
+               NIF.query(conn, "SELECT rowid, c FROM t ORDER BY 1", [])
+
+      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert pragma_flag(conn, "foreign_keys") == 1
+      assert pragma_flag(conn, "legacy_alter_table") == 0
     end
   end
 
@@ -1090,6 +1178,18 @@ defmodule Xqlite.StrictTableTest do
   defp attach(conn) do
     assert {:ok, _} = NIF.execute(conn, "ATTACH ':memory:' AS att1", [])
     assert {:ok, _} = NIF.execute(conn, "ATTACH ':memory:' AS att2", [])
+  end
+
+  # SQLite writes its own `CREATE INDEX` opening over the one the statement
+  # used, so a stored statement the rebuild cannot read back is only ever a
+  # schema someone wrote into the catalogue by hand.
+  defp plant_index_sql(conn, sql) do
+    assert {:ok, _} = NIF.execute(conn, "PRAGMA writable_schema = ON", [])
+
+    assert {:ok, 1} =
+             NIF.execute(conn, "UPDATE sqlite_master SET sql = ? WHERE type='index'", [sql])
+
+    assert {:ok, _} = NIF.execute(conn, "PRAGMA writable_schema = OFF", [])
   end
 
   # One clean row and one row SQLite would refuse under STRICT, at rowids only
@@ -1411,8 +1511,8 @@ defmodule Xqlite.StrictTableTest do
     value
   end
 
-  defp set_foreign_keys(conn, on?) do
-    assert {:ok, _} = NIF.execute(conn, "PRAGMA foreign_keys = " <> law_on_off(on?), [])
+  defp set_law_flag(conn, name, on?) do
+    assert {:ok, _} = NIF.execute(conn, "PRAGMA " <> name <> " = " <> law_on_off(on?), [])
   end
 
   defp law_on_off(true), do: "ON"
@@ -1454,7 +1554,8 @@ defmodule Xqlite.StrictTableTest do
           trigger? <- StreamData.boolean(),
           view? <- StreamData.boolean(),
           child <- law_child(alias?),
-          foreign_keys <- StreamData.boolean()
+          foreign_keys <- StreamData.boolean(),
+          legacy_alter_table <- StreamData.boolean()
         ) do
       %{
         schema: schema,
@@ -1466,7 +1567,8 @@ defmodule Xqlite.StrictTableTest do
         trigger?: trigger?,
         view?: view?,
         child: child,
-        foreign_keys: foreign_keys
+        foreign_keys: foreign_keys,
+        legacy_alter_table: legacy_alter_table
       }
     end
   end
@@ -1487,7 +1589,8 @@ defmodule Xqlite.StrictTableTest do
 
   defp run_layout(conn, layout) do
     attach(conn)
-    set_foreign_keys(conn, layout.foreign_keys)
+    set_law_flag(conn, "foreign_keys", layout.foreign_keys)
+    set_law_flag(conn, "legacy_alter_table", layout.legacy_alter_table)
 
     layout
     |> layout_statements()
@@ -1504,7 +1607,7 @@ defmodule Xqlite.StrictTableTest do
     assert fk_check(conn, layout.schema) == fk_before
     assert law_view_rows(conn, layout) == view_before
     assert pragma_flag(conn, "foreign_keys") == law_flag(layout.foreign_keys)
-    assert pragma_flag(conn, "legacy_alter_table") == 0
+    assert pragma_flag(conn, "legacy_alter_table") == law_flag(layout.legacy_alter_table)
     assert {:ok, false} = Xqlite.transaction_status(conn)
     assert_trigger_fires(conn, layout)
   end
@@ -1724,15 +1827,22 @@ defmodule Xqlite.StrictTableTest do
               :table_exists
             ]),
           schema <- StreamData.member_of(@law_schemas),
-          foreign_keys <- StreamData.boolean()
+          foreign_keys <- StreamData.boolean(),
+          legacy_alter_table <- StreamData.boolean()
         ) do
-      %{kind: kind, schema: schema, foreign_keys: foreign_keys}
+      %{
+        kind: kind,
+        schema: schema,
+        foreign_keys: foreign_keys,
+        legacy_alter_table: legacy_alter_table
+      }
     end
   end
 
   defp run_refusal(conn, refusal) do
     attach(conn)
-    set_foreign_keys(conn, refusal.foreign_keys)
+    set_law_flag(conn, "foreign_keys", refusal.foreign_keys)
+    set_law_flag(conn, "legacy_alter_table", refusal.legacy_alter_table)
 
     refusal
     |> refusal_statements()
@@ -1745,7 +1855,7 @@ defmodule Xqlite.StrictTableTest do
 
     assert snapshot(conn) == before
     assert pragma_flag(conn, "foreign_keys") == law_flag(refusal.foreign_keys)
-    assert pragma_flag(conn, "legacy_alter_table") == 0
+    assert pragma_flag(conn, "legacy_alter_table") == law_flag(refusal.legacy_alter_table)
     assert {:ok, false} = Xqlite.transaction_status(conn)
   end
 
