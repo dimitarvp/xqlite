@@ -175,6 +175,7 @@ defmodule Xqlite do
           | {:lock_error, String.t()}
           | {:no_such_index, String.t()}
           | {:no_such_table, String.t()}
+          | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
           | {:read_only_database, integer(), String.t()}
           | {:schema_changed, integer(), String.t()}
           | {:schema_parsing_error, String.t(), {:unexpected_value, String.t()}}
@@ -433,14 +434,30 @@ defmodule Xqlite do
     do: XqliteNIF.set_pragma(conn, Atom.to_string(key), value)
 
   @doc """
-  Checks an existing table for values that would violate STRICT typing rules.
+  Checks an existing table for everything that would stop it becoming STRICT.
 
-  Returns `{:ok, []}` if the table is clean, or `{:ok, violations}` where each
-  violation is a map with `:rowid`, `:column`, `:actual_type`, and `:expected_type`.
+  Returns `{:ok, []}` if the table is clean, or `{:ok, violations}`. A
+  violation is one of three maps:
 
-  Any name SQLite accepts works: the table and column names are quoted for
-  you, and the reported column name is bound as a parameter rather than
-  written into the SQL.
+  * a stored value SQLite would refuse —
+    `%{rowid: _, column: _, actual_type: _, expected_type: _}`;
+  * a column whose declared type is not one STRICT knows —
+    `%{kind: :unknown_declared_type, column: name, declared: type}`. STRICT
+    accepts only `INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB` and `ANY`, in any
+    case, so `VARCHAR(255)`, `DATETIME` and `NUMERIC` are all refused;
+  * a column with no declared type at all —
+    `%{kind: :missing_declared_type, column: name}`.
+
+  An `ANY` column is checked by nothing: STRICT accepts the type and puts no
+  rule on the values.
+
+  The name resolves the way SQLite resolves an unqualified name: the `temp`
+  schema first, then `main`, then the attached databases in attach order.
+
+  Objects that are not plain tables — views, virtual tables and the shadow
+  tables that hold a virtual table's storage — return
+  `{:error, {:not_a_plain_table, %{table: name, type: type}}}`, where `type`
+  is `:view`, `:virtual` or `:shadow`.
 
   `WITHOUT ROWID` tables are not supported — the check reads each row's
   `rowid`, which such a table does not have — and return
@@ -451,11 +468,66 @@ defmodule Xqlite do
   @spec check_strict_violations(conn(), String.t()) ::
           {:ok, [map()]} | error()
   def check_strict_violations(conn, table) when is_binary(table) do
-    with {:ok, columns} <- get_typed_columns(conn, table),
-         :ok <- reject_without_rowid(conn, table) do
-      run_violation_queries(conn, table, columns)
+    with {:ok, _object, columns} <- strict_target(conn, table) do
+      strict_violations(conn, table, columns)
     end
   end
+
+  # SQLite resolves an unqualified name in `temp` before `main`, and in `main`
+  # before the attached databases in attach order — the order PRAGMA table_list
+  # reports them in. Every statement the rebuild issues then names the schema
+  # this picked, so the checks and the rebuild cannot disagree about which
+  # table they are looking at.
+  defp strict_target(conn, table) do
+    with {:ok, columns} <- get_typed_columns(conn, table),
+         {:ok, object} <- resolve_object(conn, table),
+         :ok <- reject_non_plain_table(object, table),
+         :ok <- reject_without_rowid(object, table) do
+      {:ok, object, columns}
+    end
+  end
+
+  defp resolve_object(conn, table) do
+    with {:ok, objects} <- schema_list_objects(conn) do
+      objects
+      |> Enum.filter(&(&1.name == table))
+      |> resolved_object(table)
+    end
+  end
+
+  defp resolved_object([], table), do: {:error, {:no_such_table, table}}
+
+  defp resolved_object(matches, _table), do: {:ok, Enum.min_by(matches, &schema_rank/1)}
+
+  defp schema_rank(%Xqlite.Schema.SchemaObjectInfo{schema: "temp"}), do: 0
+  defp schema_rank(%Xqlite.Schema.SchemaObjectInfo{schema: "main"}), do: 1
+  defp schema_rank(_object), do: 2
+
+  defp reject_non_plain_table(%Xqlite.Schema.SchemaObjectInfo{object_type: :table}, _table),
+    do: :ok
+
+  defp reject_non_plain_table(%Xqlite.Schema.SchemaObjectInfo{object_type: type}, table),
+    do: {:error, {:not_a_plain_table, %{table: table, type: type}}}
+
+  defp strict_violations(conn, table, columns) do
+    declared = Enum.flat_map(columns, &declared_type_violation/1)
+
+    with {:ok, rows} <- run_violation_queries(conn, table, checked_columns(columns)) do
+      {:ok, declared ++ rows}
+    end
+  end
+
+  defp declared_type_violation({name, :missing}),
+    do: [%{kind: :missing_declared_type, column: name}]
+
+  defp declared_type_violation({name, {:unknown, declared}}),
+    do: [%{kind: :unknown_declared_type, column: name, declared: declared}]
+
+  defp declared_type_violation(_column), do: []
+
+  defp checked_columns(columns), do: Enum.filter(columns, &checked_column?/1)
+
+  defp checked_column?({_name, type}), do: type in [:integer, :real, :text, :blob]
 
   defp run_violation_queries(_conn, _table, []), do: {:ok, []}
 
@@ -493,18 +565,10 @@ defmodule Xqlite do
     %{rowid: rowid, column: col, actual_type: actual, expected_type: expected}
   end
 
-  defp reject_without_rowid(conn, table) do
-    with {:ok, objects} <- schema_list_objects(conn) do
-      objects
-      |> Enum.find(&(&1.name == table))
-      |> without_rowid_verdict(table)
-    end
-  end
-
-  defp without_rowid_verdict(%Xqlite.Schema.SchemaObjectInfo{is_without_rowid: true}, table),
+  defp reject_without_rowid(%Xqlite.Schema.SchemaObjectInfo{is_without_rowid: true}, table),
     do: {:error, {:without_rowid_unsupported, table}}
 
-  defp without_rowid_verdict(_object, _table), do: :ok
+  defp reject_without_rowid(_object, _table), do: :ok
 
   @doc """
   Converts an existing table to STRICT mode via table rebuild.
@@ -512,14 +576,24 @@ defmodule Xqlite do
   This creates a new STRICT table, copies all data, drops the original, and
   renames the new table — all inside a transaction.
 
-  If existing data violates STRICT typing rules, the operation fails with
-  `{:error, {:strict_violations, violations}}` where `violations` is a list
-  of maps from `check_strict_violations/2`. The original table is left untouched.
+  If anything `check_strict_violations/2` reports would stop the conversion —
+  a stored value SQLite would refuse, a column whose declared type STRICT does
+  not know, a column with no declared type — the operation fails with
+  `{:error, {:strict_violations, violations}}` before any SQL runs, and the
+  original table is left untouched.
 
   Any name SQLite accepts works, whatever quoting the stored `CREATE TABLE`
   statement uses: the rebuild rewrites that statement's own name token and
-  quotes every name it emits. Converting a table that is already STRICT is
-  `:ok`.
+  quotes every name it emits. A table that is already STRICT returns `:ok`
+  and no statement runs at all.
+
+  The name resolves the way SQLite resolves an unqualified name — the `temp`
+  schema first, then `main`, then the attached databases in attach order —
+  and the rebuild runs in the schema the table was found in.
+
+  Objects that are not plain tables — views, virtual tables and the shadow
+  tables that hold a virtual table's storage — return
+  `{:error, {:not_a_plain_table, %{table: name, type: type}}}`.
 
   `WITHOUT ROWID` tables are not supported and return
   `{:error, {:without_rowid_unsupported, table}}`.
@@ -535,10 +609,19 @@ defmodule Xqlite do
   """
   @spec enable_strict_table(conn(), String.t()) :: :ok | {:error, term()}
   def enable_strict_table(conn, table) when is_binary(table) do
-    with {:ok, violations} <- check_strict_violations(conn, table),
+    with {:ok, object, columns} <- strict_target(conn, table) do
+      convert_to_strict(conn, object, columns)
+    end
+  end
+
+  defp convert_to_strict(_conn, %Xqlite.Schema.SchemaObjectInfo{strict: true}, _columns),
+    do: :ok
+
+  defp convert_to_strict(conn, object, columns) do
+    with {:ok, violations} <- strict_violations(conn, object.name, columns),
          :ok <- reject_violations(violations),
-         {:ok, create_sql} <- table_create_sql(conn, table) do
-      rebuild_as_strict(conn, table, create_sql)
+         {:ok, create_sql} <- table_create_sql(conn, object.schema, object.name) do
+      rebuild_as_strict(conn, object.schema, object.name, create_sql)
     end
   end
 
@@ -546,8 +629,10 @@ defmodule Xqlite do
 
   defp reject_violations(violations), do: {:error, {:strict_violations, violations}}
 
-  defp table_create_sql(conn, table) do
-    sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+  defp table_create_sql(conn, schema, table) do
+    sql =
+      "SELECT sql FROM #{Xqlite.Pragma.quote_name(schema)}.sqlite_master " <>
+        "WHERE type='table' AND name=?"
 
     case XqliteNIF.query(conn, sql, [table]) do
       {:ok, %{rows: [[create_sql]]}} -> {:ok, create_sql}
@@ -560,25 +645,17 @@ defmodule Xqlite do
     sql = "PRAGMA table_info(#{Xqlite.Pragma.quote_name(table)})"
 
     case XqliteNIF.query(conn, sql, []) do
-      {:ok, %{rows: []}} ->
-        {:error, {:no_such_table, table}}
-
-      {:ok, %{rows: rows}} ->
-        columns =
-          rows
-          |> Enum.map(fn [_cid, name, type | _rest] ->
-            parsed_type = parse_column_type(type)
-            {name, parsed_type}
-          end)
-          |> Enum.reject(fn {_name, type} -> type == :any end)
-
-        {:ok, columns}
-
-      {:error, _} = err ->
-        err
+      {:ok, %{rows: []}} -> {:error, {:no_such_table, table}}
+      {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, &declared_column/1)}
+      {:error, _} = err -> err
     end
   end
 
+  defp declared_column([_cid, name, type | _rest]), do: {name, parse_column_type(type)}
+
+  # STRICT accepts these six declared types and nothing else, in any case.
+  # Anything else, and the empty type an untyped column reports, is what
+  # `CREATE TABLE ... STRICT` refuses as an unknown or a missing datatype.
   defp parse_column_type(type) when is_binary(type) do
     case String.downcase(type) do
       "integer" -> :integer
@@ -586,11 +663,13 @@ defmodule Xqlite do
       "real" -> :real
       "text" -> :text
       "blob" -> :blob
-      _ -> :any
+      "any" -> :any
+      "" -> :missing
+      _other -> {:unknown, type}
     end
   end
 
-  defp parse_column_type(_), do: :any
+  defp parse_column_type(_type), do: :missing
 
   defp strict_allowed_types(:integer), do: ["integer", "null"]
   defp strict_allowed_types(:real), do: ["real", "integer", "null"]
@@ -598,17 +677,21 @@ defmodule Xqlite do
   defp strict_allowed_types(:blob), do: ["blob", "null"]
   defp strict_allowed_types(:any), do: ["integer", "real", "text", "blob", "null"]
 
-  defp rebuild_as_strict(conn, table, original_create_sql) do
+  # Every name the rebuild writes carries the schema the table was resolved in,
+  # except the `RENAME TO` target: SQLite takes a bare name there and calls a
+  # qualified one a syntax error.
+  defp rebuild_as_strict(conn, schema, table, original_create_sql) do
     quoted_table = Xqlite.Pragma.quote_name(table)
-    quoted_tmp = Xqlite.Pragma.quote_name("#{table}_xqlite_strict_rebuild")
-    strict_sql = strict_create_sql(original_create_sql, quoted_tmp)
+    qualified_table = qualified_name(schema, table)
+    qualified_tmp = qualified_name(schema, "#{table}_xqlite_strict_rebuild")
+    strict_sql = strict_create_sql(original_create_sql, qualified_tmp)
 
-    with {:ok, index_sqls} <- get_index_sqls(conn, table),
+    with {:ok, index_sqls} <- get_index_sqls(conn, schema, table),
          :ok <- exec(conn, "BEGIN IMMEDIATE"),
          :ok <- exec(conn, strict_sql),
-         :ok <- exec(conn, "INSERT INTO #{quoted_tmp} SELECT * FROM #{quoted_table}"),
-         :ok <- exec(conn, "DROP TABLE #{quoted_table}"),
-         :ok <- exec(conn, "ALTER TABLE #{quoted_tmp} RENAME TO #{quoted_table}"),
+         :ok <- exec(conn, "INSERT INTO #{qualified_tmp} SELECT * FROM #{qualified_table}"),
+         :ok <- exec(conn, "DROP TABLE #{qualified_table}"),
+         :ok <- exec(conn, "ALTER TABLE #{qualified_tmp} RENAME TO #{quoted_table}"),
          :ok <- recreate_indexes(conn, index_sqls),
          :ok <- exec(conn, "COMMIT") do
       :ok
@@ -619,10 +702,14 @@ defmodule Xqlite do
     end
   end
 
-  defp strict_create_sql(create_sql, quoted_tmp) do
+  defp qualified_name(schema, name) do
+    Xqlite.Pragma.quote_name(schema) <> "." <> Xqlite.Pragma.quote_name(name)
+  end
+
+  defp strict_create_sql(create_sql, tmp_name) do
     create_sql
     |> String.replace(~r/\)\s*(STRICT)?\s*$/, ") STRICT")
-    |> rename_table_token(quoted_tmp)
+    |> rename_table_token(tmp_name)
   end
 
   # sqlite_master keeps the CREATE TABLE statement exactly as it was written,
@@ -631,20 +718,20 @@ defmodule Xqlite do
   # [bracketed] and nothing else. The row was selected by name, so that token
   # is this table's by construction: replacing it needs no pattern built from
   # the caller's name.
-  defp rename_table_token(create_sql, quoted_tmp) do
+  defp rename_table_token(create_sql, tmp_name) do
     case Regex.run(~r/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?/i, create_sql) do
-      [prefix] -> replace_name_token(create_sql, byte_size(prefix), quoted_tmp)
+      [prefix] -> replace_name_token(create_sql, byte_size(prefix), tmp_name)
       _no_match -> create_sql
     end
   end
 
-  defp replace_name_token(create_sql, prefix_len, quoted_tmp) do
+  defp replace_name_token(create_sql, prefix_len, tmp_name) do
     prefix = binary_part(create_sql, 0, prefix_len)
     rest = binary_part(create_sql, prefix_len, byte_size(create_sql) - prefix_len)
 
     case name_token_length(rest) do
       :error -> create_sql
-      {:ok, len} -> prefix <> quoted_tmp <> binary_part(rest, len, byte_size(rest) - len)
+      {:ok, len} -> prefix <> tmp_name <> binary_part(rest, len, byte_size(rest) - len)
     end
   end
 
@@ -703,8 +790,10 @@ defmodule Xqlite do
   defp ends_bare_name?(byte),
     do: byte in [" ", "\t", "\n", "\r", "\f", "\v", "(", ")", ",", "."]
 
-  defp get_index_sqls(conn, table) do
-    sql = "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL"
+  defp get_index_sqls(conn, schema, table) do
+    sql =
+      "SELECT sql FROM #{Xqlite.Pragma.quote_name(schema)}.sqlite_master " <>
+        "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL"
 
     case XqliteNIF.query(conn, sql, [table]) do
       {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, fn [s] -> s end)}

@@ -114,8 +114,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warnings` — turned it into a failure, and a plain `cargo clippy` let
   it through. It is set to deny. `cargo build` is unaffected either
   way: rustc ignores `clippy::` lints.
+- **`scripts/release.sh` leaves the working tree clean when the Rust
+  version bump fails its own check.** It rewrote `Cargo.toml`, found
+  the new version missing, and exited with that edit still on disk. It
+  now restores `Cargo.toml` and the crate's `Cargo.lock` and says so.
+  The commit `mix version` made before that point holds the Elixir bump
+  only; the message names it, since no checkout can undo a commit.
 
 ### Fixed
+
+- **The STRICT pre-check reports a declared type STRICT cannot accept.**
+  `Xqlite.check_strict_violations/2` only looked at values, so a table
+  with a `VARCHAR(255)` or `DATETIME` column, or a column with no type
+  at all, came back clean and `Xqlite.enable_strict_table/2` then died
+  part-way through its rebuild with SQLite's raw "unknown datatype" or
+  "missing datatype". STRICT accepts exactly `INT`, `INTEGER`, `REAL`,
+  `TEXT`, `BLOB` and `ANY`, in any case; every other declared type is
+  now a `%{kind: :unknown_declared_type, column: name, declared: type}`
+  violation and an untyped column a
+  `%{kind: :missing_declared_type, column: name}` one, both reported
+  beside the value violations and both refused before any SQL runs.
+  An `ANY` column is accepted and its values are checked by nothing.
+- **Both STRICT helpers work on temporary tables.** They read `main`'s
+  schema only, so a temporary table answered
+  `{:error, {:no_such_table, name}}`, and a temporary table shadowing a
+  `main` table of the same name produced a column-count mismatch,
+  because the two helpers disagreed about which table the name meant.
+  An unqualified name now resolves the way SQLite resolves it — `temp`
+  first, then `main`, then the attached databases in attach order — and
+  every statement of the rebuild names that schema, so the table that
+  converts is the one the name reaches. The `WITHOUT ROWID` refusal
+  reads the resolved table too; it used to read whichever schema listed
+  the name first, and so could refuse the wrong table or miss the right
+  one.
+- **Views, virtual tables and shadow tables are refused by name.** A
+  view failed inside the check's own query on "no such column: rowid",
+  and an FTS5 or rtree table failed mid-rebuild with "table … already
+  exists". Both helpers now answer
+  `{:error, {:not_a_plain_table, %{table: name, type: type}}}` before
+  any work, where `type` is `:view`, `:virtual` or `:shadow` — a shadow
+  table is a virtual table's storage and is refused with it.
+  `{:not_a_plain_table, map()}` joins `Xqlite.error_reason/0`.
+- **A table that is already STRICT is left alone.**
+  `Xqlite.enable_strict_table/2` returned `:ok` but ran the whole
+  rebuild first — every row copied into a new table, the old one
+  dropped, the stored `CREATE TABLE` statement re-quoted. It now
+  returns `:ok` without running a statement.
+- **`object_type` is `:virtual`, not `:"r#virtual"`.** Every virtual
+  table listed by `Xqlite.schema_list_objects/1` carried an atom named
+  after the Rust keyword escape rather than the one
+  `Xqlite.Schema.Types.object_type/0` documents.
 
 - **Fourteen documentation claims now match the code.** Every number
   below was counted from the source it describes.

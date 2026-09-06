@@ -139,8 +139,14 @@ if [[ "$CHECK_VER" != "$NEW_MIX_VER" ]]; then
   echo "   Tried to upgrade from $OLD_RUST_VER to $NEW_MIX_VER"
   echo "   But cargo metadata reports: $CHECK_VER"
   echo "   Aborting before git operations."
-  # Note: You are left with a dirty state here (Cargo.toml changed),
-  # but your git history is safe (we haven't amended yet).
+  ROLLBACK_FILE="${CARGO_MANIFEST%Cargo.toml}Cargo.lock"
+  git checkout -- "$CARGO_MANIFEST"
+  if [ -f "$ROLLBACK_FILE" ]; then
+    git checkout -- "$ROLLBACK_FILE"
+  fi
+  echo "   Working tree restored: $CARGO_MANIFEST and its lockfile are back."
+  echo "   The commit mix version already made (Elixir bump only) is still"
+  echo "   in your history and needs your hand."
   popd >/dev/null
   exit 1
 fi

@@ -100,6 +100,20 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert actual_objects_sorted == expected_objects
       end
 
+      test "schema_list_objects names a virtual table and its shadow tables", %{conn: conn} do
+        assert :ok =
+                 NIF.execute_batch(
+                   conn,
+                   "CREATE VIRTUAL TABLE notes_fts USING fts5(title, body);"
+                 )
+
+        assert {:ok, objects} = NIF.schema_list_objects(conn, "main")
+        types = Map.new(objects, fn object -> {object.name, object.object_type} end)
+
+        assert types["notes_fts"] == :virtual
+        assert types["notes_fts_data"] == :shadow
+      end
+
       test "schema_columns returns info for 'users' table", %{conn: conn} do
         # Expectation unchanged, was correct
         expected_columns = [

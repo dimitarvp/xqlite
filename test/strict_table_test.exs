@@ -124,11 +124,60 @@ defmodule Xqlite.StrictTableTest do
       assert {:ok, []} = Xqlite.check_strict_violations(conn, "empty")
     end
 
-    test "a table whose every column is untyped has nothing to check", %{conn: conn} do
+    test "a table whose every column is untyped reports one violation per column",
+         %{conn: conn} do
       assert :ok = NIF.execute_batch(conn, "CREATE TABLE untyped (a, b, c)")
       assert {:ok, 1} = NIF.execute(conn, "INSERT INTO untyped VALUES (1, 'two', X'03')")
 
-      assert {:ok, []} = Xqlite.check_strict_violations(conn, "untyped")
+      assert {:ok, violations} = Xqlite.check_strict_violations(conn, "untyped")
+
+      assert violations == [
+               %{kind: :missing_declared_type, column: "a"},
+               %{kind: :missing_declared_type, column: "b"},
+               %{kind: :missing_declared_type, column: "c"}
+             ]
+    end
+
+    test "a declared type STRICT does not know is a violation", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE typo (id INTEGER, v VARCHAR(255))")
+
+      assert {:ok, violations} = Xqlite.check_strict_violations(conn, "typo")
+
+      assert violations == [
+               %{kind: :unknown_declared_type, column: "v", declared: "VARCHAR(255)"}
+             ]
+    end
+
+    test "an ANY column is checked by nothing", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE anyish (id INTEGER, v ANY)")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO anyish VALUES (1, 'text')")
+
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "anyish")
+    end
+
+    test "declared-type and row violations are reported together", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE mixed (n INTEGER, v DATETIME)")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO mixed VALUES ('oops', 'x')")
+
+      assert {:ok, violations} = Xqlite.check_strict_violations(conn, "mixed")
+
+      assert Enum.any?(violations, &(&1[:kind] == :unknown_declared_type))
+      assert Enum.any?(violations, &(&1[:actual_type] == "text"))
+    end
+
+    property "the declared-type verdict is the verdict SQLite itself gives" do
+      check all(declared <- declared_type(), max_runs: 2000) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+
+        assert :ok = NIF.execute_batch(conn, "CREATE TABLE probe (c #{declared})")
+        assert {:ok, violations} = Xqlite.check_strict_violations(conn, "probe")
+
+        oracle = NIF.execute_batch(conn, "CREATE TABLE oracle (c #{declared}) STRICT")
+
+        assert declared_verdict(violations) == strict_verdict(oracle)
+
+        assert :ok = NIF.close(conn)
+      end
     end
   end
 
@@ -190,7 +239,7 @@ defmodule Xqlite.StrictTableTest do
       assert {:error, {:no_such_table, "ghost"}} = Xqlite.enable_strict_table(conn, "ghost")
     end
 
-    test "already-STRICT table is idempotent", %{conn: conn} do
+    test "already-STRICT table is left untouched", %{conn: conn} do
       NIF.execute(
         conn,
         "CREATE TABLE strict_already (id INTEGER PRIMARY KEY, val INTEGER) STRICT"
@@ -198,7 +247,13 @@ defmodule Xqlite.StrictTableTest do
 
       NIF.execute(conn, "INSERT INTO strict_already VALUES (1, 42)")
 
+      assert {:ok, stored_sql} = Xqlite.get_create_sql(conn, "strict_already")
+      assert {:ok, changes} = Xqlite.total_changes(conn)
+
       assert :ok = Xqlite.enable_strict_table(conn, "strict_already")
+
+      assert {:ok, ^stored_sql} = Xqlite.get_create_sql(conn, "strict_already")
+      assert {:ok, ^changes} = Xqlite.total_changes(conn)
 
       {:ok, result} = NIF.query(conn, "SELECT * FROM strict_already", [])
       assert result.rows == [[1, 42]]
@@ -237,18 +292,61 @@ defmodule Xqlite.StrictTableTest do
       NIF.execute(conn, "CREATE TABLE loose (id INTEGER PRIMARY KEY, data)")
       NIF.execute(conn, "INSERT INTO loose VALUES (1, 'text')")
 
-      assert {:error, _} = Xqlite.enable_strict_table(conn, "loose")
+      assert {:error, {:strict_violations, [%{kind: :missing_declared_type, column: "data"}]}} =
+               Xqlite.enable_strict_table(conn, "loose")
 
       # Original table untouched
       {:ok, result} = NIF.query(conn, "SELECT * FROM loose", [])
       assert result.rows == [[1, "text"]]
     end
 
-    test "an FTS5 virtual table is refused", %{conn: conn} do
+    test "a column type STRICT does not know stops the rebuild before it starts",
+         %{conn: conn} do
+      NIF.execute(conn, "CREATE TABLE dated (id INTEGER PRIMARY KEY, at DATETIME)")
+
+      assert {:error,
+              {:strict_violations,
+               [%{kind: :unknown_declared_type, column: "at", declared: "DATETIME"}]}} =
+               Xqlite.enable_strict_table(conn, "dated")
+
+      refute strict?(conn, "dated")
+      assert tables(conn) == ["dated"]
+    end
+
+    test "an FTS5 virtual table is refused by both helpers", %{conn: conn} do
       assert :ok =
                NIF.execute_batch(conn, "CREATE VIRTUAL TABLE t_fts USING fts5(title, body)")
 
-      assert {:error, {:table_exists, _detail}} = Xqlite.enable_strict_table(conn, "t_fts")
+      assert {:error, {:not_a_plain_table, %{table: "t_fts", type: :virtual}}} =
+               Xqlite.check_strict_violations(conn, "t_fts")
+
+      assert {:error, {:not_a_plain_table, %{table: "t_fts", type: :virtual}}} =
+               Xqlite.enable_strict_table(conn, "t_fts")
+    end
+
+    test "a shadow table of a virtual table is refused by both helpers", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, "CREATE VIRTUAL TABLE s_fts USING fts5(title, body)")
+
+      assert {:error, {:not_a_plain_table, %{table: "s_fts_data", type: :shadow}}} =
+               Xqlite.check_strict_violations(conn, "s_fts_data")
+
+      assert {:error, {:not_a_plain_table, %{table: "s_fts_data", type: :shadow}}} =
+               Xqlite.enable_strict_table(conn, "s_fts_data")
+    end
+
+    test "a view is refused by both helpers", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TABLE base (id INTEGER); CREATE VIEW v1 AS SELECT id FROM base;"
+               )
+
+      assert {:error, {:not_a_plain_table, %{table: "v1", type: :view}}} =
+               Xqlite.check_strict_violations(conn, "v1")
+
+      assert {:error, {:not_a_plain_table, %{table: "v1", type: :view}}} =
+               Xqlite.enable_strict_table(conn, "v1")
     end
   end
 
@@ -384,10 +482,130 @@ defmodule Xqlite.StrictTableTest do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # an unqualified name resolves in temp before main, the way SQLite resolves it
+  # ---------------------------------------------------------------------------
+
+  describe "temporary tables" do
+    test "a temporary table converts inside the temp schema", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TEMP TABLE tmp_users (id INTEGER);")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO tmp_users VALUES (?)", [1])
+
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "tmp_users")
+      assert :ok = Xqlite.enable_strict_table(conn, "tmp_users")
+
+      assert strict?(conn, "temp", "tmp_users")
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT id FROM tmp_users", [])
+      assert tables(conn) == []
+    end
+
+    test "a temporary table shadowing a main one converts only the temporary one",
+         %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE shadowed (id INTEGER);")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO shadowed VALUES (?)", [1])
+
+      assert :ok =
+               NIF.execute_batch(conn, "CREATE TEMP TABLE shadowed (id INTEGER, extra TEXT);")
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO shadowed VALUES (?, ?)", [2, "two"])
+
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "shadowed")
+      assert :ok = Xqlite.enable_strict_table(conn, "shadowed")
+
+      assert strict?(conn, "temp", "shadowed")
+      refute strict?(conn, "main", "shadowed")
+
+      assert {:ok, %{rows: [[2, "two"]]}} =
+               NIF.query(conn, ~s|SELECT * FROM "temp"."shadowed"|, [])
+
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, ~s|SELECT * FROM "main"."shadowed"|, [])
+
+      assert {:ok, "CREATE TABLE shadowed (id INTEGER)"} =
+               Xqlite.get_create_sql(conn, "shadowed")
+    end
+
+    test "a WITHOUT ROWID main table does not refuse its plain temporary namesake",
+         %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TABLE ns (id INTEGER PRIMARY KEY) WITHOUT ROWID;"
+               )
+
+      assert :ok = NIF.execute_batch(conn, "CREATE TEMP TABLE ns (id INTEGER);")
+
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "ns")
+      assert :ok = Xqlite.enable_strict_table(conn, "ns")
+
+      assert strict?(conn, "temp", "ns")
+      refute strict?(conn, "main", "ns")
+    end
+
+    test "a temporary WITHOUT ROWID table is refused over its plain main namesake",
+         %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE nr (id INTEGER);")
+
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TEMP TABLE nr (id INTEGER PRIMARY KEY) WITHOUT ROWID;"
+               )
+
+      assert {:error, {:without_rowid_unsupported, "nr"}} =
+               Xqlite.check_strict_violations(conn, "nr")
+
+      assert {:error, {:without_rowid_unsupported, "nr"}} =
+               Xqlite.enable_strict_table(conn, "nr")
+    end
+
+    test "a temporary table keeps its indexes across the rebuild", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TEMP TABLE tidx (id INTEGER, email TEXT);" <>
+                   "CREATE UNIQUE INDEX tidx_email ON tidx(email);"
+               )
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO tidx VALUES (?, ?)", [1, "a@b.com"])
+
+      assert :ok = Xqlite.enable_strict_table(conn, "tidx")
+
+      assert strict?(conn, "temp", "tidx")
+
+      assert {:error, {:constraint_violation, :constraint_unique, _}} =
+               NIF.execute(conn, "INSERT INTO tidx VALUES (?, ?)", [2, "a@b.com"])
+    end
+
+    property "whitespace survives the rebuild of a temporary table" do
+      check all(gap <- whitespace_gap(), max_runs: 2000) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+
+        assert :ok =
+                 NIF.execute_batch(conn, "CREATE TEMP TABLE users" <> gap <> "(id INTEGER)")
+
+        assert :ok = Xqlite.enable_strict_table(conn, "users")
+
+        assert {:ok, ~s|CREATE TABLE "users"| <> gap <> "(id INTEGER) STRICT"} ==
+                 temp_create_sql(conn, "users")
+
+        assert :ok = NIF.close(conn)
+      end
+    end
+  end
+
   defp quoted(name), do: ~s|"| <> String.replace(name, ~s|"|, ~s|""|) <> ~s|"|
 
-  defp strict?(conn, table) do
-    assert {:ok, objects} = Xqlite.schema_list_objects(conn, "main")
+  defp temp_create_sql(conn, table) do
+    sql = ~s|SELECT sql FROM "temp".sqlite_master WHERE type='table' AND name=?|
+
+    assert {:ok, %{rows: [[create_sql]]}} = NIF.query(conn, sql, [table])
+    {:ok, create_sql}
+  end
+
+  defp strict?(conn, table), do: strict?(conn, "main", table)
+
+  defp strict?(conn, schema, table) do
+    assert {:ok, objects} = Xqlite.schema_list_objects(conn, schema)
 
     Enum.any?(objects, fn
       %Xqlite.Schema.SchemaObjectInfo{name: ^table, strict: strict} -> strict
@@ -453,6 +671,65 @@ defmodule Xqlite.StrictTableTest do
     |> StreamData.list_of(min_length: 1, max_length: 20)
     |> StreamData.map(&List.to_string/1)
   end
+
+  defp declared_type do
+    StreamData.one_of([
+      strict_declared_type(),
+      StreamData.member_of([
+        "VARCHAR(255)",
+        "VARCHAR(1)",
+        "CHARACTER(20)",
+        "DATETIME",
+        "DATE",
+        "NUMERIC",
+        "DECIMAL(10,5)",
+        "DOUBLE",
+        "FLOAT",
+        "BOOLEAN",
+        "CLOB",
+        "SMALLINT",
+        "BIGINT",
+        "UNSIGNED BIG INT"
+      ]),
+      StreamData.constant("")
+    ])
+  end
+
+  defp strict_declared_type do
+    gen all(
+          name <- StreamData.member_of(~w[INT INTEGER REAL TEXT BLOB ANY]),
+          uppercase <- StreamData.list_of(StreamData.boolean(), length: String.length(name)),
+          lead <- type_padding(),
+          trail <- type_padding()
+        ) do
+      lead <> recased(name, uppercase) <> trail
+    end
+  end
+
+  defp type_padding, do: StreamData.member_of(["", " ", "  ", "\t", "\n"])
+
+  defp recased(name, uppercase) do
+    name
+    |> String.graphemes()
+    |> Enum.zip(uppercase)
+    |> Enum.map_join("", &recased_char/1)
+  end
+
+  defp recased_char({char, true}), do: String.upcase(char)
+  defp recased_char({char, false}), do: String.downcase(char)
+
+  defp declared_verdict(violations) do
+    case Enum.any?(
+           violations,
+           &(&1[:kind] in [:unknown_declared_type, :missing_declared_type])
+         ) do
+      true -> :refused
+      false -> :accepted
+    end
+  end
+
+  defp strict_verdict(:ok), do: :accepted
+  defp strict_verdict({:error, _reason}), do: :refused
 
   defp spellings(name) do
     [:double_quote, :backtick] ++ bracket_spelling(name) ++ bare_spelling(name)

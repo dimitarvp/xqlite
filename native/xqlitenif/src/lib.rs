@@ -205,7 +205,7 @@ pub(crate) mod atoms {
         unsupported_atom,
         unsupported_data_type,
         utf8_error,
-        r#virtual,
+        r#virtual = "virtual",
         virtual_generated,
         view,
         delete,
