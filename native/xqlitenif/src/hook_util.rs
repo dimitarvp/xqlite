@@ -26,6 +26,14 @@
 //! connection Mutex serialises *registration*; the AtomicPtr swap
 //! gives the C callback a wait-free read path with no torn views of
 //! the underlying state.
+//!
+//! Sending from a callback: erl_nif documents a NULL `caller_env` for
+//! a thread ERTS did not spawn. Every `enif_send(NULL, …)` in this
+//! crate runs inside a NIF scheduled `DirtyIo`, never on a normal
+//! scheduler — that is the case to keep avoiding. The five NIFs
+//! without that schedule (`create_cancel_token`, `cancel_operation`,
+//! `sqlite_version`, `register_log_hook`, `unregister_log_hook`) drive
+//! no SQLite callback, so none of them can reach such a send.
 
 use crate::error::XqliteError;
 use rustler::sys::{ERL_NIF_TERM, ErlNifEnv, enif_make_atom_len, enif_make_new_binary};

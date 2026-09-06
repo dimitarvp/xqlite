@@ -455,6 +455,12 @@ defmodule Xqlite.Pragma do
     as in  instruct sqlite to use the main (originally opened) database or a temporary DB
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
+
+  A name this module does not know is refused with
+  `{:error, {:unknown_pragma, name}}` before any statement is built, with or
+  without an extra argument. SQLite parses an unknown PRAGMA and ignores it,
+  so letting one through would answer with an empty result and no hint that
+  the name was wrong.
   """
   @spec get(Xqlite.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
           get_result()
@@ -518,6 +524,13 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_get_with_arg(db, key, arg, opts) do
+    case Map.get(@schema, key) do
+      nil -> {:error, {:unknown_pragma, key}}
+      _spec -> query_with_arg(db, key, arg, opts)
+    end
+  end
+
+  defp query_with_arg(db, key, arg, opts) do
     with {:ok, rows} <- do_query(db, key, arg, opts) do
       {:ok, process_list_result(key, rows)}
     end
@@ -546,6 +559,11 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Changes a PRAGMA's value.
 
+  A name this module does not know is refused with
+  `{:error, {:unknown_pragma, name}}` before any statement is built. SQLite
+  parses an unknown PRAGMA and ignores it, so letting one through would
+  report success while changing nothing.
+
   ## Options
 
     * `:db_name` (string) - Target a specific attached database schema.
@@ -567,8 +585,13 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_put(db, key_atom, val, opts) do
-    spec = Map.get(@schema, key_atom)
+    case Map.get(@schema, key_atom) do
+      nil -> {:error, {:unknown_pragma, key_atom}}
+      spec -> put_checked(db, key_atom, spec, val, opts)
+    end
+  end
 
+  defp put_checked(db, key_atom, spec, val, opts) do
     if valid_pragma_value?(spec, val) do
       case Keyword.get(opts, :db_name) do
         nil ->
@@ -676,7 +699,6 @@ defmodule Xqlite.Pragma do
   defp format_pragma_value(val) when is_atom(val), do: Atom.to_string(val)
 
   # A nil spec means an unknown pragma — pass it through unvalidated.
-  defp valid_pragma_value?(nil, _val), do: true
   defp valid_pragma_value?(%PragmaSpec{valid_values: nil}, _val), do: true
 
   defp valid_pragma_value?(%PragmaSpec{valid_values: spec}, val) when is_boolean(val) do

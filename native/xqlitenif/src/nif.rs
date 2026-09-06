@@ -1644,8 +1644,7 @@ fn backup_with_progress<'a>(
 ///
 /// # Safety
 ///
-/// Must be called from a dirty scheduler thread. Uses `enif_send` with
-/// NULL caller_env, valid since OTP 26.1.
+/// Sends with a NULL `caller_env`, which `hook_util`'s module doc covers.
 unsafe fn send_backup_progress(
     pid: &rustler::types::LocalPid,
     remaining: std::ffi::c_int,

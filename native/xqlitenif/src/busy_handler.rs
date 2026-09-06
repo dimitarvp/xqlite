@@ -186,9 +186,9 @@ fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), Xqlite
 ///
 /// # Safety
 ///
-/// Since OTP 26.1, `enif_send` with NULL `caller_env` is valid from any
-/// thread. We target OTP 26+. All data is copied into `msg_env` before
-/// send; no references are retained across the call.
+/// Sends with a NULL `caller_env`, which `hook_util`'s module doc covers.
+/// All data is copied into `msg_env` before the send; no references are
+/// retained across the call.
 unsafe fn send_busy_to_pid(pid: &LocalPid, retries: u32, elapsed_ms: u64) {
     // SAFETY: all enif_* calls operate on a freshly allocated msg_env.
     unsafe {

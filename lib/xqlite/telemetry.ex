@@ -150,7 +150,14 @@ defmodule Xqlite.Telemetry do
 
       [:xqlite, :stream, :close]
         measurements: %{monotonic_time, total_duration, total_rows}
-        metadata:     %{stream_handle, reason}
+        metadata:     %{stream_handle, reason, close_error (only on a
+                        failed close)}
+
+  The close event's `:reason` says how the stream ended: `:drained` when
+  every row was read, `:halted` when the consumer stopped early, `:errored`
+  when a fetch failed — in every `:on_error` mode, the raising one included.
+  It does not describe the closing call itself; when that call fails, the
+  metadata gains `:close_error` with the reason it gave.
 
   The fetch event fires **every batch** — potentially thousands of
   times per stream. The cost is sub-microsecond when no handler is

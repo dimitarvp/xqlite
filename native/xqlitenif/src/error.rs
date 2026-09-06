@@ -10,30 +10,57 @@ use std::fmt::{self, Display};
 use std::os::raw::c_int;
 use std::panic::RefUnwindSafe;
 
-fn constraint_kind_to_atom_extended(extended_code: i32) -> Option<Atom> {
-    // Base constraint error code (not "primary key" — that's SQLITE_CONSTRAINT_PRIMARYKEY)
-    const SQLITE_CONSTRAINT_BASE: i32 = ffi::SQLITE_CONSTRAINT;
-
+/// The `kind` atom for a constraint failure. Every caller has already
+/// matched the primary code as `SQLITE_CONSTRAINT`, so the last arm always
+/// answers: a bare 19 (a virtual table's own check, for one) and any
+/// extended constraint code this build does not know both land there.
+fn constraint_kind_to_atom_extended(extended_code: i32) -> Atom {
     match extended_code {
-        ffi::SQLITE_CONSTRAINT_CHECK => Some(atoms::constraint_check()),
-        ffi::SQLITE_CONSTRAINT_COMMITHOOK => Some(atoms::constraint_commit_hook()),
-        ffi::SQLITE_CONSTRAINT_FOREIGNKEY => Some(atoms::constraint_foreign_key()),
-        ffi::SQLITE_CONSTRAINT_FUNCTION => Some(atoms::constraint_function()),
-        ffi::SQLITE_CONSTRAINT_NOTNULL => Some(atoms::constraint_not_null()),
-        ffi::SQLITE_CONSTRAINT_PRIMARYKEY => Some(atoms::constraint_primary_key()),
-        ffi::SQLITE_CONSTRAINT_ROWID => Some(atoms::constraint_rowid()),
-        ffi::SQLITE_CONSTRAINT_TRIGGER => Some(atoms::constraint_trigger()),
-        ffi::SQLITE_CONSTRAINT_UNIQUE => Some(atoms::constraint_unique()),
-        ffi::SQLITE_CONSTRAINT_VTAB => Some(atoms::constraint_vtab()),
-        ffi::SQLITE_CONSTRAINT_PINNED => Some(atoms::constraint_pinned()),
-        ffi::SQLITE_CONSTRAINT_DATATYPE => Some(atoms::constraint_datatype()),
+        ffi::SQLITE_CONSTRAINT_CHECK => atoms::constraint_check(),
+        ffi::SQLITE_CONSTRAINT_COMMITHOOK => atoms::constraint_commit_hook(),
+        ffi::SQLITE_CONSTRAINT_FOREIGNKEY => atoms::constraint_foreign_key(),
+        ffi::SQLITE_CONSTRAINT_FUNCTION => atoms::constraint_function(),
+        ffi::SQLITE_CONSTRAINT_NOTNULL => atoms::constraint_not_null(),
+        ffi::SQLITE_CONSTRAINT_PRIMARYKEY => atoms::constraint_primary_key(),
+        ffi::SQLITE_CONSTRAINT_ROWID => atoms::constraint_rowid(),
+        ffi::SQLITE_CONSTRAINT_TRIGGER => atoms::constraint_trigger(),
+        ffi::SQLITE_CONSTRAINT_UNIQUE => atoms::constraint_unique(),
+        ffi::SQLITE_CONSTRAINT_VTAB => atoms::constraint_vtab(),
+        ffi::SQLITE_CONSTRAINT_PINNED => atoms::constraint_pinned(),
+        ffi::SQLITE_CONSTRAINT_DATATYPE => atoms::constraint_datatype(),
+        _ => atoms::constraint_violation(),
+    }
+}
 
-        // Covers a bare 19 (SQLITE_CONSTRAINT, no extended code) and any
-        // future extended constraint code this build does not know.
-        code if (code & 0xff) == SQLITE_CONSTRAINT_BASE => Some(atoms::constraint_violation()),
-
+/// The text after an ASCII prefix, matched without regard to case. The
+/// classifier tests its prefixes on a lowercase copy of the message; the
+/// prefixes are ASCII, so the copy and the original agree byte for byte
+/// over them and the original's own casing survives here.
+#[inline]
+fn strip_ascii_prefix<'m>(message: &'m str, prefix: &str) -> Option<&'m str> {
+    match message.get(..prefix.len()) {
+        Some(head) if head.eq_ignore_ascii_case(prefix) => message.get(prefix.len()..),
         _ => None,
     }
+}
+
+/// The name in a `no such table: NAME` / `no such index: NAME` message.
+#[inline]
+fn name_after(message: &str, prefix: &str) -> String {
+    strip_ascii_prefix(message, prefix)
+        .unwrap_or(message)
+        .to_string()
+}
+
+/// The name in a `table NAME already exists` / `index NAME already exists`
+/// message.
+#[inline]
+fn name_between(message: &str, prefix: &str) -> String {
+    let rest = strip_ascii_prefix(message, prefix).unwrap_or(message);
+
+    rest.strip_suffix(" already exists")
+        .unwrap_or(rest)
+        .to_string()
 }
 
 fn option_to_term<'a>(env: Env<'a>, value: &Option<String>) -> Term<'a> {
@@ -150,16 +177,23 @@ pub(crate) enum XqliteError {
     },
     OperationCancelled,
 
+    // `name` is what SQLite printed after the sanctioned message prefix and
+    // is what Elixir receives; `message` keeps the whole sentence for
+    // `Display`.
     NoSuchTable {
+        name: String,
         message: String,
     },
     NoSuchIndex {
+        name: String,
         message: String,
     },
     TableExists {
+        name: String,
         message: String,
     },
     IndexExists {
+        name: String,
         message: String,
     },
     SchemaChanged {
@@ -201,7 +235,7 @@ pub(crate) enum XqliteError {
     },
 
     ConstraintViolation {
-        kind: Option<Atom>,
+        kind: Atom,
         message: String,
         details: Box<ConstraintDetails>,
     },
@@ -289,16 +323,16 @@ impl Display for XqliteError {
             XqliteError::OperationCancelled => {
                 write!(f, "Database operation was cancelled")
             }
-            XqliteError::NoSuchTable { message } => {
+            XqliteError::NoSuchTable { name: _, message } => {
                 write!(f, "No such table: {message}")
             }
-            XqliteError::NoSuchIndex { message } => {
+            XqliteError::NoSuchIndex { name: _, message } => {
                 write!(f, "No such index: {message}")
             }
-            XqliteError::TableExists { message } => {
+            XqliteError::TableExists { name: _, message } => {
                 write!(f, "Table already exists: {message}")
             }
-            XqliteError::IndexExists { message } => {
+            XqliteError::IndexExists { name: _, message } => {
                 write!(f, "Index already exists: {message}")
             }
             XqliteError::SchemaChanged {
@@ -472,17 +506,17 @@ impl Encoder for XqliteError {
                 message,
             } => (atoms::database_busy_or_locked(), extended_code, message).encode(env),
             XqliteError::OperationCancelled => atoms::operation_cancelled().encode(env),
-            XqliteError::NoSuchTable { message } => {
-                (atoms::no_such_table(), message).encode(env)
+            XqliteError::NoSuchTable { name, message: _ } => {
+                (atoms::no_such_table(), name).encode(env)
             }
-            XqliteError::NoSuchIndex { message } => {
-                (atoms::no_such_index(), message).encode(env)
+            XqliteError::NoSuchIndex { name, message: _ } => {
+                (atoms::no_such_index(), name).encode(env)
             }
-            XqliteError::TableExists { message } => {
-                (atoms::table_exists(), message).encode(env)
+            XqliteError::TableExists { name, message: _ } => {
+                (atoms::table_exists(), name).encode(env)
             }
-            XqliteError::IndexExists { message } => {
-                (atoms::index_exists(), message).encode(env)
+            XqliteError::IndexExists { name, message: _ } => {
+                (atoms::index_exists(), name).encode(env)
             }
             XqliteError::SchemaChanged {
                 extended_code,
@@ -756,22 +790,28 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
         // Consequence, accepted deliberately: a message reword/localization
         // downgrades these to the generic `SqliteFailure` fallback — graceful (no
         // wrong result, no crash), never a misclassification. This is also why
-        // these four variants stay message-only (no `extended_code` field, unlike
-        // the SQLITE_BUSY/READONLY/SCHEMA/AUTH variants above): their extended
-        // code is invariantly 1, so it would carry no information.
+        // these four variants carry no `extended_code` field (unlike the
+        // SQLITE_BUSY/READONLY/SCHEMA/AUTH variants above): their extended
+        // code is invariantly 1, so it would carry no information. What they
+        // do carry is the object name SQLite printed after the prefix, so a
+        // caller gets the name without re-parsing the sentence.
         _ if lower_msg.starts_with("no such table") => XqliteError::NoSuchTable {
+            name: name_after(&message_string, "no such table: "),
             message: message_string,
         },
         _ if lower_msg.starts_with("no such index") => XqliteError::NoSuchIndex {
+            name: name_after(&message_string, "no such index: "),
             message: message_string,
         },
         _ if lower_msg.starts_with("table") && lower_msg.contains("already exists") => {
             XqliteError::TableExists {
+                name: name_between(&message_string, "table "),
                 message: message_string,
             }
         }
         _ if lower_msg.starts_with("index") && lower_msg.contains("already exists") => {
             XqliteError::IndexExists {
+                name: name_between(&message_string, "index "),
                 message: message_string,
             }
         }

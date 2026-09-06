@@ -20,7 +20,7 @@ defmodule Xqlite.StreamResourceCallbacks do
           rows_total: non_neg_integer(),
           opened_at: integer(),
           on_error: Xqlite.stream_on_error(),
-          errored?: boolean()
+          outcome: :atomics.atomics_ref()
         }
 
   @valid_on_error [:raise, :halt, :emit_error]
@@ -94,19 +94,50 @@ defmodule Xqlite.StreamResourceCallbacks do
       rows_total: 0,
       opened_at: Xqlite.Telemetry.monotonic_time(),
       on_error: on_error,
-      errored?: false
+      outcome: new_outcome()
     }
   end
 
-  @spec next_fun(acc()) ::
-          {[map() | {:ok, map()} | {:error, Xqlite.error_reason()}], acc()} | {:halt, acc()}
-  def next_fun(%{on_error: :emit_error, errored?: true} = acc) do
-    # The terminal {:error, reason} element was already emitted; stop without
-    # touching the (now errored) statement again.
-    {:halt, acc}
+  # How the stream ended lives in a mutable cell rather than in the
+  # accumulator: in `:raise` mode the failing fetch never returns an
+  # accumulator at all, and `Stream.resource/3` then hands the after
+  # function the one the last successful fetch returned.
+  defp new_outcome do
+    cell = :atomics.new(1, signed: false)
+    :atomics.put(cell, 1, outcome_code(:halted))
+    cell
   end
 
+  defp put_outcome(acc, outcome) do
+    :atomics.put(acc.outcome, 1, outcome_code(outcome))
+  end
+
+  defp outcome(acc) do
+    acc.outcome
+    |> :atomics.get(1)
+    |> code_outcome()
+  end
+
+  defp outcome_code(:halted), do: 0
+  defp outcome_code(:drained), do: 1
+  defp outcome_code(:errored), do: 2
+
+  defp code_outcome(0), do: :halted
+  defp code_outcome(1), do: :drained
+  defp code_outcome(2), do: :errored
+
+  @spec next_fun(acc()) ::
+          {[map() | {:ok, map()} | {:error, Xqlite.error_reason()}], acc()} | {:halt, acc()}
   def next_fun(acc) do
+    case {acc.on_error, outcome(acc)} do
+      # The terminal {:error, reason} element was already emitted; stop
+      # without touching the (now errored) statement again.
+      {:emit_error, :errored} -> {:halt, acc}
+      _ -> fetch_batch(acc)
+    end
+  end
+
+  defp fetch_batch(acc) do
     fetch_started_at = Xqlite.Telemetry.monotonic_time()
 
     case NIF.stream_fetch_cancellable(acc.handle, acc.batch_size, acc.cancel_tokens) do
@@ -119,6 +150,7 @@ defmodule Xqlite.StreamResourceCallbacks do
 
       :done ->
         emit_fetch_telemetry(fetch_started_at, 0, acc.handle, true)
+        put_outcome(acc, :drained)
         {:halt, acc}
 
       {:error, :operation_cancelled} ->
@@ -135,17 +167,22 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp shape_rows(mapped_rows, :emit_error), do: Enum.map(mapped_rows, &{:ok, &1})
   defp shape_rows(mapped_rows, _on_error), do: mapped_rows
 
-  defp handle_fetch_error(reason, %{on_error: :raise}) do
+  defp handle_fetch_error(reason, acc) do
+    put_outcome(acc, :errored)
+    apply_on_error(reason, acc)
+  end
+
+  defp apply_on_error(reason, %{on_error: :raise}) do
     raise Xqlite.StreamError, reason: reason
   end
 
-  defp handle_fetch_error(reason, %{on_error: :halt} = acc) do
+  defp apply_on_error(reason, %{on_error: :halt} = acc) do
     Logger.error("Error fetching from Xqlite stream: #{inspect(reason)}")
     {:halt, acc}
   end
 
-  defp handle_fetch_error(reason, %{on_error: :emit_error} = acc) do
-    {[{:error, reason}], %{acc | errored?: true}}
+  defp apply_on_error(reason, %{on_error: :emit_error} = acc) do
+    {[{:error, reason}], acc}
   end
 
   defp emit_fetch_telemetry(started_at, rows_returned, handle, done?) do
@@ -160,16 +197,14 @@ defmodule Xqlite.StreamResourceCallbacks do
 
   @spec after_fun(acc()) :: :ok
   def after_fun(acc) do
-    close_result = NIF.stream_close(acc.handle)
-
-    reason =
-      case close_result do
+    metadata =
+      case NIF.stream_close(acc.handle) do
         :ok ->
-          :drained
+          %{stream_handle: acc.handle, reason: outcome(acc)}
 
         {:error, close_err} ->
           Logger.error("Error closing Xqlite stream handle: #{inspect(close_err)}")
-          :errored
+          %{stream_handle: acc.handle, reason: outcome(acc), close_error: close_err}
       end
 
     now = Xqlite.Telemetry.monotonic_time()
@@ -181,7 +216,7 @@ defmodule Xqlite.StreamResourceCallbacks do
         total_duration: now - acc.opened_at,
         total_rows: acc.rows_total
       },
-      %{stream_handle: acc.handle, reason: reason}
+      metadata
     )
 
     :ok

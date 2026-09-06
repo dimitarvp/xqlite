@@ -230,16 +230,14 @@ defmodule Xqlite.NIF.ExecutionTest do
       test "execute/3 returns error for NoSuchTable on INSERT", %{conn: conn} do
         # Try inserting into a table that doesn't exist
         sql = "INSERT INTO non_existent_table (col) VALUES (1);"
-        assert {:error, {:no_such_table, msg}} = NIF.execute(conn, sql, [])
-        assert String.contains?(msg || "", "no such table: non_existent_table")
+        assert {:error, {:no_such_table, "non_existent_table"}} = NIF.execute(conn, sql, [])
       end
 
       test "execute/3 returns error for TableExists", %{conn: conn} do
         table_name = "already_exists_test_exec"
         setup_named_table(conn, table_name)
         create_sql = "CREATE TABLE #{table_name} (id INT);"
-        assert {:error, {:table_exists, msg}} = NIF.execute(conn, create_sql, [])
-        assert String.contains?(msg || "", "table #{table_name} already exists")
+        assert {:error, {:table_exists, ^table_name}} = NIF.execute(conn, create_sql, [])
       end
 
       test "execute/3 returns error for IndexExists", %{conn: conn} do
@@ -248,8 +246,7 @@ defmodule Xqlite.NIF.ExecutionTest do
         setup_named_table(conn, table_name)
         create_index_sql = "CREATE INDEX #{index_name} ON #{table_name}(name);"
         assert {:ok, 0} = NIF.execute(conn, create_index_sql, [])
-        assert {:error, {:index_exists, msg}} = NIF.execute(conn, create_index_sql, [])
-        assert String.contains?(msg || "", "index #{index_name} already exists")
+        assert {:error, {:index_exists, ^index_name}} = NIF.execute(conn, create_index_sql, [])
       end
 
       test "execute/3 returns error for constraint violation (UNIQUE)", %{conn: conn} do
@@ -338,6 +335,25 @@ defmodule Xqlite.NIF.ExecutionTest do
                    target_type: nil
                  }}} =
                  NIF.execute(conn, "INSERT INTO #{table_name} (rowid, x) VALUES (1, 'a');", [])
+      end
+
+      test "execute/3 reports the fallback kind for a plain SQLITE_CONSTRAINT",
+           %{conn: conn} do
+        table_name = "rtree_test_exec"
+
+        assert {:ok, 1} =
+                 NIF.execute(
+                   conn,
+                   "CREATE VIRTUAL TABLE #{table_name} USING rtree(id, minX, maxX);",
+                   []
+                 )
+
+        assert {:error, {:constraint_violation, :constraint_violation, _details}} =
+                 NIF.execute(
+                   conn,
+                   "INSERT INTO #{table_name} VALUES (1, 5.0, 1.0);",
+                   []
+                 )
       end
 
       test "execute/3 returns error for incorrect parameter count", %{conn: conn} do

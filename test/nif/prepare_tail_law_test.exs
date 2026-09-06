@@ -10,11 +10,10 @@ defmodule Xqlite.NIF.PrepareTailLawTest do
   each other rather than against a hard-coded table, so a path that drifts
   is caught even where the shared rule itself is debatable.
 
-  SQL whose first real statement is preceded by a bare semicolon
-  (`"; SELECT 1"`) is left out on purpose: `explain_analyze/3` builds its
-  query plan by prefixing `EXPLAIN QUERY PLAN ` to the caller's string, and
-  that prefix turns a leading semicolon into a syntax error. That is a
-  separate defect in how the plan string is built, not tail handling.
+  The generated strings carry a lead as well as a tail — bare semicolons,
+  comments and whitespace ahead of the first real statement. Those are what
+  a query plan built by prefixing text to the caller's SQL breaks on, so
+  they belong in the comparison.
   """
 
   use ExUnit.Case, async: true
@@ -40,6 +39,17 @@ defmodule Xqlite.NIF.PrepareTailLawTest do
     "; VALUES (2)"
   ]
 
+  @leads [
+    "",
+    ";",
+    "; ",
+    ";;",
+    " ; ; ",
+    "/* c */; ",
+    "-- c\n; ",
+    "\n;\n"
+  ]
+
   @no_statement [
     "",
     " ",
@@ -63,9 +73,13 @@ defmodule Xqlite.NIF.PrepareTailLawTest do
   end
 
   defp one_statement_with_tail do
-    StreamData.bind(StreamData.member_of(@statements), fn head ->
-      StreamData.map(StreamData.member_of(@tails), fn tail -> head <> tail end)
-    end)
+    gen all(
+          lead <- StreamData.member_of(@leads),
+          head <- StreamData.member_of(@statements),
+          tail <- StreamData.member_of(@tails)
+        ) do
+      lead <> head <> tail
+    end
   end
 
   defp nul_bearing do

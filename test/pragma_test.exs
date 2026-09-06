@@ -222,16 +222,17 @@ defmodule XqlitePragmaTest do
       refute Enum.empty?(rows)
     end
 
-    # A PRAGMA takes no bound parameter, so its string value is quoted in the
-    # statement text; the quote inside the value has to be doubled or the
-    # statement ends early.
-    test "put quotes a string value holding a single quote", %{db: db} do
-      assert {:ok, nil} = P.put(db, :not_a_pragma, "a'b", db_name: "main")
+    # A PRAGMA takes no bound parameter, so its argument is quoted into the
+    # statement text; a quote inside the argument has to be doubled or the
+    # statement ends early. `table_info` of a name no table carries answers
+    # with an empty list, while a broken quote is a syntax error instead.
+    test "get quotes an argument holding a double quote", %{db: db} do
+      assert {:ok, []} = P.get(db, :table_info, "a\"b", db_name: "main")
     end
 
-    property "put accepts a string value whatever characters it holds", %{db: db} do
+    property "get accepts an argument whatever characters it holds", %{db: db} do
       check all(value <- pragma_string_value(), max_runs: 2000) do
-        assert {:ok, nil} = P.put(db, :not_a_pragma, value, db_name: "main")
+        assert {:ok, []} = P.get(db, :table_info, value, db_name: "main")
       end
     end
   end
@@ -254,6 +255,36 @@ defmodule XqlitePragmaTest do
       assert {:error, {:invalid_pragma_name, "never_atomized_pragma_xyz"}} =
                P.put(db, "never_atomized_pragma_xyz", 1)
     end
+
+    # Denying the `:pragma` action turns any PRAGMA that really reaches SQLite
+    # into an authorization error, so a structured refusal here proves no
+    # statement was built at all.
+    test "an unknown name is refused before any statement reaches SQLite", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+
+      assert {:error, {:unknown_pragma, :no_such_pragma}} = P.put(db, :no_such_pragma, 1)
+      assert {:error, {:unknown_pragma, :no_such_pragma}} = P.get(db, :no_such_pragma)
+
+      assert {:error, {:unknown_pragma, :no_such_pragma}} =
+               P.get(db, :no_such_pragma, "arg")
+
+      assert {:error, {:authorization_denied, _code, _msg}} = P.get(db, :busy_timeout)
+    end
+
+    property "no name outside the schema reaches SQLite", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+
+      check all(name <- unknown_pragma_name(), max_runs: 2000) do
+        assert {:error, {:unknown_pragma, ^name}} = P.put(db, name, 1)
+        assert {:error, {:unknown_pragma, ^name}} = P.get(db, name)
+        assert {:error, {:unknown_pragma, ^name}} = P.get(db, name, "arg")
+      end
+    end
+  end
+
+  defp unknown_pragma_name do
+    StreamData.string(:printable, max_length: 10)
+    |> StreamData.map(&String.to_atom("xqlite_no_such_pragma_" <> &1))
   end
 
   defp pragma_string_value do

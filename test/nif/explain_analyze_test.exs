@@ -125,6 +125,23 @@ defmodule Xqlite.NIF.ExplainAnalyzeTest do
         assert report.stmt_counters.vm_step > 0
       end
 
+      test "statement counters describe the real run only", %{conn: conn} do
+        setup_t(conn)
+
+        assert {:ok, report} = NIF.explain_analyze(conn, "SELECT * FROM t", [])
+        assert report.stmt_counters.run == 1
+        assert report.stmt_counters.reprepare == 0
+      end
+
+      test "the query plan comes from the SQL as written, leading semicolon and all",
+           %{conn: conn} do
+        setup_t(conn)
+
+        assert {:ok, report} = NIF.explain_analyze(conn, "; SELECT * FROM t", [])
+        assert report.rows_produced == 3
+        assert length(report.query_plan) >= 1
+      end
+
       test "errors bubble up like a normal query error for bad SQL", %{conn: conn} do
         assert {:error, _} = NIF.explain_analyze(conn, "SELECT * FROM does_not_exist", [])
       end

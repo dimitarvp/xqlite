@@ -73,7 +73,7 @@ measurement and metadata key. A `:*` below stands for the span's
 | `[:xqlite, :savepoint, :create / :release / :rollback_to]` | `Xqlite.savepoint/2` etc. | `:name` |
 | `[:xqlite, :stream, :open, :*]` | `Xqlite.stream/4` opens a NIF stream | `:batch_size` |
 | `[:xqlite, :stream, :fetch]` | every batch (potentially thousands per stream) | `:stream_handle`, `:done?` |
-| `[:xqlite, :stream, :close]` | stream consumed / dropped | `:stream_handle`, `:reason` |
+| `[:xqlite, :stream, :close]` | stream consumed / dropped | `:stream_handle`, `:reason` (`:drained` / `:halted` / `:errored`), `:close_error` (only when the close itself failed) |
 | `[:xqlite, :backup, :*]` | `Xqlite.backup/3` | `:dest_path`, `:byte_size` |
 | `[:xqlite, :restore, :*]` | `Xqlite.restore/3` | `:src_path` |
 | `[:xqlite, :wal_checkpoint, :*]` | `Xqlite.wal_checkpoint/3` | `:mode`, `:log_pages`, `:checkpointed_pages`, `:busy?` |

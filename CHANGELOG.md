@@ -30,6 +30,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ORDER BY`, an aggregate or a recursive CTE inside one dirty NIF call
   with no way to stop it.
 
+### Changed
+
+- **`[:xqlite, :stream, :close]` reports how the stream ended.** Its
+  `:reason` was derived from the closing call, so a stream that hit a
+  fetch error, or one whose consumer stopped after four rows of a
+  thousand, both reported `:drained`. It is now the stream's own
+  outcome: `:drained` when every row was read, `:halted` when the
+  consumer stopped early, `:errored` when a fetch failed — in all three
+  `:on_error` modes, the raising one included. A failed close no longer
+  changes the reason; it adds `:close_error` to the metadata and keeps
+  the log line.
+- **`Xqlite.explain_analyze/3` builds its query plan without prefixing
+  text to your SQL.** It used to compile `EXPLAIN QUERY PLAN ` <> sql,
+  which turned SQL whose first statement is preceded by a bare semicolon
+  or a comment-then-semicolon into a syntax error, while `prepare`,
+  `query` and `stream` all accept it. The plan now comes from the
+  statement that runs for real, through `sqlite3_stmt_explain`. The
+  statement counters are zeroed before the real run, so `reprepare` and
+  `vm_step` describe your query and not the plan preview.
+- **`Xqlite.Pragma.put/4` and `get/3,4` refuse a name the schema does
+  not know.** Both now answer `{:error, {:unknown_pragma, name}}` before
+  any statement is built. SQLite parses an unknown PRAGMA and ignores
+  it, so `put/4` used to report success while changing nothing, and
+  `get/4` with an argument used to answer `{:ok, []}`. `{:unknown_pragma,
+  atom()}` and `{:invalid_pragma_value, map()}` join `Xqlite.error_reason/0`,
+  where neither was listed.
+- **The constraint `kind` is never `nil`.** A bare `SQLITE_CONSTRAINT`
+  and any extended constraint code this build does not know both report
+  `:constraint_violation`, which is what the code already did; `nil`
+  leaves `Xqlite.constraint_kind/0` and `:constraint_violation` joins it.
+- **`:no_such_table`, `:no_such_index`, `:table_exists` and
+  `:index_exists` carry the object name, not the whole message.** The
+  four payloads shrink to the text SQLite prints after its own prefix,
+  which is what the STRICT helpers in `Xqlite` already returned under
+  `:no_such_table`. Before and after, for a plain name, a `main.`
+  qualified one, and one quoted with a space in it:
+
+  | tag | before | after |
+  |---|---|---|
+  | `:no_such_table` | `"no such table: t"` / `"no such table: main.t"` / `"no such table: a b"` | `"t"` / `"main.t"` / `"a b"` |
+  | `:no_such_index` | `"no such index: i"` / `"no such index: main.i"` / `"no such index: a b"` | `"i"` / `"main.i"` / `"a b"` |
+  | `:table_exists` | `"table t already exists"` / `"table t already exists"` / `"table \"a b\" already exists"` | `"t"` / `"t"` / `"\"a b\""` |
+  | `:index_exists` | `"index i already exists"` / `"index i already exists"` / `"index a b already exists"` | `"i"` / `"i"` / `"a b"` |
+
+  The rendering is SQLite's own, and it is not uniform: only the two
+  "no such" messages carry a schema qualifier, and only the
+  `:table_exists` one re-quotes a name that needs quoting, because it
+  echoes the identifier token as the statement wrote it.
+
 ### Removed
 
 - **`Xqlite.enable_strict_mode/1` and `Xqlite.disable_strict_mode/1`

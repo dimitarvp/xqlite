@@ -68,8 +68,9 @@ pub fn core_explain_analyze<'a>(
         let db_handle = conn.handle();
         let stmt_ptr = crate::statement::prepare_one(db_handle, sql)?;
 
-        let result = match collect_query_plan(conn, sql) {
+        let result = match collect_query_plan(stmt_ptr.as_ptr(), db_handle) {
             Ok(query_plan) => {
+                reset_stmt_counters(stmt_ptr.as_ptr());
                 run_and_collect(env, stmt_ptr.as_ptr(), db_handle, params_term, query_plan)
             }
             Err(e) => Err(e),
@@ -146,35 +147,126 @@ fn bind_params<'a>(
     }
 }
 
-fn collect_query_plan(conn: &Connection, sql: &str) -> Result<Vec<QueryPlanRow>, XqliteError> {
-    let eqp_sql = format!("EXPLAIN QUERY PLAN {sql}");
-    let mut stmt = conn.prepare(&eqp_sql)?;
-    let col_count = stmt.column_count();
+// EXPLAIN QUERY PLAN is documented to return (id, parent, notused, detail).
+const QUERY_PLAN_COLUMNS: c_int = 4;
 
-    // EXPLAIN QUERY PLAN is documented to return (id, parent, notused, detail).
-    // Bail early if the shape ever changes.
-    if col_count != 4 {
+/// Reads the query plan out of the statement that will run for real, rather
+/// than out of a second statement compiled from prefixed SQL — a prefix
+/// turns SQL that legitimately starts with a semicolon or a comment into a
+/// syntax error, while every other entry point accepts it.
+///
+/// `sqlite3_stmt_explain` makes the statement behave as if its text began
+/// with EXPLAIN QUERY PLAN, and the plan rows are then stepped like any
+/// other rows. The order of the two restoring calls is not interchangeable:
+/// the mode of a statement that has begun running cannot be changed, so
+/// switching back before the reset fails with SQLITE_BUSY every time.
+///
+/// # Safety
+/// `stmt_ptr` must be a live prepared statement belonging to `db_handle`,
+/// and the connection Mutex must be held for the whole call.
+unsafe fn collect_query_plan(
+    stmt_ptr: *mut ffi::sqlite3_stmt,
+    db_handle: *mut ffi::sqlite3,
+) -> Result<Vec<QueryPlanRow>, XqliteError> {
+    // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
+    let explain_rc = unsafe { ffi::sqlite3_stmt_explain(stmt_ptr, 2) };
+    if explain_rc != ffi::SQLITE_OK {
+        // SAFETY: `db_handle` is valid and the Mutex is held (fn contract).
+        return Err(unsafe { ffi_error(db_handle, explain_rc) });
+    }
+
+    // SAFETY: the statement is now in EXPLAIN QUERY PLAN mode; the Mutex is held.
+    let plan = unsafe { step_query_plan(stmt_ptr, db_handle) };
+
+    // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
+    unsafe { ffi::sqlite3_reset(stmt_ptr) };
+    // SAFETY: as above, and the reset above makes the mode changeable again.
+    let restore_rc = unsafe { ffi::sqlite3_stmt_explain(stmt_ptr, 0) };
+
+    match (plan, restore_rc) {
+        (Ok(rows), ffi::SQLITE_OK) => Ok(rows),
+        // SAFETY: `db_handle` is valid and the Mutex is held (fn contract).
+        (Ok(_), rc) => Err(unsafe { ffi_error(db_handle, rc) }),
+        (Err(e), _) => Err(e),
+    }
+}
+
+/// # Safety
+/// `stmt_ptr` must be a live statement in EXPLAIN QUERY PLAN mode that has
+/// not been stepped yet, and the connection Mutex must be held.
+unsafe fn step_query_plan(
+    stmt_ptr: *mut ffi::sqlite3_stmt,
+    db_handle: *mut ffi::sqlite3,
+) -> Result<Vec<QueryPlanRow>, XqliteError> {
+    // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
+    let col_count = unsafe { ffi::sqlite3_column_count(stmt_ptr) };
+    if col_count != QUERY_PLAN_COLUMNS {
         return Err(XqliteError::CannotExecute(format!(
             "EXPLAIN QUERY PLAN returned {col_count} columns; expected 4"
         )));
     }
 
-    // `raw_query` skips rusqlite's "params match placeholders" check. The
-    // query plan shape does not depend on bound values (SQLite treats unbound
-    // placeholders as NULL), so we don't need to re-decode the user's params
-    // here just to pass validation.
-    let mut rows = stmt.raw_query();
     let mut out = Vec::new();
 
-    while let Some(row) = rows.next()? {
-        out.push(QueryPlanRow {
-            id: row.get::<_, i32>(0)?,
-            parent: row.get::<_, i32>(1)?,
-            detail: row.get::<_, String>(3)?,
-        });
+    loop {
+        // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
+        let rc = unsafe { ffi::sqlite3_step(stmt_ptr) };
+        match rc {
+            // SAFETY: the statement sits on a row of the four columns
+            // checked above, under the held Mutex.
+            ffi::SQLITE_ROW => out.push(unsafe { plan_row(stmt_ptr) }),
+            ffi::SQLITE_DONE => break,
+            // SAFETY: `db_handle` is valid and the Mutex is held (fn contract).
+            _ => return Err(unsafe { ffi_error(db_handle, rc) }),
+        }
     }
 
     Ok(out)
+}
+
+/// # Safety
+/// `stmt_ptr` must sit on an EXPLAIN QUERY PLAN row of four columns, with
+/// the connection Mutex held.
+unsafe fn plan_row(stmt_ptr: *mut ffi::sqlite3_stmt) -> QueryPlanRow {
+    // SAFETY: column 0 is inside the checked column count (fn contract).
+    let id = unsafe { ffi::sqlite3_column_int(stmt_ptr, 0) };
+    // SAFETY: column 1, as above.
+    let parent = unsafe { ffi::sqlite3_column_int(stmt_ptr, 1) };
+    // SAFETY: column 3, as above; the returned pointer is SQLite-owned and
+    // stays valid until the next step on this statement.
+    let detail_ptr = unsafe { ffi::sqlite3_column_text(stmt_ptr, 3) };
+    // SAFETY: `detail_ptr` is null or a NUL-terminated SQLite string, valid
+    // for the duration of the copy.
+    let detail = unsafe { cstr_to_string(detail_ptr.cast()) };
+
+    QueryPlanRow { id, parent, detail }
+}
+
+const STMT_STATUS_OPS: [c_int; 9] = [
+    ffi::SQLITE_STMTSTATUS_FULLSCAN_STEP,
+    ffi::SQLITE_STMTSTATUS_SORT,
+    ffi::SQLITE_STMTSTATUS_AUTOINDEX,
+    ffi::SQLITE_STMTSTATUS_VM_STEP,
+    ffi::SQLITE_STMTSTATUS_REPREPARE,
+    ffi::SQLITE_STMTSTATUS_RUN,
+    ffi::SQLITE_STMTSTATUS_FILTER_MISS,
+    ffi::SQLITE_STMTSTATUS_FILTER_HIT,
+    ffi::SQLITE_STMTSTATUS_MEMUSED,
+];
+
+/// Zeroes every counter the report carries, so it describes the statement's
+/// real run alone: switching into EXPLAIN QUERY PLAN mode and back
+/// re-prepares the statement and steps the plan, which would otherwise show
+/// up as a reprepare and as VM steps nobody asked for.
+///
+/// # Safety
+/// `stmt_ptr` must be valid and the connection Mutex must be held.
+unsafe fn reset_stmt_counters(stmt_ptr: *mut ffi::sqlite3_stmt) {
+    for op in STMT_STATUS_OPS {
+        // SAFETY: `stmt_ptr` is valid and the Mutex is held (fn contract);
+        // the reset flag reads the counter and sets it to zero.
+        unsafe { ffi::sqlite3_stmt_status(stmt_ptr, op, 1) };
+    }
 }
 
 /// # Safety

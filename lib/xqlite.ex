@@ -96,7 +96,7 @@ defmodule Xqlite do
           | :constraint_trigger
           | :constraint_unique
           | :constraint_vtab
-          | nil
+          | :constraint_violation
 
   @type sql_input_error :: %{
           code: integer(),
@@ -117,6 +117,19 @@ defmodule Xqlite do
           target_type: storage_class()
         }
 
+  @typedoc """
+  Every reason an xqlite call can fail with.
+
+  Four of them name a database object: `:no_such_table`, `:no_such_index`,
+  `:table_exists` and `:index_exists` carry the name SQLite itself printed,
+  not the sentence around it. SQLite writes that name in two ways and the
+  payload keeps whichever one it chose: the "no such" pair print the
+  resolved name with its quotes stripped and keep a schema qualifier when
+  the statement named one (`"main.people"`), while the "already exists" pair
+  never carry a qualifier — `:table_exists` echoes the identifier exactly as
+  the statement wrote it, quotes included, and `:index_exists` prints the
+  resolved name. The quoting is SQLite's own, not this library's.
+  """
   @type error_reason ::
           :connection_closed
           | :execute_returned_results
@@ -157,6 +170,7 @@ defmodule Xqlite do
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
           | {:invalid_pragma_name, String.t()}
+          | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
           | {:invalid_stream_handle, String.t()}
           | {:lock_error, String.t()}
           | {:no_such_index, String.t()}
@@ -168,6 +182,7 @@ defmodule Xqlite do
           | {:sqlite_failure, integer(), integer(), String.t() | nil}
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
+          | {:unknown_pragma, atom()}
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
           | {:utf8_error, non_neg_integer(), String.t()}

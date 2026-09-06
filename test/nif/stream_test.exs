@@ -105,9 +105,7 @@ defmodule Xqlite.NIF.StreamTest do
         sql = "SELECT id FROM non_existent_table_for_stream;"
         assert {:error, error_details} = NIF.stream_open(conn, sql, [], [])
 
-        assert {:no_such_table, msg_str} = error_details
-        assert is_binary(msg_str)
-        assert String.contains?(msg_str, "no such table")
+        assert {:no_such_table, "non_existent_table_for_stream"} = error_details
       end
 
       test "stream_open/4 with empty SQL string reports that there is no statement", %{

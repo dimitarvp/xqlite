@@ -28,6 +28,15 @@ fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
 /// SQLite answers whitespace- or comment-only SQL with SQLITE_OK and a NULL
 /// statement — no columns, no parameters, no SQL text — which rusqlite hands
 /// back as a `Statement` that steps straight into SQLITE_MISUSE.
+///
+/// `expanded_sql()` is NULL for that case and for two others: an expansion
+/// longer than SQLITE_LIMIT_LENGTH, and an allocation failure. The first
+/// cannot happen here. A statement with zero parameters expands to its own
+/// text, whose length `sqlite3_prepare` already checked against
+/// SQLITE_LIMIT_SQL_LENGTH; both limits sit at the same compiled default
+/// (one billion bytes) because nothing in this crate calls `sqlite3_limit`
+/// to lower either. That leaves an allocation failure, which fails the call
+/// whichever way it is reported.
 #[inline]
 fn reject_no_statement(stmt: &Statement<'_>) -> Result<(), XqliteError> {
     if stmt.column_count() == 0 && stmt.parameter_count() == 0 && stmt.expanded_sql().is_none()
