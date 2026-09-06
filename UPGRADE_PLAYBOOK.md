@@ -95,7 +95,7 @@ here is optional on a bump that changes the bundled SQLite version.
    nothing red shows — silence plus an unchanged surface is the
    passing grade, silence plus a changed surface needs a look.
 4. **Run the vendored integration census** and compare against the
-   recorded anchor (currently 440 passed / 26 excluded, exit 0). Any
+   recorded anchor (currently 441 passed / 25 excluded, exit 0). Any
    delta means either a behavior moved or an exclusion rationale went
    stale — `ECTO_INTEGRATION_TAGS.md` and `test/test_helper.exs`
    must be re-trued against reality, not patched to green.

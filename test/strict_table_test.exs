@@ -2,6 +2,8 @@ defmodule Xqlite.StrictTableTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  import Xqlite.TestUtil, only: [tmp_db_path: 1]
+
   alias XqliteNIF, as: NIF
 
   setup do
@@ -163,6 +165,48 @@ defmodule Xqlite.StrictTableTest do
 
       assert Enum.any?(violations, &(&1[:kind] == :unknown_declared_type))
       assert Enum.any?(violations, &(&1[:actual_type] == "text"))
+    end
+
+    test "a blob stored in a TEXT column is reported", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE texty (c TEXT)")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO texty VALUES (?)", [<<0xFF, 0xFE>>])
+
+      assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, "texty")
+      assert violation.rowid == 1
+      assert violation.column == "c"
+      assert violation.actual_type == "blob"
+      assert violation.expected_type == "TEXT"
+    end
+
+    test "text stored in a BLOB column is reported", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE blobby (c BLOB)")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO blobby VALUES (?)", ["still text"])
+
+      assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, "blobby")
+      assert violation.rowid == 1
+      assert violation.column == "c"
+      assert violation.actual_type == "text"
+      assert violation.expected_type == "BLOB"
+    end
+
+    property "the reported rows are the rows whose stored class the declared type refuses" do
+      check all(
+              declared <- StreamData.member_of(~w[INTEGER REAL TEXT BLOB ANY]),
+              values <- StreamData.list_of(strict_value(), max_length: 4),
+              max_runs: 2000
+            ) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+        assert :ok = NIF.execute_batch(conn, "CREATE TABLE probe (c #{declared})")
+
+        Enum.each(values, fn value ->
+          assert {:ok, 1} = NIF.execute(conn, "INSERT INTO probe VALUES (?)", [value])
+        end)
+
+        assert {:ok, violations} = Xqlite.check_strict_violations(conn, "probe")
+        assert reported_violations(violations) == oracle_violations(conn, declared)
+
+        assert :ok = NIF.close(conn)
+      end
     end
 
     property "the declared-type verdict is the verdict SQLite itself gives" do
@@ -593,6 +637,113 @@ defmodule Xqlite.StrictTableTest do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # main precedes the attached databases, and those follow attach order
+  # ---------------------------------------------------------------------------
+
+  describe "attached databases" do
+    test "a main table wins over its namesake in an attached database", %{conn: conn} do
+      attach(conn)
+      plant_table(conn, "main")
+      plant_table(conn, "att1")
+
+      assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, "t")
+      assert violation.rowid == planted_rowid("main")
+
+      clean_table(conn, "main")
+      clean_table(conn, "att1")
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "main", "t")
+      refute strict?(conn, "att1", "t")
+    end
+
+    test "a table only in an attached database converts inside that schema", %{conn: conn} do
+      attach(conn)
+      plant_table(conn, "att2")
+
+      assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, "t")
+      assert violation.rowid == planted_rowid("att2")
+      assert violation.column == "c"
+      assert violation.actual_type == "text"
+
+      clean_table(conn, "att2")
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "att2", "t")
+      assert {:ok, %{rows: [[7]]}} = NIF.query(conn, ~s|SELECT c FROM "att2"."t"|, [])
+    end
+
+    property "an unqualified name resolves in temp, then main, then attach order" do
+      check all(schemas <- schema_subset(), max_runs: 2000) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+        attach(conn)
+        Enum.each(schemas, &plant_table(conn, &1))
+        resolved = resolved_schema(schemas)
+
+        assert {:ok, [violation]} = Xqlite.check_strict_violations(conn, "t")
+        assert violation.rowid == planted_rowid(resolved)
+        assert violation.column == "c"
+        assert violation.actual_type == "text"
+        assert violation.expected_type == "INTEGER"
+
+        Enum.each(schemas, &clean_table(conn, &1))
+        assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+        Enum.each(schemas, fn schema ->
+          assert strict?(conn, schema, "t") == (schema == resolved)
+        end)
+
+        assert :ok = NIF.close(conn)
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # the rebuild's own transaction closes before the helper returns
+  # ---------------------------------------------------------------------------
+
+  describe "the rebuild's transaction" do
+    test "the rebuild leaves the connection out of any transaction", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE settled (id INTEGER);")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO settled VALUES (?)", [1])
+      assert {:ok, false} = Xqlite.transaction_status(conn)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "settled")
+
+      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert strict?(conn, "settled")
+    end
+
+    test "a second connection to the same file sees the rebuilt table" do
+      path = tmp_db_path("strict_rebuild")
+
+      assert {:ok, writer} = NIF.open(path)
+      on_exit(fn -> NIF.close(writer) end)
+
+      assert :ok =
+               NIF.execute_batch(
+                 writer,
+                 "CREATE TABLE shared (id INTEGER, email TEXT);" <>
+                   "CREATE UNIQUE INDEX shared_email ON shared(email);"
+               )
+
+      assert {:ok, 1} = NIF.execute(writer, "INSERT INTO shared VALUES (?, ?)", [1, "a@b.com"])
+      assert :ok = Xqlite.enable_strict_table(writer, "shared")
+
+      assert {:ok, reader} = NIF.open(path)
+      on_exit(fn -> NIF.close(reader) end)
+
+      assert strict?(reader, "shared")
+      assert {:ok, %{rows: [[1, "a@b.com"]]}} = NIF.query(reader, "SELECT * FROM shared", [])
+
+      assert {:error, {:constraint_violation, :constraint_unique, _}} =
+               NIF.execute(reader, "INSERT INTO shared VALUES (?, ?)", [2, "a@b.com"])
+    end
+  end
+
   defp quoted(name), do: ~s|"| <> String.replace(name, ~s|"|, ~s|""|) <> ~s|"|
 
   defp temp_create_sql(conn, table) do
@@ -627,6 +778,95 @@ defmodule Xqlite.StrictTableTest do
     assert {:ok, %{rows: [[n]]}} = NIF.query(conn, "SELECT count(*) FROM #{quoted(table)}", [])
     n
   end
+
+  defp attach(conn) do
+    assert {:ok, _} = NIF.execute(conn, "ATTACH ':memory:' AS att1", [])
+    assert {:ok, _} = NIF.execute(conn, "ATTACH ':memory:' AS att2", [])
+  end
+
+  # One clean row and one row SQLite would refuse under STRICT, at rowids only
+  # this schema uses, so a reported violation names the schema it came from.
+  defp plant_table(conn, schema) do
+    assert {:ok, _} = NIF.execute(conn, "CREATE TABLE #{schema}.t (c INTEGER)", [])
+    insert_at(conn, schema, planted_rowid(schema) - 1, 7)
+    insert_at(conn, schema, planted_rowid(schema), "oops")
+  end
+
+  defp insert_at(conn, schema, rowid, value) do
+    sql = "INSERT INTO #{schema}.t (rowid, c) VALUES (?, ?)"
+    assert {:ok, 1} = NIF.execute(conn, sql, [rowid, value])
+  end
+
+  defp clean_table(conn, schema) do
+    sql = "DELETE FROM #{schema}.t WHERE typeof(c) = 'text'"
+    assert {:ok, 1} = NIF.execute(conn, sql, [])
+  end
+
+  defp planted_rowid(schema), do: 10 * (schema_order(schema) + 1)
+
+  defp schema_order("temp"), do: 0
+  defp schema_order("main"), do: 1
+  defp schema_order("att1"), do: 2
+  defp schema_order("att2"), do: 3
+
+  defp resolved_schema(schemas), do: Enum.min_by(schemas, &schema_order/1)
+
+  defp schema_subset do
+    ~w[temp main att1 att2]
+    |> subsets()
+    |> Enum.reject(&(&1 == []))
+    |> StreamData.member_of()
+  end
+
+  defp subsets([]), do: [[]]
+
+  defp subsets([head | tail]) do
+    rest = subsets(tail)
+    rest ++ Enum.map(rest, &[head | &1])
+  end
+
+  # A binary parameter binds as text when it is valid UTF-8 and as a blob when
+  # it is not, so the invalid ones are the only way to store a blob from here.
+  defp strict_value do
+    StreamData.one_of([
+      StreamData.integer(),
+      StreamData.scale(StreamData.float(), fn _size -> 3 end),
+      StreamData.member_of(["", "12", "1.5", "abc", <<0>>, "a" <> <<0>> <> "b", "1e3", "  "]),
+      StreamData.member_of([<<255>>, <<0xFF, 0xFE>>, <<0xC3, 0x28>>, <<0, 255>>]),
+      StreamData.constant(nil)
+    ])
+  end
+
+  defp reported_violations(violations) do
+    violations
+    |> Enum.map(&violation_tuple/1)
+    |> Enum.sort()
+  end
+
+  defp violation_tuple(violation) do
+    {violation.rowid, violation.column, violation.actual_type, violation.expected_type}
+  end
+
+  defp oracle_violations(conn, declared) do
+    assert {:ok, %{rows: rows}} = NIF.query(conn, "SELECT rowid, typeof(c) FROM probe", [])
+
+    rows
+    |> Enum.flat_map(&outside_accepted(&1, declared))
+    |> Enum.sort()
+  end
+
+  defp outside_accepted([rowid, actual], declared) do
+    case actual in accepted_classes(declared) do
+      true -> []
+      false -> [{rowid, "c", actual, declared}]
+    end
+  end
+
+  defp accepted_classes("INTEGER"), do: ["integer", "null"]
+  defp accepted_classes("REAL"), do: ["real", "integer", "null"]
+  defp accepted_classes("TEXT"), do: ["text", "integer", "real", "null"]
+  defp accepted_classes("BLOB"), do: ["blob", "null"]
+  defp accepted_classes("ANY"), do: ["integer", "real", "text", "blob", "null"]
 
   defp name_char do
     StreamData.member_of([
