@@ -123,6 +123,13 @@ defmodule Xqlite.StrictTableTest do
       NIF.execute(conn, "CREATE TABLE empty (id INTEGER PRIMARY KEY, val INTEGER)")
       assert {:ok, []} = Xqlite.check_strict_violations(conn, "empty")
     end
+
+    test "a table whose every column is untyped has nothing to check", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE untyped (a, b, c)")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO untyped VALUES (1, 'two', X'03')")
+
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "untyped")
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -236,6 +243,13 @@ defmodule Xqlite.StrictTableTest do
       {:ok, result} = NIF.query(conn, "SELECT * FROM loose", [])
       assert result.rows == [[1, "text"]]
     end
+
+    test "an FTS5 virtual table is refused", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, "CREATE VIRTUAL TABLE t_fts USING fts5(title, body)")
+
+      assert {:error, {:table_exists, _detail}} = Xqlite.enable_strict_table(conn, "t_fts")
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -332,10 +346,39 @@ defmodule Xqlite.StrictTableTest do
       assert {:error, :null_byte_in_string} = Xqlite.enable_strict_table(conn, name)
     end
 
+    test "a newline between the name and the column list survives the rebuild", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE users\n(id INTEGER)")
+      assert :ok = Xqlite.enable_strict_table(conn, "users")
+
+      assert {:ok, ~s|CREATE TABLE "users"\n(id INTEGER) STRICT|} =
+               Xqlite.get_create_sql(conn, "users")
+    end
+
+    test "a tab between the name and the column list survives the rebuild", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE users\t(id INTEGER)")
+      assert :ok = Xqlite.enable_strict_table(conn, "users")
+
+      assert {:ok, ~s|CREATE TABLE "users"\t(id INTEGER) STRICT|} =
+               Xqlite.get_create_sql(conn, "users")
+    end
+
     property "any name SQLite accepts round-trips through both helpers" do
       check all(scenario <- scenario(), max_runs: 2000) do
         assert {:ok, conn} = NIF.open_in_memory(":memory:")
         run_scenario(conn, scenario)
+        assert :ok = NIF.close(conn)
+      end
+    end
+
+    property "whitespace between the name and the column list survives the rebuild" do
+      check all(gap <- whitespace_gap(), max_runs: 2000) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+        assert :ok = NIF.execute_batch(conn, "CREATE TABLE users" <> gap <> "(id INTEGER)")
+        assert :ok = Xqlite.enable_strict_table(conn, "users")
+
+        assert {:ok, ~s|CREATE TABLE "users"| <> gap <> "(id INTEGER) STRICT"} ==
+                 Xqlite.get_create_sql(conn, "users")
+
         assert :ok = NIF.close(conn)
       end
     end
@@ -393,6 +436,16 @@ defmodule Xqlite.StrictTableTest do
       ?é,
       ?ß
     ])
+  end
+
+  # SQLite's tokenizer takes exactly these five bytes as whitespace between
+  # the table name and the column list; a vertical tab is an unrecognized
+  # token there, so no generated run can hold one.
+  defp whitespace_gap do
+    [" ", "\t", "\n", "\r", "\f"]
+    |> StreamData.member_of()
+    |> StreamData.list_of(min_length: 1, max_length: 3)
+    |> StreamData.map(&Enum.join/1)
   end
 
   defp hostile_name do

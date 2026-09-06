@@ -198,6 +198,16 @@ jobs:
       - name: Run tests
         run: mix test.seq
 
+      # The "Format & lints" job already runs `cargo test` on ubuntu. One
+      # macOS and one Windows entry pick up the platforms it never covers,
+      # reusing this job's checkout, toolchain and Cargo cache.
+      - name: Rust tests
+        if: >-
+          matrix.elixir == '1.20' && matrix.otp == '29' &&
+          (matrix.os == 'macos-latest' || matrix.os == 'windows-2022')
+        working-directory: native/xqlitenif
+        run: cargo test
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

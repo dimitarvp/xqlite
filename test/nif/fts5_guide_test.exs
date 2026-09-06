@@ -1,19 +1,38 @@
 defmodule Xqlite.NIF.Fts5GuideTest do
-  # Executes the code path from `guides/full_text_search.md` so the guide
-  # cannot rot silently: the same CREATE VIRTUAL TABLE / trigger / MATCH /
-  # bm25 / highlight / snippet / operational-command SQL the guide publishes.
-  # If FTS5 stops being compiled in, or any snippet's SQL stops working, this
-  # test fails. Kept faithful to the guide (identical SQL and NIF calls);
-  # parameterised over every connection opener for good measure.
+  @moduledoc """
+  Executes `guides/full_text_search.md` instead of restating it.
+
+  Every fenced block of the guide runs, in the order the guide prints
+  it, against one connection: the `elixir` blocks through
+  `Code.eval_string/2` with the bindings carried from one block to the
+  next, the `sql` block through `XqliteNIF.query/3`. The guide's
+  opening line sits in a fence of its own, which this test skips — the
+  connection comes from the opener harness instead. Blocks that name
+  `Repo` belong to the Ecto adapter and cannot run here; their count is
+  asserted, so a second unrunnable block cannot slip in unnoticed.
+
+  Beside that, three tests pin guide claims that live in prose rather
+  than in a fence: the match language, the operational commands, the
+  tokenizer options, and what SQLite does with `STRICT` and column
+  constraints on an FTS5 table.
+  """
   use ExUnit.Case, async: true
 
   import Xqlite.ConnCase
 
   alias XqliteNIF, as: NIF
 
+  @guide "guides/full_text_search.md"
+  @opener_line "{:ok, conn} = Xqlite.open_in_memory()"
+  @sql_fence_param "schedulers"
+  @adapter_fences 1
+
   for_each_opener "fts5_guide" do
-    test "a searchable table in two statements + external-content triggers", %{conn: conn} do
-      # FTS5 must be compiled in (the guide's opening claim).
+    test "every fenced block of the guide runs, in order", %{conn: conn} do
+      run_guide(conn, File.read!(@guide))
+    end
+
+    test "FTS5 is compiled in, as the guide's opening line claims", %{conn: conn} do
       assert {:ok, %{rows: [[opts]]}} =
                NIF.query(
                  conn,
@@ -22,76 +41,6 @@ defmodule Xqlite.NIF.Fts5GuideTest do
                )
 
       assert opts =~ "ENABLE_FTS5"
-
-      # A searchable table in two statements.
-      :ok =
-        NIF.execute_batch(conn, """
-        CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT, body TEXT);
-        CREATE VIRTUAL TABLE articles_fts USING fts5(
-          title, body,
-          content = 'articles',
-          content_rowid = 'id'
-        );
-        """)
-
-      # External-content sync triggers (insert / delete / update).
-      :ok =
-        NIF.execute_batch(conn, """
-        CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN
-          INSERT INTO articles_fts(rowid, title, body)
-          VALUES (new.id, new.title, new.body);
-        END;
-        CREATE TRIGGER articles_ad AFTER DELETE ON articles BEGIN
-          INSERT INTO articles_fts(articles_fts, rowid, title, body)
-          VALUES ('delete', old.id, old.title, old.body);
-        END;
-        CREATE TRIGGER articles_au AFTER UPDATE ON articles BEGIN
-          INSERT INTO articles_fts(articles_fts, rowid, title, body)
-          VALUES ('delete', old.id, old.title, old.body);
-          INSERT INTO articles_fts(rowid, title, body)
-          VALUES (new.id, new.title, new.body);
-        END;
-        """)
-
-      # Querying: the guide's exact INSERT + MATCH-with-bm25-rank join.
-      {:ok, _} =
-        NIF.execute(
-          conn,
-          "INSERT INTO articles (title, body) VALUES (?1, ?2)",
-          ["SQLite and the BEAM", "Cancellable queries keep schedulers happy"]
-        )
-
-      assert {:ok, %{rows: [[1, "SQLite and the BEAM", rank]]}} =
-               NIF.query(
-                 conn,
-                 """
-                 SELECT a.id, a.title, bm25(articles_fts) AS rank
-                 FROM articles_fts
-                 JOIN articles a ON a.id = articles_fts.rowid
-                 WHERE articles_fts MATCH ?1
-                 ORDER BY rank
-                 """,
-                 ["schedulers"]
-               )
-
-      # bm25 is "lower is better"; a single match ranks negative (best-first).
-      assert is_float(rank)
-
-      # Snippets and highlighting are built in.
-      assert {:ok, %{rows: [[title_hl, excerpt]]}} =
-               NIF.query(
-                 conn,
-                 """
-                 SELECT highlight(articles_fts, 0, '<b>', '</b>') AS title_hl,
-                        snippet(articles_fts, 1, '<b>', '</b>', '…', 12) AS excerpt
-                 FROM articles_fts
-                 WHERE articles_fts MATCH ?1
-                 """,
-                 ["schedulers"]
-               )
-
-      assert title_hl == "SQLite and the BEAM"
-      assert excerpt =~ "<b>schedulers</b>"
     end
 
     test "match language + operational commands", %{conn: conn} do
@@ -155,5 +104,64 @@ defmodule Xqlite.NIF.Fts5GuideTest do
                  "CREATE VIRTUAL TABLE t_tri USING fts5(x, tokenize = 'trigram');"
                )
     end
+
+    test "an FTS5 table takes neither STRICT nor a column constraint", %{conn: conn} do
+      assert {:error, {:sql_input_error, %{code: 1}}} =
+               NIF.execute_batch(conn, "CREATE VIRTUAL TABLE t_strict USING fts5(a) STRICT")
+
+      for column <- [
+            "a NOT NULL",
+            "a PRIMARY KEY",
+            "a CHECK (a <> '')",
+            "a UNIQUE",
+            "a INTEGER"
+          ] do
+        assert {:error, {:sqlite_failure, 1, 1, _detail}} =
+                 NIF.execute_batch(conn, "CREATE VIRTUAL TABLE t_c USING fts5(#{column})")
+      end
+    end
   end
+
+  defp run_guide(conn, guide) do
+    blocks = fenced_blocks(guide)
+
+    assert Enum.count(blocks, &opener_block?/1) == 1
+    assert Enum.count(blocks, &adapter_block?/1) == @adapter_fences
+
+    Enum.reduce(blocks, [conn: conn], fn block, bindings ->
+      run_block(conn, block, bindings)
+    end)
+  end
+
+  defp fenced_blocks(guide) do
+    Regex.scan(~r/```(\w+)\n(.*?)```/s, guide, capture: :all_but_first)
+  end
+
+  defp run_block(_conn, ["elixir", body] = block, bindings) do
+    case skip?(block) do
+      true -> bindings
+      false -> eval_block(body, bindings)
+    end
+  end
+
+  defp run_block(conn, ["sql", body], bindings) do
+    assert {:ok, _} = NIF.query(conn, String.trim(body), [@sql_fence_param])
+    bindings
+  end
+
+  defp run_block(_conn, [lang, _body], _bindings),
+    do: flunk("the guide has a #{lang} fence and this test has no runner for it")
+
+  defp eval_block(body, bindings) do
+    {_value, carried} = Code.eval_string(body, bindings)
+    carried
+  end
+
+  defp skip?(block), do: opener_block?(block) or adapter_block?(block)
+
+  defp opener_block?(["elixir", body]), do: String.trim(body) == @opener_line
+  defp opener_block?(_block), do: false
+
+  defp adapter_block?(["elixir", body]), do: String.contains?(body, "Repo")
+  defp adapter_block?(_block), do: false
 end

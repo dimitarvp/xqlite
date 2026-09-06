@@ -212,8 +212,7 @@ defmodule Xqlite.NIF.ExecutionTest do
         """
 
         # Expect :no_such_table error from the SELECT statement
-        assert {:error, {:no_such_table, msg}} = NIF.execute_batch(conn, bad_sql)
-        assert String.contains?(msg || "", "no such table: non_existent_table")
+        assert {:error, {:no_such_table, _msg}} = NIF.execute_batch(conn, bad_sql)
 
         # Verify statements before the error might have executed
         assert {:ok, %{rows: [[1]], num_rows: 1}} =

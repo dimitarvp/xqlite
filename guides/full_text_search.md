@@ -8,9 +8,13 @@ extension loading, no extra process — it's already there.
 
 ## A searchable table in two statements
 
+Everything below runs against one connection:
+
 ```elixir
 {:ok, conn} = Xqlite.open_in_memory()
+```
 
+```elixir
 :ok =
   XqliteNIF.execute_batch(conn, """
   CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT, body TEXT);
@@ -89,6 +93,34 @@ FROM articles_fts
 WHERE articles_fts MATCH ?1
 ```
 
+The triggers keep the index following the table: an update re-indexes
+the row under its new text, a delete takes it out of the index.
+
+```elixir
+{:ok, 1} =
+  XqliteNIF.execute(
+    conn,
+    "UPDATE articles SET body = ?1 WHERE id = ?2",
+    ["Cancellable queries keep reductions flowing", 1]
+  )
+
+{:ok, %{rows: [[1]]}} =
+  XqliteNIF.query(
+    conn,
+    "SELECT rowid FROM articles_fts WHERE articles_fts MATCH ?1",
+    ["reductions"]
+  )
+
+{:ok, 1} = XqliteNIF.execute(conn, "DELETE FROM articles WHERE id = ?1", [1])
+
+{:ok, %{rows: []}} =
+  XqliteNIF.query(
+    conn,
+    "SELECT rowid FROM articles_fts WHERE articles_fts MATCH ?1",
+    ["reductions"]
+  )
+```
+
 ## Through the Ecto adapter
 
 Everything above is plain SQL, so with
@@ -121,5 +153,23 @@ into the query string.
 - **Size/speed knobs.** `'optimize'` merges the b-trees after heavy
   write churn; `detail = 'column'` or `'none'` shrink the index if you
   don't need phrase/NEAR queries.
-- FTS5 tables ignore `STRICT` and constraints — they are indexes, not
-  data owners. Keep constraints on the content table.
+- FTS5 refuses `STRICT` and column constraints rather than ignoring
+  them. A `STRICT` suffix on `CREATE VIRTUAL TABLE` is a syntax error,
+  and `NOT NULL`, `PRIMARY KEY`, `CHECK`, `UNIQUE` or a type name on a
+  column is rejected when the table is created. An FTS5 column is a
+  bare name and nothing more — the table is an index, not a data
+  owner. Types and constraints belong on the content table.
+
+`detail` is chosen in the `CREATE VIRTUAL TABLE` statement:
+
+```elixir
+:ok =
+  XqliteNIF.execute_batch(conn, """
+  CREATE VIRTUAL TABLE articles_fts_small USING fts5(
+    title, body,
+    content = 'articles',
+    content_rowid = 'id',
+    detail = 'none'
+  );
+  """)
+```

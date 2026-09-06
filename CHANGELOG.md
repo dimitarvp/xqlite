@@ -54,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipping them put a `mix verify` task under a generic name into
   every dependent project's task list. They stay in the repository
   for contributors.
+- **`cargo test` runs on macOS and Windows in CI.** The crate's own
+  unit tests ran in one ubuntu job and nowhere else, so a platform
+  difference in the Rust layer could only be found by a user. The
+  Tests job now runs them on the newest Elixir/OTP pair of its macOS
+  and Windows entries as well, reusing that job's toolchain and cache.
+- **`cargo clippy` now fails on an `unsafe` block that has no
+  `// SAFETY:` comment, whatever flags it is given.** The lint was set
+  to warn, so only the project's own gate — `cargo clippy -- -D
+  warnings` — turned it into a failure, and a plain `cargo clippy` let
+  it through. It is set to deny. `cargo build` is unaffected either
+  way: rustc ignores `clippy::` lints.
 
 ### Fixed
 
@@ -293,6 +304,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicate rowid, for one), which names neither table nor column;
   that shape keeps returning empty details and is now pinned by
   tests so it cannot start guessing.
+
+- **With telemetry compiled out, `span_with_stop_metadata/3` no longer
+  rejects the three-element block shape.** The macro lets its block
+  return `{value, stop_metadata}` or
+  `{value, extra_measurements, stop_metadata}`, and the enabled build
+  accepts both. The disabled build matched only the two-element shape,
+  so the three-element one raised `CaseClauseError` — in the default
+  build, where telemetry is off. Both builds now accept the same two
+  shapes and reject everything else. No emission site inside xqlite
+  returns the three-element shape, so the library itself was never
+  affected; a caller writing its own span was.
+
+- **A branch of the STRICT rewrite that could never run is gone.**
+  `Xqlite.enable_strict_table/2` rebuilds a table by rewriting the
+  table's own name token in the `CREATE TABLE` statement SQLite has
+  stored, and the scanner carried a branch for a schema-qualified name
+  such as `main.users`. SQLite strips the schema qualifier before
+  storing the statement, so that branch was unreachable. Behaviour is
+  unchanged. What the rewrite does preserve is now pinned by a
+  property: whatever whitespace stood between the table name and the
+  column list — one to three of the five bytes SQLite accepts there —
+  comes back byte for byte after the conversion.
+
+- **The full-text-search guide is executed by the test suite, not
+  restated by it.** The test held its own copy of the guide's SQL, so
+  editing a snippet in `guides/full_text_search.md` could not fail
+  anything. It now reads the guide at test time and runs every fenced
+  block in order against one connection, carrying bindings from block
+  to block; only the Ecto adapter's block is skipped, and the number of
+  skipped blocks is asserted, so a second unrunnable block cannot slip
+  in. The guide's opening `Xqlite.open_in_memory/0` line moved into a
+  fence of its own, which the test skips and supplies itself. Three
+  claims of the guide were not covered anywhere and now are: the
+  `detail = 'column'` / `'none'` knob, which gets a snippet; the sync
+  triggers, which the guide now shows keeping the index right through
+  an update and a delete; and `STRICT` on an FTS5 table, which the
+  guide had wrong. FTS5 refuses `STRICT` and column constraints
+  outright — a `STRICT` suffix is a syntax error, and `NOT NULL`,
+  `PRIMARY KEY`, `CHECK`, `UNIQUE` or a type name on a column is
+  rejected when the table is created — rather than accepting and
+  ignoring them, as the guide claimed.
 
 ## [0.11.0] - 2026-08-20
 

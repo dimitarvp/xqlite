@@ -7,9 +7,10 @@ defmodule Xqlite.Telemetry do
   > Telemetry is gated by a **compile-time** flag. Default: `false`.
   > When disabled, every emission site in xqlite compiles to a no-op —
   > there are no `:telemetry.execute/3` or `:telemetry.span/3` calls in
-  > the bytecode at all. Zero per-call overhead. Designed for
-  > resource-constrained environments (Nerves, embedded, hot loops)
-  > where the cost of even an unused `:telemetry.execute/3` matters.
+  > the bytecode at all, nothing is timed and no handler runs.
+  > Designed for resource-constrained environments (Nerves, embedded,
+  > hot loops) where the cost of even an unused `:telemetry.execute/3`
+  > matters.
   >
   > To enable, set this in your application's `config/config.exs` and
   > rebuild xqlite (`mix deps.compile xqlite --force`):
@@ -534,22 +535,31 @@ defmodule Xqlite.Telemetry do
     end
 
     @doc """
-    Like `span/3` but lets the block return `{value, stop_metadata}`,
-    so the `:stop` event can carry metadata that wasn't known at
-    `:start`. With telemetry compiled out only that two-element shape
-    is accepted; the `{value, extra_measurements, stop_metadata}` shape
-    needs the enabled macro, which has measurements to merge them into.
+    Like `span/3` but lets the block return `{value, stop_metadata}` or
+    `{value, extra_measurements, stop_metadata}`, so the `:stop` event
+    can carry numbers and metadata that weren't known at `:start`.
+
+    With telemetry compiled out there is no event to carry them, so
+    both shapes are unwrapped to their value. The accepted shapes are
+    the same either way: a block that evaluates to anything else fails
+    in both builds.
     """
     defmacro span_with_stop_metadata(event_name, start_metadata, do: block) do
       quote do
         _ = unquote(event_name)
         _ = unquote(start_metadata)
-
-        case unquote(block) do
-          {value, _stop_metadata} -> value
-        end
+        unquote(__MODULE__).span_block_value(unquote(block))
       end
     end
+
+    # Unwrapping in a function rather than in a `case` inside the macro:
+    # the compiler knows each call site's block shape exactly, so an
+    # inlined `case` over both shapes leaves one clause provably dead
+    # there — a warning, and warnings are errors here.
+    @doc false
+    @spec span_block_value(term()) :: term()
+    def span_block_value({value, _extra_measurements, _stop_metadata}), do: value
+    def span_block_value({value, _stop_metadata}), do: value
   end
 
   @doc """

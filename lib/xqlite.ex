@@ -611,10 +611,11 @@ defmodule Xqlite do
   end
 
   # sqlite_master keeps the CREATE TABLE statement exactly as it was written,
-  # so the table's own name token can be bare, "double-quoted", `backticked`
-  # or [bracketed], and may carry a schema qualifier. The row was selected by
-  # name, so that token is this table's by construction: replacing it needs no
-  # pattern built from the caller's name.
+  # minus the schema qualifier, which SQLite strips before storing it. So the
+  # table's own name token can be bare, "double-quoted", `backticked` or
+  # [bracketed] and nothing else. The row was selected by name, so that token
+  # is this table's by construction: replacing it needs no pattern built from
+  # the caller's name.
   defp rename_table_token(create_sql, quoted_tmp) do
     case Regex.run(~r/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?/i, create_sql) do
       [prefix] -> replace_name_token(create_sql, byte_size(prefix), quoted_tmp)
@@ -646,7 +647,6 @@ defmodule Xqlite do
     end
   end
 
-  defp scan_dotted("." <> tail, taken), do: scan_name_token(tail, taken + 1)
   defp scan_dotted(_rest, taken), do: {:ok, taken}
 
   defp take_identifier("\"" <> tail), do: take_double_quoted(tail, 1)
