@@ -91,10 +91,11 @@ Windows). A missing one locks that target's users out: re-run its job.
 ## Checksums
 
 `RustlerPrecompiled` verifies every downloaded binary against
-`checksum-Elixir.XqliteNIF.exs`, which ships inside the Hex package
-(`package/0` lists `checksum-*.exs`). Regenerate it after the workflow
-finishes, then commit it — deleting it first makes a run that wrote
-nothing visible, instead of leaving the old file to be published:
+`checksum-Elixir.XqliteNIF.exs`, which is git-ignored and ships inside the
+Hex package from the working tree (`package/0` lists `checksum-*.exs`).
+Regenerate it after the workflow finishes and before `mix hex.publish` —
+deleting it first makes a run that wrote nothing visible, instead of
+leaving the old file to be published:
 
 ```bash
 rm -f checksum-Elixir.XqliteNIF.exs
@@ -102,7 +103,8 @@ mix clean && mix compile
 mix rustler_precompiled.download XqliteNIF --all --print --no-config
 ```
 
-- `mix clean && mix compile` is not optional. Compiling `XqliteNIF` writes
+- `mix clean && mix compile` is not optional (`mix run -e ':ok'` compiles
+  too, where a hook redirects a bare compile). Compiling `XqliteNIF` writes
   a metadata file into the user cache — version, base URL, target list —
   and the download task reads that cache, not your source, so a stale one
   fetches the previous release's binaries. That compile needs no checksum
