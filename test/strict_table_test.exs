@@ -744,6 +744,314 @@ defmodule Xqlite.StrictTableTest do
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # the rebuild drops and recreates the table, so everything SQLite attaches to
+  # a table — foreign-key actions on its children, its triggers, the views that
+  # read it, its rowids — has to come back
+  # ---------------------------------------------------------------------------
+
+  describe "what the rebuild carries across" do
+    for {label, clause} <- [
+          {"ON DELETE CASCADE", "ON DELETE CASCADE"},
+          {"ON DELETE SET NULL", "ON DELETE SET NULL"},
+          {"ON DELETE SET DEFAULT", "ON DELETE SET DEFAULT"},
+          {"ON DELETE RESTRICT", "ON DELETE RESTRICT"},
+          {"no action clause", ""}
+        ] do
+      test "a child declaring #{label} keeps its rows when the parent converts",
+           %{conn: conn} do
+        plant_parent_and_child(conn, unquote(clause))
+
+        assert :ok = Xqlite.enable_strict_table(conn, "p")
+
+        assert strict?(conn, "p")
+
+        assert {:ok, %{rows: [[1, 1], [2, 1]]}} =
+                 NIF.query(conn, "SELECT id, p_id FROM ch", [])
+
+        assert {:ok, %{rows: []}} = NIF.query(conn, "PRAGMA foreign_key_check", [])
+        assert pragma_flag(conn, "foreign_keys") == 1
+      end
+    end
+
+    test "a trigger on the table survives and still fires", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER);
+               CREATE TABLE log (n INTEGER);
+               CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN INSERT INTO log VALUES (new.c); END;
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "t")
+
+      assert {:ok,
+              %{
+                rows: [
+                  [
+                    "CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN INSERT INTO log VALUES (new.c); END"
+                  ]
+                ]
+              }} =
+               NIF.query(conn, "SELECT sql FROM main.sqlite_master WHERE type='trigger'", [])
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (?)", [5])
+      assert {:ok, %{rows: [[5]]}} = NIF.query(conn, "SELECT n FROM log", [])
+    end
+
+    test "a temporary trigger on a main table survives and still fires", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE mt (c INTEGER);
+               CREATE TABLE mlog (n INTEGER);
+               CREATE TEMP TRIGGER mt_ai AFTER INSERT ON main.mt
+                 BEGIN INSERT INTO mlog VALUES (new.c); END;
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "mt")
+
+      assert strict?(conn, "mt")
+
+      assert {:ok, %{rows: [["mt_ai", "mt"]]}} =
+               NIF.query(conn, "SELECT name, tbl_name FROM temp.sqlite_master", [])
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO mt VALUES (?)", [8])
+      assert {:ok, %{rows: [[8]]}} = NIF.query(conn, "SELECT n FROM mlog", [])
+    end
+
+    test "a trigger on another table that writes the table still fires", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER);
+               CREATE TABLE other (n INTEGER);
+               CREATE TRIGGER other_ai AFTER INSERT ON other
+                 BEGIN INSERT INTO t VALUES (new.n); END;
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO other VALUES (?)", [4])
+      assert {:ok, %{rows: [[4]]}} = NIF.query(conn, "SELECT c FROM t", [])
+    end
+
+    test "the views that read the table keep answering", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER);
+               CREATE VIEW v AS SELECT c FROM t;
+               CREATE VIEW v2 AS SELECT c FROM v;
+               CREATE TEMP VIEW tv AS SELECT c FROM main.t;
+               INSERT INTO t VALUES (1), (2);
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "t")
+      assert {:ok, %{rows: [[1], [2]]}} = NIF.query(conn, "SELECT c FROM v", [])
+      assert {:ok, %{rows: [[1], [2]]}} = NIF.query(conn, "SELECT c FROM v2", [])
+      assert {:ok, %{rows: [[1], [2]]}} = NIF.query(conn, "SELECT c FROM tv", [])
+    end
+
+    test "a table in an attached database keeps a usable index", %{conn: conn} do
+      attach(conn)
+
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE att1.t (c INTEGER);
+               CREATE UNIQUE INDEX att1.t_c ON t(c);
+               INSERT INTO att1.t VALUES (1), (2);
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "att1", "t")
+
+      assert {:error, {:constraint_violation, :constraint_unique, _}} =
+               NIF.execute(conn, "INSERT INTO att1.t VALUES (?)", [1])
+
+      assert {:ok, %{rows: plan_rows}} =
+               NIF.query(conn, "EXPLAIN QUERY PLAN SELECT c FROM att1.t WHERE c = 1", [])
+
+      assert Enum.any?(plan_rows, &plan_names_index?/1)
+    end
+
+    test "a gap in the rowids survives", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER);
+               INSERT INTO t (rowid, c) VALUES (1, 1), (3, 3);
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert {:ok, %{rows: [[1, 1], [3, 3]]}} =
+               NIF.query(conn, "SELECT rowid, c FROM t ORDER BY rowid", [])
+    end
+
+    test "a table with generated columns converts", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE g (
+                 a INTEGER,
+                 b INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL,
+                 e INTEGER GENERATED ALWAYS AS (a * 3) STORED
+               );
+               INSERT INTO g (a) VALUES (1), (2);
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "g")
+
+      assert strict?(conn, "g")
+
+      assert {:ok, %{rows: [[1, 1, 2, 3], [2, 2, 4, 6]]}} =
+               NIF.query(conn, "SELECT rowid, a, b, e FROM g ORDER BY rowid", [])
+    end
+
+    test "a self-referencing foreign key converts", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE s (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES s(id));
+               INSERT INTO s VALUES (1, NULL), (2, 1);
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "s")
+
+      assert strict?(conn, "s")
+      assert {:ok, %{rows: []}} = NIF.query(conn, "PRAGMA foreign_key_check", [])
+      assert row_count(conn, "s") == 2
+    end
+
+    test "every index shape comes back byte-identical", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER, d TEXT);
+               CREATE UNIQUE INDEX "i ""x"".y" ON t(c);
+               CREATE INDEX i_partial ON t(c) WHERE c > 1;
+               CREATE INDEX i_expression ON t(length(d));
+               CREATE INDEX [i desc] ON t(c DESC);
+               INSERT INTO t VALUES (1, 'a'), (2, 'b');
+               """)
+
+      before = master_rows(conn, "main")
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert master_rows(conn, "main") ==
+               Enum.map(
+                 before,
+                 &strict_master_row(&1, "t", ~s|CREATE TABLE "t" (c INTEGER, d TEXT)|)
+               )
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # the refusals that keep the rebuild from destroying what it cannot rebuild
+  # ---------------------------------------------------------------------------
+
+  describe "the rebuild's refusals" do
+    test "a call inside a caller's transaction is refused and leaves it open",
+         %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TABLE t (c INTEGER); CREATE TABLE keep (c INTEGER);"
+               )
+
+      assert {:ok, _} = NIF.execute(conn, "BEGIN IMMEDIATE", [])
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO keep VALUES (?)", [1])
+
+      assert {:error, :transaction_in_progress} = Xqlite.enable_strict_table(conn, "t")
+
+      assert {:ok, true} = Xqlite.transaction_status(conn)
+      assert row_count(conn, "keep") == 1
+      assert {:ok, _} = NIF.execute(conn, "COMMIT", [])
+      assert row_count(conn, "keep") == 1
+      refute strict?(conn, "t")
+    end
+
+    test "an existing rebuild table is refused by its bare name", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (c INTEGER);
+               CREATE TABLE t_xqlite_strict_rebuild (c INTEGER);
+               """)
+
+      assert {:error, {:table_exists, "t_xqlite_strict_rebuild"}} =
+               Xqlite.enable_strict_table(conn, "t")
+
+      refute strict?(conn, "t")
+      assert {:ok, false} = Xqlite.transaction_status(conn)
+    end
+
+    test "a table declaring rowid, _rowid_ and oid is refused", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 ~s|CREATE TABLE t ("RowID" TEXT, "_RowID_" TEXT, "OID" TEXT);|
+               )
+
+      assert {:error, {:rowid_shadowed, "t"}} = Xqlite.enable_strict_table(conn, "t")
+
+      refute strict?(conn, "t")
+    end
+
+    test "all three names declared with one of them the rowid alias converts",
+         %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (rowid INTEGER PRIMARY KEY, _rowid_ TEXT, oid TEXT);
+               INSERT INTO t VALUES (10, 'a', 'x'), (30, 'c', 'z');
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+
+      assert strict?(conn, "t")
+
+      assert {:ok, %{rows: [[10, "a", "x"], [30, "c", "z"]]}} =
+               NIF.query(conn, ~s|SELECT "rowid", "_rowid_", "oid" FROM t ORDER BY 1|, [])
+    end
+
+    test "the pragmas the rebuild switches are restored after a failure", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(
+                 conn,
+                 "CREATE TABLE g (a INTEGER, b NUMERIC GENERATED ALWAYS AS (a * 2) VIRTUAL);"
+               )
+
+      assert {:error, _reason} = Xqlite.enable_strict_table(conn, "g")
+
+      refute strict?(conn, "g")
+      assert pragma_flag(conn, "foreign_keys") == 1
+      assert pragma_flag(conn, "legacy_alter_table") == 0
+      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert tables(conn) == ["g"]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # the two laws: what a successful rebuild preserves, and what a refused one
+  # leaves alone
+  # ---------------------------------------------------------------------------
+
+  describe "the rebuild's laws" do
+    property "a successful rebuild preserves the schema, the rows and the pragmas" do
+      check all(layout <- layout(), max_runs: 2000) do
+        assert {:ok, conn} = Xqlite.open_in_memory()
+        run_layout(conn, layout)
+        assert :ok = NIF.close(conn)
+      end
+    end
+
+    property "a refused rebuild leaves the schema, the rows and the pragmas alone" do
+      check all(refusal <- refusal(), max_runs: 2000) do
+        assert {:ok, conn} = Xqlite.open_in_memory()
+        run_refusal(conn, refusal)
+        assert :ok = NIF.close(conn)
+      end
+    end
+  end
+
   defp quoted(name), do: ~s|"| <> String.replace(name, ~s|"|, ~s|""|) <> ~s|"|
 
   defp temp_create_sql(conn, table) do
@@ -1083,5 +1391,404 @@ defmodule Xqlite.StrictTableTest do
     assert strict?(conn, scenario.table)
     assert tables(conn) == [scenario.table]
     assert row_count(conn, scenario.table) == length(scenario.rows)
+  end
+
+  @law_schemas ["main", "temp", "att1", "att2"]
+
+  defp plant_parent_and_child(conn, clause) do
+    assert :ok =
+             NIF.execute_batch(conn, """
+             CREATE TABLE p (id INTEGER PRIMARY KEY);
+             CREATE TABLE ch (id INTEGER PRIMARY KEY,
+               p_id INTEGER DEFAULT 1 REFERENCES p(id) #{clause});
+             INSERT INTO p VALUES (1);
+             INSERT INTO ch VALUES (1, 1), (2, 1);
+             """)
+  end
+
+  defp pragma_flag(conn, name) do
+    assert {:ok, %{rows: [[value]]}} = NIF.query(conn, "PRAGMA " <> name, [])
+    value
+  end
+
+  defp set_foreign_keys(conn, on?) do
+    assert {:ok, _} = NIF.execute(conn, "PRAGMA foreign_keys = " <> law_on_off(on?), [])
+  end
+
+  defp law_on_off(true), do: "ON"
+  defp law_on_off(false), do: "OFF"
+
+  defp law_flag(true), do: 1
+  defp law_flag(false), do: 0
+
+  defp master_rows(conn, schema) do
+    sql =
+      "SELECT type, name, tbl_name, sql FROM " <>
+        quoted(schema) <> ".sqlite_master ORDER BY type, name"
+
+    assert {:ok, %{rows: rows}} = NIF.query(conn, sql, [])
+    rows
+  end
+
+  defp strict_master_row(["table", name, tbl_name, _sql], name, create_sql),
+    do: ["table", name, tbl_name, create_sql <> " STRICT"]
+
+  defp strict_master_row(row, _table, _create_sql), do: row
+
+  defp plan_names_index?([_id, _parent, _notused, detail]), do: String.contains?(detail, "t_c")
+  defp plan_names_index?(_row), do: false
+
+  # ---------------------------------------------------------------------------
+  # the preservation law's generated layout: a table with a rowid gap, and any
+  # combination of the things SQLite attaches to a table around it
+  # ---------------------------------------------------------------------------
+
+  defp layout do
+    gen all(
+          schema <- StreamData.member_of(@law_schemas),
+          table <- StreamData.member_of(["t", "t x", ~s|t"x|, "t]y"]),
+          spelling <- StreamData.member_of(spellings(table)),
+          columns <- law_columns(),
+          alias? <- StreamData.boolean(),
+          index <- StreamData.member_of([:none, :unique, :partial, :expression, :desc]),
+          trigger? <- StreamData.boolean(),
+          view? <- StreamData.boolean(),
+          child <- law_child(alias?),
+          foreign_keys <- StreamData.boolean()
+        ) do
+      %{
+        schema: schema,
+        table: table,
+        spelling: spelling,
+        columns: columns,
+        alias?: alias?,
+        index: index,
+        trigger?: trigger?,
+        view?: view?,
+        child: child,
+        foreign_keys: foreign_keys
+      }
+    end
+  end
+
+  defp law_columns do
+    hostile_name()
+    |> StreamData.list_of(min_length: 1, max_length: 2)
+    |> StreamData.map(&law_distinct/1)
+  end
+
+  defp law_distinct(names), do: Enum.uniq_by(names, &String.downcase/1)
+
+  # A child can only name a parent key, so a foreign key needs the alias column.
+  defp law_child(true),
+    do: StreamData.member_of([:none, :cascade, :set_null, :set_default, :restrict, :no_action])
+
+  defp law_child(false), do: StreamData.constant(:none)
+
+  defp run_layout(conn, layout) do
+    attach(conn)
+    set_foreign_keys(conn, layout.foreign_keys)
+
+    layout
+    |> layout_statements()
+    |> run_statements(conn)
+
+    before = snapshot(conn)
+    fk_before = fk_check(conn, layout.schema)
+    view_before = law_view_rows(conn, layout)
+
+    assert :ok = Xqlite.enable_strict_table(conn, layout.table)
+
+    assert strict?(conn, layout.schema, layout.table)
+    assert snapshot(conn) == converted(before, layout)
+    assert fk_check(conn, layout.schema) == fk_before
+    assert law_view_rows(conn, layout) == view_before
+    assert pragma_flag(conn, "foreign_keys") == law_flag(layout.foreign_keys)
+    assert pragma_flag(conn, "legacy_alter_table") == 0
+    assert {:ok, false} = Xqlite.transaction_status(conn)
+    assert_trigger_fires(conn, layout)
+  end
+
+  defp run_statements(statements, conn) do
+    Enum.each(statements, fn
+      {sql, params} -> assert {:ok, _} = NIF.execute(conn, sql, params)
+      other -> flunk("unbuildable statement: " <> inspect(other))
+    end)
+  end
+
+  defp layout_statements(layout) do
+    [{law_create_statement(layout), []}] ++
+      law_row_statements(layout) ++
+      law_index_statements(layout) ++
+      law_trigger_statements(layout) ++
+      law_view_statements(layout) ++
+      law_child_statements(layout)
+  end
+
+  defp law_create_statement(layout) do
+    rendered = render(layout.table, layout.spelling)
+    law_create_sql(layout, quoted(layout.schema) <> "." <> rendered)
+  end
+
+  defp law_create_sql(layout, rendered),
+    do: "CREATE TABLE " <> rendered <> " (" <> law_column_defs(layout) <> ")"
+
+  defp law_column_defs(layout) do
+    layout.columns
+    |> Enum.with_index()
+    |> Enum.map_join(", ", &law_column_def(&1, layout))
+  end
+
+  defp law_column_def({name, 0}, %{alias?: true}), do: quoted(name) <> " INTEGER PRIMARY KEY"
+  defp law_column_def({name, 0}, _layout), do: quoted(name) <> " INTEGER"
+  defp law_column_def({name, _index}, _layout), do: quoted(name) <> " TEXT"
+
+  defp law_object(layout, name), do: quoted(layout.schema) <> "." <> quoted(name)
+
+  defp law_row_statements(layout) do
+    names = ["rowid" | layout.columns]
+    columns = Enum.map_join(names, ", ", &quoted/1)
+    marks = Enum.map_join(names, ", ", fn _name -> "?" end)
+
+    sql =
+      "INSERT INTO " <>
+        law_object(layout, layout.table) <> " (" <> columns <> ") VALUES (" <> marks <> ")"
+
+    Enum.map(law_row_values(layout), fn values -> {sql, Enum.take(values, length(names))} end)
+  end
+
+  defp law_row_values(%{alias?: true}), do: [[1, 1, "a"], [3, 3, "b"]]
+  defp law_row_values(_layout), do: [[1, 10, "a"], [3, 30, "b"]]
+
+  defp law_index_statements(%{index: :none}), do: []
+
+  defp law_index_statements(layout) do
+    column = quoted(List.last(layout.columns))
+    sql = law_index_sql(layout.index, law_object(layout, "ix"), quoted(layout.table), column)
+    [{sql, []}]
+  end
+
+  defp law_index_sql(:unique, name, table, column),
+    do: "CREATE UNIQUE INDEX " <> name <> " ON " <> table <> "(" <> column <> ")"
+
+  defp law_index_sql(:partial, name, table, column),
+    do:
+      "CREATE INDEX " <>
+        name <> " ON " <> table <> "(" <> column <> ") WHERE " <> column <> " IS NOT NULL"
+
+  defp law_index_sql(:expression, name, table, column),
+    do: "CREATE INDEX " <> name <> " ON " <> table <> "(length(" <> column <> "))"
+
+  defp law_index_sql(:desc, name, table, column),
+    do: "CREATE INDEX " <> name <> " ON " <> table <> "(" <> column <> " DESC)"
+
+  defp law_trigger_statements(%{trigger?: false}), do: []
+
+  defp law_trigger_statements(layout) do
+    [
+      {"CREATE TABLE " <> law_object(layout, "log") <> " (n INTEGER)", []},
+      {"CREATE TRIGGER " <>
+         law_object(layout, "tr") <>
+         " AFTER INSERT ON " <>
+         quoted(layout.table) <> " BEGIN INSERT INTO \"log\" VALUES (1); END", []}
+    ]
+  end
+
+  defp law_view_statements(%{view?: false}), do: []
+
+  defp law_view_statements(layout) do
+    sql =
+      "CREATE VIEW " <>
+        law_object(layout, "v") <>
+        " AS SELECT " <> quoted(List.first(layout.columns)) <> " FROM " <> quoted(layout.table)
+
+    [{sql, []}]
+  end
+
+  defp law_child_statements(%{child: :none}), do: []
+
+  defp law_child_statements(layout) do
+    create =
+      "CREATE TABLE " <>
+        law_object(layout, "ch") <>
+        " (id INTEGER PRIMARY KEY, p INTEGER DEFAULT 1 REFERENCES " <>
+        quoted(layout.table) <>
+        "(" <> quoted(List.first(layout.columns)) <> ") " <> law_fk_action(layout.child) <> ")"
+
+    insert = "INSERT INTO " <> law_object(layout, "ch") <> " VALUES (?, ?)"
+
+    [{create, []}, {insert, [1, 1]}, {insert, [2, 1]}]
+  end
+
+  defp law_fk_action(:cascade), do: "ON DELETE CASCADE"
+  defp law_fk_action(:set_null), do: "ON DELETE SET NULL"
+  defp law_fk_action(:set_default), do: "ON DELETE SET DEFAULT"
+  defp law_fk_action(:restrict), do: "ON DELETE RESTRICT"
+  defp law_fk_action(:no_action), do: ""
+
+  defp assert_trigger_fires(_conn, %{trigger?: false}), do: :ok
+
+  defp assert_trigger_fires(conn, layout) do
+    logged = law_row_count(conn, layout.schema, "log")
+    {sql, params} = law_extra_row(layout)
+
+    assert {:ok, 1} = NIF.execute(conn, sql, params)
+    assert law_row_count(conn, layout.schema, "log") == logged + 1
+  end
+
+  defp law_extra_row(layout) do
+    columns = Enum.map_join(layout.columns, ", ", &quoted/1)
+    marks = Enum.map_join(layout.columns, ", ", fn _name -> "?" end)
+
+    sql =
+      "INSERT INTO " <>
+        law_object(layout, layout.table) <> " (" <> columns <> ") VALUES (" <> marks <> ")"
+
+    {sql, Enum.take([99, "z"], length(layout.columns))}
+  end
+
+  defp law_row_count(conn, schema, table) do
+    sql = "SELECT count(*) FROM " <> quoted(schema) <> "." <> quoted(table)
+    assert {:ok, %{rows: [[n]]}} = NIF.query(conn, sql, [])
+    n
+  end
+
+  defp law_view_rows(_conn, %{view?: false}), do: :no_view
+
+  defp law_view_rows(conn, layout) do
+    assert {:ok, %{rows: rows}} =
+             NIF.query(conn, "SELECT * FROM " <> law_object(layout, "v"), [])
+
+    rows
+  end
+
+  defp fk_check(conn, schema) do
+    sql = "PRAGMA " <> quoted(schema) <> ".foreign_key_check"
+    assert {:ok, %{rows: rows}} = NIF.query(conn, sql, [])
+    rows
+  end
+
+  # SQLite is the oracle for both halves: its own catalogue, and every table's
+  # rows read with the rowid in front so a renumbering cannot hide.
+  defp snapshot(conn) do
+    Map.new(@law_schemas, fn schema -> {schema, schema_snapshot(conn, schema)} end)
+  end
+
+  defp schema_snapshot(conn, schema) do
+    master = master_rows(conn, schema)
+    {master, law_table_rows(conn, schema, master)}
+  end
+
+  defp law_table_rows(conn, schema, master) do
+    master
+    |> Enum.flat_map(&master_table_name/1)
+    |> Map.new(fn name -> {name, rows_with_rowid(conn, schema, name)} end)
+  end
+
+  defp master_table_name(["table", name | _rest]), do: [name]
+  defp master_table_name(_row), do: []
+
+  defp rows_with_rowid(conn, schema, table) do
+    sql = "SELECT rowid, * FROM " <> quoted(schema) <> "." <> quoted(table) <> " ORDER BY 1"
+
+    case NIF.query(conn, sql, []) do
+      {:ok, %{rows: rows}} -> rows
+      {:error, reason} -> reason
+    end
+  end
+
+  defp converted(snapshot, layout) do
+    Map.update!(snapshot, layout.schema, fn
+      {master, rows} -> {law_strict_master(master, layout), rows}
+      other -> other
+    end)
+  end
+
+  defp law_strict_master(master, layout) do
+    create_sql = law_create_sql(layout, quoted(layout.table))
+    Enum.map(master, &strict_master_row(&1, layout.table, create_sql))
+  end
+
+  # ---------------------------------------------------------------------------
+  # the refusal law's domain: one setup per refusal the helpers can produce
+  # ---------------------------------------------------------------------------
+
+  defp refusal do
+    gen all(
+          kind <-
+            StreamData.member_of([
+              :violations,
+              :not_a_plain_table,
+              :without_rowid,
+              :rowid_shadowed,
+              :table_exists
+            ]),
+          schema <- StreamData.member_of(@law_schemas),
+          foreign_keys <- StreamData.boolean()
+        ) do
+      %{kind: kind, schema: schema, foreign_keys: foreign_keys}
+    end
+  end
+
+  defp run_refusal(conn, refusal) do
+    attach(conn)
+    set_foreign_keys(conn, refusal.foreign_keys)
+
+    refusal
+    |> refusal_statements()
+    |> run_statements(conn)
+
+    before = snapshot(conn)
+
+    assert {:error, reason} = Xqlite.enable_strict_table(conn, "t")
+    assert refused?(reason, refusal.kind)
+
+    assert snapshot(conn) == before
+    assert pragma_flag(conn, "foreign_keys") == law_flag(refusal.foreign_keys)
+    assert pragma_flag(conn, "legacy_alter_table") == 0
+    assert {:ok, false} = Xqlite.transaction_status(conn)
+  end
+
+  defp refused?({:strict_violations, [_ | _]}, :violations), do: true
+  defp refused?({:not_a_plain_table, %{table: "t", type: :view}}, :not_a_plain_table), do: true
+  defp refused?({:without_rowid_unsupported, "t"}, :without_rowid), do: true
+  defp refused?({:rowid_shadowed, "t"}, :rowid_shadowed), do: true
+  defp refused?({:table_exists, "t_xqlite_strict_rebuild"}, :table_exists), do: true
+  defp refused?(_reason, _kind), do: false
+
+  defp refusal_statements(%{kind: :violations} = refusal) do
+    [
+      {"CREATE TABLE " <> law_object(refusal, "t") <> " (c INTEGER)", []},
+      {"INSERT INTO " <> law_object(refusal, "t") <> " VALUES (?)", ["oops"]}
+    ]
+  end
+
+  defp refusal_statements(%{kind: :not_a_plain_table} = refusal) do
+    [
+      {"CREATE TABLE " <> law_object(refusal, "base") <> " (c INTEGER)", []},
+      {"CREATE VIEW " <> law_object(refusal, "t") <> ~s| AS SELECT c FROM "base"|, []}
+    ]
+  end
+
+  defp refusal_statements(%{kind: :without_rowid} = refusal) do
+    sql =
+      "CREATE TABLE " <> law_object(refusal, "t") <> " (id INTEGER PRIMARY KEY) WITHOUT ROWID"
+
+    [{sql, []}]
+  end
+
+  defp refusal_statements(%{kind: :rowid_shadowed} = refusal) do
+    sql =
+      "CREATE TABLE " <>
+        law_object(refusal, "t") <> ~s| ("rowid" TEXT, "_rowid_" TEXT, "oid" TEXT)|
+
+    [{sql, []}]
+  end
+
+  defp refusal_statements(%{kind: :table_exists} = refusal) do
+    [
+      {"CREATE TABLE " <> law_object(refusal, "t") <> " (c INTEGER)", []},
+      {"CREATE TABLE " <> law_object(refusal, "t_xqlite_strict_rebuild") <> " (c INTEGER)", []}
+    ]
   end
 end

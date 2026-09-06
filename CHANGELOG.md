@@ -5,6 +5,70 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`Xqlite.enable_strict_table/2` no longer deletes the rows of child
+  tables.** With `PRAGMA foreign_keys` on — the default `Xqlite.open/2`
+  sets — the rebuild's `DROP TABLE` performed the implicit delete SQLite
+  does there, and that delete ran every child's `ON DELETE` action: a
+  child declaring `CASCADE` lost every row that pointed at the converted
+  table, and the helper still answered `:ok`; a child declaring
+  `RESTRICT` or nothing at all failed the drop with a bare constraint
+  violation instead. The rebuild now reads `foreign_keys`, switches it
+  off before its transaction opens (SQLite ignores the pragma inside
+  one) and puts it back afterwards on every path, so the drop runs no
+  action and every child keeps its rows.
+- **Triggers survive the rebuild.** `DROP TABLE` drops the table's
+  triggers, and only index statements were saved and replayed, so every
+  trigger on the table was gone after a successful conversion. Triggers
+  are now saved and replayed beside the indexes — including a
+  `TEMP` trigger, which lives in the `temp` schema with the table's bare
+  name and which the drop deletes there without a word. Each statement
+  is replayed into the schema it came from, with the same bytes SQLite
+  stored.
+- **A table that a view reads converts.** The rename at the end of the
+  rebuild re-parses every view and trigger in the schema to carry the
+  new name into them, and one still naming the dropped original made it
+  fail with `{:sqlite_failure, 1, 1, "error in view ..."}`. The rename
+  now runs with `PRAGMA legacy_alter_table` on, which renames the table
+  and nothing else; the views keep their text, which already names the
+  final name. That pragma is read first and put back too.
+- **A table in an attached database keeps its indexes.** SQLite stores
+  `CREATE INDEX` without the schema qualifier it was written with, so
+  the replayed statement resolved the bare table name through `temp`
+  and `main` first and answered `{:no_such_table, "main.t"}` — an
+  attached table with any index could not be converted at all. Every
+  replayed statement now carries the schema it came from.
+- **The rowids survive.** The copy was `INSERT INTO tmp SELECT * FROM t`,
+  which let SQLite hand out fresh rowids, so a table without an
+  `INTEGER PRIMARY KEY` alias came back renumbered 1..n and any gap was
+  gone. The copy now names the rowid on both sides. A table declaring
+  all three of `rowid`, `_rowid_` and `oid` as columns, none of them the
+  alias, has no spelling left to name it with and is refused with the
+  new `{:rowid_shadowed, table}`.
+- **A call made inside the caller's own transaction is refused.** The
+  helper's `BEGIN` failed and its error path then ran `ROLLBACK`, which
+  threw away the caller's transaction and every row it had not
+  committed. It now answers the new bare `:transaction_in_progress`
+  before touching anything, and rolls back only a transaction it opened
+  itself.
+- **Generated columns and self-referencing foreign keys convert.**
+  `SELECT *` supplied a value for every generated column, which SQLite
+  refused with a column-count mismatch; the copy's column list now comes
+  from `PRAGMA table_info`, which leaves them out. A table whose foreign
+  key points at itself failed the drop for the same reason the child
+  tables did, and converts now.
+- **The temporary-table collision names the table plainly.** An existing
+  `<table>_xqlite_strict_rebuild` reached SQLite's own `CREATE TABLE`
+  error, whose payload echoed the quoted token
+  (`{:table_exists, "\"t_xqlite_strict_rebuild\""}`). It is now refused
+  before the transaction with the bare name.
+
+`:transaction_in_progress` and `{:rowid_shadowed, String.t()}` join
+`Xqlite.error_reason/0`.
+
 ## [0.12.0] - 2026-09-06
 
 ### Added

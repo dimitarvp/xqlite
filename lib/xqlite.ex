@@ -140,6 +140,7 @@ defmodule Xqlite do
           | :null_byte_in_string
           | :operation_cancelled
           | :statement_finalized
+          | :transaction_in_progress
           | {:authorization_denied, integer(), String.t()}
           | {:cannot_convert_atom_to_string, String.t()}
           | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
@@ -177,6 +178,7 @@ defmodule Xqlite do
           | {:no_such_table, String.t()}
           | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
           | {:read_only_database, integer(), String.t()}
+          | {:rowid_shadowed, String.t()}
           | {:schema_changed, integer(), String.t()}
           | {:schema_parsing_error, String.t(), {:unexpected_value, String.t()}}
           | {:sql_input_error, sql_input_error()}
@@ -598,6 +600,27 @@ defmodule Xqlite do
   `WITHOUT ROWID` tables are not supported and return
   `{:error, {:without_rowid_unsupported, table}}`.
 
+  The rebuild puts back everything SQLite hangs off a table: the rowids, gaps
+  included; the indexes; the triggers, a `TEMP` trigger — which lives in the
+  `temp` schema, not in the table's — included; and the views that read the
+  table keep answering. The rows of child tables are left alone:
+  `PRAGMA foreign_keys` is switched off around the rebuild, so dropping the
+  original runs no `ON DELETE` action, and `PRAGMA legacy_alter_table` is
+  switched on around the rename, so a view still naming the original does not
+  fail it. Both pragmas are read first and put back afterwards, on every path.
+  The copy's column list comes from `PRAGMA table_info`, so a table with
+  generated columns converts too.
+
+  The rebuild needs a transaction of its own. Called while the caller has one
+  open it returns `{:error, :transaction_in_progress}` and touches nothing —
+  its rollback would discard the caller's uncommitted rows. Two more refusals
+  come before any statement runs: an existing
+  `<table>_xqlite_strict_rebuild` in the same schema returns
+  `{:error, {:table_exists, name}}`, and a table declaring all three of
+  `rowid`, `_rowid_` and `oid` as columns without one of them being the
+  `INTEGER PRIMARY KEY` alias returns `{:error, {:rowid_shadowed, table}}`,
+  because with every spelling taken the copy cannot name the rowid.
+
   ## Options
 
   None currently.
@@ -681,26 +704,129 @@ defmodule Xqlite do
   # except the `RENAME TO` target: SQLite takes a bare name there and calls a
   # qualified one a syntax error.
   defp rebuild_as_strict(conn, schema, table, original_create_sql) do
-    quoted_table = Xqlite.Pragma.quote_name(table)
-    qualified_table = qualified_name(schema, table)
-    qualified_tmp = qualified_name(schema, "#{table}_xqlite_strict_rebuild")
-    strict_sql = strict_create_sql(original_create_sql, qualified_tmp)
+    with :ok <- reject_open_transaction(conn),
+         :ok <- reject_tmp_collision(conn, schema, tmp_table_name(table)),
+         {:ok, plan} <- rebuild_plan(conn, schema, table, original_create_sql),
+         {:ok, pragmas} <- rebuild_pragmas(conn),
+         :ok <- suspend_foreign_keys(conn, pragmas) do
+      conn
+      |> run_rebuild(plan)
+      |> restore_pragmas(conn, pragmas)
+    end
+  end
 
-    with {:ok, index_sqls} <- get_index_sqls(conn, schema, table),
-         :ok <- exec(conn, "BEGIN IMMEDIATE"),
-         :ok <- exec(conn, strict_sql),
-         :ok <- exec(conn, "INSERT INTO #{qualified_tmp} SELECT * FROM #{qualified_table}"),
-         :ok <- exec(conn, "DROP TABLE #{qualified_table}"),
-         :ok <- exec(conn, "ALTER TABLE #{qualified_tmp} RENAME TO #{quoted_table}"),
-         :ok <- recreate_indexes(conn, index_sqls),
-         :ok <- exec(conn, "COMMIT") do
-      :ok
-    else
+  defp tmp_table_name(table), do: table <> "_xqlite_strict_rebuild"
+
+  defp reject_open_transaction(conn) do
+    case transaction_status(conn) do
+      {:ok, false} -> :ok
+      {:ok, true} -> {:error, :transaction_in_progress}
+      {:error, _} = err -> err
+    end
+  end
+
+  # A trigger's name never collides with a table's; every other object's does.
+  defp reject_tmp_collision(conn, schema, tmp_name) do
+    sql =
+      "SELECT 1 FROM #{Xqlite.Pragma.quote_name(schema)}.sqlite_master " <>
+        "WHERE name=? AND type<>'trigger'"
+
+    case XqliteNIF.query(conn, sql, [tmp_name]) do
+      {:ok, %{rows: []}} -> :ok
+      {:ok, %{rows: _rows}} -> {:error, {:table_exists, tmp_name}}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp rebuild_plan(conn, schema, table, original_create_sql) do
+    with {:ok, columns} <- copy_column_list(conn, schema, table),
+         {:ok, replays} <- saved_object_sqls(conn, schema, table) do
+      {:ok, rebuild_statements(schema, table, original_create_sql, columns, replays)}
+    end
+  end
+
+  defp rebuild_statements(schema, table, original_create_sql, columns, replays) do
+    qualified_table = qualified_name(schema, table)
+    qualified_tmp = qualified_name(schema, tmp_table_name(table))
+
+    %{
+      create: strict_create_sql(original_create_sql, qualified_tmp),
+      copy:
+        "INSERT INTO #{qualified_tmp} (#{columns}) SELECT #{columns} FROM #{qualified_table}",
+      drop: "DROP TABLE #{qualified_table}",
+      rename: "ALTER TABLE #{qualified_tmp} RENAME TO #{Xqlite.Pragma.quote_name(table)}",
+      replays: replays
+    }
+  end
+
+  defp run_rebuild(conn, plan) do
+    case exec(conn, "BEGIN IMMEDIATE") do
+      :ok -> conn |> rebuild_steps(plan) |> settle_rebuild(conn)
+      {:error, _} = err -> err
+    end
+  end
+
+  # Without `legacy_alter_table` the rename re-parses every view and trigger in
+  # the schema, and one still naming the dropped original fails the statement.
+  defp rebuild_steps(conn, plan) do
+    with :ok <- exec(conn, plan.create),
+         :ok <- exec(conn, plan.copy),
+         :ok <- exec(conn, plan.drop),
+         :ok <- exec(conn, "PRAGMA legacy_alter_table = ON"),
+         :ok <- exec(conn, plan.rename) do
+      replay_objects(conn, plan.replays)
+    end
+  end
+
+  defp settle_rebuild(:ok, conn), do: exec(conn, "COMMIT")
+
+  defp settle_rebuild({:error, _} = err, conn) do
+    exec(conn, "ROLLBACK")
+    err
+  end
+
+  defp rebuild_pragmas(conn) do
+    with {:ok, foreign_keys} <- pragma_flag(conn, "foreign_keys"),
+         {:ok, legacy_alter_table} <- pragma_flag(conn, "legacy_alter_table") do
+      {:ok, %{foreign_keys: foreign_keys, legacy_alter_table: legacy_alter_table}}
+    end
+  end
+
+  defp pragma_flag(conn, name) do
+    case XqliteNIF.query(conn, "PRAGMA " <> name, []) do
+      {:ok, %{rows: [[value]]}} ->
+        {:ok, value == 1}
+
+      {:ok, %{rows: rows}} ->
+        {:error, {:schema_parsing_error, name, {:unexpected_value, inspect(rows)}}}
+
       {:error, _} = err ->
-        exec(conn, "ROLLBACK")
         err
     end
   end
+
+  # SQLite ignores this pragma inside a transaction, so it has to precede the
+  # BEGIN.
+  defp suspend_foreign_keys(conn, %{foreign_keys: true}),
+    do: exec(conn, "PRAGMA foreign_keys = OFF")
+
+  defp suspend_foreign_keys(_conn, _pragmas), do: :ok
+
+  defp restore_pragmas(:ok, conn, pragmas), do: set_rebuild_pragmas(conn, pragmas)
+
+  defp restore_pragmas({:error, _} = err, conn, pragmas) do
+    set_rebuild_pragmas(conn, pragmas)
+    err
+  end
+
+  defp set_rebuild_pragmas(conn, pragmas) do
+    with :ok <- exec(conn, "PRAGMA foreign_keys = " <> pragma_word(pragmas.foreign_keys)) do
+      exec(conn, "PRAGMA legacy_alter_table = " <> pragma_word(pragmas.legacy_alter_table))
+    end
+  end
+
+  defp pragma_word(true), do: "ON"
+  defp pragma_word(false), do: "OFF"
 
   defp qualified_name(schema, name) do
     Xqlite.Pragma.quote_name(schema) <> "." <> Xqlite.Pragma.quote_name(name)
@@ -790,24 +916,136 @@ defmodule Xqlite do
   defp ends_bare_name?(byte),
     do: byte in [" ", "\t", "\n", "\r", "\f", "\v", "(", ")", ",", "."]
 
-  defp get_index_sqls(conn, schema, table) do
-    sql =
-      "SELECT sql FROM #{Xqlite.Pragma.quote_name(schema)}.sqlite_master " <>
-        "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL"
+  defp copy_column_list(conn, schema, table) do
+    with {:ok, info} <- table_info_rows(conn, schema, table),
+         {:ok, names} <- copy_names(conn, schema, table, info) do
+      {:ok, Enum.map_join(names, ", ", &Xqlite.Pragma.quote_name/1)}
+    end
+  end
 
-    case XqliteNIF.query(conn, sql, [table]) do
-      {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, fn [s] -> s end)}
+  defp table_info_rows(conn, schema, table) do
+    sql =
+      "PRAGMA #{Xqlite.Pragma.quote_name(schema)}.table_info(#{Xqlite.Pragma.quote_name(table)})"
+
+    case XqliteNIF.query(conn, sql, []) do
+      {:ok, %{rows: rows}} -> {:ok, rows}
       {:error, _} = err -> err
     end
   end
 
-  defp recreate_indexes(_conn, []), do: :ok
+  defp copy_names(conn, schema, table, info) do
+    names = Enum.flat_map(info, &column_name/1)
 
-  defp recreate_indexes(conn, [sql | rest]) do
-    case exec(conn, sql) do
-      :ok -> recreate_indexes(conn, rest)
+    case unshadowed_rowid_name(names) do
+      {:ok, rowid_name} -> {:ok, [rowid_name | names]}
+      :error -> aliased_copy_names(conn, schema, table, names, info)
+    end
+  end
+
+  defp column_name([_cid, name | _rest]), do: [name]
+  defp column_name(_row), do: []
+
+  defp unshadowed_rowid_name(names) do
+    declared = Enum.map(names, &String.downcase/1)
+
+    case Enum.find(["rowid", "_rowid_", "oid"], &(&1 not in declared)) do
+      nil -> :error
+      name -> {:ok, name}
+    end
+  end
+
+  defp aliased_copy_names(conn, schema, table, names, info) do
+    with {:ok, aliased} <- rowid_alias?(conn, schema, table, info) do
+      copy_names_or_refusal(aliased, names, table)
+    end
+  end
+
+  defp copy_names_or_refusal(true, names, _table), do: {:ok, names}
+  defp copy_names_or_refusal(false, _names, table), do: {:error, {:rowid_shadowed, table}}
+
+  # An INTEGER PRIMARY KEY is the rowid itself and gets no index, while
+  # `INT PRIMARY KEY` and `INTEGER PRIMARY KEY DESC` are ordinary keys with
+  # one — a difference `table_info` alone does not show.
+  defp rowid_alias?(conn, schema, table, info) do
+    with {:ok, rows} <- index_list_rows(conn, schema, table) do
+      {:ok, integer_primary_key?(info) and not Enum.any?(rows, &primary_key_index?/1)}
+    end
+  end
+
+  defp index_list_rows(conn, schema, table) do
+    sql =
+      "PRAGMA #{Xqlite.Pragma.quote_name(schema)}.index_list(#{Xqlite.Pragma.quote_name(table)})"
+
+    case XqliteNIF.query(conn, sql, []) do
+      {:ok, %{rows: rows}} -> {:ok, rows}
       {:error, _} = err -> err
     end
+  end
+
+  defp integer_primary_key?(info), do: Enum.any?(info, &integer_primary_key_column?/1)
+
+  defp integer_primary_key_column?([_cid, _name, type, _notnull, _default, 1])
+       when is_binary(type), do: String.downcase(type) == "integer"
+
+  defp integer_primary_key_column?(_row), do: false
+
+  defp primary_key_index?([_seq, _name, _unique, "pk" | _rest]), do: true
+  defp primary_key_index?(_row), do: false
+
+  defp saved_object_sqls(conn, schema, table) do
+    with {:ok, indexes} <- object_sqls(conn, schema, table, "index"),
+         {:ok, triggers} <- object_sqls(conn, schema, table, "trigger"),
+         {:ok, temp_triggers} <- temp_trigger_sqls(conn, schema, table) do
+      {:ok, indexes ++ triggers ++ temp_triggers}
+    end
+  end
+
+  # A `CREATE TEMP TRIGGER ... ON main.t` lives in `temp`, not in the table's
+  # own schema, and the DROP deletes it there without a word.
+  defp temp_trigger_sqls(_conn, "temp", _table), do: {:ok, []}
+  defp temp_trigger_sqls(conn, _schema, table), do: object_sqls(conn, "temp", table, "trigger")
+
+  defp object_sqls(conn, schema, table, type) do
+    sql =
+      "SELECT sql FROM #{Xqlite.Pragma.quote_name(schema)}.sqlite_master " <>
+        "WHERE type=? AND tbl_name=? AND sql IS NOT NULL"
+
+    case XqliteNIF.query(conn, sql, [type, table]) do
+      {:ok, %{rows: rows}} -> saved_sqls(rows, schema, [])
+      {:error, _} = err -> err
+    end
+  end
+
+  defp saved_sqls([], _schema, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp saved_sqls([[sql] | rest], schema, acc) when is_binary(sql),
+    do: saved_sqls(rest, schema, [{schema, sql} | acc])
+
+  defp saved_sqls([row | _rest], _schema, _acc),
+    do: {:error, {:schema_parsing_error, "sqlite_master", {:unexpected_value, inspect(row)}}}
+
+  defp replay_objects(_conn, []), do: :ok
+
+  defp replay_objects(conn, [{schema, sql} | rest]) do
+    with {:ok, qualified} <- qualify_object_sql(schema, sql),
+         :ok <- exec(conn, qualified) do
+      replay_objects(conn, rest)
+    end
+  end
+
+  # SQLite strips the schema qualifier, `TEMP` and `IF NOT EXISTS` before
+  # storing, so a qualifier put in front of the stored name token — never over
+  # it — replays the object where it was and stores the same bytes again.
+  defp qualify_object_sql(schema, sql) do
+    case Regex.run(~r/^\s*CREATE\s+(?:UNIQUE\s+)?(?:INDEX|TRIGGER)\s+/i, sql) do
+      [prefix] -> {:ok, insert_schema_qualifier(sql, prefix, schema)}
+      _no_match -> {:error, {:schema_parsing_error, "sqlite_master", {:unexpected_value, sql}}}
+    end
+  end
+
+  defp insert_schema_qualifier(sql, prefix, schema) do
+    qualified = prefix <> Xqlite.Pragma.quote_name(schema) <> "."
+    String.replace_prefix(sql, prefix, qualified)
   end
 
   defp exec(conn, sql) do
