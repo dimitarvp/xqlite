@@ -1,5 +1,6 @@
 defmodule Xqlite.TypeExtensionTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Xqlite.TestUtil
   alias Xqlite.TypeExtension
@@ -103,6 +104,50 @@ defmodule Xqlite.TypeExtensionTest do
       assert {:ok, dt} = DTExt.decode("2024-01-15T10:30:00-05:00")
       assert dt.hour == 15
       assert dt.utc_offset == 0
+    end
+
+    test "the offset is written but the value reads back as UTC" do
+      dt = offset_datetime(2024, 3, 15, 10, 30, 0, 123_456, 7200)
+
+      assert {:ok, text} = DTExt.encode(dt)
+      assert String.ends_with?(text, "+02:00")
+
+      assert {:ok, decoded} = DTExt.decode(text)
+      assert DateTime.compare(decoded, dt) == :eq
+      assert decoded.utc_offset == 0
+      assert decoded.std_offset == 0
+    end
+
+    property "any offset round-trips to the same instant, normalized to UTC" do
+      check all(
+              offset_minutes <- StreamData.integer(-840..840),
+              year <- StreamData.integer(1970..2100),
+              month <- StreamData.integer(1..12),
+              day <- StreamData.integer(1..28),
+              hour <- StreamData.integer(0..23),
+              minute <- StreamData.integer(0..59),
+              second <- StreamData.integer(0..59),
+              microsecond <- StreamData.integer(0..999_999),
+              max_runs: 2000
+            ) do
+        dt =
+          offset_datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            microsecond,
+            offset_minutes * 60
+          )
+
+        assert {:ok, text} = DTExt.encode(dt)
+        assert {:ok, decoded} = DTExt.decode(text)
+        assert DateTime.compare(decoded, dt) == :eq
+        assert decoded.utc_offset == 0
+        assert decoded.std_offset == 0
+      end
     end
 
     test "decode skips non-ISO 8601 strings" do
@@ -813,5 +858,27 @@ defmodule Xqlite.TypeExtensionTest do
         assert [[^dt, ^d, ^t, 99]] = decoded
       end
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers
+  # ---------------------------------------------------------------------------
+
+  # A `DateTime` carrying an arbitrary offset. Built by hand because Elixir
+  # ships no time-zone database, so `DateTime.new/3` can only make UTC ones.
+  defp offset_datetime(year, month, day, hour, minute, second, microsecond, offset_seconds) do
+    %DateTime{
+      year: year,
+      month: month,
+      day: day,
+      hour: hour,
+      minute: minute,
+      second: second,
+      microsecond: {microsecond, 6},
+      time_zone: "Etc/Unknown",
+      zone_abbr: "TST",
+      utc_offset: offset_seconds,
+      std_offset: 0
+    }
   end
 end

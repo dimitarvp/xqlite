@@ -6,6 +6,14 @@ defmodule Xqlite.TypeExtension.DateTime do
   Decodes ISO 8601 strings back to `DateTime` structs.
 
   Microsecond precision is preserved in both directions.
+
+  The offset is written but not restored. `encode/1` writes whatever
+  offset the value carries (`...Z`, `...+02:00`); `decode/1` applies
+  that offset and hands back a UTC `DateTime`, so the instant survives
+  the round trip and the original offset does not. Use
+  `Xqlite.TypeExtension.Instant` when you want the instant as an
+  integer, or the Ecto adapter's `XqliteEcto3.Types.TimestampTZ` when
+  the offset itself has to come back.
   """
 
   @behaviour Xqlite.TypeExtension

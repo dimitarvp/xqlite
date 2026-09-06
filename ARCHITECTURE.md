@@ -179,10 +179,13 @@ between steps. `serialize` copies the image into an `OwnedBinary`;
 produced by transmuting away the connection borrow, kept sound by the
 `ResourceArc<XqliteConn>` the resource also holds, and every
 `sqlite3session_*` call takes the connection Mutex first, the per-session
-Mutex second. One fact lives only here: `span_with_stop_metadata` hands
-its block's second element to `:telemetry.span/3` as **stop metadata**,
-so `:stop` measurements are always just `%{duration, monotonic_time}`
-and every extra a call records arrives in the metadata map.
+Mutex second. Two facts live only here: `span_with_stop_metadata` treats
+its block's last element as **stop metadata**, so `:stop` measurements
+are always just `%{duration, monotonic_time}` and every extra a call
+records arrives in the metadata map; and `Xqlite.Telemetry.run_span/3`
+emits the three span events itself instead of calling
+`:telemetry.span/3`, whose measurements are in the VM's native time
+unit while every xqlite measurement is a nanosecond count.
 
 ## 3. State machines
 

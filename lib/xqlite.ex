@@ -859,6 +859,12 @@ defmodule Xqlite do
 
   Wraps `XqliteNIF.execute_batch/2` and emits `[:xqlite, :execute_batch, :*]`
   telemetry. No parameter binding inside the batch.
+
+  SQLite runs the statements one at a time. The first failure stops the batch
+  and returns that error; the statements that already ran stay applied. There
+  is no implicit transaction around a batch — a batch may open and close its
+  own — so wrap the statements in your own `BEGIN` / `COMMIT` when the batch
+  has to be all-or-nothing.
   """
   @spec execute_batch(conn(), String.t()) :: :ok | error()
   def execute_batch(conn, sql_batch) when is_binary(sql_batch) do
@@ -1647,6 +1653,12 @@ defmodule Xqlite do
   lean on PRAGMAs too. Denying `:pragma` therefore makes all of them fail with
   `{:error, {:authorization_denied, _, _}}`. Deny it only when you intend to lock
   those paths out as well.
+
+  Two reads slip past that deny, because neither runs a `PRAGMA` statement for
+  SQLite to refuse: `get_pragma(conn, :wal_autocheckpoint)`, whose value comes
+  from xqlite's own WAL callback rather than from SQLite (writing it is still
+  denied), and `get_create_sql/2`, a `SELECT` over `sqlite_schema` that obeys
+  the `:read` and `:select` actions instead.
 
   No telemetry is emitted for authorizer install/remove or for denials.
 

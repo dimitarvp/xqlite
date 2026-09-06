@@ -53,6 +53,30 @@ defmodule Xqlite.NIF.AuthorizerTest do
                NIF.set_pragma(conn, "user_version", 7)
     end
 
+    test "a :pragma deny stops journal_mode but not wal_autocheckpoint", %{conn: conn} do
+      :ok = Xqlite.set_authorizer(conn, [:pragma])
+
+      assert {:error, {:authorization_denied, _, _}} = Xqlite.get_pragma(conn, :journal_mode)
+
+      # xqlite's own WAL callback owns the autocheckpoint setting and answers
+      # from its own state, so this read runs no PRAGMA for SQLite to refuse.
+      assert {:ok, pages} = Xqlite.get_pragma(conn, :wal_autocheckpoint)
+      assert is_integer(pages)
+    end
+
+    test "get_create_sql survives a :pragma deny and falls to :read and :select",
+         %{conn: conn} do
+      :ok = Xqlite.set_authorizer(conn, [:pragma])
+      assert {:ok, sql} = Xqlite.get_create_sql(conn, "t")
+      assert is_binary(sql)
+
+      :ok = Xqlite.set_authorizer(conn, [:read])
+      assert {:error, {:authorization_denied, _, _}} = Xqlite.get_create_sql(conn, "t")
+
+      :ok = Xqlite.set_authorizer(conn, [:select])
+      assert {:error, {:authorization_denied, _, _}} = Xqlite.get_create_sql(conn, "t")
+    end
+
     test "re-installing replaces the previous deny-list", %{conn: conn} do
       :ok = Xqlite.set_authorizer(conn, [:delete])
       :ok = Xqlite.set_authorizer(conn, [:insert])

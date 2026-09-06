@@ -147,6 +147,11 @@ defmodule XqliteNIF do
   `rows` list and `num_rows: 0`, or potentially an error like `:execute_returned_results`
   if SQLite's API indicates results were returned unexpectedly for a non-query.
   It is generally recommended to use `execute/3` for non-row-returning statements.
+
+  A string holding a second statement after the first is refused with
+  `{:error, :multiple_statements}` and nothing runs. `execute_batch/2` is the
+  exception: it exists to run several statements, one at a time, and keeps
+  the ones that ran before a failure.
   """
   @spec query(
           conn :: Xqlite.conn(),
@@ -294,6 +299,11 @@ defmodule XqliteNIF do
   Returns `{:error, reason}` on failure. For example, `{:error, :execute_returned_results}`
   if a statement unexpectedly returns data (e.g., a `SELECT` statement or an
   `INSERT ... RETURNING` statement was passed).
+
+  A string holding a second statement after the first is refused with
+  `{:error, :multiple_statements}` and nothing runs. `execute_batch/2` is the
+  exception: it exists to run several statements, one at a time, and keeps
+  the ones that ran before a failure.
   """
   @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list() | keyword()) ::
           {:ok, non_neg_integer()} | Xqlite.error()
@@ -330,12 +340,12 @@ defmodule XqliteNIF do
   Parameters are not supported for statements within the batch.
 
   `conn` is the database connection resource.
-  `sql_batch` is a string containing one or more SQL statements. SQLite executes
-  the statements sequentially. If an error occurs in one statement, subsequent
-  statements in the batch are typically not executed, and the function returns
-  an error. The changes made by prior successful statements within the batch
-  are usually persisted unless the batch execution occurs within an explicit
-  transaction that is later rolled back.
+  `sql_batch` is a string containing one or more SQL statements. SQLite runs
+  them one at a time. The first failure stops the batch and returns that
+  error; the statements that already ran stay applied. There is no implicit
+  transaction around a batch — a batch may open and close its own — so wrap
+  the statements in your own `BEGIN` / `COMMIT` when the batch has to be
+  all-or-nothing.
 
   Returns `:ok` if all statements in the batch execute successfully.
   Returns `{:error, reason}` if any statement fails.

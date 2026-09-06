@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Xqlite.Telemetry.events/0` lists every event xqlite emits.** One
+  entry per name, each tagged `:span` (it stands for `:start`, `:stop`
+  and `:exception`) or `:event`. It is the one source for the event
+  surface: the `Xqlite.Telemetry` moduledoc, the telemetry guide and
+  the emission sites in `lib/` are all checked against it by the test
+  suite, so a name can no longer be documented without being emitted
+  or emitted without being documented. Attaching a handler to
+  everything is now a two-liner over that list.
 - **Streams can be cancelled.** `Xqlite.stream/4` takes
   `:cancel_tokens` — one token from `create_cancel_token/0` or a list of
   them — and hands them to every batch it fetches, so signalling any one
@@ -48,6 +56,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for contributors.
 
 ### Fixed
+
+- **Span events now measure in nanoseconds, like every other event.**
+  `:start`, `:stop` and `:exception` came from `:telemetry.span/3`,
+  which reads the clock in the VM's native time unit. Every other
+  xqlite event uses `System.monotonic_time(:nanosecond)`, and both the
+  guide and the moduledoc promised nanoseconds throughout. On Linux
+  the native unit *is* the nanosecond, so the numbers agreed by luck;
+  on a platform where it is not — xqlite ships Windows and macOS
+  binaries — every span's `duration` and `monotonic_time` was off by
+  that ratio while the point events beside it were not. xqlite now
+  emits the three events itself, with the same names, keys and
+  `telemetry_span_context`, measured in nanoseconds, and re-raises a
+  block's exception untouched as before.
+
+- **The two event catalogues no longer drift from the code.** The
+  moduledoc and the telemetry guide each listed events nothing emits
+  (`[:xqlite, :backup_with_progress, …]` in both, plus whole `session`
+  and `blob` blocks in the moduledoc) and each missed events that do
+  fire (`open`, `close`, `restore` and `query_with_changes` in the
+  guide; `restore`, `extension.enable` and `close.exception` in the
+  moduledoc). Several entries also labelled metadata keys as
+  measurements. Both are regenerated from the emission sites and
+  checked against `Xqlite.Telemetry.events/0` by the suite.
+
+- **Three documentation promises corrected.**
+  `Xqlite.TypeExtension.DateTime` was described as offset-preserving in
+  four places; it writes the offset and reads the value back as UTC, so
+  the instant round-trips and the offset does not. `execute_batch/2`'s
+  docs never said what a mid-batch failure leaves behind: the
+  statements before it stay applied, and there is no implicit
+  transaction. The authorizer docs said a `:pragma` deny disables every
+  pragma read; two reads run no `PRAGMA` at all and still answer —
+  `get_pragma(conn, :wal_autocheckpoint)`, served from xqlite's own WAL
+  callback, and `get_create_sql/2`, which is a `SELECT` and obeys
+  `:read` and `:select` instead.
 
 - **Closing a connection no longer leaks its SQLite handle.** A
   connection closed while a prepared statement, a stream or an

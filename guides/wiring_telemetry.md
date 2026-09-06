@@ -37,8 +37,11 @@ counts).
 
 ## Conventions
 
-* **Time units:** integer **nanoseconds** everywhere. Convert at
-  handler time (`/1_000` for µs, `/1_000_000` for ms).
+* **Time units:** every time-valued measurement — `monotonic_time`,
+  `system_time`, `duration`, `total_duration`, `elapsed` — is an
+  integer **nanosecond** count. Convert at handler time (`/1_000` for
+  µs, `/1_000_000` for ms). Counts such as `rows_returned`, `pages`
+  and `retries` ride in the same map and are not times.
 * **Time source:** `System.monotonic_time(:nanosecond)`. Stable
   across NTP drift; consumers convert to wall-clock at handler time
   if needed.
@@ -52,22 +55,27 @@ counts).
 
 ## Event surface — operation events (always-on)
 
-See `Xqlite.Telemetry` moduledoc for the complete schema with every
-measurement and metadata key. Highlights:
+`Xqlite.Telemetry.events/0` returns this list as data, and the
+`Xqlite.Telemetry` moduledoc carries the complete schema with every
+measurement and metadata key. A `:*` below stands for the span's
+`:start`, `:stop` and `:exception` events.
 
 | Event | Trigger | Key metadata |
 |---|---|---|
-| `[:xqlite, :query, :*]` | `Xqlite.query/3`, `Xqlite.query_cancellable/4` | `:sql`, `:cancellable?`, `:num_rows` (on stop) |
-| `[:xqlite, :execute, :*]` | `Xqlite.execute/3` and cancellable variant | `:sql`, `:affected_rows` (on stop) |
+| `[:xqlite, :open, :*]` | `Xqlite.open/2` and the other `open_*` functions | `:path`, `:mode` |
+| `[:xqlite, :close, :*]` | `Xqlite.close/1` | `:conn`, `:path` |
+| `[:xqlite, :query, :*]` | `Xqlite.query/4`, `Xqlite.query_cancellable/4` | `:sql`, `:cancellable?`, `:num_rows` (on stop) |
+| `[:xqlite, :execute, :*]` | `Xqlite.execute/4` and cancellable variant | `:sql`, `:affected_rows` (on stop) |
 | `[:xqlite, :execute_batch, :*]` | `Xqlite.execute_batch/2` and cancellable variant | `:sql_batch_size_bytes` |
+| `[:xqlite, :query_with_changes, :*]` | `Xqlite.query_with_changes_cancellable/4` | `:sql`, `:num_rows`, `:changes` (on stop) |
 | `[:xqlite, :explain_analyze, :*]` | `Xqlite.explain_analyze/3` | `:wall_time_ns`, `:rows_produced`, `:scan_count` |
 | `[:xqlite, :transaction, :begin / :commit / :rollback]` | `Xqlite.begin/2`, `commit/1`, `rollback/1` | `:mode` (begin), `:reason` (rollback) |
 | `[:xqlite, :savepoint, :create / :release / :rollback_to]` | `Xqlite.savepoint/2` etc. | `:name` |
 | `[:xqlite, :stream, :open, :*]` | `Xqlite.stream/4` opens a NIF stream | `:batch_size` |
-| `[:xqlite, :stream, :fetch]` | every batch (potentially thousands per stream) | `:rows_returned`, `:done?` |
-| `[:xqlite, :stream, :close]` | stream consumed / dropped | `:total_rows`, `:reason` |
+| `[:xqlite, :stream, :fetch]` | every batch (potentially thousands per stream) | `:stream_handle`, `:done?` |
+| `[:xqlite, :stream, :close]` | stream consumed / dropped | `:stream_handle`, `:reason` |
 | `[:xqlite, :backup, :*]` | `Xqlite.backup/3` | `:dest_path`, `:byte_size` |
-| `[:xqlite, :backup_with_progress, :*]` | one-shot via `Xqlite.backup_with_progress/6` (see notes) | `:pages_per_step` |
+| `[:xqlite, :restore, :*]` | `Xqlite.restore/3` | `:src_path` |
 | `[:xqlite, :wal_checkpoint, :*]` | `Xqlite.wal_checkpoint/3` | `:mode`, `:log_pages`, `:checkpointed_pages`, `:busy?` |
 | `[:xqlite, :serialize, :*]` | `Xqlite.serialize/2` | `:byte_size` |
 | `[:xqlite, :deserialize, :*]` | `Xqlite.deserialize/4` | `:read_only?`, `:byte_size` |
@@ -78,31 +86,45 @@ measurement and metadata key. Highlights:
 | `[:xqlite, :cancel, :signalled]` | `Xqlite.cancel_operation/1` | `:token` |
 | `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:operation`, `:tokens` |
 
+`Xqlite.backup_with_progress/6` is not in the list: it reports its
+progress to a pid and emits no telemetry.
+
 ## Event surface — hook bridge events (opt-in)
 
 The hook bridge turns the multi-subscriber hook fan-out (commit,
-rollback, update, wal, progress) into telemetry events. NOT
+rollback, update, wal, progress, busy) into telemetry events. NOT
 attached automatically — call `Xqlite.Telemetry.bridge/2`:
 
 ```elixir
 {:ok, bridge} =
   Xqlite.Telemetry.bridge(conn,
-    hooks: [:wal, :commit, :rollback, :update, :progress],
+    hooks: [:wal, :commit, :rollback, :update, :progress, :busy],
     tag: :my_app_replica_a
   )
 
-# Events fire as [:xqlite, :hook, :wal] etc. with `tag: :my_app_replica_a`
-# in metadata.
+# The hook events below now fire with `tag: :my_app_replica_a` in
+# their metadata.
 
 :ok = Xqlite.Telemetry.unbridge(bridge)
 ```
 
 Pass `hooks: :all` for the full set. For the global SQLite log hook,
-use `Xqlite.Telemetry.bridge_log/1`.
+use `Xqlite.Telemetry.bridge_log/1` — it is process-wide, not
+per-connection, so it takes no `conn`.
 
-`busy_handler` is intentionally not in the bridge — it's
-single-subscriber by design. Register your own busy handler if you
-want busy events as telemetry.
+| Event | Fires when | Key metadata |
+|---|---|---|
+| `[:xqlite, :hook, :commit]` | a transaction commits on the bridged connection | `:conn`, `:tag` |
+| `[:xqlite, :hook, :rollback]` | a transaction rolls back | `:conn`, `:tag` |
+| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:action`, `:db_name`, `:table`, `:rowid` |
+| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:db_name`; measurement `pages` |
+| `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:hook_tag`; measurements `count`, `elapsed` |
+| `[:xqlite, :hook, :busy]` | the connection meets a lock another one holds | `:conn`, `:tag`; measurements `retries`, `elapsed` |
+| `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:code`, `:base_code`, `:message` |
+
+Only the *observer* half of busy handling is bridged. The retry
+policy stays a single slot per connection and is set with
+`Xqlite.set_busy_policy/2`.
 
 ## Sample handlers
 

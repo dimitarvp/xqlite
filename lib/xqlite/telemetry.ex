@@ -22,15 +22,20 @@ defmodule Xqlite.Telemetry do
 
     * **Event names:** atom lists prefixed with `:xqlite`. Sub-systems
       get their own segment (`:hook`, `:cancel`, `:transaction`,
-      `:savepoint`).
+      `:savepoint`). `events/0` returns the whole list as data.
     * **Spans:** every operation that has a clear "start" and "end"
-      uses `:telemetry.span/3`'s convention — `:start`, `:stop`,
+      follows `:telemetry.span/3`'s convention — `:start`, `:stop`,
       `:exception` events with a stable `:telemetry_span_context`
-      reference linking them.
-    * **Time units:** **integer nanoseconds** everywhere. No `_ns`
-      suffix on key names — `duration` and `monotonic_time` are
-      always nanoseconds. Convert to microseconds (`/1_000`) or
-      milliseconds (`/1_000_000`) at handler time.
+      reference linking them. xqlite emits the three itself rather
+      than calling `:telemetry.span/3`, which measures in the VM's
+      native time unit; xqlite measures in nanoseconds.
+    * **Time units:** **integer nanoseconds** for every time-valued
+      measurement — `monotonic_time`, `system_time`, `duration`,
+      `total_duration` and `elapsed`. No `_ns` suffix on those key
+      names. Counts (`rows_returned`, `total_rows`, `pages`,
+      `retries`, `count`) ride in the same map and are not times.
+      Convert to microseconds (`/1_000`) or milliseconds
+      (`/1_000_000`) at handler time.
     * **Time source:** **`System.monotonic_time(:nanosecond)`**, not
       `:os.system_time/0`. Stable across NTP adjustments and clock
       changes; consumers map to wall-clock at handler time if needed.
@@ -47,46 +52,62 @@ defmodule Xqlite.Telemetry do
   These events fire automatically when telemetry is compiled in. No
   registration needed; just attach a handler with `:telemetry.attach/4`.
 
+  Every span fires the same three events with the same measurements:
+  `:start` carries `%{monotonic_time, system_time}`, and `:stop` and
+  `:exception` carry `%{duration, monotonic_time}`. Numbers a span
+  learns while it runs travel in its `:stop` metadata, not in its
+  measurements. `:exception` metadata is the start metadata plus
+  `kind`, `reason` and `stacktrace`. All three carry the same
+  `telemetry_span_context` reference.
+
   ### Connection lifecycle
 
       [:xqlite, :open, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{path, mode, result_class, error_reason}
+        start metadata: %{path, mode}
+        stop metadata:  %{path, mode, result_class, error_reason}
 
-      [:xqlite, :close, :start | :stop]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{conn, path}
+      [:xqlite, :close, :start | :stop | :exception]
+        start metadata: %{conn, path}
+        stop metadata:  %{conn, path}
 
   `:mode` is one of `:file`, `:memory`, `:readonly`, `:memory_readonly`,
   `:temp`. `:result_class` is `:ok` or `:error`. `:error_reason` is
-  `nil` on success or the structured error reason atom on failure.
+  `nil` on success or the structured error reason on failure.
 
   ### Query / Execute
 
       [:xqlite, :query, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, num_rows (on :stop)}
-        metadata:     %{conn, sql, params_count, cancellable?, result_class, error_reason}
+        start metadata: %{conn, sql, params_count, cancellable?}
+        stop metadata:  %{conn, sql, params_count, cancellable?,
+                          result_class, error_reason, num_rows, changes}
 
       [:xqlite, :execute, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, affected_rows (on :stop)}
-        metadata:     %{conn, sql, params_count, cancellable?, result_class, error_reason}
+        start metadata: %{conn, sql, params_count, cancellable?}
+        stop metadata:  %{conn, sql, params_count, cancellable?,
+                          result_class, error_reason, affected_rows}
 
       [:xqlite, :execute_batch, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{conn, sql_batch_size_bytes, cancellable?, result_class, error_reason}
+        start metadata: %{conn, sql_batch_size_bytes, cancellable?}
+        stop metadata:  %{conn, sql_batch_size_bytes, cancellable?,
+                          result_class, error_reason}
 
       [:xqlite, :query_with_changes, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, num_rows, changes}
-        metadata:     %{conn, sql, params_count, cancellable?, result_class, error_reason}
+        start metadata: %{conn, sql, params_count, cancellable?}
+        stop metadata:  %{conn, sql, params_count, cancellable?,
+                          result_class, error_reason, num_rows, changes}
 
       [:xqlite, :explain_analyze, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, wall_time_ns, rows_produced, scan_count}
-        metadata:     %{conn, sql, result_class, error_reason}
+        start metadata: %{conn, sql, params_count}
+        stop metadata:  %{conn, sql, params_count, result_class,
+                          error_reason, wall_time_ns, rows_produced,
+                          scan_count}
 
-  `wall_time_ns` is SQLite's own clock measurement of the executed
+  `wall_time_ns` is SQLite's own nanosecond measurement of the executed
   statement (from `EXPLAIN ANALYZE`). `:cancellable?` is `true` iff
   the operation was invoked through a `*_cancellable` NIF or
-  `Xqlite.query_cancellable` etc.
+  `Xqlite.query_cancellable/4` and its siblings. `changes` is
+  `sqlite3_changes()` read beside the rows; it is `nil` on error and on
+  the cancellable query path.
 
   ### Transactions
 
@@ -111,15 +132,16 @@ defmodule Xqlite.Telemetry do
         metadata:     %{conn, name}
 
   `:mode` is `:deferred`, `:immediate`, or `:exclusive`. `:reason`
-  on rollback is `:user_initiated`, `:constraint`, `:deferred_fk`,
-  or `:error`.
+  on rollback is `:user_initiated` — the only value xqlite emits,
+  since these three events fire from the explicit transaction API.
 
   ### Streams
 
       [:xqlite, :stream, :open, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{conn, sql, batch_size, type_extensions_count,
-                        cancellable?}
+        start metadata: %{conn, sql, batch_size, type_extensions_count,
+                          cancellable?}
+        stop metadata:  %{conn, sql, batch_size, type_extensions_count,
+                          cancellable?, result_class, error_reason}
 
       [:xqlite, :stream, :fetch]
         measurements: %{monotonic_time, duration, rows_returned}
@@ -129,75 +151,61 @@ defmodule Xqlite.Telemetry do
         measurements: %{monotonic_time, total_duration, total_rows}
         metadata:     %{stream_handle, reason}
 
-  `[:xqlite, :stream, :fetch]` fires **every batch** — potentially
-  thousands of times per stream. The cost is sub-microsecond when
-  no handler is attached and zero when telemetry is disabled at
-  compile time. If you attach a heavy handler, expect proportional
-  cost; consider sampling or a dedicated metrics handler.
+  The fetch event fires **every batch** — potentially thousands of
+  times per stream. The cost is sub-microsecond when no handler is
+  attached and zero when telemetry is disabled at compile time. If you
+  attach a heavy handler, expect proportional cost; consider sampling
+  or a dedicated metrics handler.
 
-  ### Backup
+  ### Backup, restore, serialize, deserialize
 
       [:xqlite, :backup, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, byte_size}
-        metadata:     %{conn, schema, dest_path, result_class, error_reason}
+        start metadata: %{conn, schema, dest_path}
+        stop metadata:  %{conn, schema, dest_path, result_class,
+                          error_reason, byte_size}
 
-      [:xqlite, :backup_with_progress, :start | :step | :stop | :exception]
-        :start measurements: %{monotonic_time}
-        :step  measurements: %{monotonic_time, pages_remaining, pagecount, step_duration}
-        :stop  measurements: %{monotonic_time, total_duration, total_pages}
-        metadata:             %{conn, schema, dest_path, pages_per_step, result_class, error_reason}
-
-  ### WAL checkpoint, serialize, deserialize, extension
-
-      [:xqlite, :wal_checkpoint, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, log_pages, checkpointed_pages}
-        metadata:     %{conn, mode, schema, busy?}
+      [:xqlite, :restore, :start | :stop | :exception]
+        start metadata: %{conn, schema, src_path}
+        stop metadata:  %{conn, schema, src_path, result_class, error_reason}
 
       [:xqlite, :serialize, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, byte_size}
-        metadata:     %{conn, schema}
+        start metadata: %{conn, schema}
+        stop metadata:  %{conn, schema, result_class, error_reason, byte_size}
 
       [:xqlite, :deserialize, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration, byte_size}
-        metadata:     %{conn, schema, read_only?}
+        start metadata: %{conn, schema, read_only?, byte_size}
+        stop metadata:  %{conn, schema, read_only?, byte_size,
+                          result_class, error_reason}
+
+  `byte_size` is `nil` on a failed backup or serialize.
+  `Xqlite.backup_with_progress/6` reports to a pid instead and emits
+  no telemetry of its own.
+
+  ### WAL checkpoint and extensions
+
+      [:xqlite, :wal_checkpoint, :start | :stop | :exception]
+        start metadata: %{conn, mode, schema}
+        stop metadata:  %{conn, mode, schema, result_class, error_reason,
+                          log_pages, checkpointed_pages, busy?}
 
       [:xqlite, :extension, :load, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{conn, path, entry_point}
+        start metadata: %{conn, path, entry_point}
+        stop metadata:  %{conn, path, entry_point, result_class, error_reason}
+
+      [:xqlite, :extension, :enable]
+        measurements: %{monotonic_time}
+        metadata:     %{conn, enabled}
 
   WAL `:mode` is `:passive`, `:full`, `:restart`, or `:truncate`.
   `:busy?` is `true` if the checkpoint did not complete because of
-  reader/writer contention.
+  reader/writer contention. The three checkpoint counters are present
+  only when the checkpoint succeeded.
 
   ### PRAGMA
 
       [:xqlite, :pragma, :get | :set]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{conn, name, value (on :set only)}
-
-  ### Session extension
-
-      [:xqlite, :session, :new | :attach | :delete]
         measurements: %{monotonic_time}
-        metadata:     %{session, conn (on :new), table (on :attach)}
-
-      [:xqlite, :session, :changeset | :patchset]
-        measurements: %{monotonic_time, duration, byte_size}
-        metadata:     %{session}
-
-      [:xqlite, :session, :apply, :start | :stop | :exception]
-        measurements: %{monotonic_time, duration}
-        metadata:     %{conn, conflict_strategy}
-
-  ### Blob I/O
-
-      [:xqlite, :blob, :open | :close | :reopen]
-        measurements: %{monotonic_time, byte_size (on :open / :reopen)}
-        metadata:     %{blob, conn (on :open), table, column, row_id, read_only?}
-
-      [:xqlite, :blob, :read | :write]
-        measurements: %{monotonic_time, duration, bytes, offset}
-        metadata:     %{blob}
+        metadata:     %{conn, name, value (on :set only)}
 
   ### Cancellation
 
@@ -210,24 +218,19 @@ defmodule Xqlite.Telemetry do
         metadata:     %{token}
 
       [:xqlite, :cancel, :honored]
-        measurements: %{monotonic_time, lag}
-        metadata:     %{token, operation, conn}
+        measurements: %{monotonic_time}
+        metadata:     %{conn, operation, tokens}
 
-  `:lag` is the duration in nanoseconds between
-  `[:xqlite, :cancel, :signalled]` and `[:xqlite, :cancel, :honored]`
-  for the same token. `:operation` is the operation that the cancel
-  signal interrupted: `:query`, `:execute`, `:execute_batch`,
-  `:query_with_changes`, or `:stream_fetch`.
+  `:operation` is the operation that the cancel signal interrupted:
+  `:query`, `:execute`, `:execute_batch`, `:query_with_changes`, or
+  `:stream_fetch`. `:tokens` is the list of tokens that operation was
+  watching.
 
   ## Event surface — hook bridge events (opt-in registration)
 
   The hook bridge layer turns multi-subscriber hook deliveries into
   telemetry events. NOT auto-attached — the user explicitly calls
   `bridge/2` on a connection to wire the hooks they care about.
-
-      [:xqlite, :hook, :busy]
-        measurements: %{retries, elapsed}
-        metadata:     %{conn, tag}
 
       [:xqlite, :hook, :commit]
         measurements: %{monotonic_time}
@@ -239,30 +242,31 @@ defmodule Xqlite.Telemetry do
 
       [:xqlite, :hook, :update]
         measurements: %{monotonic_time}
-        metadata:     %{conn, action, db_name, table, rowid, tag}
+        metadata:     %{conn, tag, action, db_name, table, rowid}
 
       [:xqlite, :hook, :wal]
-        measurements: %{pages}
-        metadata:     %{conn, db_name, tag}
+        measurements: %{monotonic_time, pages}
+        metadata:     %{conn, tag, db_name}
 
       [:xqlite, :hook, :progress]
-        measurements: %{count, elapsed}
-        metadata:     %{conn, hook_tag, tag}
+        measurements: %{monotonic_time, count, elapsed}
+        metadata:     %{conn, tag, hook_tag}
 
       [:xqlite, :hook, :busy]
         measurements: %{monotonic_time, retries, elapsed}
         metadata:     %{conn, tag}
 
       [:xqlite, :hook, :log]
-        measurements: %{}
-        metadata:     %{code, base_code, message}
+        measurements: %{monotonic_time}
+        metadata:     %{tag, code, base_code, message}
 
   `:tag` (in the metadata) is the user-supplied tag from `bridge/2`
-  for distinguishing connections in dashboards. `:hook_tag` (only
-  on `[:xqlite, :hook, :progress]`) is the tag passed to
-  `Xqlite.register_progress_hook/3`.
+  for distinguishing connections in dashboards. `:hook_tag`, only on
+  the progress event, is the tag passed to
+  `Xqlite.register_progress_hook/3`. `:elapsed` is a nanosecond count,
+  converted from the milliseconds SQLite reports.
 
-  See `bridge/2` and `unbridge/2` for the registration API. Bridge
+  See `bridge/2` and `unbridge/1` for the registration API. Bridge
   is implemented on top of the same multi-subscriber primitives that
   power direct hook usage — registering the bridge on a connection
   is independent of any other subscribers, and unbridging never
@@ -282,12 +286,14 @@ defmodule Xqlite.Telemetry do
 
   ## Reading the source
 
-  This module is small on purpose. The two macros (`emit/3` and
-  `span/3`) are what every call site in `lib/xqlite/*.ex` invokes.
-  They take the `:telemetry_enabled` flag at compile time and either
-  emit normal `:telemetry` calls or expand to direct evaluation of
-  the inner block. The macros live here, not in each caller, so the
-  compile-time check happens in one place.
+  This module is small on purpose. The three macros (`emit/3`,
+  `span/3` and `span_with_stop_metadata/3`) are what every call site
+  in `lib/xqlite/*.ex` invokes. They read the `:telemetry_enabled`
+  flag at compile time and either expand to `:telemetry` calls or to
+  direct evaluation of the inner block. The macros live here, not in
+  each caller, so the compile-time check happens in one place; the
+  span bodies expand to `run_span/3`, which emits the three span
+  events with nanosecond measurements.
   """
 
   @enabled Application.compile_env(:xqlite, :telemetry_enabled, false)
@@ -300,6 +306,73 @@ defmodule Xqlite.Telemetry do
   """
   @spec enabled?() :: boolean()
   def enabled?, do: unquote(@enabled)
+
+  @events [
+    %{name: [:xqlite, :open], kind: :span},
+    %{name: [:xqlite, :close], kind: :span},
+    %{name: [:xqlite, :query], kind: :span},
+    %{name: [:xqlite, :execute], kind: :span},
+    %{name: [:xqlite, :execute_batch], kind: :span},
+    %{name: [:xqlite, :query_with_changes], kind: :span},
+    %{name: [:xqlite, :explain_analyze], kind: :span},
+    %{name: [:xqlite, :transaction, :begin], kind: :event},
+    %{name: [:xqlite, :transaction, :commit], kind: :event},
+    %{name: [:xqlite, :transaction, :rollback], kind: :event},
+    %{name: [:xqlite, :savepoint, :create], kind: :event},
+    %{name: [:xqlite, :savepoint, :release], kind: :event},
+    %{name: [:xqlite, :savepoint, :rollback_to], kind: :event},
+    %{name: [:xqlite, :stream, :open], kind: :span},
+    %{name: [:xqlite, :stream, :fetch], kind: :event},
+    %{name: [:xqlite, :stream, :close], kind: :event},
+    %{name: [:xqlite, :backup], kind: :span},
+    %{name: [:xqlite, :restore], kind: :span},
+    %{name: [:xqlite, :serialize], kind: :span},
+    %{name: [:xqlite, :deserialize], kind: :span},
+    %{name: [:xqlite, :wal_checkpoint], kind: :span},
+    %{name: [:xqlite, :extension, :load], kind: :span},
+    %{name: [:xqlite, :extension, :enable], kind: :event},
+    %{name: [:xqlite, :pragma, :get], kind: :event},
+    %{name: [:xqlite, :pragma, :set], kind: :event},
+    %{name: [:xqlite, :cancel, :token_created], kind: :event},
+    %{name: [:xqlite, :cancel, :signalled], kind: :event},
+    %{name: [:xqlite, :cancel, :honored], kind: :event},
+    %{name: [:xqlite, :hook, :commit], kind: :event},
+    %{name: [:xqlite, :hook, :rollback], kind: :event},
+    %{name: [:xqlite, :hook, :update], kind: :event},
+    %{name: [:xqlite, :hook, :wal], kind: :event},
+    %{name: [:xqlite, :hook, :progress], kind: :event},
+    %{name: [:xqlite, :hook, :busy], kind: :event},
+    %{name: [:xqlite, :hook, :log], kind: :event}
+  ]
+
+  @doc """
+  Returns every event xqlite can emit, in the order the moduledoc
+  presents them.
+
+  Each entry is `%{name: [atom()], kind: :span | :event}`. A `:span`
+  entry stands for three event names — its `name` with `:start`,
+  `:stop` and `:exception` appended. An `:event` entry is the whole
+  name on its own.
+
+  Useful for attaching one handler to everything:
+
+      names =
+        Enum.flat_map(Xqlite.Telemetry.events(), fn
+          %{name: name, kind: :span} ->
+            Enum.map([:start, :stop, :exception], &(name ++ [&1]))
+
+          %{name: name, kind: :event} ->
+            [name]
+        end)
+
+      :telemetry.attach_many("my-app-xqlite", names, &MyApp.handle/4, nil)
+
+  The list is the one source for the event surface: the moduledoc
+  above, `guides/wiring_telemetry.md`, and the emission sites in
+  `lib/` are all checked against it by the test suite.
+  """
+  @spec events() :: [%{name: [atom()], kind: :span | :event}]
+  def events, do: @events
 
   if @enabled do
     @doc """
@@ -320,37 +393,104 @@ defmodule Xqlite.Telemetry do
     end
 
     @doc """
-    Run `block` inside a `:telemetry.span/3`.
+    Run `block` inside a span: a `:start` event, then a `:stop` one.
 
     The block must evaluate to a value; that value is returned. Both
     the `:start` and `:stop` events carry the supplied `metadata`.
-    If the block raises or throws, an `:exception` event fires
+    If the block raises, throws or exits, an `:exception` event fires
     instead of `:stop`, with `kind`, `reason`, and `stacktrace` added
-    to the metadata, and the exception re-raises.
+    to the metadata, and the exception re-raises unchanged.
 
     When telemetry is compiled out, the block evaluates directly with
     no telemetry calls.
     """
     defmacro span(event_name, metadata, do: block) do
       quote do
-        :telemetry.span(unquote(event_name), unquote(metadata), fn ->
-          {unquote(block), unquote(metadata)}
+        start_metadata = unquote(metadata)
+
+        Xqlite.Telemetry.run_span(unquote(event_name), start_metadata, fn ->
+          {unquote(block), start_metadata}
         end)
       end
     end
 
     @doc """
-    Like `span/3` but lets the block return `{value, extra_metadata}`
-    so the `:stop` event can carry per-operation metadata that wasn't
-    known at `:start`.
+    Like `span/3` but lets the block return `{value, stop_metadata}` or
+    `{value, extra_measurements, stop_metadata}`, so the `:stop` event
+    can carry numbers and metadata that weren't known at `:start`. The
+    stop metadata replaces the start metadata; the extra measurements
+    are merged under `duration` and `monotonic_time`.
     """
     defmacro span_with_stop_metadata(event_name, start_metadata, do: block) do
       quote do
-        :telemetry.span(unquote(event_name), unquote(start_metadata), fn ->
+        Xqlite.Telemetry.run_span(unquote(event_name), unquote(start_metadata), fn ->
           unquote(block)
         end)
       end
     end
+
+    @doc false
+    @spec run_span([atom()], map(), (-> term())) :: term()
+    def run_span(event_name, start_metadata, block) do
+      context = make_ref()
+      metadata = with_span_context(start_metadata, context)
+      start_time = monotonic_time()
+
+      :telemetry.execute(
+        event_name ++ [:start],
+        %{monotonic_time: start_time, system_time: System.system_time(:nanosecond)},
+        metadata
+      )
+
+      # The one try/catch the Elixir layer keeps: it turns the caller's own
+      # exception into an `:exception` event and re-raises it untouched.
+      try do
+        block.()
+      catch
+        kind, reason ->
+          stacktrace = __STACKTRACE__
+          stop_time = monotonic_time()
+
+          :telemetry.execute(
+            event_name ++ [:exception],
+            %{duration: stop_time - start_time, monotonic_time: stop_time},
+            Map.merge(metadata, %{kind: kind, reason: reason, stacktrace: stacktrace})
+          )
+
+          :erlang.raise(kind, reason, stacktrace)
+      else
+        outcome -> emit_stop(event_name, start_time, context, outcome)
+      end
+    end
+
+    defp emit_stop(event_name, start_time, context, {result, stop_metadata}) do
+      stop_time = monotonic_time()
+
+      :telemetry.execute(
+        event_name ++ [:stop],
+        %{duration: stop_time - start_time, monotonic_time: stop_time},
+        with_span_context(stop_metadata, context)
+      )
+
+      result
+    end
+
+    defp emit_stop(event_name, start_time, context, {result, extra, stop_metadata}) do
+      stop_time = monotonic_time()
+
+      :telemetry.execute(
+        event_name ++ [:stop],
+        Map.merge(extra, %{duration: stop_time - start_time, monotonic_time: stop_time}),
+        with_span_context(stop_metadata, context)
+      )
+
+      result
+    end
+
+    defp with_span_context(%{telemetry_span_context: _} = metadata, _context), do: metadata
+
+    defp with_span_context(metadata, context),
+      do: Map.put(metadata, :telemetry_span_context, context)
   else
     # Disabled-mode macros still evaluate their arguments: bindings that
     # exist only to feed measurement / metadata maps would otherwise trip
@@ -374,13 +514,13 @@ defmodule Xqlite.Telemetry do
     end
 
     @doc """
-    Run `block` inside a `:telemetry.span/3`.
+    Run `block` inside a span: a `:start` event, then a `:stop` one.
 
     The block must evaluate to a value; that value is returned. Both
     the `:start` and `:stop` events carry the supplied `metadata`.
-    If the block raises or throws, an `:exception` event fires
+    If the block raises, throws or exits, an `:exception` event fires
     instead of `:stop`, with `kind`, `reason`, and `stacktrace` added
-    to the metadata, and the exception re-raises.
+    to the metadata, and the exception re-raises unchanged.
 
     When telemetry is compiled out, the block evaluates directly with
     no telemetry calls.
@@ -394,9 +534,11 @@ defmodule Xqlite.Telemetry do
     end
 
     @doc """
-    Like `span/3` but lets the block return `{value, extra_metadata}`
-    so the `:stop` event can carry per-operation metadata that wasn't
-    known at `:start`.
+    Like `span/3` but lets the block return `{value, stop_metadata}`,
+    so the `:stop` event can carry metadata that wasn't known at
+    `:start`. With telemetry compiled out only that two-element shape
+    is accepted; the `{value, extra_measurements, stop_metadata}` shape
+    needs the enabled macro, which has measurements to merge them into.
     """
     defmacro span_with_stop_metadata(event_name, start_metadata, do: block) do
       quote do

@@ -19,7 +19,8 @@ defmodule Xqlite.TypeExtension do
   ## Built-in extensions
 
     * `Xqlite.TypeExtension.DateTime` — `DateTime` ↔ ISO 8601 text
-      (offsets included both ways, so timezone-aware round-trips work)
+      (the offset is written; decoding applies it and returns UTC, so
+      the instant round-trips and the offset does not)
     * `Xqlite.TypeExtension.NaiveDateTime` — `NaiveDateTime` ↔ ISO 8601 text
     * `Xqlite.TypeExtension.Date` — `Date` ↔ `YYYY-MM-DD` text
     * `Xqlite.TypeExtension.Time` — `Time` ↔ `HH:MM:SS` text

@@ -101,12 +101,13 @@ function returns the number of Unicode code points (not bytes) in input string X
 prior to the first U+0000 character."* See
 [SQLite — Core Functions](https://www.sqlite.org/lang_corefunc.html#length).
 
-### Offset-preserving DateTimes sort lexically, not chronologically
+### DateTimes stored with an offset sort lexically, not chronologically
 
 `Xqlite.TypeExtension.DateTime` stores a `DateTime` as ISO 8601 TEXT via
-`DateTime.to_iso8601/1`, which **preserves the original UTC offset** (`...Z`,
-`...+02:00`, and so on). The value round-trips exactly. But when rows carry
-*different* offsets, an `ORDER BY` on that column sorts the strings
+`DateTime.to_iso8601/1`, which **writes the original UTC offset** (`...Z`,
+`...+02:00`, and so on). Reading it back gives you the same instant as a UTC
+`DateTime` — the offset itself is applied and then dropped. But when rows
+carry *different* offsets, an `ORDER BY` on that column sorts the strings
 lexically — and lexical order is not chronological order:
 
 ```text
@@ -117,7 +118,7 @@ lexically — and lexical order is not chronological order:
 `ORDER BY ts ASC` returns the first row before the second, because the date
 field `06-01` sorts ahead of `06-02` — yet the second instant is chronologically
 *earlier*. Only the sort is affected; reading either value back gives you the
-exact `DateTime` you stored.
+instant you stored, as a UTC `DateTime`.
 
 If you need `ORDER BY` to be chronological, store a sort-stable form:
 
