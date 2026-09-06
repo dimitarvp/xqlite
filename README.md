@@ -36,12 +36,12 @@ Xqlite is inspired by [exqlite](https://github.com/elixir-sqlite/exqlite), which
 ```elixir
 def deps do
   [
-    {:xqlite, "~> 0.11"}
+    {:xqlite, "~> 0.12"}
   ]
 end
 ```
 
-Compatibility: the Ecto adapter (`xqlite_ecto3`) pins exactly one xqlite minor series per adapter release, because xqlite is pre-1.0 and its minor is the break slot. The current pairing is xqlite `~> 0.11.0`; the adapter's README states its own pairing.
+Compatibility: the Ecto adapter (`xqlite_ecto3`) pins exactly one xqlite minor series per adapter release, because xqlite is pre-1.0 and its minor is the break slot. The current pairing is xqlite `~> 0.12.0`; the adapter's README states its own pairing.
 
 Precompiled NIF binaries are included for macOS, Linux (glibc and musl, including ARM and RISC-V), and Windows -- no Rust toolchain needed for them. They are built for NIF API 2.17, so the runtime floor is OTP 26 with Elixir 1.17 -- the oldest pair CI actually runs. CI covers 10 of the 16 combinations of Elixir 1.17-1.20 with OTP 26-29, on Linux, macOS and Windows: Elixir 1.17 and 1.18 on OTP 26-27, Elixir 1.19 on OTP 26-28, Elixir 1.20 on OTP 27-29. A source build -- forced with `XQLITE_BUILD=true`, or unavoidable on a platform without a binary -- needs Rust 1.91 or newer, the floor that rustler 0.38 declares. To force source compilation:
 
