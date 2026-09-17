@@ -136,6 +136,13 @@ pub(crate) enum XqliteError {
     UnsupportedDataType {
         term_type: TermType,
     },
+    // An `%Xqlite.Blob{}` parameter whose `bytes` field is not a binary.
+    // Distinct from UnsupportedDataType because the parameter itself is a
+    // supported form and so is the type inside it — only not there.
+    InvalidBlobBytes {
+        position: usize,
+        term_type: TermType,
+    },
     CannotConvertAtomToString(String),
     InvalidParameterCount {
         provided: usize,
@@ -308,6 +315,13 @@ impl Display for XqliteError {
                     "Unsupported data type {name}. Allowed types: atom, integer, float, binary"
                 )
             }
+            XqliteError::InvalidBlobBytes {
+                position,
+                term_type,
+            } => write!(
+                f,
+                "Blob parameter at position {position} holds {term_type:?} instead of a binary"
+            ),
             XqliteError::CannotExecute(reason) => {
                 write!(f, "Cannot execute query/statement: {reason}")
             }
@@ -556,6 +570,26 @@ impl Encoder for XqliteError {
                     Err(_) => {
                         let err = XqliteError::InternalEncodingError {
                             context: "Failed map create for InvalidParameterCount".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
+            XqliteError::InvalidBlobBytes {
+                position,
+                term_type,
+            } => {
+                let map_result =
+                    map_new(env)
+                        .map_put(atoms::position(), position)
+                        .and_then(|map| {
+                            map.map_put(atoms::r#type(), term_type_to_atom(*term_type))
+                        });
+                match map_result {
+                    Ok(map) => (atoms::invalid_blob_bytes(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidBlobBytes".to_string(),
                         };
                         err.encode(env)
                     }

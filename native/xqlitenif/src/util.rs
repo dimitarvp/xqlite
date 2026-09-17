@@ -8,6 +8,7 @@ use rustler::{
     types::{
         atom::{error, false_, nil, ok, true_},
         binary::OwnedBinary,
+        elixir_struct::get_ex_struct_name,
     },
 };
 use std::ops::DerefMut;
@@ -186,10 +187,36 @@ pub(crate) fn process_rows<'a, 'rows>(
     Ok(results)
 }
 
+/// The `bytes` field of an `%Xqlite.Blob{}`, or `None` for any other map.
+/// Only that struct forces a BLOB bind; every other map stays an unsupported
+/// parameter value.
+#[inline]
+fn blob_struct_bytes<'a>(term: Term<'a>) -> Option<Term<'a>> {
+    match get_ex_struct_name(term) {
+        Ok(name) if name == atoms::elixir_xqlite_blob() => term.map_get(atoms::bytes()).ok(),
+        _ => None,
+    }
+}
+
+/// Binds the wrapped bytes as a BLOB whatever they decode to — skipping the
+/// UTF-8 test the plain binary arm applies is the whole point of the wrapper.
+/// `position` is the parameter's one-based place in the list the caller passed.
+#[inline]
+fn blob_struct_value(bytes_term: Term<'_>, position: usize) -> Result<Value, XqliteError> {
+    match bytes_term.decode::<Binary>() {
+        Ok(bin) => Ok(Value::Blob(bin.as_slice().to_vec())),
+        Err(_) => Err(XqliteError::InvalidBlobBytes {
+            position,
+            term_type: bytes_term.get_type(),
+        }),
+    }
+}
+
 #[inline]
 fn elixir_term_to_rusqlite_value<'a>(
     env: Env<'a>,
     term: Term<'a>,
+    position: usize,
 ) -> Result<Value, XqliteError> {
     let make_convert_error = |term: Term<'a>, err: RustlerError| -> XqliteError {
         XqliteError::CannotConvertToSqliteValue {
@@ -229,6 +256,10 @@ fn elixir_term_to_rusqlite_value<'a>(
                 Err(binary_decode_err) => Err(make_convert_error(term, binary_decode_err)),
             },
         },
+        TermType::Map => match blob_struct_bytes(term) {
+            Some(bytes_term) => blob_struct_value(bytes_term, position),
+            None => Err(XqliteError::UnsupportedDataType { term_type }),
+        },
         _ => Err(XqliteError::UnsupportedDataType { term_type }),
     }
 }
@@ -244,7 +275,7 @@ pub(crate) fn decode_exec_keyword_params<'a>(
                 value_str: format!("{list_term:?}"),
             })?;
     let mut params: Vec<(String, Value)> = Vec::new();
-    for term_item in iter {
+    for (index, term_item) in iter.enumerate() {
         let (key_atom, value_term): (Atom, Term<'a>) =
             term_item
                 .decode()
@@ -256,7 +287,7 @@ pub(crate) fn decode_exec_keyword_params<'a>(
             .atom_to_string()
             .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{e:?}")))?;
         key_string.insert(0, ':');
-        let rusqlite_value = elixir_term_to_rusqlite_value(env, value_term)?;
+        let rusqlite_value = elixir_term_to_rusqlite_value(env, value_term, index + 1)?;
         params.push((key_string, rusqlite_value));
     }
     Ok(params)
@@ -271,8 +302,8 @@ pub(crate) fn decode_plain_list_params<'a>(
             value_str: format!("{list_term:?}"),
         })?;
     let mut values = Vec::new();
-    for term in iter {
-        values.push(elixir_term_to_rusqlite_value(env, term)?);
+    for (index, term) in iter.enumerate() {
+        values.push(elixir_term_to_rusqlite_value(env, term, index + 1)?);
     }
     Ok(values)
 }

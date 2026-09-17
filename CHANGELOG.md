@@ -5,7 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.2] - 2026-09-18
+
+### Added
+
+- **`%Xqlite.Blob{}`, a parameter that is always stored as a `BLOB`.** A
+  plain Elixir binary is stored as `TEXT` when its bytes are valid UTF-8
+  and as a `BLOB` otherwise — right for strings, and a coin toss for raw
+  bytes: about one in fourteen thousand random 16-byte values (a UUID, a
+  key, a piece of ciphertext) happens to decode as UTF-8 and lands as
+  `TEXT`. The two classes sort apart and compare unequal, so a `UNIQUE`
+  column accepts the same bytes twice and a STRICT table with a `BLOB`
+  column rejects the `TEXT` one outright. Binding
+  `%Xqlite.Blob{bytes: bytes}` stores a `BLOB` whatever the bytes are, as a
+  positional element or as a keyword pair's value, on `Xqlite.query/4`,
+  `Xqlite.execute/4`, their cancellable forms, `Xqlite.stream/4`,
+  `Xqlite.bind/2`, `Xqlite.explain_analyze/3` and the matching `XqliteNIF`
+  functions. Values read back are plain binaries, never wrapped, so a
+  read-and-write-back loop moves them to `TEXT` unless it wraps them again.
+  A `bytes` field that is not a binary is refused with
+  `{:error, {:invalid_blob_bytes, %{position: position, type: type}}}`,
+  naming the parameter's one-based position in the list and the type found
+  there.
 
 ### Changed
 
@@ -15,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NO_PROXY` and `RUSTLER_PRECOMPILED_IPFAMILY` are honoured),
   telemetry 1.4.2, and the crate's transitive dependencies (rusqlite,
   rustler and the bundled SQLite unchanged at 3.53.2).
+
+### Fixed
+
+- **`Xqlite.TypeExtension.UUID` no longer spreads UUIDs over two storage
+  classes.** It emitted the bare sixteen bytes, so the storage class
+  followed their contents: the nil UUID and roughly one in fourteen
+  thousand others were stored as `TEXT` while every other UUID in the same
+  column was a `BLOB`. Decoding hid the split — both read back as the same
+  hyphenated string — while `ORDER BY`, `UNIQUE` and STRICT tables saw it.
+  The extension now emits `%Xqlite.Blob{}`.
+- **`Xqlite.TypeExtension.encode_params/2` encodes every element of a
+  keyword list.** Positional or keyword is decided once, from the list's
+  first element, exactly as the NIF decides it; the keyword branch then
+  re-decided per element and encoded only those that were a pair with an
+  atom key, passing every other one through untouched.
 
 ## [0.12.1] - 2026-09-06
 
@@ -1161,6 +1197,7 @@ Initial public release. The supported SQLite functionality:
   callers).
 - **SQLite introspection** — `compile_options` and `sqlite_version`.
 
+[0.12.2]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.2
 [0.12.1]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.1
 [0.12.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.0
 [0.11.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.11.0

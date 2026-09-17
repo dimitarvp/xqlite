@@ -132,7 +132,9 @@ defmodule XqliteNIF do
   Use an empty list `[]` if the query has no parameters.
 
   Supported Elixir parameter types are integers, floats, strings, `nil`,
-  booleans (`true`/`false`), and binaries (blobs).
+  booleans (`true`/`false`), and binaries. A binary is stored as `TEXT` when
+  its bytes are valid UTF-8 and as a `BLOB` otherwise; wrap it as
+  `%Xqlite.Blob{bytes: bytes}` to store a `BLOB` whatever the bytes are.
 
   Returns `{:ok, result_map}` on success or `{:error, reason}` on failure.
   The `result_map` is `%{columns: [String.t()], rows: [[term()]], num_rows: non_neg_integer()}`.
@@ -291,7 +293,9 @@ defmodule XqliteNIF do
   Use an empty list `[]` if the statement has no parameters.
 
   Supported Elixir parameter types are integers, floats, strings, `nil`,
-  booleans (`true`/`false`), and binaries (blobs).
+  booleans (`true`/`false`), and binaries. A binary is stored as `TEXT` when
+  its bytes are valid UTF-8 and as a `BLOB` otherwise; wrap it as
+  `%Xqlite.Blob{bytes: bytes}` to store a `BLOB` whatever the bytes are.
 
   Returns `{:ok, affected_rows}` on success, where `affected_rows` is a non-negative
   integer indicating the number of rows modified, inserted, or deleted. For DDL
@@ -1253,8 +1257,13 @@ defmodule XqliteNIF do
   %{provided: _, expected: _}}}` is returned) or a keyword list (named
   parameters). After stepping has started, `stmt_reset/1` must run before
   rebinding (SQLite lifecycle).
+
+  A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
+  `BLOB` otherwise; wrap it as `%Xqlite.Blob{bytes: bytes}` to store a `BLOB`
+  whatever the bytes are.
   """
-  @spec stmt_bind(stmt :: Xqlite.stmt(), params :: list()) :: :ok | Xqlite.error()
+  @spec stmt_bind(stmt :: Xqlite.stmt(), params :: list() | keyword()) ::
+          :ok | Xqlite.error()
   def stmt_bind(_stmt, _params), do: err()
 
   @doc """

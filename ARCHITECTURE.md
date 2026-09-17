@@ -83,7 +83,12 @@ prepares, runs `reject_no_statement`, then binds: an empty list binds
 nothing, a keyword list goes through
 `util.rs:decode_exec_keyword_params` (each atom key gains a leading `:`),
 any other list through `decode_plain_list_params`, `nil` means none,
-anything else is `ExpectedList`. `util.rs:process_rows` encodes each
+anything else is `ExpectedList`. Both hand each value to
+`util.rs:elixir_term_to_rusqlite_value`, where a binary becomes `Text`
+when its bytes are valid UTF-8 and `Blob` otherwise, and a map that is an
+`%Xqlite.Blob{}` becomes `Blob` whatever its bytes are — any other map,
+and `bytes` holding anything but a binary, is refused.
+`util.rs:process_rows` encodes each
 value with `encode_val` → `encode_f64` / `encode_text` / `encode_blob`.
 `nif.rs:encode_query_result_with_changes` builds the map, the Mutex
 releases, and `query/4` builds `%Xqlite.Result{}` and runs

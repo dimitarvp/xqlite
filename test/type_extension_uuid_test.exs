@@ -15,8 +15,8 @@ defmodule Xqlite.TypeExtension.UUIDTest do
   # ---------------------------------------------------------------------------
 
   describe "encode/1" do
-    test "encodes a canonical lowercase UUID to its 16 raw bytes" do
-      assert {:ok, bytes} = UUIDExt.encode(@canonical)
+    test "encodes a canonical lowercase UUID to its 16 raw bytes, wrapped for BLOB storage" do
+      assert {:ok, %Xqlite.Blob{bytes: bytes}} = UUIDExt.encode(@canonical)
       assert byte_size(bytes) == 16
       assert Base.encode16(bytes, case: :lower) == @canonical_hex
     end
@@ -25,9 +25,9 @@ defmodule Xqlite.TypeExtension.UUIDTest do
       upper = String.upcase(@canonical)
       mixed = "550E8400-e29b-41D4-a716-446655440000"
 
-      assert {:ok, bytes} = UUIDExt.encode(@canonical)
-      assert UUIDExt.encode(upper) == {:ok, bytes}
-      assert UUIDExt.encode(mixed) == {:ok, bytes}
+      assert {:ok, %Xqlite.Blob{} = wrapped} = UUIDExt.encode(@canonical)
+      assert UUIDExt.encode(upper) == {:ok, wrapped}
+      assert UUIDExt.encode(mixed) == {:ok, wrapped}
     end
 
     test "skips the un-hyphenated 32-char hex form" do
@@ -122,13 +122,15 @@ defmodule Xqlite.TypeExtension.UUIDTest do
     end
 
     test "canonical text encodes to a compact BLOB and decodes back", %{conn: conn} do
-      [1, encoded] = TypeExtension.encode_params([1, @canonical], [UUIDExt])
-      assert byte_size(encoded) == 16
+      [1, %Xqlite.Blob{bytes: bytes} = encoded] =
+        TypeExtension.encode_params([1, @canonical], [UUIDExt])
+
+      assert byte_size(bytes) == 16
 
       {:ok, 1} =
         NIF.execute(conn, "INSERT INTO uuid_test (id, u) VALUES (?1, ?2)", [1, encoded])
 
-      # Stored compactly with BLOB affinity (these bytes are not valid UTF-8).
+      # Stored compactly, with the storage class forced rather than inferred.
       {:ok, %{rows: [["blob"]]}} =
         NIF.query(conn, "SELECT typeof(u) FROM uuid_test WHERE id = 1", [])
 
@@ -154,6 +156,27 @@ defmodule Xqlite.TypeExtension.UUIDTest do
         |> Enum.to_list()
 
       assert row["u"] == @canonical
+    end
+
+    # The nil UUID is sixteen NUL bytes, which are valid UTF-8. Classified by
+    # content it would be stored as TEXT while every ordinary UUID is stored as
+    # BLOB, putting two values of the same kind in two storage classes in one
+    # column — different `typeof`, different sort position, and a UNIQUE column
+    # that accepts both. Both must be BLOB.
+    test "every UUID lands in one storage class, the nil UUID included", %{conn: conn} do
+      nil_uuid = "00000000-0000-0000-0000-000000000000"
+
+      for {id, text} <- [{10, @canonical}, {11, nil_uuid}] do
+        params = TypeExtension.encode_params([id, text], [UUIDExt])
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO uuid_test (id, u) VALUES (?1, ?2)", params)
+      end
+
+      assert {:ok, %{rows: [["blob"], ["blob"]]}} =
+               NIF.query(
+                 conn,
+                 "SELECT typeof(u) FROM uuid_test WHERE id IN (10, 11) ORDER BY id",
+                 []
+               )
     end
   end
 end

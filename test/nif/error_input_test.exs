@@ -110,6 +110,54 @@ defmodule Xqlite.NIF.ErrorInputTest do
                  NIF.query(conn, sql, params)
       end
 
+      test "a blob wrapper holding a non-binary is refused with its position and type",
+           %{conn: conn} do
+        sql = "SELECT ?1, ?2;"
+
+        assert {:error, {:invalid_blob_bytes, %{position: 1, type: :integer}}} =
+                 NIF.query(conn, sql, [%Xqlite.Blob{bytes: 42}, 1])
+
+        assert {:error, {:invalid_blob_bytes, %{position: 2, type: :atom}}} =
+                 NIF.query(conn, sql, [1, %Xqlite.Blob{bytes: nil}])
+
+        assert {:error, {:invalid_blob_bytes, %{position: 2, type: :list}}} =
+                 NIF.query(conn, sql, [1, %Xqlite.Blob{bytes: [1, 2]}])
+      end
+
+      test "a blob wrapper holding a non-binary is refused inside a keyword list",
+           %{conn: conn} do
+        sql = "SELECT :a, :b;"
+
+        assert {:error, {:invalid_blob_bytes, %{position: 2, type: :integer}}} =
+                 NIF.query(conn, sql, a: 1, b: %Xqlite.Blob{bytes: 42})
+      end
+
+      test "a blob wrapper holding a non-binary is refused on execute/3", %{conn: conn} do
+        sql = "INSERT INTO error_input_test (data) VALUES (?1);"
+
+        assert {:error, {:invalid_blob_bytes, %{position: 1, type: :float}}} =
+                 NIF.execute(conn, sql, [%Xqlite.Blob{bytes: 1.5}])
+      end
+
+      # Only the struct is a parameter; tuples and plain maps stay refused as
+      # before, so nothing that used to be an error quietly became a blob.
+      test "tuples and plain maps are still unsupported parameter values", %{conn: conn} do
+        sql = "SELECT ?1;"
+
+        assert {:error, {:unsupported_data_type, :tuple}} =
+                 NIF.query(conn, sql, [{:blob, "abc", :x}])
+
+        assert {:error, {:unsupported_data_type, :tuple}} = NIF.query(conn, sql, [{1, "abc"}])
+
+        assert {:error, {:unsupported_data_type, :map}} =
+                 NIF.query(conn, sql, [%{bytes: "abc"}])
+
+        # A leading atom-headed pair is a keyword list in Elixir and always
+        # was; the list dispatch is untouched by the wrapper.
+        assert {:error, {:invalid_parameter_name, ":blob"}} =
+                 NIF.query(conn, sql, [{:blob, "abc"}])
+      end
+
       test "execute/3 returns :multiple_statements for multi-statement SQL", %{conn: conn} do
         sql = "UPDATE error_input_test SET data = 'a'; SELECT * FROM error_input_test;"
         assert {:error, :multiple_statements} = NIF.execute(conn, sql, [])

@@ -75,7 +75,14 @@ defmodule Xqlite do
     :mmap_size
   ]
 
-  @type sqlite_value :: integer() | float() | binary() | nil
+  @typedoc """
+  A value SQLite can store.
+
+  `%Xqlite.Blob{}` is a parameter form only: it forces `BLOB` storage for the
+  bytes it wraps. Nothing reads back wrapped — a result row carries plain
+  integers, floats, binaries and `nil`.
+  """
+  @type sqlite_value :: integer() | float() | binary() | Xqlite.Blob.t() | nil
 
   @type query_result :: %{
           columns: [String.t()],
@@ -158,6 +165,7 @@ defmodule Xqlite do
           | {:internal_encoding_error, String.t()}
           | {:invalid_authorizer_action, atom()}
           | {:invalid_batch_size, %{provided: term(), minimum: 1}}
+          | {:invalid_blob_bytes, %{position: pos_integer(), type: atom()}}
           | {:invalid_cancel_tokens, term()}
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
@@ -1451,8 +1459,13 @@ defmodule Xqlite do
   %{provided: _, expected: _}}}`) or a keyword list for named placeholders.
   Once stepping has started, call `reset/1` before rebinding — SQLite
   rejects mid-run rebinds.
+
+  A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
+  `BLOB` otherwise. Pass `%Xqlite.Blob{bytes: bytes}` in either form — a
+  positional element or a keyword pair's value — to store a `BLOB` whatever
+  the bytes are.
   """
-  @spec bind(stmt(), list()) :: :ok | error()
+  @spec bind(stmt(), list() | keyword()) :: :ok | error()
   def bind(stmt, params) when is_list(params) do
     XqliteNIF.stmt_bind(stmt, params)
   end

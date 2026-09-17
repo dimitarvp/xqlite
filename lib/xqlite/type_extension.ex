@@ -67,8 +67,9 @@ defmodule Xqlite.TypeExtension do
   Converts an Elixir term to a SQLite-compatible storage value.
 
   Return `{:ok, sqlite_value}` where `sqlite_value` is an integer, float,
-  binary, or nil. Return `:skip` if this extension does not handle the
-  given value.
+  binary, `nil`, or an `%Xqlite.Blob{}` wrapping bytes that must be stored
+  as a `BLOB` whatever they contain. Return `:skip` if this extension does
+  not handle the given value.
   """
   @callback encode(value :: term()) :: {:ok, Xqlite.sqlite_value()} | :skip
 
@@ -83,8 +84,12 @@ defmodule Xqlite.TypeExtension do
   @doc """
   Encodes a list of query parameters through the extension chain.
 
-  Handles both positional parameter lists and keyword parameter lists.
-  Values that no extension handles pass through unchanged.
+  Positional or keyword is decided once, from the list's first element, by
+  the same rule the NIF applies when it binds: a list whose first element is
+  a two-element tuple with an atom key is a keyword list, and every other
+  list is positional. The whole list is then encoded that way — in a keyword
+  list every pair's value goes through the chain, in a positional list every
+  element does. Values that no extension handles pass through unchanged.
   """
   @spec encode_params(params :: list() | keyword(), extensions :: [module()]) ::
           list() | keyword()
@@ -92,7 +97,7 @@ defmodule Xqlite.TypeExtension do
 
   def encode_params([{key, _} | _] = params, extensions) when is_atom(key) do
     Enum.map(params, fn
-      {k, value} when is_atom(k) -> {k, encode_value(value, extensions)}
+      {k, value} -> {k, encode_value(value, extensions)}
       other -> other
     end)
   end

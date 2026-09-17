@@ -252,8 +252,15 @@ A few smaller behaviors that occasionally surprise, all deliberate:
   claim to be.
 - **Binary parameters dispatch on validity.** An Elixir binary bound as a
   parameter is stored as SQLite `TEXT` when it is valid UTF-8 and as a
-  `BLOB` otherwise. Bind explicitly typed values if you need a specific
-  column affinity regardless of contents.
+  `BLOB` otherwise. Raw bytes therefore land in two storage classes: about
+  one in fourteen thousand random 16-byte values — a UUID, a key, a piece of
+  ciphertext — happens to decode as UTF-8 and is stored as `TEXT`, which
+  sorts before and compares unequal to the same bytes stored as a `BLOB`, so
+  a `UNIQUE` column accepts them twice and a STRICT table with a `BLOB`
+  column rejects the `TEXT` one. Bind such a value as
+  `%Xqlite.Blob{bytes: bytes}` and it is a `BLOB` whatever the bytes are.
+  A value read back is a plain binary with nothing to say which class it
+  came from, so wrap it again when you write it back.
 - **`:memory:` vs file is a trust and durability choice.** An in-memory
   database (`Xqlite.open_in_memory/1`) has no on-disk footprint and is
   gone when its connection closes — nothing to leak to the filesystem, and

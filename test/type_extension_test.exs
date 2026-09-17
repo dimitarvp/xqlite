@@ -411,6 +411,21 @@ defmodule Xqlite.TypeExtensionTest do
       result = TypeExtension.encode_params(params, [Xqlite.TypeExtension.Date])
       assert result == [start: "2024-01-15", end: "2024-12-31"]
     end
+
+    # Positional or keyword is decided once, from the first element, exactly as
+    # the NIF decides it. A blob wrapper is a struct, so a list that starts with
+    # one is positional and every later element is still encoded.
+    test "a positional list starting with a blob wrapper encodes every later element" do
+      wrapper = %Xqlite.Blob{bytes: <<1, 2>>}
+
+      assert TypeExtension.encode_params([wrapper, 5], [IntDoubler]) == [wrapper, 10]
+    end
+
+    test "a keyword list encodes every pair's value, whatever its key" do
+      params = [{:a, 5}, {"b", 5}]
+
+      assert TypeExtension.encode_params(params, [IntDoubler]) == [{:a, 10}, {"b", 10}]
+    end
   end
 
   describe "decode_rows/2" do

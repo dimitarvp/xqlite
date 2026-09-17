@@ -4,10 +4,12 @@ defmodule Xqlite.TypeExtension.UUID do
 
   Encodes a canonical hyphenated UUID string (36 chars, `8-4-4-4-12` hex,
   case-insensitive) to the raw 16-byte binary it represents — half the size of
-  the textual form. SQLite stores that binary with BLOB affinity in the common
-  case (real UUIDs are not valid UTF-8); the rare value whose bytes *do* form
-  valid UTF-8 (e.g. the nil UUID) is stored as TEXT instead. Both are 16 bytes
-  and decode identically.
+  the textual form — wrapped in `%Xqlite.Blob{}` so every UUID is stored as a
+  `BLOB`. Without the wrapper the storage class would follow the bytes: the
+  rare value whose sixteen bytes *do* form valid UTF-8 (the nil UUID, for one)
+  would be stored as `TEXT` while every other UUID is a `BLOB`, putting two
+  values of the same kind in one column in two classes that sort apart,
+  compare unequal and split a `UNIQUE` constraint.
 
   Only the canonical hyphenated form is encoded. A raw 16-byte binary passed to
   `encode/1` returns `:skip` — encoding it would be indistinguishable from an
@@ -60,7 +62,7 @@ defmodule Xqlite.TypeExtension.UUID do
 
   defp encode_hex(hex) do
     case Base.decode16(hex, case: :mixed) do
-      {:ok, bytes} -> {:ok, bytes}
+      {:ok, bytes} -> {:ok, %Xqlite.Blob{bytes: bytes}}
       :error -> :skip
     end
   end
