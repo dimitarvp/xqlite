@@ -3,12 +3,12 @@ defmodule Xqlite do
   This is the central module of this library. All SQLite operations can be performed from here.
   Note that they delegate to other modules which you can also use directly.
 
-  Two kinds of bad input, two answers. An argument of the wrong type raises
-  `FunctionClauseError` at the call: the guards on these functions state what
-  each one takes, and a term that does not match is a mistake in the calling
-  code, not a condition to handle. A value of the right type that this library
-  or SQLite refuses is an answer instead — `{:error, reason}`, with the reason
-  saying what was wrong.
+  Two kinds of bad input, two answers. An argument of the wrong type is a
+  mistake in the calling code and raises at the call — from a guard
+  (`FunctionClauseError`) or from the native function's argument decoding
+  (`ArgumentError`), whichever the term reaches first. A value of the right
+  type that this library or SQLite refuses is an answer instead —
+  `{:error, reason}`, with the reason saying what was wrong.
   """
 
   import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
@@ -164,6 +164,14 @@ defmodule Xqlite do
   atom or string for a PRAGMA the typed schema does not know.
   `:invalid_pragma_name` carries a key that is neither an atom nor a string.
 
+  Two more name the option or argument that was wrong and why.
+  `:invalid_hook_option` carries the option key a hook registration could not
+  take, its value, and `:invalid_value`. `:invalid_pragma_argument` carries
+  the PRAGMA, the argument and one of `:not_a_scalar` (a term no PRAGMA
+  argument can be, a list included), `:missing` (a PRAGMA that reads only
+  with an argument, called without one) and `:takes_no_argument` (a PRAGMA
+  with no one-argument read form, called with one).
+
   `:unsupported_data_type` names the kind of term handed to the binder when no
   SQLite value can hold it: `:bitstring`, `:function`, `:list`, `:map`, `:pid`,
   `:port`, `:reference` or `:tuple`. `:bitstring` is a value whose bit size is
@@ -205,6 +213,8 @@ defmodule Xqlite do
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
+          | {:invalid_hook_option,
+             %{key: :every_n | :tag, value: term(), reason: :invalid_value}}
           | {:invalid_on_error, term()}
           | {:invalid_open_option,
              %{key: atom(), reason: :unknown_key, allowed: [atom()], value: nil}
@@ -213,6 +223,12 @@ defmodule Xqlite do
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
+          | {:invalid_pragma_argument,
+             %{
+               pragma: atom(),
+               value: term(),
+               reason: :missing | :not_a_scalar | :takes_no_argument
+             }}
           | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
           | {:invalid_stream_handle, String.t()}
@@ -377,7 +393,15 @@ defmodule Xqlite do
   `:ok`. A session is not covered — delete sessions before closing (see
   `XqliteNIF.session_delete/1`).
 
-  The one error it can answer is `{:error, {:lock_error, message}}`, after a
+  SQLite can refuse to free the handle, which answers
+  `{:error, {:database_busy_or_locked, code, message}}`. The drain has
+  already run by then, so that answer never means "nothing happened": every
+  prepared statement, stream and blob is finalized, and the connection —
+  still open — can be closed again. Nothing this library opens is left behind
+  by the drain, so no measured state reaches that answer today; it is
+  SQLite's own report, passed on rather than discarded.
+
+  The other error is `{:error, {:lock_error, message}}`, after a
   thread panicked inside the NIF while holding a lock the close needs (Rust
   marks such a lock broken for good). Two locks can produce it and they leave
   different states behind: the connection's own lock, where the SQLite handle
@@ -2295,20 +2319,30 @@ defmodule Xqlite do
 
   Returns `{:ok, handle}` where `handle` is the value to pass to
   `unregister_progress_hook/2`. Returns `{:error, reason}` on failure.
+
+  Both options are checked before the connection is touched: a `:tag` that is
+  not an atom and an `:every_n` that is not a positive integer answer
+  `{:error, {:invalid_hook_option, %{key: key, value: value,
+  reason: :invalid_value}}}`.
   """
   @spec register_progress_hook(conn(), pid(), keyword()) ::
           {:ok, non_neg_integer()} | error()
   def register_progress_hook(conn, pid, opts \\ []) when is_pid(pid) and is_list(opts) do
-    every_n = Keyword.get(opts, :every_n, 1000)
-    tag_atom = Keyword.get(opts, :tag)
+    with {:ok, every_n} <- hook_every_n(Keyword.get(opts, :every_n, 1000)),
+         {:ok, tag} <- hook_tag(Keyword.get(opts, :tag)) do
+      XqliteNIF.register_progress_hook(conn, pid, every_n, tag)
+    end
+  end
 
-    tag =
-      case tag_atom do
-        nil -> nil
-        a when is_atom(a) -> Atom.to_string(a)
-      end
+  defp hook_every_n(every_n) when is_integer(every_n) and every_n >= 1, do: {:ok, every_n}
+  defp hook_every_n(value), do: {:error, invalid_hook_option(:every_n, value)}
 
-    XqliteNIF.register_progress_hook(conn, pid, every_n, tag)
+  defp hook_tag(nil), do: {:ok, nil}
+  defp hook_tag(tag) when is_atom(tag), do: {:ok, Atom.to_string(tag)}
+  defp hook_tag(value), do: {:error, invalid_hook_option(:tag, value)}
+
+  defp invalid_hook_option(key, value) do
+    {:invalid_hook_option, %{key: key, value: value, reason: :invalid_value}}
   end
 
   @doc """

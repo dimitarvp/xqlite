@@ -48,7 +48,7 @@ pub(crate) fn set<'a>(
     value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
     validate_name(pragma_name)?;
-    let value_literal = format_term_for_pragma(env, value_term)?;
+    let value_literal = format_term_for_pragma(env, pragma_name, value_term)?;
     let write_sql = format!("PRAGMA {pragma_name} = {value_literal};");
     let mut write_stmt = conn
         .prepare(&write_sql)

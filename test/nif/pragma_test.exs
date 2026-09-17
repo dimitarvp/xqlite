@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.PragmaTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
@@ -84,6 +85,40 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:error, {:unsupported_data_type, :map}} =
                  NIF.set_pragma(conn, "cache_size", %{})
       end
+
+      # A PRAGMA value is interpolated into the statement, so it has to be
+      # text. Three ways it can fail to be, three answers.
+      test "set_pragma/3 refuses a value that is no text, by what it is", %{conn: conn} do
+        assert {:error, {:unsupported_data_type, :bitstring}} =
+                 NIF.set_pragma(conn, "user_version", <<1::7>>)
+
+        assert {:error, {:cannot_execute_pragma, "user_version", reason}} =
+                 NIF.set_pragma(conn, "user_version", <<255>>)
+
+        assert is_binary(reason)
+
+        assert {:error, :null_byte_in_string} = NIF.set_pragma(conn, "user_version", <<0>>)
+
+        assert {:ok, 0} = NIF.get_pragma(conn, "user_version")
+      end
+
+      test "the wrapper answers the same for a name the schema does not model", %{conn: conn} do
+        assert {:error, {:unsupported_data_type, :bitstring}} =
+                 Xqlite.set_pragma(conn, :not_a_pragma, <<1::7>>)
+
+        assert {:error, {:cannot_execute_pragma, "not_a_pragma", _reason}} =
+                 Xqlite.set_pragma(conn, :not_a_pragma, <<255>>)
+
+        assert {:error, :null_byte_in_string} =
+                 Xqlite.set_pragma(conn, :not_a_pragma, <<0>>)
+      end
+
+      property "a bit size that is no whole byte is refused by its kind", %{conn: conn} do
+        check all(bits <- partial_byte_bitstring(), max_runs: 2000) do
+          assert {:error, {:unsupported_data_type, :bitstring}} =
+                   NIF.set_pragma(conn, "user_version", bits)
+        end
+      end
     end
 
     # end describe "using #{prefix}"
@@ -164,4 +199,12 @@ defmodule Xqlite.NIF.PragmaTest do
       assert {:ok, "delete"} = NIF.get_pragma(conn, "journal_mode")
     end
   end
+
+  defp partial_byte_bitstring do
+    StreamData.bitstring()
+    |> StreamData.scale(fn size -> min(size, 32) end)
+    |> StreamData.filter(&partial_byte?/1)
+  end
+
+  defp partial_byte?(bits), do: rem(bit_size(bits), 8) != 0
 end

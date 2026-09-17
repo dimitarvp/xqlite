@@ -291,6 +291,157 @@ defmodule XqlitePragmaTest do
     end
   end
 
+  # A PRAGMA argument is a scalar, so a list in that position is the options and
+  # only when every element is a `{key, value}` pair. What a pragma reads with
+  # decides the rest: the six that read only with an argument refuse a missing
+  # one, and the ones with no one-argument form refuse an argument instead of
+  # handing SQLite `PRAGMA name(value)`, which it reads as a write.
+  describe "the argument position" do
+    setup do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+
+      :ok =
+        NIF.execute_batch(db, "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);")
+
+      {:ok, db: db}
+    end
+
+    test "the anchor: a list is not an argument, on either path", %{db: db} do
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: ["people"], reason: :not_a_scalar}}} =
+               P.get(db, :table_info, ["people"])
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: ["people"], reason: :not_a_scalar}}} =
+               P.get(db, :table_info, ["people"], db_name: "main")
+
+      # The named accessor takes a name, so `apply/3` keeps the compiler's
+      # type checker out of a call whose argument is wrong on purpose.
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: ["people"], reason: :not_a_scalar}}} =
+               apply(P, :table_info, [db, ["people"]])
+
+      assert {:ok, [[0, "id" | _] | _]} = P.get(db, :table_info, "people")
+    end
+
+    test "the anchor: a pragma that reads only with an argument refuses a missing one",
+         %{db: db} do
+      assert {:error,
+              {:invalid_pragma_argument, %{pragma: :table_info, value: nil, reason: :missing}}} =
+               P.get(db, :table_info)
+
+      assert {:error,
+              {:invalid_pragma_argument, %{pragma: :table_info, value: nil, reason: :missing}}} =
+               P.get(db, :table_info, db_name: "main")
+    end
+
+    test "the anchor: a getter with no one-argument form refuses the argument", %{db: db} do
+      assert {:ok, _} = P.put(db, :user_version, 7)
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: 42, reason: :takes_no_argument}}} =
+               P.get(db, :user_version, 42)
+
+      assert {:ok, 7} = P.get(db, :user_version)
+    end
+
+    property "the refused argument writes nothing", %{db: db} do
+      assert {:ok, _} = P.put(db, :user_version, 7)
+
+      check all(value <- pragma_scalar(), max_runs: 2000) do
+        assert {:error, {:invalid_pragma_argument, %{pragma: :user_version, reason: reason}}} =
+                 P.get(db, :user_version, value)
+
+        assert :takes_no_argument = reason
+        assert {:ok, 7} = P.get(db, :user_version)
+      end
+    end
+
+    property "every name answers by its read arities, and nothing else is built", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+
+      check all(
+              name <- StreamData.member_of(P.all()),
+              shape <- argument_shape(),
+              opts <- StreamData.member_of([[], [db_name: "main"]]),
+              max_runs: 2000
+            ) do
+        assert argument_verdict(name, shape) ==
+                 classify_answer(answer_for(db, name, shape, opts))
+      end
+    end
+  end
+
+  # The five shapes the argument position can take.
+  defp argument_shape do
+    StreamData.one_of([
+      StreamData.constant(:none),
+      StreamData.map(pragma_scalar(), fn value -> {:scalar, value} end),
+      StreamData.map(StreamData.member_of([[], [db_name: "main"]]), fn kw -> {:options, kw} end),
+      StreamData.map(non_keyword_list(), fn list -> {:list, list} end),
+      StreamData.map(nested_list(), fn list -> {:list, list} end)
+    ])
+  end
+
+  defp pragma_scalar do
+    StreamData.one_of([
+      pragma_string_value(),
+      StreamData.atom(:alphanumeric),
+      StreamData.integer(-2_147_483_648..2_147_483_647),
+      StreamData.member_of([nil, true, false, :people, "people", 0, -1])
+    ])
+  end
+
+  defp non_keyword_list do
+    [StreamData.atom(:alphanumeric), StreamData.integer(), pragma_string_value()]
+    |> StreamData.one_of()
+    |> StreamData.list_of(min_length: 1, max_length: 3)
+  end
+
+  defp nested_list do
+    pragma_string_value()
+    |> StreamData.list_of(min_length: 1, max_length: 2)
+    |> StreamData.list_of(min_length: 1, max_length: 2)
+  end
+
+  defp argument_verdict(name, :none), do: no_argument_verdict(name)
+  defp argument_verdict(name, {:options, _kw}), do: no_argument_verdict(name)
+  defp argument_verdict(name, {:list, list}), do: {:refused, name, :not_a_scalar, list}
+
+  defp argument_verdict(name, {:scalar, value}) do
+    case name in P.readable_with_one_arg() do
+      true -> :went_ahead
+      false -> {:refused, name, :takes_no_argument, value}
+    end
+  end
+
+  defp no_argument_verdict(name) do
+    case name in P.readable_with_zero_args() do
+      true -> :went_ahead
+      false -> {:refused, name, :missing, nil}
+    end
+  end
+
+  defp answer_for(db, name, :none, []), do: P.get(db, name)
+  defp answer_for(db, name, :none, opts), do: P.get(db, name, [], opts)
+  defp answer_for(db, name, {_kind, value}, []), do: P.get(db, name, value)
+  defp answer_for(db, name, {_kind, value}, opts), do: P.get(db, name, value, opts)
+
+  # The denying authorizer turns every PRAGMA that really reaches SQLite into
+  # an authorization error, so a refusal here proves no statement was built.
+  # A read that goes ahead is not always a statement: `wal_autocheckpoint` is
+  # answered from the connection's own emulated threshold.
+  defp classify_answer(
+         {:error, {:invalid_pragma_argument, %{pragma: pragma, value: value, reason: reason}}}
+       ), do: {:refused, pragma, reason, value}
+
+  defp classify_answer(_went_ahead), do: :went_ahead
+
   # SQLite matches a PRAGMA name without regard to case, and the typed schema
   # spells every name in lower-case atoms. A caller who writes the name any
   # other way must reach the same PRAGMA through every door.

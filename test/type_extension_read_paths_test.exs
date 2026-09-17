@@ -13,7 +13,8 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
   Three built-ins are encode-only (`Decimal`, `Duration`, `Instant`), `UUID`
   lower-cases its text and `JSON` turns atom keys into strings, so the law
   compares the two read paths with one another rather than against the value
-  that went in.
+  that went in. For the encode-only three it also asserts what "encode-only"
+  means: `decode/1` answers `:skip` on the value SQLite stored.
   """
 
   use ExUnit.Case, async: true
@@ -21,6 +22,8 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
 
   alias Xqlite.TypeExtension
   alias XqliteNIF, as: NIF
+
+  @encode_only [TypeExtension.Decimal, TypeExtension.Duration, TypeExtension.Instant]
 
   setup do
     {:ok, conn} = NIF.open_in_memory(":memory:")
@@ -71,6 +74,7 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
 
       assert {:row, [raw] = row} = Xqlite.step(stmt)
       assert {^raw, ^class} = encoded_form(extension, value)
+      assert_skipped(extension, raw)
       assert [[^decoded]] = TypeExtension.decode_rows([row], [extension])
 
       assert :ok = Xqlite.reset(stmt)
@@ -85,6 +89,15 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
       assert :ok = Xqlite.finalize(stmt)
     end
   end
+
+  # An encode-only extension reads nothing back: deciding that a stored
+  # number or string is one of its values is the application's call, not
+  # this library's, so `decode/1` hands the raw value on untouched.
+  defp assert_skipped(extension, raw) when extension in @encode_only do
+    assert :skip = extension.decode(raw)
+  end
+
+  defp assert_skipped(_extension, _raw), do: :ok
 
   defp param_member?(%Xqlite.Blob{}), do: true
 

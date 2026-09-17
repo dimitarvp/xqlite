@@ -326,11 +326,25 @@ pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), X
             // other thread is inside a `sqlite3_*` call on this handle, and
             // every registered cell holds null or a handle opened on it.
             unsafe { handle.release_children()? };
-            // Dropping the Connection runs `sqlite3_close`, which now finds no
-            // statement of ours outstanding and frees the handle.
-            conn_guard.take();
-            Ok(())
+            free_handle(&mut conn_guard)
         }
+    }
+}
+
+/// Runs `sqlite3_close` and answers its result: dropping the `Connection`
+/// would discard it inside rusqlite's `Drop`. A refused close hands the
+/// connection back, so it goes into the slot again and can be closed later;
+/// its children are gone either way, the drain having run first.
+fn free_handle(conn_slot: &mut Option<Connection>) -> Result<(), XqliteError> {
+    match conn_slot.take() {
+        None => Ok(()),
+        Some(conn) => match conn.close() {
+            Ok(()) => Ok(()),
+            Err((conn, err)) => {
+                *conn_slot = Some(conn);
+                Err(XqliteError::from(err))
+            }
+        },
     }
 }
 
@@ -395,5 +409,46 @@ where
     match conn_guard.as_mut() {
         Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
         None => Err(XqliteError::ConnectionClosed),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    // A statement rusqlite does not own is the one way a test can make
+    // `sqlite3_close` refuse: the connection comes back with the error, which
+    // this crate classifies rather than discards.
+    #[test]
+    fn a_refused_close_answers_the_classified_error() {
+        let conn = Connection::open_in_memory().expect("an in-memory connection");
+        let sql = CString::new("SELECT 1").expect("SQL without a NUL byte");
+        let mut stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+
+        // SAFETY: the connection outlives the call, `sql` is a valid
+        // NUL-terminated string, `stmt` is valid for writing, and the
+        // statement left behind is finalized below.
+        let rc = unsafe {
+            ffi::sqlite3_prepare_v2(
+                conn.handle(),
+                sql.as_ptr(),
+                -1,
+                &mut stmt,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK);
+
+        let (conn, err) = conn.close().expect_err("a close SQLite refuses");
+        assert!(matches!(
+            XqliteError::from(err),
+            XqliteError::DatabaseBusyOrLocked { .. }
+        ));
+
+        // SAFETY: `stmt` is the statement prepared above on `conn`, which is
+        // still open because the close was refused, and nothing else holds it.
+        assert_eq!(unsafe { ffi::sqlite3_finalize(stmt) }, ffi::SQLITE_OK);
+        assert!(conn.close().is_ok());
     }
 }

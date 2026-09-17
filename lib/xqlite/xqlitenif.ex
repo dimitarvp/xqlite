@@ -401,8 +401,15 @@ defmodule XqliteNIF do
 
   `conn` is the database connection resource.
 
-  Returns `:ok`. The one error it can answer is
-  `{:error, {:lock_error, message}}`, after a thread panicked inside the NIF
+  Returns `:ok`. SQLite can refuse to free the handle, which answers
+  `{:error, {:database_busy_or_locked, code, message}}`. The children are
+  finalized before the handle is freed, so that answer never means "nothing
+  happened": every statement, stream and blob is gone, and the connection —
+  still open — can be closed again. No state this library can reach makes
+  SQLite refuse today; the answer is SQLite's own, passed on rather than
+  discarded.
+
+  The other error is `{:error, {:lock_error, message}}`, after a thread panicked inside the NIF
   while holding a lock the close needs (Rust marks such a lock broken for
   good). Two locks can produce it and they leave different states behind: the
   connection's own lock, where the SQLite handle is never freed and the

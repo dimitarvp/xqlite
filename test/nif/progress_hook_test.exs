@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.ProgressHookTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
@@ -393,6 +394,75 @@ defmodule Xqlite.NIF.ProgressHookTest do
       :ok = run_workload(conn)
       :ok = Xqlite.unregister_progress_hook(conn, handle)
     end
+
+    test "a value neither option takes is an answer, not a crash", %{conn: conn} do
+      assert {:error, {:invalid_hook_option, %{key: :tag, value: "t", reason: :invalid_value}}} =
+               Xqlite.register_progress_hook(conn, self(), tag: "t")
+
+      assert {:error, {:invalid_hook_option, %{key: :tag, value: 42, reason: :invalid_value}}} =
+               Xqlite.register_progress_hook(conn, self(), tag: 42)
+
+      assert {:error,
+              {:invalid_hook_option, %{key: :every_n, value: :foo, reason: :invalid_value}}} =
+               Xqlite.register_progress_hook(conn, self(), every_n: :foo)
+
+      assert {:error,
+              {:invalid_hook_option, %{key: :every_n, value: -1, reason: :invalid_value}}} =
+               Xqlite.register_progress_hook(conn, self(), every_n: -1)
+
+      assert {:error,
+              {:invalid_hook_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
+               Xqlite.register_progress_hook(conn, self(), every_n: 0)
+    end
+
+    test "the documented values still register", %{conn: conn} do
+      assert {:ok, handle} =
+               Xqlite.register_progress_hook(conn, self(), tag: nil, every_n: 1)
+
+      assert :ok = Xqlite.unregister_progress_hook(conn, handle)
+    end
+
+    property "no value outside what an option takes reaches the NIF", %{conn: conn} do
+      check all({key, value} <- bad_hook_option(), max_runs: 2000) do
+        assert {:error,
+                {:invalid_hook_option, %{key: ^key, value: ^value, reason: :invalid_value}}} =
+                 Xqlite.register_progress_hook(conn, self(), [{key, value}])
+      end
+    end
+  end
+
+  # `:tag` takes an atom, `:every_n` a positive integer; everything else is a
+  # value of the wrong kind in a well-formed option list.
+  defp bad_hook_option do
+    StreamData.one_of([
+      StreamData.map(non_atom_term(), fn value -> {:tag, value} end),
+      StreamData.map(non_positive_integer_term(), fn value -> {:every_n, value} end)
+    ])
+  end
+
+  defp non_atom_term do
+    StreamData.filter(any_term(), fn term -> not is_atom(term) end)
+  end
+
+  defp non_positive_integer_term do
+    StreamData.filter(any_term(), fn term -> not (is_integer(term) and term >= 1) end)
+  end
+
+  defp any_term do
+    StreamData.scale(
+      StreamData.one_of([
+        StreamData.atom(:alphanumeric),
+        StreamData.boolean(),
+        StreamData.constant(nil),
+        StreamData.binary(),
+        StreamData.string(:printable),
+        StreamData.integer(),
+        StreamData.list_of(StreamData.integer(), max_length: 3),
+        StreamData.map_of(StreamData.atom(:alphanumeric), StreamData.integer(), max_length: 3),
+        StreamData.tuple({StreamData.atom(:alphanumeric), StreamData.integer()})
+      ]),
+      fn size -> min(size, 8) end
+    )
   end
 
   # ---------------------------------------------------------------------------

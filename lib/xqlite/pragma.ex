@@ -5,12 +5,12 @@ defmodule Xqlite.Pragma do
   This module deliberately omits the PRAGMAs that are deprecated, or are used with non-standard
   sqlite compile options, or are intended for testing sqlite.
 
-  Two kinds of bad input, two answers. An argument of the wrong type raises
-  `FunctionClauseError` at the call: the guards on these functions state what
-  each one takes, and a term that does not match is a mistake in the calling
-  code, not a condition to handle. A value of the right type that this library
-  or SQLite refuses is an answer instead — `{:error, reason}`, with the reason
-  saying what was wrong.
+  Bad input is an answer here, not a raise. A key that is neither an atom nor
+  a string answers `{:error, {:invalid_pragma_name, key}}`, a value a pragma
+  cannot take `{:error, {:invalid_pragma_value, _}}`, and an argument a
+  pragma cannot take `{:error, {:invalid_pragma_argument, _}}`. The one term
+  these functions do not judge is the connection: a term that is not one
+  raises `ArgumentError` from the native function it is handed to.
   """
 
   alias Xqlite.PragmaSpec
@@ -614,37 +614,57 @@ defmodule Xqlite.Pragma do
   with `{:error, {:invalid_pragma_name, key}}`. SQLite parses an unknown
   PRAGMA and ignores it, so letting one through would answer with an empty
   result and no hint that the name was wrong.
+
+  The name is resolved first, then the argument position. An extra argument
+  is a scalar — a string, an atom or an integer; a list there is the options
+  and only when every element is a `{key, value}` pair, so `[]` is options
+  too. Anything else in that position, a plain list included, is refused
+  with `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
+  reason: :not_a_scalar}}}`. What the PRAGMA reads with decides the rest:
+  one that reads only with an argument (`:table_info` and its siblings)
+  called without one answers the same shape with `reason: :missing`, and one
+  with no one-argument form called with an argument answers
+  `reason: :takes_no_argument` — SQLite reads `PRAGMA name(value)` on a
+  writable pragma as a write, so a getter must not build it.
   """
-  @spec get(Xqlite.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
-          get_result()
+  @spec get(Xqlite.conn(), pragma_key(), term(), pragma_opts()) :: get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
 
-  def get(db, key, arg, opts) when not is_list(arg) do
-    do_get_with_arg(db, key, arg, opts)
-  end
-
-  def get(db, key, opts, []) when is_list(opts) do
-    do_get_no_arg(db, key, opts)
-  end
-
-  def get(db, key, arg_list, opts) when is_list(arg_list) do
-    with {:ok, name} <- resolve_name(key) do
-      get_list_arg(db, name, arg_list, opts)
-    end
-  end
-
-  defp get_list_arg(db, name, arg_list, opts) do
-    case name in @readable_with_one_arg do
-      true -> do_get_with_arg(db, name, arg_list, opts)
-      false -> do_get_no_arg(db, name, arg_list ++ opts)
-    end
-  end
-
-  defp do_get_no_arg(db, key, opts) do
+  def get(db, key, arg_or_opts, opts) do
     with {:ok, name} <- resolve_name(key),
          {:ok, spec} <- known_spec(name) do
-      dispatch_get(db, name, spec, opts)
+      read_pragma(db, name, spec, arg_or_opts, opts)
     end
+  end
+
+  defp read_pragma(db, name, spec, arg_or_opts, opts) when is_list(arg_or_opts) do
+    case Keyword.keyword?(arg_or_opts) do
+      true -> read_without_arg(db, name, spec, arg_or_opts ++ opts)
+      false -> {:error, invalid_argument(name, arg_or_opts, :not_a_scalar)}
+    end
+  end
+
+  defp read_pragma(db, name, _spec, arg, opts)
+       when is_binary(arg) or is_atom(arg) or is_integer(arg) do
+    case name in @readable_with_one_arg do
+      true -> query_with_arg(db, name, arg, opts)
+      false -> {:error, invalid_argument(name, arg, :takes_no_argument)}
+    end
+  end
+
+  defp read_pragma(_db, name, _spec, arg, _opts) do
+    {:error, invalid_argument(name, arg, :not_a_scalar)}
+  end
+
+  defp read_without_arg(db, name, spec, opts) do
+    case name in @readable_with_zero_args do
+      true -> dispatch_get(db, name, spec, opts)
+      false -> {:error, invalid_argument(name, nil, :missing)}
+    end
+  end
+
+  defp invalid_argument(name, value, reason) do
+    {:invalid_pragma_argument, %{pragma: name, value: value, reason: reason}}
   end
 
   defp known_spec(name) do
@@ -685,13 +705,6 @@ defmodule Xqlite.Pragma do
     case do_pragma_read(db, key, opts) do
       {:ok, :no_value} -> :ok
       other -> other
-    end
-  end
-
-  defp do_get_with_arg(db, key, arg, opts) do
-    with {:ok, name} <- resolve_name(key),
-         {:ok, _spec} <- known_spec(name) do
-      query_with_arg(db, name, arg, opts)
     end
   end
 

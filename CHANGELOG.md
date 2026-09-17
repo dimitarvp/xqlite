@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A PRAGMA argument is a scalar, and the PRAGMA's own read forms decide the
+  rest.** `Xqlite.Pragma.get/3,4` and the named accessors
+  (`Xqlite.Pragma.table_info/2,3` and its siblings) resolve the name first and
+  then judge the argument position: a string, an atom or an integer is the
+  argument, a keyword list is the options, and anything else answers
+  `{:error, {:invalid_pragma_argument, %{pragma: name, value: value, reason:
+  reason}}}` before a statement is built. Three calls that used to answer
+  `{:ok, []}` now answer that error: a plain list in the argument position
+  (`get(conn, :table_info, ["people"])`, `reason: :not_a_scalar`); one of the
+  six PRAGMAs that read only with an argument, called without one
+  (`get(conn, :table_info)`, `reason: :missing`); and an argument to a PRAGMA
+  with no one-argument read form (`get(conn, :user_version, 42)`,
+  `reason: :takes_no_argument`) — SQLite reads `PRAGMA user_version("42")` as
+  a write, so that getter used to write. A fourth call changes the other way:
+  `get(conn, :table_info, ["people"], db_name: "main")` worked by accident,
+  because the list was turned into a string, and now answers the same error.
+  `@type error_reason` gains the shape.
+- **`close/1` answers what `sqlite3_close` said.** The connection is closed
+  through rusqlite's own `close`, whose result used to be discarded inside
+  `Drop`, so a refusal is now `{:error, {:database_busy_or_locked, code,
+  message}}` instead of a silent `:ok`. The statements, streams and blobs are
+  finalized before the handle is freed, so that answer still leaves none
+  behind, and the connection stays open and can be closed again. No state this
+  library can reach makes SQLite refuse today.
+- **A PRAGMA value that is not text is refused by what it is.**
+  `XqliteNIF.set_pragma/3` (and `Xqlite.set_pragma/3` for a name the typed
+  schema does not model) used to answer
+  `{:cannot_convert_to_sqlite_value, "<<1:7>>", "Failed to decode binary as
+  string for PRAGMA: {error, badarg}"}`, two strings written for a human, for
+  every binary it could not read as text. Now a bit size that is no whole
+  number of bytes answers `{:unsupported_data_type, :bitstring}`, bytes that
+  are no UTF-8 answer `{:cannot_execute_pragma, name, reason}`, and a value
+  holding a NUL byte answers `:null_byte_in_string` instead of being written
+  into the statement, where SQLite's tokenizer would stop at the NUL.
+- **`register_progress_hook/3` refuses a bad option instead of raising.** A
+  `:tag` that is not an atom used to raise `CaseClauseError`, an `:every_n`
+  that is not an integer or is negative raised `ArgumentError` from the NIF,
+  and `0` answered a sentence. All four answer
+  `{:error, {:invalid_hook_option, %{key: key, value: value, reason:
+  :invalid_value}}}` now, checked before the connection is touched.
+  `@type error_reason` gains the shape.
+
 - **Two value types, one per direction.** `Xqlite.sqlite_value/0` now says
   what a result row holds: an integer, a float, a binary, `nil`, and the two
   atoms a REAL that is not finite reads back as, `:positive_infinity` and

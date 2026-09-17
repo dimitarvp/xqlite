@@ -310,6 +310,7 @@ pub(crate) fn decode_plain_list_params<'a>(
 
 pub(crate) fn format_term_for_pragma<'a>(
     env: Env<'a>,
+    pragma_name: &str,
     term: Term<'a>,
 ) -> Result<String, XqliteError> {
     let term_type = term.get_type();
@@ -338,15 +339,32 @@ pub(crate) fn format_term_for_pragma<'a>(
                 reason: format!("{e:?}"),
             }
         }),
-        // PRAGMA values are interpolated into SQL text — quote and escape.
-        TermType::Binary => term
-            .decode::<String>()
-            .map(|s| format!("'{}'", s.replace('\'', "''")))
-            .map_err(|e| XqliteError::CannotConvertToSqliteValue {
-                value_str: format!("{term:?}"),
-                reason: format!("Failed to decode binary as string for PRAGMA: {e:?}"),
-            }),
+        TermType::Binary => pragma_text(pragma_name, term),
         _ => Err(XqliteError::UnsupportedDataType { term_type }),
+    }
+}
+
+/// A PRAGMA value is written into the statement, so it has to be text. Three
+/// ways a term of the BEAM's one binary type is not: a bit size that is no
+/// whole number of bytes, bytes that are no UTF-8, and a NUL byte, where
+/// SQLite's tokenizer would stop and read a shorter statement than we built.
+fn pragma_text(pragma_name: &str, term: Term<'_>) -> Result<String, XqliteError> {
+    match term.decode::<String>() {
+        Ok(text) if text.contains('\0') => Err(XqliteError::NulErrorInString),
+        Ok(text) => Ok(format!("'{}'", text.replace('\'', "''"))),
+        Err(_not_text) => Err(non_text_pragma_value(pragma_name, term)),
+    }
+}
+
+fn non_text_pragma_value(pragma_name: &str, term: Term<'_>) -> XqliteError {
+    match term.decode::<Binary>() {
+        Ok(_bytes) => XqliteError::CannotExecutePragma {
+            pragma: pragma_name.to_string(),
+            reason: "the value is not UTF-8 text".to_string(),
+        },
+        Err(_not_bytes) => XqliteError::UnsupportedDataType {
+            term_type: TermType::Binary,
+        },
     }
 }
 
