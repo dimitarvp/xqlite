@@ -76,13 +76,27 @@ defmodule Xqlite do
   ]
 
   @typedoc """
-  A value SQLite can store.
+  A value a result row can hold.
 
-  `%Xqlite.Blob{}` is a parameter form only: it forces `BLOB` storage for the
-  bytes it wraps. Nothing reads back wrapped — a result row carries plain
-  integers, floats, binaries and `nil`.
+  A REAL that is not finite reads back as `:positive_infinity` or
+  `:negative_infinity`, and a REAL that is NaN reads back as `nil` — SQLite
+  stores a computed NaN as NULL. Neither atom can be bound as a parameter:
+  the binder answers `{:error, {:unsupported_atom, name}}` for both. What a
+  parameter can be is `t:param_value/0`.
   """
-  @type sqlite_value :: integer() | float() | binary() | Xqlite.Blob.t() | nil
+  @type sqlite_value ::
+          integer() | float() | binary() | :positive_infinity | :negative_infinity | nil
+
+  @typedoc """
+  A value a parameter can be.
+
+  `true` and `false` are stored as `1` and `0` and `nil` as NULL. A binary is
+  stored as `TEXT` when its bytes are valid UTF-8 and as a `BLOB` otherwise,
+  while `%Xqlite.Blob{}` forces `BLOB` storage whatever the bytes are —
+  nothing reads back wrapped. A value a type extension encodes arrives here
+  as one of these forms.
+  """
+  @type param_value :: integer() | float() | binary() | boolean() | nil | Xqlite.Blob.t()
 
   @type query_result :: %{
           columns: [String.t()],
@@ -136,6 +150,12 @@ defmodule Xqlite do
   never carry a qualifier — `:table_exists` echoes the identifier exactly as
   the statement wrote it, quotes included, and `:index_exists` prints the
   resolved name. The quoting is SQLite's own, not this library's.
+
+  Three of them carry what could not be used as it was given.
+  `:invalid_blob_bytes` names the term found in a wrapper's `bytes`, one of
+  the atoms `Xqlite.Blob` lists. `:unknown_pragma` carries the caller's own
+  atom or string for a PRAGMA the typed schema does not know.
+  `:invalid_pragma_name` carries a key that is neither an atom nor a string.
   """
   @type error_reason ::
           :connection_closed
@@ -179,7 +199,7 @@ defmodule Xqlite do
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
-          | {:invalid_pragma_name, String.t()}
+          | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
           | {:invalid_stream_handle, String.t()}
           | {:lock_error, String.t()}
@@ -197,7 +217,7 @@ defmodule Xqlite do
           | {:to_sql_conversion_failure, String.t()}
           | {:type_extension_refused,
              %{position: pos_integer(), extension: module(), reason: term()}}
-          | {:unknown_pragma, atom()}
+          | {:unknown_pragma, atom() | String.t()}
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
           | {:utf8_error, non_neg_integer(), String.t()}
@@ -452,7 +472,9 @@ defmodule Xqlite do
   rule on the values.
 
   The name resolves the way SQLite resolves an unqualified name: the `temp`
-  schema first, then `main`, then the attached databases in attach order.
+  schema first, then `main`, then the attached databases in attach order,
+  with ASCII case folded and no other letter — `"PEOPLE"` finds a table
+  stored as `people`, `"ÄPFEL"` does not find one stored as `äpfel`.
 
   Objects that are not plain tables — views, virtual tables and the shadow
   tables that hold a virtual table's storage — return
@@ -475,22 +497,36 @@ defmodule Xqlite do
 
   # SQLite resolves an unqualified name in `temp` before `main`, and in `main`
   # before the attached databases in attach order — the order PRAGMA table_list
-  # reports them in. Every statement the rebuild issues then names the schema
-  # this picked, so the checks and the rebuild cannot disagree about which
-  # table they are looking at.
+  # reports them in — comparing names with ASCII case folded and no other
+  # letter. The columns are read from the object that resolved, schema
+  # qualified, and every statement the rebuild issues names that schema, so
+  # the checks and the rebuild cannot disagree about which table they see.
   defp strict_target(conn, table) do
-    with {:ok, columns} <- get_typed_columns(conn, table),
+    with :ok <- reject_nul_byte(table),
          {:ok, object} <- resolve_object(conn, table),
          :ok <- reject_non_plain_table(object, table),
-         :ok <- reject_without_rowid(object, table) do
+         :ok <- reject_without_rowid(object, table),
+         {:ok, columns} <- get_typed_columns(conn, object, table) do
       {:ok, object, columns}
     end
   end
 
+  # The name is compared against the schema listing now instead of being
+  # written into a PRAGMA statement, which is where SQLite used to reject an
+  # interior NUL byte.
+  defp reject_nul_byte(table) do
+    case String.contains?(table, <<0>>) do
+      true -> {:error, :null_byte_in_string}
+      false -> :ok
+    end
+  end
+
   defp resolve_object(conn, table) do
+    folded = String.downcase(table, :ascii)
+
     with {:ok, objects} <- schema_list_objects(conn) do
       objects
-      |> Enum.filter(&(&1.name == table))
+      |> Enum.filter(fn object -> String.downcase(object.name, :ascii) == folded end)
       |> resolved_object(table)
     end
   end
@@ -588,8 +624,9 @@ defmodule Xqlite do
   and no statement runs at all.
 
   The name resolves the way SQLite resolves an unqualified name — the `temp`
-  schema first, then `main`, then the attached databases in attach order —
-  and the rebuild runs in the schema the table was found in.
+  schema first, then `main`, then the attached databases in attach order,
+  with ASCII case folded and no other letter — and the rebuild runs in the
+  schema the table was found in, under the spelling stored there.
 
   Objects that are not plain tables — views, virtual tables and the shadow
   tables that hold a virtual table's storage — return
@@ -662,8 +699,10 @@ defmodule Xqlite do
     end
   end
 
-  defp get_typed_columns(conn, table) do
-    sql = "PRAGMA table_info(#{Xqlite.Pragma.quote_name(table)})"
+  defp get_typed_columns(conn, object, table) do
+    schema = Xqlite.Pragma.quote_name(object.schema)
+    name = Xqlite.Pragma.quote_name(object.name)
+    sql = "PRAGMA #{schema}.table_info(#{name})"
 
     case XqliteNIF.query(conn, sql, []) do
       {:ok, %{rows: []}} -> {:error, {:no_such_table, table}}
@@ -1594,6 +1633,10 @@ defmodule Xqlite do
   token aborts with `{:error, :operation_cancelled}`). Cancellation rides
   the connection's progress handler, exactly like `query_cancellable/4`.
   After a cancellation, `reset/1` the statement before stepping it again.
+
+  The rows come back exactly as SQLite stored them: no type extension runs
+  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
+  decoded form.
   """
   @spec multi_step_cancellable(stmt(), pos_integer(), reference() | [reference()]) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
@@ -2083,7 +2126,8 @@ defmodule Xqlite do
   (SQLite returns `SQLITE_BUSY` immediately on contention). SQLite stores
   the timeout as a 32-bit integer, so values above `2_147_483_647` (about
   24.8 days) are refused with `{:error, {:cannot_execute, reason}}`
-  rather than silently clamped.
+  rather than silently clamped. Anything that is not a non-negative integer
+  is refused the same way, before anything reaches SQLite.
 
   This function always works, slot held or not: it calls
   `sqlite3_busy_timeout` directly and no authorizer is consulted. A raw
@@ -2095,6 +2139,11 @@ defmodule Xqlite do
   @spec busy_timeout(conn(), non_neg_integer()) :: :ok | error()
   def busy_timeout(conn, ms) when is_integer(ms) and ms >= 0 do
     XqliteNIF.set_busy_timeout(conn, ms)
+  end
+
+  def busy_timeout(_conn, ms) do
+    {:error,
+     {:cannot_execute, "invalid busy timeout #{inspect(ms)}; expected a non-negative integer"}}
   end
 
   @doc """

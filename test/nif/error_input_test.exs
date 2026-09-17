@@ -139,6 +139,41 @@ defmodule Xqlite.NIF.ErrorInputTest do
                  NIF.execute(conn, sql, [%Xqlite.Blob{bytes: 1.5}])
       end
 
+      # The BEAM has one term type for binaries and bitstrings alike, so the
+      # refusal cannot read the case off the term type: bytes that are not a
+      # whole number of bytes are the only thing that reaches it from there.
+      test "a blob wrapper holding a partial-byte bitstring reports :bitstring",
+           %{conn: conn} do
+        assert {:error, {:invalid_blob_bytes, %{position: 1, type: :bitstring}}} =
+                 NIF.query(conn, "SELECT ?1;", [%Xqlite.Blob{bytes: <<1::7>>}])
+
+        assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT ?1;")
+
+        assert {:error, {:invalid_blob_bytes, %{position: 1, type: :bitstring}}} =
+                 NIF.stmt_bind(stmt, [%Xqlite.Blob{bytes: <<1::7>>}])
+      end
+
+      test "every term type a wrapper's bytes can hold names itself", %{conn: conn} do
+        payloads = [
+          {42, :integer},
+          {1.5, :float},
+          {nil, :atom},
+          {[1, 2], :list},
+          {%{a: 1}, :map},
+          {{1, 2}, :tuple},
+          {fn -> :ok end, :function},
+          {self(), :pid},
+          {:erlang.list_to_port(~c"#Port<0.1>"), :port},
+          {make_ref(), :reference},
+          {<<1::7>>, :bitstring}
+        ]
+
+        for {bytes, type} <- payloads do
+          assert {:error, {:invalid_blob_bytes, %{position: 1, type: ^type}}} =
+                   NIF.query(conn, "SELECT ?1;", [%Xqlite.Blob{bytes: bytes}])
+        end
+      end
+
       # Only the struct is a parameter; tuples and plain maps stay refused as
       # before, so nothing that used to be an error quietly became a blob.
       test "tuples and plain maps are still unsupported parameter values", %{conn: conn} do

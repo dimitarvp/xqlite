@@ -516,7 +516,7 @@ fn get_pragma(
         // hook occupies the wal_hook slot, and our master callback
         // holds that slot (emulating the autocheckpoint). Report the
         // emulated threshold — the effective value.
-        if pragma_name == "wal_autocheckpoint" {
+        if pragma_name.eq_ignore_ascii_case("wal_autocheckpoint") {
             let pages = handle.wal_hook.autocheckpoint_pages.load(Ordering::Relaxed);
             Ok((pages as i64).encode(env))
         } else {
@@ -542,7 +542,7 @@ fn set_pragma<'a>(
         // emulates the autocheckpoint the caller just configured. Raw
         // SQL (`query`/`execute_batch` "PRAGMA ...") bypasses this
         // repair — documented limitation.
-        if pragma_name == "wal_autocheckpoint" {
+        if pragma_name.eq_ignore_ascii_case("wal_autocheckpoint") {
             if let Ok(pages) = result.decode::<i64>() {
                 let clamped = pages.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                 handle

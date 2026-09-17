@@ -33,8 +33,11 @@ defmodule Xqlite.Blob do
 
   `bytes` must be a binary. Anything else is refused with
   `{:error, {:invalid_blob_bytes, %{position: n, type: t}}}`, where `n` is
-  the parameter's one-based position in the list you passed and `t` is the
-  type of the value found in `bytes`.
+  the parameter's one-based position in the list you passed and `t` names the
+  term found in `bytes`: one of `:atom`, `:bitstring`, `:float`, `:function`,
+  `:integer`, `:list`, `:map`, `:pid`, `:port`, `:reference` and `:tuple`.
+  `:bitstring` is a bitstring whose bit size is not a whole number of bytes —
+  a binary is accepted, so `t` is never `:binary`.
 
   ## A value read back is never wrapped
 

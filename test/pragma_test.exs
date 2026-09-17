@@ -249,11 +249,20 @@ defmodule XqlitePragmaTest do
                P.get(db, :totally_fake_pragma)
     end
 
-    test "put returns {:error, {:invalid_pragma_name, name}} for unknown string pragma", %{
+    test "put returns {:error, {:unknown_pragma, name}} for unknown string pragma", %{
       db: db
     } do
-      assert {:error, {:invalid_pragma_name, "never_atomized_pragma_xyz"}} =
+      assert {:error, {:unknown_pragma, "never_atomized_pragma_xyz"}} =
                P.put(db, "never_atomized_pragma_xyz", 1)
+    end
+
+    test "put returns {:error, {:invalid_pragma_name, term}} for a key that is not a name", %{
+      db: db
+    } do
+      assert {:error, {:invalid_pragma_name, {:not, :a, :name}}} =
+               P.put(db, {:not, :a, :name}, 1)
+
+      assert {:error, {:invalid_pragma_name, 7}} = P.get(db, 7)
     end
 
     # Denying the `:pragma` action turns any PRAGMA that really reaches SQLite
@@ -282,9 +291,92 @@ defmodule XqlitePragmaTest do
     end
   end
 
+  # SQLite matches a PRAGMA name without regard to case, and the typed schema
+  # spells every name in lower-case atoms. A caller who writes the name any
+  # other way must reach the same PRAGMA through every door.
+  describe "spellings of a known name" do
+    setup do
+      {:ok, canonical: Map.new(P.all(), fn name -> {name, door_answers(name, name)} end)}
+    end
+
+    test "the anchor: an upper-case string reads what the lower-case atom reads" do
+      assert door_answers("FOREIGN_KEYS", :foreign_keys) ==
+               door_answers(:foreign_keys, :foreign_keys)
+    end
+
+    property "every door answers what the canonical atom answers", %{canonical: canonical} do
+      check all(
+              name <- StreamData.member_of(P.all()),
+              spelling <- spelling_of(name),
+              max_runs: 2000
+            ) do
+        assert door_answers(spelling, name) == Map.get(canonical, name)
+      end
+    end
+  end
+
   defp unknown_pragma_name do
-    StreamData.string(:printable, max_length: 10)
-    |> StreamData.map(&String.to_atom("xqlite_no_such_pragma_" <> &1))
+    StreamData.bind(StreamData.string(:printable, max_length: 10), fn suffix ->
+      text = "xqlite_no_such_pragma_" <> suffix
+
+      StreamData.member_of([
+        String.to_atom(text),
+        String.to_atom(String.upcase(text)),
+        text,
+        String.upcase(text)
+      ])
+    end)
+  end
+
+  # Every spelling of a known name, the way a caller might write it.
+  defp spelling_of(name) do
+    text = Atom.to_string(name)
+    upper = String.upcase(text)
+    mixed = alternating_case(text)
+
+    StreamData.member_of([
+      name,
+      String.to_atom(upper),
+      String.to_atom(mixed),
+      text,
+      upper,
+      mixed
+    ])
+  end
+
+  defp alternating_case(text) do
+    text
+    |> String.graphemes()
+    |> Enum.with_index()
+    |> Enum.map_join("", &recased_char/1)
+  end
+
+  defp recased_char({char, index}) when rem(index, 2) == 0, do: String.upcase(char)
+  defp recased_char({char, _index}), do: String.downcase(char)
+
+  # Every door, on a connection of its own, with a value no PRAGMA accepts so
+  # that nothing is written and the answers depend on the name alone.
+  defp door_answers(key, name) do
+    assert {:ok, db} = NIF.open_in_memory(":memory:")
+    :ok = NIF.execute_batch(db, "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);")
+
+    answers =
+      [
+        P.get(db, key),
+        P.put(db, key, nil),
+        Xqlite.get_pragma(db, key),
+        Xqlite.set_pragma(db, key, nil)
+      ] ++ with_arg_answer(db, key, name)
+
+    assert :ok = NIF.close(db)
+    answers
+  end
+
+  defp with_arg_answer(db, key, name) do
+    case name in P.readable_with_one_arg() do
+      true -> [P.get(db, key, "people")]
+      false -> []
+    end
   end
 
   defp pragma_string_value do

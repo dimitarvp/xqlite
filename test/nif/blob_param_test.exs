@@ -16,6 +16,7 @@ defmodule Xqlite.NIF.BlobParamTest do
   """
 
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.ConnCase
 
@@ -236,5 +237,37 @@ defmodule Xqlite.NIF.BlobParamTest do
                  %Blob{bytes: @utf8_bytes}
                ])
     end
+
+    property "whole bytes bind as a blob of that many bytes, the rest are refused",
+             %{conn: conn} do
+      check all(bits <- payload_bits(), max_runs: 2000) do
+        assert_bits_bind(conn, bits, rem(bit_size(bits), 8))
+      end
+    end
+  end
+
+  defp payload_bits do
+    StreamData.scale(StreamData.bitstring(), fn size -> min(size, 64) end)
+  end
+
+  defp assert_bits_bind(conn, bits, 0) do
+    bytes = div(bit_size(bits), 8)
+
+    assert {:ok, %{rows: [["blob", ^bytes]]}} =
+             NIF.query(conn, "SELECT typeof(?1), length(?1)", [%Blob{bytes: bits}])
+
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT typeof(?1), length(?1)")
+    assert :ok = NIF.stmt_bind(stmt, [%Blob{bytes: bits}])
+    assert {:row, ["blob", ^bytes]} = NIF.stmt_step(stmt)
+  end
+
+  defp assert_bits_bind(conn, bits, _remainder) do
+    assert {:error, {:invalid_blob_bytes, %{position: 1, type: :bitstring}}} =
+             NIF.query(conn, "SELECT ?1", [%Blob{bytes: bits}])
+
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT ?1")
+
+    assert {:error, {:invalid_blob_bytes, %{position: 1, type: :bitstring}}} =
+             NIF.stmt_bind(stmt, [%Blob{bytes: bits}])
   end
 end

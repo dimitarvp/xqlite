@@ -427,10 +427,11 @@ defmodule Xqlite.Pragma do
     * `{:error, {:invalid_pragma_value, %{pragma: name, value: value}}}` —
       including for `nil`, which no pragma takes.
     * `{:error, {:read_only_pragma, name}}` — the pragma cannot be written.
-    * `{:error, {:invalid_pragma_name, name}}` for a string and
-      `{:error, {:unknown_pragma, name}}` for an atom this module does not
-      model. `Xqlite.set_pragma/3` treats both as "not mine" and hands the
-      value to SQLite as written; `put/4` refuses them.
+    * `{:error, {:unknown_pragma, name}}` for a name this module does not
+      model, atom or string alike, and `{:error, {:invalid_pragma_name,
+      key}}` for a key that is neither. `Xqlite.set_pragma/3` treats both as
+      "not mine" and hands the value to SQLite as written; `put/4` refuses
+      them.
   """
   @spec check_value(pragma_key(), term()) :: {:ok, pragma_value()} | Xqlite.error()
   def check_value(key, value) do
@@ -450,7 +451,7 @@ defmodule Xqlite.Pragma do
   defp resolve_name(key) when is_binary(key) do
     case Map.fetch(@string_to_atom_map, String.downcase(key)) do
       {:ok, name} -> {:ok, name}
-      :error -> {:error, {:invalid_pragma_name, key}}
+      :error -> {:error, {:unknown_pragma, key}}
     end
   end
 
@@ -598,11 +599,14 @@ defmodule Xqlite.Pragma do
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
 
-  A name this module does not know is refused with
+  A known name is matched with its case folded, so `:foreign_keys`,
+  `:FOREIGN_KEYS`, `"foreign_keys"` and `"FOREIGN_KEYS"` all reach the same
+  PRAGMA. A name this module does not know is refused with
   `{:error, {:unknown_pragma, name}}` before any statement is built, with or
-  without an extra argument. SQLite parses an unknown PRAGMA and ignores it,
-  so letting one through would answer with an empty result and no hint that
-  the name was wrong.
+  without an extra argument, and a key that is neither an atom nor a string
+  with `{:error, {:invalid_pragma_name, key}}`. SQLite parses an unknown
+  PRAGMA and ignores it, so letting one through would answer with an empty
+  result and no hint that the name was wrong.
   """
   @spec get(Xqlite.conn(), pragma_key(), pragma_key() | pragma_opts(), pragma_opts()) ::
           get_result()
@@ -617,17 +621,29 @@ defmodule Xqlite.Pragma do
   end
 
   def get(db, key, arg_list, opts) when is_list(arg_list) do
-    if key in @readable_with_one_arg do
-      do_get_with_arg(db, key, arg_list, opts)
-    else
-      do_get_no_arg(db, key, arg_list ++ opts)
+    with {:ok, name} <- resolve_name(key) do
+      get_list_arg(db, name, arg_list, opts)
+    end
+  end
+
+  defp get_list_arg(db, name, arg_list, opts) do
+    case name in @readable_with_one_arg do
+      true -> do_get_with_arg(db, name, arg_list, opts)
+      false -> do_get_no_arg(db, name, arg_list ++ opts)
     end
   end
 
   defp do_get_no_arg(db, key, opts) do
-    case Map.get(@schema, key) do
-      nil -> {:error, {:unknown_pragma, key}}
-      spec -> dispatch_get(db, key, spec, opts)
+    with {:ok, name} <- resolve_name(key),
+         {:ok, spec} <- known_spec(name) do
+      dispatch_get(db, name, spec, opts)
+    end
+  end
+
+  defp known_spec(name) do
+    case Map.fetch(@schema, name) do
+      {:ok, spec} -> {:ok, spec}
+      :error -> {:error, {:unknown_pragma, name}}
     end
   end
 
@@ -666,9 +682,9 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_get_with_arg(db, key, arg, opts) do
-    case Map.get(@schema, key) do
-      nil -> {:error, {:unknown_pragma, key}}
-      _spec -> query_with_arg(db, key, arg, opts)
+    with {:ok, name} <- resolve_name(key),
+         {:ok, _spec} <- known_spec(name) do
+      query_with_arg(db, name, arg, opts)
     end
   end
 
@@ -701,10 +717,13 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Changes a PRAGMA's value.
 
-  A name this module does not know is refused with
-  `{:error, {:unknown_pragma, name}}` before any statement is built. SQLite
-  parses an unknown PRAGMA and ignores it, so letting one through would
-  report success while changing nothing.
+  A known name is matched with its case folded, the same way `get/3,4` match
+  it. A name this module does not know is refused with
+  `{:error, {:unknown_pragma, name}}` before any statement is built, and a
+  key that is neither an atom nor a string with
+  `{:error, {:invalid_pragma_name, key}}`. SQLite parses an unknown PRAGMA
+  and ignores it, so letting one through would report success while changing
+  nothing.
 
   The value goes through `check_value/2`, so a value the PRAGMA cannot take
   is refused with `{:error, {:invalid_pragma_value, %{pragma: name, value:
@@ -721,14 +740,9 @@ defmodule Xqlite.Pragma do
           {:ok, term()} | Xqlite.error()
   def put(db, key, val, opts \\ [])
 
-  def put(db, key, val, opts) when is_atom(key) do
-    do_put(db, key, val, opts)
-  end
-
-  def put(db, key, val, opts) when is_binary(key) do
-    case Map.fetch(@string_to_atom_map, key) do
-      {:ok, key_atom} -> do_put(db, key_atom, val, opts)
-      :error -> {:error, {:invalid_pragma_name, key}}
+  def put(db, key, val, opts) do
+    with {:ok, name} <- resolve_name(key) do
+      do_put(db, name, val, opts)
     end
   end
 

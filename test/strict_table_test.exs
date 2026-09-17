@@ -538,6 +538,77 @@ defmodule Xqlite.StrictTableTest do
   end
 
   # ---------------------------------------------------------------------------
+  # SQLite matches an unqualified table name with ASCII case folded, and only
+  # ASCII — every other letter is compared byte for byte. `PRAGMA table_info`
+  # folds the same way and searches the temp schema first, so it is the oracle
+  # for "the same name".
+  # ---------------------------------------------------------------------------
+
+  describe "names differing in ASCII case" do
+    test "the anchor: PEOPLE is people", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE people (id INTEGER, name TEXT);")
+
+      assert Xqlite.check_strict_violations(conn, "PEOPLE") ==
+               Xqlite.check_strict_violations(conn, "people")
+
+      assert :ok = Xqlite.enable_strict_table(conn, "PEOPLE")
+      assert strict?(conn, "people")
+      assert tables(conn) == ["people"]
+    end
+
+    test "a variant differing outside ASCII is a different table", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, ~s|CREATE TABLE "äpfel" (id INTEGER);|)
+
+      assert {:ok, %{rows: []}} = NIF.query(conn, ~s|PRAGMA table_info("ÄPFEL")|, [])
+
+      assert {:error, {:no_such_table, "ÄPFEL"}} =
+               Xqlite.check_strict_violations(conn, "ÄPFEL")
+
+      assert {:error, {:no_such_table, "ÄPFEL"}} = Xqlite.enable_strict_table(conn, "ÄPFEL")
+    end
+
+    test "both helpers act on the table an unqualified table_info picks", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE shadow (bad VARCHAR(255));")
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO shadow VALUES (?)", [1])
+      assert :ok = NIF.execute_batch(conn, "CREATE TEMP TABLE SHADOW (ok INTEGER);")
+
+      assert ["ok"] == unqualified_column_names(conn, "shadow")
+      assert {:ok, []} = Xqlite.check_strict_violations(conn, "shadow")
+      assert :ok = Xqlite.enable_strict_table(conn, "shadow")
+
+      assert strict?(conn, "temp", "SHADOW")
+      refute strict?(conn, "main", "shadow")
+      assert {:ok, %{rows: [["1"]]}} = NIF.query(conn, "SELECT bad FROM main.shadow", [])
+    end
+
+    property "a variant of the stored name answers what the stored name answers" do
+      check all(
+              name <- hostile_name(),
+              variant <- ascii_case_variant(name),
+              max_runs: 2000
+            ) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+
+        assert :ok =
+                 NIF.execute_batch(conn, "CREATE TABLE #{quoted(name)} (n INTEGER, t TEXT);")
+
+        assert {:ok, 1} =
+                 NIF.execute(conn, "INSERT INTO #{quoted(name)} VALUES (?, ?)", ["x", "y"])
+
+        assert {:ok, [_violation]} = Xqlite.check_strict_violations(conn, name)
+
+        assert Xqlite.check_strict_violations(conn, variant) ==
+                 Xqlite.check_strict_violations(conn, name)
+
+        assert {:ok, 1} = NIF.execute(conn, "DELETE FROM #{quoted(name)}", [])
+        assert :ok = Xqlite.enable_strict_table(conn, variant)
+        assert tables(conn) == [name]
+        assert :ok = NIF.close(conn)
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # an unqualified name resolves in temp before main, the way SQLite resolves it
   # ---------------------------------------------------------------------------
 
@@ -1365,6 +1436,34 @@ defmodule Xqlite.StrictTableTest do
 
   defp recased_char({char, true}), do: String.upcase(char)
   defp recased_char({char, false}), do: String.downcase(char)
+
+  # Only the ASCII letters move: SQLite folds no other letter, so recasing one
+  # would name a different table.
+  defp ascii_case_variant(name) do
+    StreamData.map(
+      StreamData.list_of(StreamData.boolean(), length: length(String.graphemes(name))),
+      fn uppercase -> ascii_recased(name, uppercase) end
+    )
+  end
+
+  defp ascii_recased(name, uppercase) do
+    name
+    |> String.graphemes()
+    |> Enum.zip(uppercase)
+    |> Enum.map_join("", &ascii_recased_char/1)
+  end
+
+  defp ascii_recased_char({char, true}), do: String.upcase(char, :ascii)
+  defp ascii_recased_char({char, false}), do: String.downcase(char, :ascii)
+
+  defp unqualified_column_names(conn, table) do
+    assert {:ok, %{rows: rows}} = NIF.query(conn, ~s|PRAGMA table_info(#{quoted(table)})|, [])
+
+    Enum.map(rows, fn
+      [_cid, name | _rest] -> name
+      other -> other
+    end)
+  end
 
   defp declared_verdict(violations) do
     case Enum.any?(

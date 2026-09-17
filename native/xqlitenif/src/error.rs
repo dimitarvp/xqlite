@@ -102,6 +102,16 @@ fn term_type_to_atom(term_type: TermType) -> Atom {
     }
 }
 
+/// The BEAM reports a bitstring as `TermType::Binary`, and the only term the
+/// `Binary` decoder refuses there is one whose bit size is not a whole number
+/// of bytes, so this arm can name that case where the shared table cannot.
+fn blob_bytes_type_atom(term_type: TermType) -> Atom {
+    match term_type {
+        TermType::Binary => atoms::bitstring(),
+        other => term_type_to_atom(other),
+    }
+}
+
 fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
     match t {
         rusqlite::types::Type::Null => nil(),
@@ -324,10 +334,16 @@ impl Display for XqliteError {
             XqliteError::InvalidBlobBytes {
                 position,
                 term_type,
-            } => write!(
-                f,
-                "Blob parameter at position {position} holds {term_type:?} instead of a binary"
-            ),
+            } => match term_type {
+                TermType::Binary => write!(
+                    f,
+                    "Blob parameter at position {position} holds a bitstring instead of a binary"
+                ),
+                other => write!(
+                    f,
+                    "Blob parameter at position {position} holds {other:?} instead of a binary"
+                ),
+            },
             XqliteError::CannotExecute(reason) => {
                 write!(f, "Cannot execute query/statement: {reason}")
             }
@@ -610,7 +626,7 @@ impl Encoder for XqliteError {
                     map_new(env)
                         .map_put(atoms::position(), position)
                         .and_then(|map| {
-                            map.map_put(atoms::r#type(), term_type_to_atom(*term_type))
+                            map.map_put(atoms::r#type(), blob_bytes_type_atom(*term_type))
                         });
                 match map_result {
                     Ok(map) => (atoms::invalid_blob_bytes(), map).encode(env),

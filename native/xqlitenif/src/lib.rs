@@ -10,6 +10,7 @@ pub(crate) mod atoms {
         authorization_denied,
         autoindex,
         binary,
+        bitstring,
         blob,
         busy,
         busy_timeout_write_refused,

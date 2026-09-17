@@ -47,6 +47,10 @@ defmodule Xqlite.ArgumentValidationLawTest do
     StreamData.filter(any_term(), fn term -> not (is_binary(term) or is_nil(term)) end)
   end
 
+  defp non_timeout_term do
+    StreamData.filter(any_term(), fn term -> not (is_integer(term) and term >= 0) end)
+  end
+
   for_each_opener do
     property "begin/2 refuses every term that is not a transaction mode", %{conn: conn} do
       check all(mode <- term_other_than(@begin_modes), max_runs: 2000) do
@@ -103,6 +107,31 @@ defmodule Xqlite.ArgumentValidationLawTest do
       assert {:ok, :none} == Xqlite.txn_state(conn, "main")
       assert {:ok, :none} == Xqlite.txn_state(conn, nil)
       assert {:ok, :none} == Xqlite.txn_state(conn)
+    end
+
+    test "busy_timeout/2 refuses a negative integer and a string", %{conn: conn} do
+      assert {:error, {:cannot_execute, negative}} = Xqlite.busy_timeout(conn, -1)
+      assert is_binary(negative)
+
+      assert {:error, {:cannot_execute, text}} = Xqlite.busy_timeout(conn, "5")
+      assert is_binary(text)
+    end
+
+    property "busy_timeout/2 refuses every term that is not a non-negative integer",
+             %{conn: conn} do
+      check all(ms <- non_timeout_term(), max_runs: 2000) do
+        assert {:ok, before} = Xqlite.get_pragma(conn, :busy_timeout)
+        assert {:error, {:cannot_execute, reason}} = Xqlite.busy_timeout(conn, ms)
+        assert is_binary(reason)
+        assert {:ok, ^before} = Xqlite.get_pragma(conn, :busy_timeout)
+      end
+    end
+
+    test "busy_timeout/2 accepts zero and a positive integer", %{conn: conn} do
+      assert :ok = Xqlite.busy_timeout(conn, 0)
+      assert {:ok, 0} = Xqlite.get_pragma(conn, :busy_timeout)
+      assert :ok = Xqlite.busy_timeout(conn, 250)
+      assert {:ok, 250} = Xqlite.get_pragma(conn, :busy_timeout)
     end
   end
 end

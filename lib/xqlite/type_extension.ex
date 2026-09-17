@@ -9,7 +9,7 @@ defmodule Xqlite.TypeExtension do
   ## Callbacks
 
     * `encode/1` — converts an Elixir term to a SQLite-compatible value.
-      Return `{:ok, sqlite_value}` on success, `:skip` to pass to the next
+      Return `{:ok, value}` on success, `:skip` to pass to the next
       extension in the chain, or `{:error, reason}` when the value is this
       extension's to convert but cannot be stored. An `{:error, reason}`
       stops the chain and the call that supplied the parameter fails with
@@ -72,14 +72,15 @@ defmodule Xqlite.TypeExtension do
   @doc """
   Converts an Elixir term to a SQLite-compatible storage value.
 
-  Return `{:ok, sqlite_value}` where `sqlite_value` is an integer, float,
-  binary, `nil`, or an `%Xqlite.Blob{}` wrapping bytes that must be stored
-  as a `BLOB` whatever they contain. Return `:skip` if this extension does
+  Return `{:ok, value}` where `value` is a `t:Xqlite.param_value/0` — an
+  integer, a float, a binary, `true`, `false`, `nil`, or an `%Xqlite.Blob{}`
+  wrapping bytes that must be stored as a `BLOB` whatever they contain.
+  Return `:skip` if this extension does
   not handle the given value. Return `{:error, reason}` when the value is
   this extension's to convert but cannot be stored — the chain stops there
   and the caller is told which parameter, which extension and why.
   """
-  @callback encode(value :: term()) :: {:ok, Xqlite.sqlite_value()} | :skip | {:error, term()}
+  @callback encode(value :: term()) :: {:ok, Xqlite.param_value()} | :skip | {:error, term()}
 
   @doc """
   Converts a SQLite storage value back to an Elixir term.

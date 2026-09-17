@@ -77,8 +77,10 @@ exclusion.
   diff that does the job — do not touch code you were not asked to.
 - Never assert on error message text, only on structured atoms and
   fields; nothing structured to match on means the error struct needs
-  fixing. Parameter dispatch (keyword list versus positional) mirrors
-  `native/xqlitenif/src/util.rs:is_keyword`, never re-checked in Elixir.
+  fixing. Parameter dispatch (keyword list versus positional) is decided
+  by the list's first element in `native/xqlitenif/src/util.rs:is_keyword`;
+  `Xqlite.TypeExtension.encode_params/2` applies the same rule before the
+  NIF sees the list, and the two must agree.
 
 ## Structured errors
 
@@ -109,7 +111,7 @@ Pointers), updated whenever an arm is added or removed.
   indexing, or `unwrap_or*` on a caller's number — return a structured
   error. The crate has none today; a new one is justified in review.
 - Every `unsafe` block carries a `// SAFETY:` comment stating what makes
-  it sound (`lib.rs` warns on undocumented ones), and `clippy.toml` sets
+  it sound (`lib.rs` denies undocumented ones), and `clippy.toml` sets
   `check-private-items = true`: a private `unsafe fn` needs `# Safety`.
 - Never add `sqlite3_interrupt`: cancellation runs through the progress
   handler, so it is per operation and needs no connection handle.

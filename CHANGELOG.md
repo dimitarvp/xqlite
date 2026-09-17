@@ -5,6 +5,64 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Two value types, one per direction.** `Xqlite.sqlite_value/0` now says
+  what a result row holds: an integer, a float, a binary, `nil`, and the two
+  atoms a REAL that is not finite reads back as, `:positive_infinity` and
+  `:negative_infinity`. `%Xqlite.Blob{}` left it — no result row ever carries
+  the wrapper — and moved to the new `Xqlite.param_value/0`, which says what
+  the binder takes: the same scalars plus `true`, `false` and the wrapper.
+  `Xqlite.TypeExtension`'s `encode/1` callback answers a `param_value`, its
+  `decode/1` callback takes a `sqlite_value`. No function changed; the types
+  now describe the direction they are used in.
+- **A PRAGMA name resolves the same way through every door.**
+  `Xqlite.Pragma.get/3,4`, `Xqlite.Pragma.put/4`, `Xqlite.get_pragma/2` and
+  `Xqlite.set_pragma/3` fold the name's case before anything else, so
+  `:foreign_keys`, `:FOREIGN_KEYS`, `"foreign_keys"` and `"FOREIGN_KEYS"` all
+  reach the same PRAGMA. A string naming a PRAGMA the typed schema does not
+  know is now rejected with `{:unknown_pragma, name}`, where
+  `Xqlite.Pragma.put/4` used to answer `{:invalid_pragma_name, name}`;
+  `{:invalid_pragma_name, key}` is left for a key that is neither an atom nor
+  a string, which used to raise. `@type error_reason` follows:
+  `{:unknown_pragma, atom() | String.t()}` and
+  `{:invalid_pragma_name, term()}`.
+
+### Fixed
+
+- **A blob wrapper holding a bitstring says so.**
+  `%Xqlite.Blob{bytes: <<1::7>>}` is rejected with `type: :bitstring` instead
+  of `type: :binary`: the BEAM has one term type for binaries and bitstrings
+  alike, and a bitstring whose bit size is not a whole number of bytes is the
+  only value that can produce that error. `Xqlite.Blob` now lists every atom
+  `type` can hold.
+- **The PRAGMA getters accept every spelling the setters accept.**
+  `Xqlite.Pragma.get(conn, :FOREIGN_KEYS)` and
+  `Xqlite.Pragma.get(conn, "foreign_keys")` answered
+  `{:error, {:unknown_pragma, _}}` while the same spellings worked for
+  writing.
+- **`wal_autocheckpoint` is read and written under any spelling.**
+  `Xqlite.get_pragma(conn, :WAL_AUTOCHECKPOINT)` reported `0` while the
+  lower-case spelling reported the threshold in force. xqlite's own WAL
+  callback holds the slot SQLite would report that number from, so the NIF
+  substitutes the value it is emulating — and it matched the PRAGMA's name
+  byte for byte when deciding to.
+- **The STRICT helpers match a table name the way SQLite does.**
+  `Xqlite.check_strict_violations/2` and `Xqlite.enable_strict_table/2` fold
+  ASCII case when they look the table up — and only ASCII, which is all
+  SQLite folds — so `"PEOPLE"` finds a table stored as `people` again. They
+  also read the columns from the table that was found, schema qualified: with
+  a temporary table and a main table whose names differ only in case, the
+  check used to pair one table's columns with the other table's definition.
+- **`Xqlite.busy_timeout/2` rejects a bad argument.** `-1`, `"5"` and
+  `:infinity` answer `{:error, {:cannot_execute, reason}}` instead of raising
+  `FunctionClauseError`.
+- **`Xqlite.multi_step_cancellable/3` documents its rows.** Like `step/1` and
+  `multi_step/2` it hands back what SQLite stored, with no type extension run
+  on the rows.
+
 ## [0.14.0] - 2026-09-17
 
 ### Added
@@ -153,7 +211,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the gotchas guide already said — not an absolute ceiling from the
   slot's first installation.
 
-## [0.12.2] - 2026-09-18
+## [0.12.2] - 2026-09-17
 
 ### Added
 
