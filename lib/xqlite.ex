@@ -177,7 +177,8 @@ defmodule Xqlite do
   `:invalid_open_option` carries an option key the openers do not know with
   `:unknown_key`, a value they refuse with `:invalid_value`, or, for an
   element of the options list that is not a `{key, value}` pair, that
-  element with `:not_a_pair` and no key.
+  element with `:not_a_pair` and no key. A list ending in something other
+  than `[]` answers `:not_a_pair` too, carrying that tail.
 
   `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
   never the statement built around it — and why it could not run.
@@ -455,7 +456,7 @@ defmodule Xqlite do
   defp validate_open_opts(opts) do
     allowed = allowed_open_opt_keys()
 
-    case Enum.find_value(opts, fn element -> open_opt_fault(element, allowed) end) do
+    case open_opts_fault(opts, allowed) do
       nil ->
         validated_open_opts(opts)
 
@@ -469,14 +470,19 @@ defmodule Xqlite do
     end
   end
 
-  defp open_opt_fault({key, _value}, allowed) do
+  defp open_opts_fault([], _allowed), do: nil
+
+  defp open_opts_fault([{key, _value} | rest], allowed) do
     case key in allowed do
-      true -> nil
+      true -> open_opts_fault(rest, allowed)
       false -> {:unknown_key, key}
     end
   end
 
-  defp open_opt_fault(element, _allowed), do: {:not_a_pair, element}
+  defp open_opts_fault([element | _rest], _allowed), do: {:not_a_pair, element}
+
+  # A list the caller built by hand can end in something other than `[]`.
+  defp open_opts_fault(tail, _allowed), do: {:not_a_pair, tail}
 
   defp validated_open_opts(opts) do
     case NimbleOptions.validate(opts, @open_opts_schema) do
@@ -3071,7 +3077,7 @@ defmodule Xqlite do
   # Public so the stream callbacks module validates through the same helper.
   @spec validate_cancel_tokens(term()) :: :ok | error()
   def validate_cancel_tokens(tokens) when is_list(tokens) do
-    case Enum.all?(tokens, &XqliteNIF.is_cancel_token/1) do
+    case all_cancel_tokens?(tokens) do
       true -> :ok
       false -> {:error, {:invalid_cancel_tokens, tokens}}
     end
@@ -3083,6 +3089,18 @@ defmodule Xqlite do
       false -> {:error, {:invalid_cancel_tokens, token}}
     end
   end
+
+  defp all_cancel_tokens?([]), do: true
+
+  defp all_cancel_tokens?([token | rest]) do
+    case XqliteNIF.is_cancel_token(token) do
+      true -> all_cancel_tokens?(rest)
+      false -> false
+    end
+  end
+
+  # A list the caller built by hand can end in something other than `[]`.
+  defp all_cancel_tokens?(_tail), do: false
 
   @doc false
   # Public so the stream callbacks module emits this event through the same

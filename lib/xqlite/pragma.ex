@@ -617,11 +617,12 @@ defmodule Xqlite.Pragma do
   result and no hint that the name was wrong.
 
   The name is resolved first, then the argument position. An extra argument
-  is a scalar — a string, an atom or an integer; a list there is the options
-  and only when every element is a `{key, value}` pair, so `[]` is options
-  too. Anything else in that position, a plain list included, is refused
-  with `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
-  reason: :not_a_scalar}}}`. What the PRAGMA reads with decides the rest:
+  is a scalar — a string, an atom other than `nil`, or an integer; a list
+  there is the options and only when every element is a `{key, value}` pair,
+  so `[]` is options too. Anything else in that position, `nil` and a plain
+  list included, is refused with `{:error, {:invalid_pragma_argument,
+  %{pragma: name, value: value, reason: :not_a_scalar}}}`. What the PRAGMA
+  reads with decides the rest:
   one that reads only with an argument (`:table_info` and its siblings)
   called without one answers the same shape with `reason: :missing`, and one
   with no one-argument form called with an argument answers
@@ -658,7 +659,7 @@ defmodule Xqlite.Pragma do
   end
 
   defp read_pragma(db, name, _spec, arg, opts)
-       when is_binary(arg) or is_atom(arg) or is_integer(arg) do
+       when (is_binary(arg) or is_atom(arg) or is_integer(arg)) and not is_nil(arg) do
     case name in @readable_with_one_arg do
       true -> query_with_arg(db, name, arg, opts)
       false -> {:error, invalid_argument(name, arg, :takes_no_argument)}

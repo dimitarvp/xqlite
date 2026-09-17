@@ -112,6 +112,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and answers `{:error, {:invalid_open_option, %{key: nil,
   reason: :not_a_pair, value: element}}}` now. `@type error_reason` gains
   the shape.
+- **A cancel-token list that ends in something other than `[]` is an answer.**
+  `[token | :bogus]` passes the `is_list/1` test, and the seven doors that
+  take cancel tokens — both query forms, `execute`, `execute_batch`,
+  `stream`, `multi_step` and `backup` — raised `FunctionClauseError` from
+  inside `Enum.all?/2` on it, while `Xqlite.cancel_operation/1` answered for
+  the same value. They walk the list themselves now and all answer
+  `{:error, {:invalid_cancel_tokens, value}}`, carrying the value unchanged.
+- **An options list that ends in something other than `[]` is an answer.**
+  A list built by hand as `[{:foreign_keys, true} | :busy_timeout]` passes
+  the `is_list/1` guard, and `Xqlite.open/2` and `Xqlite.open_in_memory/1`
+  raised `FunctionClauseError` from inside `Enum.find_value/2` on it. They
+  walk the list themselves now and answer `{:error, {:invalid_open_option,
+  %{key: nil, reason: :not_a_pair, value: tail}}}`, carrying whatever the
+  list ended in.
 - **A number in the PRAGMA argument position reaches SQLite as a number.**
   `Xqlite.Pragma.get/3,4` quoted every argument into a name, so
   `get(conn, :integrity_check, 1)` built `PRAGMA integrity_check("1")` and
@@ -119,6 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `:optimize` and `:incremental_vacuum` lost the bitmask and the page
   count they were handed. An integer is written as a number now, a string or
   an atom as a quoted name.
+- **`nil` is no PRAGMA argument.** `nil` is an atom, so
+  `Xqlite.Pragma.get/3,4` and the named accessors read it as one and built
+  the statement with no argument at all: `get(conn, :table_info, nil)`
+  answered `{:ok, []}`, the same as a table no database holds. It answers
+  `{:error, {:invalid_pragma_argument, %{pragma: name, value: nil,
+  reason: :not_a_scalar}}}` now, like any other term that is no scalar.
 - **`{:cannot_execute_pragma, name, reason}` carries the name, never the
   statement.** Two of the three places that build it passed the whole
   statement text as the first element — `XqliteNIF.get_pragma(conn, "42")`

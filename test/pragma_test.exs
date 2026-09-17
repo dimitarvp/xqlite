@@ -340,6 +340,23 @@ defmodule XqlitePragmaTest do
       assert {:ok, [[0, "id" | _] | _]} = P.get(db, :table_info, "people")
     end
 
+    test "the anchor: nil is not an argument, on either path", %{db: db} do
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: nil, reason: :not_a_scalar}}} =
+               P.get(db, :table_info, nil)
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: nil, reason: :not_a_scalar}}} =
+               P.get(db, :table_info, nil, db_name: "main")
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: nil, reason: :not_a_scalar}}} =
+               apply(P, :table_info, [db, nil])
+    end
+
     test "the anchor: a pragma that reads only with an argument refuses a missing one",
          %{db: db} do
       assert {:error,
@@ -433,10 +450,11 @@ defmodule XqlitePragmaTest do
     end
   end
 
-  # The five shapes the argument position can take.
+  # The six shapes the argument position can take.
   defp argument_shape do
     StreamData.one_of([
       StreamData.constant(:none),
+      StreamData.constant({:nil_argument, nil}),
       StreamData.map(pragma_scalar(), fn value -> {:scalar, value} end),
       StreamData.map(StreamData.member_of([[], [db_name: "main"]]), fn kw -> {:options, kw} end),
       StreamData.map(non_keyword_list(), fn list -> {:list, list} end),
@@ -447,9 +465,9 @@ defmodule XqlitePragmaTest do
   defp pragma_scalar do
     StreamData.one_of([
       pragma_string_value(),
-      StreamData.atom(:alphanumeric),
+      StreamData.filter(StreamData.atom(:alphanumeric), fn atom -> not is_nil(atom) end),
       StreamData.integer(-2_147_483_648..2_147_483_647),
-      StreamData.member_of([nil, true, false, :people, "people", 0, -1])
+      StreamData.member_of([true, false, :people, "people", 0, -1])
     ])
   end
 
@@ -468,6 +486,7 @@ defmodule XqlitePragmaTest do
   defp argument_verdict(name, :none), do: no_argument_verdict(name)
   defp argument_verdict(name, {:options, _kw}), do: no_argument_verdict(name)
   defp argument_verdict(name, {:list, list}), do: {:refused, name, :not_a_scalar, list}
+  defp argument_verdict(name, {:nil_argument, nil}), do: {:refused, name, :not_a_scalar, nil}
 
   defp argument_verdict(name, {:scalar, value}) do
     case name in P.readable_with_one_arg() do

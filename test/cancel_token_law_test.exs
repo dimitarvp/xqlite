@@ -46,6 +46,16 @@ defmodule Xqlite.CancelTokenLawTest do
                Xqlite.stream(conn, @select, [], cancel_tokens: alien)
     end
 
+    test "the anchor: a token list that does not end in [] is refused", %{conn: conn} do
+      improper = [new_token() | :bogus]
+
+      assert {:error, {:invalid_cancel_tokens, ^improper}} =
+               Xqlite.stream(conn, @select, [], cancel_tokens: improper)
+
+      assert {:error, {:invalid_cancel_tokens, ^improper}} =
+               Xqlite.query_cancellable(conn, @select, [], improper)
+    end
+
     test "the anchor: a refusal closes the query span instead of raising", %{conn: conn} do
       handler = attach_capture([[:xqlite, :query, :start], [:xqlite, :query, :stop]])
 
@@ -130,7 +140,17 @@ defmodule Xqlite.CancelTokenLawTest do
   defp shape, do: StreamData.member_of([:bare, :list])
 
   defp alien_value do
-    StreamData.one_of([alien_term(), spoiled_list()])
+    StreamData.one_of([alien_term(), spoiled_list(), improper_list()])
+  end
+
+  defp improper_list do
+    gen all(
+          tail <- alien_term(),
+          good <- StreamData.integer(1..3)
+        ) do
+      tokens = Enum.map(1..good//1, fn _index -> new_token() end)
+      tokens ++ tail
+    end
   end
 
   defp spoiled_list do

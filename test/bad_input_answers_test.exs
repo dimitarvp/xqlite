@@ -70,6 +70,19 @@ defmodule Xqlite.BadInputAnswersTest do
                Xqlite.open_in_memory([:busy_timeout])
     end
 
+    test "an options list that does not end in [] is an answer" do
+      path = Xqlite.TestUtil.tmp_db_path("bad_open_opts")
+      improper = [{:foreign_keys, true} | :busy_timeout]
+
+      assert {:error,
+              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+               apply(Xqlite, :open, [path, improper])
+
+      assert {:error,
+              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+               apply(Xqlite, :open_in_memory, [improper])
+    end
+
     test "a value no pragma takes is an answer", %{conn: conn} do
       assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: "nope"}}} =
                P.put(conn, :user_version, "nope")
