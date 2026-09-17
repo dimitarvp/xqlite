@@ -22,6 +22,14 @@ defmodule Xqlite.BadInputAnswersTest do
     # would report as a mistake; `apply/3` keeps it out of the call.
     test "a guard on an Xqlite function raises", %{conn: conn} do
       assert_raise FunctionClauseError, fn -> apply(Xqlite, :prepare, [conn, 42]) end
+
+      assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT 1")
+      assert_raise FunctionClauseError, fn -> apply(Xqlite, :multi_step, [stmt, :ten]) end
+
+      # The guard catches the wrong type and nothing else: a number outside the
+      # batch size's domain is an answer.
+      assert {:error, {:invalid_batch_size, %{minimum: 1, provided: 0}}} =
+               Xqlite.multi_step(stmt, 0)
     end
 
     test "the native argument decoding raises", %{conn: conn} do

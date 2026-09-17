@@ -156,6 +156,15 @@ fn encode_list_refusal<'a>(
     }
 }
 
+/// A pragma name is handed back exactly as the caller wrote it, bytes and all,
+/// so a name holding something that is no UTF-8 is still the name they used.
+fn encode_pragma_name<'a>(env: Env<'a>, name: &[u8]) -> Term<'a> {
+    match crate::util::encode_text(env, name) {
+        Ok(term) => (atoms::invalid_pragma_name(), term).encode(env),
+        Err(err) => err.encode(env),
+    }
+}
+
 fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
     match t {
         rusqlite::types::Type::Null => nil(),
@@ -198,7 +207,7 @@ pub(crate) enum XqliteError {
         value_type: TermType,
     },
     InvalidCancelTokens {
-        position: usize,
+        refusal: ListRefusal,
         value_type: TermType,
     },
     UnsupportedAtom {
@@ -220,12 +229,13 @@ pub(crate) enum XqliteError {
         expected: usize,
     },
     InvalidParameterName(String),
-    InvalidPragmaName(String),
+    InvalidPragmaName(Vec<u8>),
     InvalidTransactionMode,
     InvalidAuthorizerAction {
         action: Atom,
     },
     NulErrorInString,
+    InvalidUtf8InString,
     MultipleStatements,
 
     CannotOpenDatabase {
@@ -369,6 +379,21 @@ impl XqliteError {
         }
     }
 
+    /// The same refusal, told about the list of cancel tokens it was reading,
+    /// so the caller learns which of a call's two lists it is about.
+    pub(crate) fn about_cancel_tokens(self) -> Self {
+        match self {
+            XqliteError::ExpectedList {
+                refusal,
+                value_type,
+            } => XqliteError::InvalidCancelTokens {
+                refusal,
+                value_type,
+            },
+            other => other,
+        }
+    }
+
     /// The same refusal, told about a list whose first element made it a
     /// keyword list.
     pub(crate) fn about_keyword_list(self) -> Self {
@@ -419,11 +444,12 @@ impl Display for XqliteError {
                 refusal_text(refusal)
             ),
             XqliteError::InvalidCancelTokens {
-                position,
+                refusal,
                 value_type,
             } => write!(
                 f,
-                "element {position} of the cancel token list is no live token (a {value_type:?})"
+                "Expected a list of cancel tokens: {} ({value_type:?})",
+                refusal_text(refusal)
             ),
             XqliteError::UnsupportedAtom { atom_value } => write!(
                 f,
@@ -546,7 +572,11 @@ impl Display for XqliteError {
                 write!(f, "Invalid parameter name: '{name}'")
             }
             XqliteError::InvalidPragmaName(name) => {
-                write!(f, "Invalid pragma name: '{name}'")
+                write!(
+                    f,
+                    "Invalid pragma name: '{}'",
+                    String::from_utf8_lossy(name)
+                )
             }
             XqliteError::InvalidTransactionMode => {
                 write!(
@@ -559,6 +589,9 @@ impl Display for XqliteError {
             }
             XqliteError::NulErrorInString => {
                 write!(f, "Input string contains embedded null byte")
+            }
+            XqliteError::InvalidUtf8InString => {
+                write!(f, "Input string contains bytes that are not UTF-8")
             }
             XqliteError::MultipleStatements => {
                 write!(f, "Provided SQL string contains multiple statements")
@@ -660,16 +693,11 @@ impl Encoder for XqliteError {
                 value_type,
             } => encode_list_refusal(env, atoms::expected_list(), refusal, *value_type),
             XqliteError::InvalidCancelTokens {
-                position,
+                refusal,
                 value_type,
-            } => encode_list_refusal(
-                env,
-                atoms::invalid_cancel_tokens(),
-                &ListRefusal::BadElement {
-                    position: *position,
-                },
-                *value_type,
-            ),
+            } => {
+                encode_list_refusal(env, atoms::invalid_cancel_tokens(), refusal, *value_type)
+            }
             XqliteError::UnsupportedAtom { atom_value } => {
                 (atoms::unsupported_atom(), atom_value).encode(env)
             }
@@ -782,9 +810,7 @@ impl Encoder for XqliteError {
             XqliteError::InvalidParameterName(name) => {
                 (atoms::invalid_parameter_name(), name).encode(env)
             }
-            XqliteError::InvalidPragmaName(name) => {
-                (atoms::invalid_pragma_name(), name).encode(env)
-            }
+            XqliteError::InvalidPragmaName(name) => encode_pragma_name(env, name),
             XqliteError::InvalidTransactionMode => {
                 atoms::invalid_transaction_mode().encode(env)
             }
@@ -792,6 +818,7 @@ impl Encoder for XqliteError {
                 (atoms::invalid_authorizer_action(), *action).encode(env)
             }
             XqliteError::NulErrorInString => atoms::null_byte_in_string().encode(env),
+            XqliteError::InvalidUtf8InString => atoms::invalid_utf8_in_string().encode(env),
             XqliteError::MultipleStatements => atoms::multiple_statements().encode(env),
             XqliteError::InvalidColumnIndex(index) => {
                 (atoms::invalid_column_index(), index).encode(env)

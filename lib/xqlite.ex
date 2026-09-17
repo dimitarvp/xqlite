@@ -173,8 +173,9 @@ defmodule Xqlite do
   take, its value, and `:invalid_value`. `:invalid_pragma_argument` carries
   the PRAGMA, the argument and one of `:not_a_scalar` (a term no PRAGMA
   argument can be, a list included), `:missing` (a PRAGMA that reads only
-  with an argument, called without one) and `:takes_no_argument` (a PRAGMA
-  with no one-argument read form, called with one).
+  with an argument, called without one), `:takes_no_argument` (a PRAGMA
+  with no one-argument read form, called with one) and `:invalid_utf8` (a
+  binary whose bytes are not UTF-8, in the argument or in a `:db_name`).
   `:invalid_open_option` carries an option key the openers do not know with
   `:unknown_key`, a value they refuse with `:invalid_value`, or, for an
   element of the options list that is not a `{key, value}` pair, that
@@ -183,6 +184,13 @@ defmodule Xqlite do
 
   `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
   never the statement built around it — and why it could not run.
+
+  Two of them are about a binary handed in where text was meant, one byte
+  apart. `:invalid_utf8_in_string` is a binary whose bytes are not UTF-8 —
+  SQL text, a file path, a schema or an object name — refused on the way in,
+  before SQLite is asked anything. `:null_byte_in_string` is text that is
+  UTF-8 but holds a NUL byte: SQLite's tokenizer would stop at the NUL and
+  read a shorter statement than we built.
 
   `:unsupported_data_type` names the kind of term handed to the binder when no
   SQLite value can hold it: `:bitstring`, `:function`, `:list`, `:map`, `:pid`,
@@ -197,6 +205,7 @@ defmodule Xqlite do
           | :extension_loading_disabled
           | :invalid_conflict_strategy
           | :invalid_transaction_mode
+          | :invalid_utf8_in_string
           | :multiple_statements
           | :null_byte_in_string
           | :operation_cancelled
@@ -240,7 +249,12 @@ defmodule Xqlite do
              %{
                pragma: atom(),
                value: term(),
-               reason: :invalid_options | :missing | :not_a_scalar | :takes_no_argument
+               reason:
+                 :invalid_options
+                 | :invalid_utf8
+                 | :missing
+                 | :not_a_scalar
+                 | :takes_no_argument
              }}
           | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
@@ -276,6 +290,14 @@ defmodule Xqlite do
 
   Four reasons carry this map: `:expected_list`, `:expected_keyword_list`,
   `:expected_keyword_tuple` and `:invalid_cancel_tokens`.
+
+  A cancellable call takes two lists, so the tag says which one it refused:
+  `:invalid_cancel_tokens` is always about the tokens, `:expected_list` always
+  about the parameters. For a token argument that is no list at all the reason
+  differs by door, on purpose: a raw `XqliteNIF` function takes a list and
+  nothing else, so it answers `:not_a_list`, while the `Xqlite` function takes
+  one token or a list of them and reads a bare term as one token, so it
+  answers `:bad_element` at position 1.
   """
   @type list_refusal :: %{
           :reason => :not_a_list | :improper_tail | :bad_element,

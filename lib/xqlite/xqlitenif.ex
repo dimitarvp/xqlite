@@ -23,10 +23,14 @@ defmodule XqliteNIF do
   Most functions return `{:ok, value}` or `:ok` on success, and
   `{:error, reason_tuple}` on failure. The `reason_tuple` provides structured
   error information (e.g., `{:sqlite_failure, code, extended_code, message}`).
-  An argument of the wrong type never gets that far: these are raw NIFs, so a
-  term the native function cannot decode raises `ArgumentError` at the call.
-  The `Xqlite` wrappers check such arguments first and answer
-  `{:error, reason}` instead.
+
+  A term of the wrong TYPE raises where it is met: `ArgumentError` on a raw
+  stub here, from the native argument decoding, and `FunctionClauseError` at
+  an `Xqlite` function that guards the argument. A value of the right type
+  that this library refuses is an `{:error, reason}` answer instead — a
+  binary that is not UTF-8 where text was meant included, which answers
+  `{:error, :invalid_utf8_in_string}`, and one holding a NUL byte, which
+  answers `{:error, :null_byte_in_string}`.
 
   **Usage note:**
   These are low-level functions. For more idiomatic Elixir usage, consider
@@ -1165,9 +1169,9 @@ defmodule XqliteNIF do
   guarantee that the operation has already stopped. The cancellable NIF function
   will return `{:error, :operation_cancelled}` when it actually terminates due
   to the cancellation.
-  A term that is not a cancellation token raises `ArgumentError`, as a
-  wrong-typed argument does on every raw NIF; `Xqlite.cancel_operation/1`
-  asks `is_cancel_token/1` first and answers
+  A term that is not a cancellation token raises `ArgumentError`, the kind a
+  term of the wrong type gets on a raw NIF; `Xqlite.cancel_operation/1` asks
+  `is_cancel_token/1` first and answers
   `{:error, {:invalid_cancel_tokens, refusal}}` instead.
   """
   @spec cancel_operation(token_resource :: reference()) :: :ok | Xqlite.error()
@@ -1866,9 +1870,26 @@ defmodule XqliteNIF do
   def blob_open(_conn, _db, _table, _column, _row_id, _read_only), do: err()
 
   @doc """
-  Reads `length` bytes from the blob starting at `offset`.
+  Reads up to `length` bytes from the blob, starting at `offset`.
+
+  The read is a window over the bytes that are there: it answers fewer bytes
+  than asked for when the blob ends first, and `{:ok, ""}` when `offset` is at
+  or past the end, without asking SQLite anything. A short answer therefore
+  means the blob ended, not that the read failed — a caller that wants the
+  size asks `blob_size/1`. A `length` of zero answers `{:ok, ""}` too.
+
+  A negative `offset` or `length` raises `ArgumentError`: the arguments are
+  unsigned on the native side, so the decoding refuses them.
+
+  A write is not a window: `blob_write/3` refuses to write past the end with
+  `{:error, {:cannot_execute, reason}}` rather than writing the part that
+  fits.
   """
-  @spec blob_read(blob :: reference(), offset :: non_neg_integer(), length :: pos_integer()) ::
+  @spec blob_read(
+          blob :: reference(),
+          offset :: non_neg_integer(),
+          length :: non_neg_integer()
+        ) ::
           {:ok, binary()} | Xqlite.error()
   def blob_read(_blob, _offset, _length), do: err()
 
@@ -1876,7 +1897,10 @@ defmodule XqliteNIF do
   Writes `data` to the blob starting at `offset`.
 
   Cannot change the blob size — the data must fit within the existing
-  blob. Use `zeroblob()` in SQL to pre-allocate the desired size.
+  blob. Use `zeroblob()` in SQL to pre-allocate the desired size. A write that
+  would run past the end is refused with
+  `{:error, {:cannot_execute, reason}}`, where a read of the same range
+  answers the bytes that are there.
   """
   @spec blob_write(blob :: reference(), offset :: non_neg_integer(), data :: binary()) ::
           :ok | Xqlite.error()

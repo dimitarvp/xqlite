@@ -1135,4 +1135,119 @@ defmodule XqlitePragmaTest do
                Xqlite.open_in_memory(wal_autocheckpoint: 3_000_000_000)
     end
   end
+
+  # A binary that is not UTF-8 is no text, so every position that becomes part
+  # of the statement refuses it before the statement is built. The name has its
+  # own answer, the one it gives for any character outside `A-Z`, `a-z`, `0-9`
+  # and `_`.
+  describe "a text position holding bytes that are no UTF-8" do
+    setup do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+      {:ok, db: db}
+    end
+
+    test "the argument of a reading pragma is refused", %{db: db} do
+      bad = <<109, 97, 255>>
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :table_info, value: ^bad, reason: :invalid_utf8}}} =
+               P.get(db, :table_info, bad)
+    end
+
+    test "a db_name option is refused on both doors", %{db: db} do
+      bad = <<109, 97, 255>>
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: ^bad, reason: :invalid_utf8}}} =
+               P.get(db, :user_version, db_name: bad)
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: ^bad, reason: :invalid_utf8}}} =
+               P.put(db, :user_version, 1, db_name: bad)
+    end
+
+    test "an argument holding a NUL keeps its own answer", %{db: db} do
+      assert {:error, :null_byte_in_string} = P.get(db, :table_info, "us" <> <<0>> <> "ers")
+    end
+
+    test "a pragma name that is not UTF-8 is refused as a name", %{db: db} do
+      bad = <<109, 97, 255>>
+
+      assert {:error, {:invalid_pragma_name, ^bad}} = Xqlite.get_pragma(db, bad)
+      assert {:error, {:invalid_pragma_name, ^bad}} = Xqlite.set_pragma(db, bad, 1)
+      assert {:error, {:invalid_pragma_name, ^bad}} = NIF.get_pragma(db, bad)
+      assert {:error, {:invalid_pragma_name, ^bad}} = NIF.set_pragma(db, bad, 1)
+    end
+
+    test "the two setters answer their own refusal for a value that is not UTF-8", %{db: db} do
+      bad = <<255>>
+
+      assert {:error, :invalid_utf8_in_string} = NIF.set_pragma(db, "user_version", bad)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: ^bad}}} =
+               Xqlite.set_pragma(db, :user_version, bad)
+    end
+  end
+
+  # `mmap_size` is capped by the bundled build's own `MAX_MMAP_SIZE`: SQLite
+  # stores the cap for anything above it and 0 for anything below zero, so the
+  # domain ends where the build does.
+  describe "the memory-map size domain" do
+    setup do
+      path = tmp_db_path("mmap_domain")
+      assert {:ok, db} = Xqlite.open(path)
+      on_exit(fn -> Xqlite.close(db) end)
+      {:ok, db: db}
+    end
+
+    test "zero and the ceiling are written and read back", %{db: db} do
+      ceiling = mmap_ceiling()
+
+      assert {:ok, ^ceiling} = P.put(db, :mmap_size, ceiling)
+      assert {:ok, ^ceiling} = P.get(db, :mmap_size)
+
+      assert {:ok, 0} = P.put(db, :mmap_size, 0)
+      assert {:ok, 0} = P.get(db, :mmap_size)
+    end
+
+    test "a negative size and one past the ceiling are refused", %{db: db} do
+      over = mmap_ceiling() + 1
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: -1}}} =
+               P.put(db, :mmap_size, -1)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: ^over}}} =
+               P.put(db, :mmap_size, over)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: -1}}} =
+               Xqlite.set_pragma(db, :mmap_size, -1)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: ^over}}} =
+               Xqlite.set_pragma(db, :mmap_size, over)
+    end
+
+    # The schema carries one number for eight shipped builds, so the build has
+    # to be asked whether it is still its own.
+    test "the ceiling in the schema is the one this build was compiled with", %{db: db} do
+      assert {:ok, options} = P.get(db, :compile_options)
+      assert max_mmap_size(options) == mmap_ceiling()
+    end
+  end
+
+  defp mmap_ceiling do
+    %{mmap_size: %{valid_values: %Range{last: last}}} = P.schema()
+    last
+  end
+
+  defp max_mmap_size(options) do
+    Enum.find_value(options, fn option -> max_mmap_value(option) end)
+  end
+
+  defp max_mmap_value("MAX_MMAP_SIZE=0x" <> hex), do: String.to_integer(hex, 16)
+  defp max_mmap_value("MAX_MMAP_SIZE=" <> decimal), do: String.to_integer(decimal)
+  defp max_mmap_value(_other), do: nil
 end

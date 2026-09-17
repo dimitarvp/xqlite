@@ -92,10 +92,8 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:error, {:unsupported_data_type, :bitstring}} =
                  NIF.set_pragma(conn, "user_version", <<1::7>>)
 
-        assert {:error, {:cannot_execute_pragma, "user_version", reason}} =
+        assert {:error, :invalid_utf8_in_string} =
                  NIF.set_pragma(conn, "user_version", <<255>>)
-
-        assert is_binary(reason)
 
         assert {:error, :null_byte_in_string} = NIF.set_pragma(conn, "user_version", <<0>>)
 
@@ -106,7 +104,7 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:error, {:unsupported_data_type, :bitstring}} =
                  Xqlite.set_pragma(conn, :not_a_pragma, <<1::7>>)
 
-        assert {:error, {:cannot_execute_pragma, "not_a_pragma", _reason}} =
+        assert {:error, :invalid_utf8_in_string} =
                  Xqlite.set_pragma(conn, :not_a_pragma, <<255>>)
 
         assert {:error, :null_byte_in_string} =
@@ -182,8 +180,18 @@ defmodule Xqlite.NIF.PragmaTest do
 
       assert {:error, {:cannot_execute_pragma, "42", _write_reason}} =
                NIF.set_pragma(conn, "42", 1)
+    end
 
-      assert {:error, {:cannot_execute_pragma, "user_version", _value_reason}} =
+    # A name is read as bytes and judged by the name rule, so bytes that are
+    # no UTF-8 are refused as a name; a VALUE that is no UTF-8 is refused as
+    # text, by the atom every text argument answers.
+    test "bytes that are no UTF-8 are refused as a name and as text", %{conn: conn} do
+      bad = <<109, 97, 255>>
+
+      assert {:error, {:invalid_pragma_name, ^bad}} = NIF.get_pragma(conn, bad)
+      assert {:error, {:invalid_pragma_name, ^bad}} = NIF.set_pragma(conn, bad, 1)
+
+      assert {:error, :invalid_utf8_in_string} =
                NIF.set_pragma(conn, "user_version", <<255>>)
     end
   end

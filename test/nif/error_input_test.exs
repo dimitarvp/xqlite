@@ -1,7 +1,8 @@
 defmodule Xqlite.NIF.ErrorInputTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
-  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1, tmp_db_path: 1]
 
   alias XqliteNIF, as: NIF
 
@@ -282,6 +283,155 @@ defmodule Xqlite.NIF.ErrorInputTest do
         assert {:error, {:constraint_violation, :constraint_foreign_key, _msg}} =
                  NIF.execute(conn, sql, [])
       end
+
+      # --- Text arguments that hold bytes which are no UTF-8 ---
+
+      test "SQL text that is not UTF-8 is refused on every SQL door", %{conn: conn} do
+        sql = "SELECT " <> <<255>>
+
+        assert {:error, :invalid_utf8_in_string} = NIF.query(conn, sql, [])
+        assert {:error, :invalid_utf8_in_string} = NIF.execute(conn, sql, [])
+        assert {:error, :invalid_utf8_in_string} = NIF.execute_batch(conn, sql)
+        assert {:error, :invalid_utf8_in_string} = NIF.stmt_prepare(conn, sql)
+        assert {:error, :invalid_utf8_in_string} = NIF.stream_open(conn, sql, [])
+        assert {:error, :invalid_utf8_in_string} = NIF.explain_analyze(conn, sql, [])
+
+        assert {:error, :invalid_utf8_in_string} = Xqlite.query(conn, sql, [])
+        assert {:error, :invalid_utf8_in_string} = Xqlite.execute(conn, sql, [])
+        assert {:error, :invalid_utf8_in_string} = Xqlite.execute_batch(conn, sql)
+        assert {:error, :invalid_utf8_in_string} = Xqlite.prepare(conn, sql)
+        assert {:error, :invalid_utf8_in_string} = Xqlite.stream(conn, sql, [])
+        assert {:error, :invalid_utf8_in_string} = Xqlite.explain_analyze(conn, sql, [])
+      end
+
+      test "the cancellable twins refuse the same SQL text", %{conn: conn} do
+        sql = "SELECT " <> <<255>>
+
+        assert {:error, :invalid_utf8_in_string} = NIF.query_cancellable(conn, sql, [], [])
+        assert {:error, :invalid_utf8_in_string} = NIF.execute_cancellable(conn, sql, [], [])
+        assert {:error, :invalid_utf8_in_string} = NIF.execute_batch_cancellable(conn, sql, [])
+
+        assert {:error, :invalid_utf8_in_string} =
+                 NIF.query_with_changes_cancellable(conn, sql, [], [])
+      end
+
+      # One byte apart, two faults, one atom each.
+      test "an interior NUL and bytes that are no UTF-8 answer their own atom", %{conn: conn} do
+        assert {:error, :null_byte_in_string} = NIF.query(conn, "SELECT 1" <> <<0>>, [])
+        assert {:error, :invalid_utf8_in_string} = NIF.query(conn, "SELECT 1" <> <<255>>, [])
+      end
+
+      test "every text argument of the raw NIFs refuses bytes that are no UTF-8", %{conn: conn} do
+        for {door, call} <- text_doors(conn, <<109, 97, 255, 110>>) do
+          assert {^door, {:error, :invalid_utf8_in_string}} = {door, call.()}
+        end
+      end
+
+      test "every text argument still raises for a term that is no binary", %{conn: conn} do
+        for {_door, call} <- text_doors(conn, 42) do
+          assert_raise ArgumentError, fn -> call.() end
+        end
+      end
+
+      # The witness that nothing is prepared: an authorizer that denies SELECT
+      # answers for a statement SQLite parses, so a text refusal arriving
+      # instead means SQLite was never asked.
+      property "text that is not UTF-8 is refused before SQLite sees a statement", %{
+        conn: conn
+      } do
+        assert :ok = Xqlite.set_authorizer(conn, [:select])
+        assert {:error, {:authorization_denied, _code, _msg}} = NIF.query(conn, "SELECT 1", [])
+
+        check all(
+                head <- short_ascii(),
+                tail <- short_ascii(),
+                max_runs: 2000
+              ) do
+          sql = "SELECT '" <> head <> <<255>> <> tail <> "'"
+          refute String.valid?(sql)
+
+          assert {:error, :invalid_utf8_in_string} = NIF.query(conn, sql, [])
+          assert {:error, :invalid_utf8_in_string} = NIF.stmt_prepare(conn, sql)
+          assert {:error, :invalid_utf8_in_string} = NIF.execute_batch(conn, sql)
+        end
+      end
+
+      # The rule the refusal must not move: the same bytes in a PARAMETER are
+      # a BLOB, not text, and come back byte for byte.
+      property "the same bytes as a parameter still bind as a BLOB", %{conn: conn} do
+        check all(
+                head <- short_ascii(),
+                tail <- short_ascii(),
+                max_runs: 2000
+              ) do
+          bytes = head <> <<255>> <> tail
+
+          assert {:ok, %{rows: [["blob", ^bytes]]}} =
+                   NIF.query(conn, "SELECT typeof(?1), ?1", [bytes])
+
+          assert {:ok, %{rows: [["blob", ^bytes]]}} =
+                   NIF.query(conn, "SELECT typeof(:v), :v", v: bytes)
+        end
+      end
     end
+  end
+
+  defp short_ascii do
+    StreamData.scale(StreamData.string(:alphanumeric), fn size -> min(size, 12) end)
+  end
+
+  # One call per argument the native side reads as caller text, each with the
+  # text position holding `value`. The calls are functions so a test can run
+  # them for an answer or for a raise.
+  defp text_doors(conn, value) do
+    assert {:ok, session} = NIF.session_new(conn)
+    path = tmp_db_path("bad_text_arg")
+
+    [
+      {:open, fn -> NIF.open(value) end},
+      {:open_in_memory, fn -> NIF.open_in_memory(value) end},
+      {:open_readonly, fn -> NIF.open_readonly(value) end},
+      {:open_in_memory_readonly, fn -> NIF.open_in_memory_readonly(value) end},
+      {:query, fn -> NIF.query(conn, value, []) end},
+      {:execute, fn -> NIF.execute(conn, value, []) end},
+      {:execute_batch, fn -> NIF.execute_batch(conn, value) end},
+      {:query_with_changes, fn -> NIF.query_with_changes(conn, value, []) end},
+      {:query_cancellable, fn -> NIF.query_cancellable(conn, value, [], []) end},
+      {:execute_cancellable, fn -> NIF.execute_cancellable(conn, value, [], []) end},
+      {:execute_batch_cancellable, fn -> NIF.execute_batch_cancellable(conn, value, []) end},
+      {:query_with_changes_cancellable,
+       fn -> NIF.query_with_changes_cancellable(conn, value, [], []) end},
+      {:explain_analyze, fn -> NIF.explain_analyze(conn, value, []) end},
+      {:stmt_prepare, fn -> NIF.stmt_prepare(conn, value) end},
+      {:stream_open, fn -> NIF.stream_open(conn, value, []) end},
+      {:savepoint, fn -> NIF.savepoint(conn, value) end},
+      {:rollback_to_savepoint, fn -> NIF.rollback_to_savepoint(conn, value) end},
+      {:release_savepoint, fn -> NIF.release_savepoint(conn, value) end},
+      {:schema_list_objects, fn -> NIF.schema_list_objects(conn, value) end},
+      {:schema_columns, fn -> NIF.schema_columns(conn, value) end},
+      {:schema_foreign_keys, fn -> NIF.schema_foreign_keys(conn, value) end},
+      {:schema_indexes, fn -> NIF.schema_indexes(conn, value) end},
+      {:schema_index_columns, fn -> NIF.schema_index_columns(conn, value) end},
+      {:get_create_sql, fn -> NIF.get_create_sql(conn, value) end},
+      {:txn_state, fn -> NIF.txn_state(conn, value) end},
+      {:wal_checkpoint, fn -> NIF.wal_checkpoint(conn, :passive, value) end},
+      {:progress_hook_tag, fn -> NIF.register_progress_hook(conn, self(), 1, value) end},
+      {:serialize, fn -> NIF.serialize(conn, value) end},
+      {:deserialize, fn -> NIF.deserialize(conn, value, <<>>, false) end},
+      {:load_extension_path, fn -> NIF.load_extension(conn, value, nil) end},
+      {:load_extension_entry_point, fn -> NIF.load_extension(conn, path, value) end},
+      {:backup_schema, fn -> NIF.backup(conn, value, path) end},
+      {:backup_dest_path, fn -> NIF.backup(conn, "main", value) end},
+      {:restore_schema, fn -> NIF.restore(conn, value, path) end},
+      {:restore_src_path, fn -> NIF.restore(conn, "main", value) end},
+      {:backup_with_progress_schema,
+       fn -> NIF.backup_with_progress(conn, value, path, self(), 1, []) end},
+      {:backup_with_progress_dest,
+       fn -> NIF.backup_with_progress(conn, "main", value, self(), 1, []) end},
+      {:session_attach, fn -> NIF.session_attach(session, value) end},
+      {:blob_open_db, fn -> NIF.blob_open(conn, value, "t", "c", 1, false) end},
+      {:blob_open_table, fn -> NIF.blob_open(conn, "main", value, "c", 1, false) end},
+      {:blob_open_column, fn -> NIF.blob_open(conn, "main", "t", value, 1, false) end}
+    ]
   end
 end

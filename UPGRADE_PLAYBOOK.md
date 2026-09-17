@@ -50,6 +50,9 @@ here is optional on a bump that changes the bundled SQLite version.
    - `LIKE_DOESNT_MATCH_BLOBS` ABSENT (the adapter's
      `:like_match_blob` tests pass because LIKE matches blobs; if a
      bump flips this, those tests and their rationale must flip too).
+   - `MAX_MMAP_SIZE` re-measured: it is the ceiling of `mmap_size`'s
+     domain in `pragma.ex`, which the schema carries as one number for
+     every shipped build, so a bump that moves it moves the schema too.
 5. **Read the SQLite release notes for the surfaces we pin.** The
    library asserts specific SQLite behaviors; a bump can move them
    legitimately, and the fix is updating our pins knowingly, not

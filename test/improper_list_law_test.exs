@@ -23,7 +23,9 @@ defmodule Xqlite.ImproperListLawTest do
   @moduletag timeout: 300_000
 
   # Each door: the kind of element its list holds, and the tag it refuses
-  # with. Nineteen doors — every argument the library reads as a list.
+  # with. Nineteen doors — every argument the library reads as a list. A
+  # token list is named by its own tag on both sides of the door, so
+  # `:expected_list` on a cancellable call is always about its parameters.
   @doors [
     {:stream_params, :value, :expected_list},
     {:bind2_params, :value, :expected_list},
@@ -36,14 +38,14 @@ defmodule Xqlite.ImproperListLawTest do
     {:nif_stmt_bind_params, :value, :expected_list},
     {:nif_stream_open_params, :value, :expected_list},
     {:nif_explain_analyze_params, :value, :expected_list},
-    {:nif_query_cancellable_tokens, :token, :expected_list},
-    {:nif_execute_cancellable_tokens, :token, :expected_list},
-    {:nif_execute_batch_cancellable_tokens, :token, :expected_list},
-    {:nif_query_with_changes_cancellable_tokens, :token, :expected_list},
-    {:nif_stmt_multi_step_cancellable_tokens, :token, :expected_list},
-    {:nif_stream_fetch_cancellable_tokens, :token, :expected_list},
+    {:nif_query_cancellable_tokens, :token, :invalid_cancel_tokens},
+    {:nif_execute_cancellable_tokens, :token, :invalid_cancel_tokens},
+    {:nif_execute_batch_cancellable_tokens, :token, :invalid_cancel_tokens},
+    {:nif_query_with_changes_cancellable_tokens, :token, :invalid_cancel_tokens},
+    {:nif_stmt_multi_step_cancellable_tokens, :token, :invalid_cancel_tokens},
+    {:nif_stream_fetch_cancellable_tokens, :token, :invalid_cancel_tokens},
     {:nif_set_authorizer, :action, :expected_list},
-    {:nif_backup_with_progress_tokens, :token, :expected_list}
+    {:nif_backup_with_progress_tokens, :token, :invalid_cancel_tokens}
   ]
 
   test "the anchor: a stream refuses an improper parameter list at open" do

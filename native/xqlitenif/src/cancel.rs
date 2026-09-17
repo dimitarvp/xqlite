@@ -1,4 +1,4 @@
-use crate::error::XqliteError;
+use crate::error::{ListRefusal, XqliteError};
 use crate::progress_dispatch::{CancelSubscriber, ProgressDispatch};
 use crate::util::walk_list;
 use rustler::{Resource, ResourceArc, Term, resource_impl};
@@ -25,9 +25,10 @@ impl XqliteCancelToken {
 ///
 /// The list is walked by hand, so a broken tail is a structured refusal rather
 /// than a panic, and an element that is no cancel token names its own position,
-/// one-based.
+/// one-based. Every refusal is told about the token list, so a caller can tell
+/// it from the same call's parameter list.
 pub(crate) fn decode_tokens(term: Term<'_>) -> Result<Vec<Arc<AtomicBool>>, XqliteError> {
-    let items = walk_list(term)?;
+    let items = walk_list(term).map_err(XqliteError::about_cancel_tokens)?;
     let mut flags = Vec::with_capacity(items.len());
 
     for (index, item) in items.iter().enumerate() {
@@ -35,7 +36,9 @@ pub(crate) fn decode_tokens(term: Term<'_>) -> Result<Vec<Arc<AtomicBool>>, Xqli
             Ok(token) => flags.push(token.0.clone()),
             Err(_not_a_token) => {
                 return Err(XqliteError::InvalidCancelTokens {
-                    position: index + 1,
+                    refusal: ListRefusal::BadElement {
+                        position: index + 1,
+                    },
                     value_type: item.get_type(),
                 });
             }

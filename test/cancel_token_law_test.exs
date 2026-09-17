@@ -110,6 +110,32 @@ defmodule Xqlite.CancelTokenLawTest do
                NIF.query_cancellable(conn, @select, [], tokens)
     end
 
+    # A raw door takes a list of tokens and nothing else, so a term that is no
+    # list is refused as the token list it was meant to be — and the reason
+    # differs from the Elixir door's on purpose, which reads a bare term as one
+    # token and so blames element one.
+    test "the anchor: a raw door names a token argument that is no list", %{conn: conn} do
+      assert {:error, {:invalid_cancel_tokens, %{reason: :not_a_list, value_type: :atom}}} =
+               NIF.execute_batch_cancellable(conn, @insert, :bogus)
+
+      assert {:error,
+              {:invalid_cancel_tokens, %{reason: :bad_element, position: 1, value_type: :atom}}} =
+               Xqlite.execute_batch_cancellable(conn, @insert, :bogus)
+    end
+
+    # The other list of the same call keeps its own tag, which is what makes
+    # the token tag worth having.
+    test "the anchor: a parameter list that is no list is still about the parameters",
+         %{conn: conn} do
+      token = new_token()
+
+      assert {:error, {:expected_list, %{reason: :not_a_list, value_type: :atom}}} =
+               NIF.query_cancellable(conn, @select, :bogus, [token])
+
+      assert {:error, {:expected_list, %{reason: :improper_tail, value_type: :integer}}} =
+               NIF.query_cancellable(conn, @select, [1 | 2], [token])
+    end
+
     test "the anchor: cancel_operation/1 takes one token, not a list" do
       token = new_token()
 
@@ -196,8 +222,10 @@ defmodule Xqlite.CancelTokenLawTest do
     end
 
     # A raw door takes a list and nothing else, so a broken tail there is a
-    # refusal about the list itself, by the walk-by-hand rule.
-    property "a raw door refuses a broken tail as a list it cannot read", %{doors: doors} do
+    # refusal about the list itself, by the walk-by-hand rule — and the list it
+    # was reading is the token list, which the refusal names.
+    property "a raw door refuses a broken tail as a token list it cannot read",
+             %{doors: doors} do
       check all(
               door <- StreamData.member_of(@raw_doors),
               tail <- alien_term(),
@@ -205,9 +233,26 @@ defmodule Xqlite.CancelTokenLawTest do
               max_runs: 2000
             ) do
         value = improper(good, tail)
+        type = type_of(tail)
 
-        assert {^door, {:error, {:expected_list, _refusal}}} =
+        assert {^door,
+                {:error,
+                 {:invalid_cancel_tokens, %{reason: :improper_tail, value_type: ^type}}}} =
                  {door, answer(door, doors, value)}
+      end
+    end
+
+    property "a raw door refuses a token argument that is no list as such", %{doors: doors} do
+      check all(
+              door <- StreamData.member_of(@raw_doors),
+              alien <- alien_term(),
+              max_runs: 2000
+            ) do
+        type = type_of(alien)
+
+        assert {^door,
+                {:error, {:invalid_cancel_tokens, %{reason: :not_a_list, value_type: ^type}}}} =
+                 {door, answer(door, doors, alien)}
       end
     end
 

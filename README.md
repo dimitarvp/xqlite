@@ -83,7 +83,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Diagnostics & connection state:** `compile_options/1`, `sqlite_version/0`, `connection_stats/1` (per-connection `sqlite3_db_status` counters), `autocommit/1`, `txn_state/2`, structured `wal_checkpoint/3`
 - **Result integration:** `Xqlite.Result` implements `Table.Reader` (works with Explorer, Kino, VegaLite)
 
-Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 62 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
+Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 63 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
 
 ## Focused examples
 
@@ -223,6 +223,8 @@ observation is fan-out, and the telemetry bridge re-emits it as
 {:ok, header} = XqliteNIF.blob_read(blob, 0, 64)
 :ok = XqliteNIF.blob_close(blob)
 ```
+
+A read is a window over the bytes that are there: `blob_read/3` answers up to `length` bytes, fewer when the blob ends first and `{:ok, ""}` at or past the end, so a short answer means the blob ended rather than the read failing. A write is not: `blob_write/3` refuses a write that would run past the end instead of writing the part that fits.
 
 ### Serialize / deserialize -- atomic in-memory snapshots
 

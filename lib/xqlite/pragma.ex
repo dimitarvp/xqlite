@@ -69,11 +69,14 @@ defmodule Xqlite.Pragma do
   # 32-bit constants above, each measured by writing the value and reading it
   # back: a page count up to 2^32 - 2, a heap limit up to 2^63 - 1, a worker
   # count capped at the compile-time maximum, and -1 for "no limit" where every
-  # other negative is stored as -1 anyway.
+  # other negative is stored as -1 anyway. The memory-map size ends at the
+  # bundled build's own MAX_MMAP_SIZE, which stores the maximum for anything
+  # above it and 0 for anything below zero.
   @page_count 1..4_294_967_294
   @heap_limit 0..0x7FFFFFFFFFFFFFFF
   @worker_threads 0..8
   @journal_size -1..0x7FFFFFFFFFFFFFFF
+  @mmap_size 0..0x7FFF0000
 
   @true_words ~w(on yes true)
   @false_words ~w(off no false)
@@ -150,7 +153,7 @@ defmodule Xqlite.Pragma do
       read_arities: [0],
       schema_prefix: true,
       writable: true,
-      valid_values: @signed_i32
+      valid_values: @mmap_size
     },
     page_count: %PragmaSpec{
       return_type: :int,
@@ -720,6 +723,13 @@ defmodule Xqlite.Pragma do
   `reason: :takes_no_argument` — SQLite reads `PRAGMA name(value)` on a
   writable pragma as a write, so a getter must not build it.
 
+  Both the argument and a `:db_name` are written into the statement, so they
+  have to be text: a binary whose bytes are not UTF-8 is refused with
+  `reason: :invalid_utf8`, carrying the bytes as they were given, before
+  anything is built from them. One holding a NUL byte is refused a step later,
+  with `{:error, :null_byte_in_string}`, because SQLite's tokenizer would stop
+  at the NUL and read a shorter statement than we built.
+
   An integer argument is written into the statement as a number and a string
   or an atom as a quoted name, which is what each PRAGMA reads: `:optimize`
   takes a bitmask, `:incremental_vacuum` a page count, `:integrity_check`
@@ -763,10 +773,25 @@ defmodule Xqlite.Pragma do
 
   defp judge_options(name, options) do
     case Enum.find(options, &unreadable_option?/1) do
-      nil -> {:ok, options}
+      nil -> judge_option_text(name, options)
       pair -> {:error, invalid_argument(name, pair, :invalid_options)}
     end
   end
+
+  # A `:db_name` becomes part of the statement, so bytes that are no UTF-8 are
+  # no name: they are refused here, before anything is built from them.
+  defp judge_option_text(name, options) do
+    case Enum.find(options, &unreadable_text?/1) do
+      {_key, value} -> {:error, invalid_argument(name, value, :invalid_utf8)}
+      _no_pair -> {:ok, options}
+    end
+  end
+
+  defp unreadable_text?({_key, value}), do: not_utf8?(value)
+  defp unreadable_text?(_pair), do: false
+
+  defp not_utf8?(value) when is_binary(value), do: not String.valid?(value)
+  defp not_utf8?(_value), do: false
 
   # `:db_name` is the one key, and it names a database: a string, or an atom
   # quoted the same way, `nil` meaning the one the connection opened with.
@@ -780,16 +805,29 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  defp read_pragma(db, name, _spec, arg, opts)
-       when (is_binary(arg) or is_atom(arg) or is_integer(arg)) and not is_nil(arg) do
-    case name in @readable_with_one_arg do
-      true -> query_with_arg(db, name, arg, opts)
-      false -> {:error, invalid_argument(name, arg, :takes_no_argument)}
+  # The argument is quoted into the statement, so a binary that is no UTF-8 is
+  # refused before the statement is built, the way a `:db_name` is.
+  defp read_pragma(db, name, _spec, arg, opts) when is_binary(arg) do
+    case String.valid?(arg) do
+      true -> read_with_arg(db, name, arg, opts)
+      false -> {:error, invalid_argument(name, arg, :invalid_utf8)}
     end
+  end
+
+  defp read_pragma(db, name, _spec, arg, opts)
+       when (is_atom(arg) or is_integer(arg)) and not is_nil(arg) do
+    read_with_arg(db, name, arg, opts)
   end
 
   defp read_pragma(_db, name, _spec, arg, _opts) do
     {:error, invalid_argument(name, arg, :not_a_scalar)}
+  end
+
+  defp read_with_arg(db, name, arg, opts) do
+    case name in @readable_with_one_arg do
+      true -> query_with_arg(db, name, arg, opts)
+      false -> {:error, invalid_argument(name, arg, :takes_no_argument)}
+    end
   end
 
   defp read_without_arg(db, name, spec, opts) do
@@ -922,7 +960,9 @@ defmodule Xqlite.Pragma do
       that are no keyword list, another key, and a `:db_name` that is neither
       a string nor an atom are refused with
       `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
-      reason: :invalid_options}}}`, as in `get/4`.
+      reason: :invalid_options}}}`, as in `get/4`. A `:db_name` whose bytes
+      are not UTF-8 is refused the same way with `reason: :invalid_utf8`, also
+      as in `get/4`.
   """
   @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) ::
           {:ok, term()} | Xqlite.error()

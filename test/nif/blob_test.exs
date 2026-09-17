@@ -113,6 +113,36 @@ defmodule Xqlite.NIF.BlobTest do
       NIF.blob_close(blob)
     end
 
+    # A read is a window: it answers the bytes that are there, whatever they
+    # are, and an empty binary once the window starts at or past the end. A
+    # write is not: it refuses to go past the end instead of writing less.
+    test "a read is a window over the bytes that are there", %{conn: conn} do
+      value = :binary.copy("z", 30) <> <<0, 255>> <> :binary.copy("q", 35)
+
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE bl_window (id INTEGER PRIMARY KEY, data BLOB);
+        """)
+
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO bl_window VALUES (1, ?1)", [value])
+      {:ok, blob} = NIF.blob_open(conn, "main", "bl_window", "data", 1, false)
+
+      assert {:ok, 67} = NIF.blob_size(blob)
+      assert {:ok, ^value} = NIF.blob_read(blob, 0, 67)
+      assert {:ok, <<122, 122, 0, 255, 113, 113>>} = NIF.blob_read(blob, 28, 6)
+      assert {:ok, "qqqqqqq"} = NIF.blob_read(blob, 60, 100)
+      assert {:ok, ""} = NIF.blob_read(blob, 67, 1)
+      assert {:ok, ""} = NIF.blob_read(blob, 68, 1)
+      assert {:ok, ""} = NIF.blob_read(blob, 0, 0)
+
+      assert {:error, {:cannot_execute, _reason}} = NIF.blob_write(blob, 66, <<1, 2>>)
+
+      assert_raise ArgumentError, fn -> NIF.blob_read(blob, 0, -1) end
+      assert_raise ArgumentError, fn -> NIF.blob_read(blob, -1, 4) end
+
+      NIF.blob_close(blob)
+    end
+
     test "read zeroblob returns all zeros", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, """

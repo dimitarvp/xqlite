@@ -138,6 +138,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it found into its own job summary. The step reports and never fails the job:
   the marker that proves unwinding differs per target family, and one that is
   wrong for a family would block that target's asset.
+- **A binary that is not UTF-8 where text was meant is an answer, not a
+  raise.** Every argument the native side reads as text — the SQL of the six
+  query doors and their cancellable twins, the paths and URIs of the openers,
+  savepoint names, table and index names, `get_create_sql/2`'s object name,
+  the schema and path of `serialize`, `deserialize`, `load_extension`,
+  `backup` and `restore`, `blob_open/6`'s three names, a progress hook's tag
+  and a session's table — used to raise `ArgumentError` for a binary holding
+  bytes that are no UTF-8, out of functions whose specs promise
+  `{:ok, _} | {:error, _}`. They now answer
+  `{:error, :invalid_utf8_in_string}`, the neighbour of
+  `{:error, :null_byte_in_string}` one byte away. A term that is no binary at
+  all still raises, the documented kind for a wrong type on a raw stub. At the
+  typed PRAGMA doors a `:db_name` or an argument whose bytes are not UTF-8
+  answers `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
+  reason: :invalid_utf8}}}`, and a raw PRAGMA name answers
+  `{:error, {:invalid_pragma_name, name}}` with the bytes as they were given.
+  `XqliteNIF.set_pragma/3` answers `{:error, :invalid_utf8_in_string}` for
+  such a value, where it used to answer
+  `{:error, {:cannot_execute_pragma, name, _}}`; `Xqlite.set_pragma/3` keeps
+  `{:error, {:invalid_pragma_value, _}}`, a value that PRAGMA cannot take.
+- **A raw cancellable NIF says which of its two lists it refused.** A token
+  argument that is no list, or a list with a broken tail, answered
+  `{:error, {:expected_list, _}}` on the raw NIFs — byte for byte what a bad
+  PARAMETER list answers, on `execute_batch_cancellable/3` too, which has no
+  parameters. Every refusal of a token argument is now
+  `{:error, {:invalid_cancel_tokens, refusal}}` with `:not_a_list`,
+  `:improper_tail` or `:bad_element` as the reason, so `{:expected_list, _}`
+  on a cancellable call is always about the parameters. The reason still
+  differs across the door for a term that is no list: the raw NIF takes a list
+  and nothing else and answers `:not_a_list`, while the `Xqlite` function
+  reads a bare term as one token and answers `:bad_element` at position 1.
+- **`mmap_size` takes the values this build keeps.** Its domain was the shared
+  32-bit range, while the bundled SQLite is built with
+  `MAX_MMAP_SIZE=0x7fff0000`: it stored the maximum for anything above that
+  and 0 for anything negative, and both were accepted as written. The domain
+  is now `0..0x7FFF0000`, so a negative size and one past the ceiling answer
+  `{:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: value}}}`;
+  `0`, which turns memory mapping off, stays legal.
 
 ## [0.15.0] - 2026-09-18
 

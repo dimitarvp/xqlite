@@ -15,7 +15,7 @@ use crate::session::{self, XqliteSession};
 use crate::statement::{self, XqliteStatement};
 use crate::stream::{XqliteStream, finalize_stream_stmt_locked};
 use crate::transaction;
-use crate::util::singular_ok_or_error_tuple;
+use crate::util::{MaybeTextArg, TextArg, singular_ok_or_error_tuple};
 use rusqlite::Connection;
 use rusqlite::ffi;
 use rusqlite::session::{ConflictAction, ConflictType};
@@ -31,34 +31,34 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn open(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let result = Connection::open(&path);
-    connection::handle_open_result(result, path)
+fn open(path: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let result = Connection::open(path.as_str());
+    connection::handle_open_result(result, path.into_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn open_in_memory(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let result = Connection::open(&uri);
-    connection::handle_open_result(result, uri)
+fn open_in_memory(uri: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+    let result = Connection::open(uri.as_str());
+    connection::handle_open_result(result, uri.into_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn open_readonly(path: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn open_readonly(path: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
         | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-    let result = Connection::open_with_flags(&path, flags);
-    connection::handle_open_result(result, path)
+    let result = Connection::open_with_flags(path.as_str(), flags);
+    connection::handle_open_result(result, path.into_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn open_in_memory_readonly(uri: String) -> Result<ResourceArc<XqliteConn>, XqliteError> {
+fn open_in_memory_readonly(uri: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
         | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
         | rusqlite::OpenFlags::SQLITE_OPEN_MEMORY
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-    let result = Connection::open_with_flags(&uri, flags);
-    connection::handle_open_result(result, uri)
+    let result = Connection::open_with_flags(uri.as_str(), flags);
+    connection::handle_open_result(result, uri.into_string())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -86,7 +86,7 @@ fn db_path(handle: ResourceArc<XqliteConn>) -> Result<Option<String>, XqliteErro
 fn query<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
@@ -98,7 +98,7 @@ fn query<'a>(
 fn execute<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
     connection::with_conn(&handle, |conn| {
@@ -110,7 +110,7 @@ fn execute<'a>(
 fn execute_batch(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
-    sql_batch: String,
+    sql_batch: TextArg,
 ) -> Term<'_> {
     let execution_result =
         connection::with_conn(&handle, |conn| query::core_execute_batch(conn, &sql_batch));
@@ -121,7 +121,7 @@ fn execute_batch(
 fn query_with_changes<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
@@ -138,7 +138,7 @@ fn query_with_changes<'a>(
 fn query_with_changes_cancellable<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
     tokens_term: Term<'a>,
 ) -> Term<'a> {
@@ -162,7 +162,7 @@ fn query_with_changes_cancellable<'a>(
 fn query_cancellable<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
     tokens_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
@@ -178,7 +178,7 @@ fn query_cancellable<'a>(
 fn execute_cancellable<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
     tokens_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
@@ -194,7 +194,7 @@ fn execute_cancellable<'a>(
 fn execute_batch_cancellable<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql_batch: String,
+    sql_batch: TextArg,
     tokens_term: Term<'a>,
 ) -> Term<'a> {
     let token_bools = match crate::cancel::decode_tokens(tokens_term) {
@@ -213,7 +213,7 @@ fn execute_batch_cancellable<'a>(
 fn explain_analyze<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
 ) -> Result<ExplainAnalyze, XqliteError> {
     connection::with_conn(&handle, |conn| {
@@ -230,7 +230,7 @@ fn autocommit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 fn txn_state<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: Option<String>,
+    schema: MaybeTextArg,
 ) -> Result<Term<'a>, XqliteError> {
     use rusqlite::TransactionState as TS;
 
@@ -336,7 +336,7 @@ fn wal_checkpoint<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     mode: rustler::Atom,
-    schema: Option<String>,
+    schema: MaybeTextArg,
 ) -> Result<Term<'a>, XqliteError> {
     let mode_int = match () {
         _ if mode == atoms::passive() => ffi::SQLITE_CHECKPOINT_PASSIVE,
@@ -515,22 +515,25 @@ fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn get_pragma(
-    env: Env<'_>,
+fn get_pragma<'a>(
+    env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    pragma_name: String,
-) -> Result<Term<'_>, XqliteError> {
+    pragma_name: rustler::Binary<'a>,
+) -> Result<Term<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         // The real PRAGMA read would always report 0 here: SQLite only
         // reports a wal_autocheckpoint threshold while ITS internal
         // hook occupies the wal_hook slot, and our master callback
         // holds that slot (emulating the autocheckpoint). Report the
         // emulated threshold — the effective value.
-        if pragma_name.eq_ignore_ascii_case("wal_autocheckpoint") {
+        if pragma_name
+            .as_slice()
+            .eq_ignore_ascii_case(b"wal_autocheckpoint")
+        {
             let pages = handle.wal_hook.autocheckpoint_pages.load(Ordering::Relaxed);
             Ok((pages as i64).encode(env))
         } else {
-            pragma::get(env, conn, &pragma_name)
+            pragma::get(env, conn, pragma_name.as_slice())
         }
     })
 }
@@ -539,11 +542,11 @@ fn get_pragma(
 fn set_pragma<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    pragma_name: String,
+    pragma_name: rustler::Binary<'a>,
     value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
-        let result = pragma::set(env, conn, &pragma_name, value_term)?;
+        let result = pragma::set(env, conn, pragma_name.as_slice(), value_term)?;
 
         // `PRAGMA wal_autocheckpoint` installs SQLite's internal
         // autocheckpoint wal_hook, evicting our master callback from
@@ -552,7 +555,10 @@ fn set_pragma<'a>(
         // emulates the autocheckpoint the caller just configured. Raw
         // SQL (`query`/`execute_batch` "PRAGMA ...") bypasses this
         // repair — documented limitation.
-        if pragma_name.eq_ignore_ascii_case("wal_autocheckpoint") {
+        if pragma_name
+            .as_slice()
+            .eq_ignore_ascii_case(b"wal_autocheckpoint")
+        {
             if let Ok(pages) = result.decode::<i64>() {
                 let clamped = pages.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                 handle
@@ -594,7 +600,7 @@ fn rollback(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
+fn savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: TextArg) -> Term<'_> {
     let execution_result =
         connection::with_conn(&handle, |conn| transaction::savepoint(conn, &name));
     singular_ok_or_error_tuple(env, execution_result)
@@ -604,7 +610,7 @@ fn savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Ter
 fn rollback_to_savepoint(
     env: Env<'_>,
     handle: ResourceArc<XqliteConn>,
-    name: String,
+    name: TextArg,
 ) -> Term<'_> {
     let execution_result = connection::with_conn(&handle, |conn| {
         transaction::rollback_to_savepoint(conn, &name)
@@ -613,7 +619,11 @@ fn rollback_to_savepoint(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn release_savepoint(env: Env<'_>, handle: ResourceArc<XqliteConn>, name: String) -> Term<'_> {
+fn release_savepoint(
+    env: Env<'_>,
+    handle: ResourceArc<XqliteConn>,
+    name: TextArg,
+) -> Term<'_> {
     let execution_result =
         connection::with_conn(&handle, |conn| transaction::release_savepoint(conn, &name));
     singular_ok_or_error_tuple(env, execution_result)
@@ -634,7 +644,7 @@ fn schema_databases(
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_list_objects(
     handle: ResourceArc<XqliteConn>,
-    schema: Option<String>,
+    schema: MaybeTextArg,
 ) -> Result<Vec<SchemaObjectInfo>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         crate::schema::list_objects(conn, schema.as_deref())
@@ -644,7 +654,7 @@ fn schema_list_objects(
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_columns(
     handle: ResourceArc<XqliteConn>,
-    table_name: String,
+    table_name: TextArg,
 ) -> Result<Vec<ColumnInfo>, XqliteError> {
     connection::with_conn(&handle, |conn| crate::schema::columns(conn, &table_name))
 }
@@ -652,7 +662,7 @@ fn schema_columns(
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_foreign_keys(
     handle: ResourceArc<XqliteConn>,
-    table_name: String,
+    table_name: TextArg,
 ) -> Result<Vec<ForeignKeyInfo>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         crate::schema::foreign_keys(conn, &table_name)
@@ -662,7 +672,7 @@ fn schema_foreign_keys(
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_indexes(
     handle: ResourceArc<XqliteConn>,
-    table_name: String,
+    table_name: TextArg,
 ) -> Result<Vec<IndexInfo>, XqliteError> {
     connection::with_conn(&handle, |conn| crate::schema::indexes(conn, &table_name))
 }
@@ -670,7 +680,7 @@ fn schema_indexes(
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_index_columns(
     handle: ResourceArc<XqliteConn>,
-    index_name: String,
+    index_name: TextArg,
 ) -> Result<Vec<IndexColumnInfo>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         crate::schema::index_columns(conn, &index_name)
@@ -680,7 +690,7 @@ fn schema_index_columns(
 #[rustler::nif(schedule = "DirtyIo")]
 fn get_create_sql(
     handle: ResourceArc<XqliteConn>,
-    object_name: String,
+    object_name: TextArg,
 ) -> Result<Option<String>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         crate::schema::create_sql(conn, &object_name)
@@ -705,7 +715,7 @@ fn total_changes(handle: ResourceArc<XqliteConn>) -> Result<u64, XqliteError> {
 #[rustler::nif(schedule = "DirtyIo")]
 fn stmt_prepare(
     conn_handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
 ) -> Result<ResourceArc<XqliteStatement>, XqliteError> {
     let conn_resource_arc_clone = conn_handle.clone();
 
@@ -1029,7 +1039,7 @@ fn bind_stream_params<'a>(
 fn stream_open<'a>(
     env: Env<'a>,
     conn_handle: ResourceArc<XqliteConn>,
-    sql: String,
+    sql: TextArg,
     params_term: Term<'a>,
 ) -> Result<ResourceArc<XqliteStream>, XqliteError> {
     use crate::statement::PreparedStmt;
@@ -1479,7 +1489,7 @@ fn register_progress_hook(
     handle: ResourceArc<XqliteConn>,
     pid: rustler::LocalPid,
     every_n: u32,
-    tag: Option<String>,
+    tag: MaybeTextArg,
 ) -> Term<'_> {
     if every_n == 0 {
         let err = XqliteError::CannotExecute(
@@ -1489,7 +1499,7 @@ fn register_progress_hook(
     }
 
     let result = connection::with_conn(&handle, |_conn| {
-        let tag_bytes = tag.map(|s| s.into_bytes());
+        let tag_bytes = tag.into_option().map(|text| text.into_bytes());
         let subscriber =
             crate::progress_dispatch::TickSubscriber::new(pid, every_n, tag_bytes);
         let id = handle.progress_dispatch.ticks.register(subscriber);
@@ -1522,7 +1532,7 @@ fn unregister_progress_hook(
 fn serialize<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: String,
+    schema: TextArg,
 ) -> Result<rustler::Binary<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         let data = conn.serialize(schema.as_str())?;
@@ -1541,7 +1551,7 @@ fn serialize<'a>(
 fn deserialize<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: String,
+    schema: TextArg,
     data: rustler::Binary<'a>,
     read_only: bool,
 ) -> Term<'a> {
@@ -1578,8 +1588,8 @@ fn enable_load_extension<'a>(
 fn load_extension<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    path: String,
-    entry_point: Option<String>,
+    path: TextArg,
+    entry_point: MaybeTextArg,
 ) -> Term<'a> {
     if !handle.extensions_enabled.load(Ordering::Acquire) {
         return (atoms::error(), atoms::extension_loading_disabled()).encode(env);
@@ -1600,8 +1610,8 @@ fn load_extension<'a>(
 fn backup<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: String,
-    dest_path: String,
+    schema: TextArg,
+    dest_path: TextArg,
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
         conn.backup(schema.as_str(), dest_path.as_str(), None)?;
@@ -1614,8 +1624,8 @@ fn backup<'a>(
 fn restore<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: String,
-    src_path: String,
+    schema: TextArg,
+    src_path: TextArg,
 ) -> Term<'a> {
     let result = connection::with_conn_mut(&handle, |conn| {
         conn.restore(
@@ -1632,8 +1642,8 @@ fn restore<'a>(
 fn backup_with_progress<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: String,
-    dest_path: String,
+    schema: TextArg,
+    dest_path: TextArg,
     pid: rustler::types::LocalPid,
     pages_per_step: i32,
     cancel_tokens_term: Term<'a>,
@@ -1785,11 +1795,11 @@ fn session_new<'a>(env: Env<'a>, handle: ResourceArc<XqliteConn>) -> Term<'a> {
 fn session_attach<'a>(
     env: Env<'a>,
     session_handle: ResourceArc<XqliteSession>,
-    table: Option<String>,
+    table: MaybeTextArg,
 ) -> Term<'a> {
     let result = session::with_session_mut(&session_handle, |s| {
-        match &table {
-            Some(name) => s.attach(Some(name.as_str()))?,
+        match table.as_deref() {
+            Some(name) => s.attach(Some(name))?,
             None => s.attach(None::<&str>)?,
         }
         Ok(())
@@ -1925,9 +1935,9 @@ fn changeset_concat<'a>(
 fn blob_open<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    db: String,
-    table: String,
-    column: String,
+    db: TextArg,
+    table: TextArg,
+    column: TextArg,
     row_id: i64,
     read_only: bool,
 ) -> Term<'a> {

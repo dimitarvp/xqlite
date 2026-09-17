@@ -3,8 +3,8 @@ use crate::error::XqliteError;
 use rusqlite::ffi;
 use rusqlite::{Rows, types::Value};
 use rustler::{
-    Atom, Binary, Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term, TermType,
-    resource_impl,
+    Atom, Binary, Decoder, Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term,
+    TermType, resource_impl,
     sys::enif_get_list_cell,
     types::{
         atom::{error, false_, nil, ok, true_},
@@ -19,6 +19,76 @@ use std::ops::DerefMut;
 pub(crate) struct BlobResource(pub(crate) Vec<u8>);
 #[resource_impl]
 impl Resource for BlobResource {}
+
+/// A text argument as the caller wrote it. Reading the term IS the check: the
+/// bytes are validated once, on the way in, and a binary that is no UTF-8 is
+/// answered with `:invalid_utf8_in_string` instead of raising. A term that is
+/// no binary still raises, the documented kind for a wrong type on a raw stub.
+#[derive(Debug)]
+pub(crate) struct TextArg(String);
+
+impl TextArg {
+    #[inline]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[inline]
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::ops::Deref for TextArg {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A text argument the caller may leave out: `nil` is "no text" and anything
+/// else is read as text. Rustler's own `Option` decoder turns every refusal of
+/// the inner type into a raise, which would hide the UTF-8 answer.
+#[derive(Debug)]
+pub(crate) struct MaybeTextArg(Option<String>);
+
+impl MaybeTextArg {
+    #[inline]
+    pub(crate) fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn into_option(self) -> Option<String> {
+        self.0
+    }
+}
+
+impl<'a> Decoder<'a> for MaybeTextArg {
+    fn decode(term: Term<'a>) -> rustler::NifResult<Self> {
+        match term.decode::<Atom>() {
+            Ok(atom) if atom == nil() => Ok(MaybeTextArg(None)),
+            _not_nil => {
+                let text: TextArg = term.decode()?;
+                Ok(MaybeTextArg(Some(text.into_string())))
+            }
+        }
+    }
+}
+
+impl<'a> Decoder<'a> for TextArg {
+    fn decode(term: Term<'a>) -> rustler::NifResult<Self> {
+        let bytes: Binary<'a> = term.decode()?;
+        match std::str::from_utf8(bytes.as_slice()) {
+            Ok(text) => Ok(TextArg(text.to_string())),
+            Err(_not_utf8) => Err(RustlerError::Term(Box::new(
+                atoms::invalid_utf8_in_string(),
+            ))),
+        }
+    }
+}
 
 #[inline]
 pub(crate) fn encode_val(
@@ -382,7 +452,6 @@ pub(crate) fn decode_plain_list_params<'a>(
 
 pub(crate) fn format_term_for_pragma<'a>(
     env: Env<'a>,
-    pragma_name: &str,
     term: Term<'a>,
 ) -> Result<String, XqliteError> {
     let term_type = term.get_type();
@@ -411,7 +480,7 @@ pub(crate) fn format_term_for_pragma<'a>(
                 reason: format!("{e:?}"),
             }
         }),
-        TermType::Binary => pragma_text(pragma_name, term),
+        TermType::Binary => pragma_text(term),
         _ => Err(XqliteError::UnsupportedDataType { term_type }),
     }
 }
@@ -420,20 +489,17 @@ pub(crate) fn format_term_for_pragma<'a>(
 /// ways a term of the BEAM's one binary type is not: a bit size that is no
 /// whole number of bytes, bytes that are no UTF-8, and a NUL byte, where
 /// SQLite's tokenizer would stop and read a shorter statement than we built.
-fn pragma_text(pragma_name: &str, term: Term<'_>) -> Result<String, XqliteError> {
+fn pragma_text(term: Term<'_>) -> Result<String, XqliteError> {
     match term.decode::<String>() {
         Ok(text) if text.contains('\0') => Err(XqliteError::NulErrorInString),
         Ok(text) => Ok(format!("'{}'", text.replace('\'', "''"))),
-        Err(_not_text) => Err(non_text_pragma_value(pragma_name, term)),
+        Err(_not_text) => Err(non_text_pragma_value(term)),
     }
 }
 
-fn non_text_pragma_value(pragma_name: &str, term: Term<'_>) -> XqliteError {
+fn non_text_pragma_value(term: Term<'_>) -> XqliteError {
     match term.decode::<Binary>() {
-        Ok(_bytes) => XqliteError::CannotExecutePragma {
-            pragma: pragma_name.to_string(),
-            reason: "the value is not UTF-8 text".to_string(),
-        },
+        Ok(_bytes) => XqliteError::InvalidUtf8InString,
         Err(_not_bytes) => XqliteError::UnsupportedDataType {
             term_type: TermType::Binary,
         },
