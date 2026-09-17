@@ -105,9 +105,9 @@ Xqlite.stream(conn, "SELECT ts, day FROM events", [],
 ### Cancellation from another process
 
 ```elixir
-{:ok, token} = XqliteNIF.create_cancel_token()
-task = Task.async(fn -> XqliteNIF.query_cancellable(conn, slow_sql, [], token) end)
-:ok = XqliteNIF.cancel_operation(token)
+{:ok, token} = Xqlite.create_cancel_token()
+task = Task.async(fn -> Xqlite.query_cancellable(conn, slow_sql, [], token) end)
+:ok = Xqlite.cancel_operation(token)
 {:error, :operation_cancelled} = Task.await(task)
 ```
 

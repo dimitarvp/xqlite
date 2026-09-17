@@ -253,7 +253,7 @@ fn elixir_term_to_rusqlite_value<'a>(
             Ok(s) => Ok(Value::Text(s)),
             Err(_string_decode_err) => match term.decode::<Binary>() {
                 Ok(bin) => Ok(Value::Blob(bin.as_slice().to_vec())),
-                Err(binary_decode_err) => Err(make_convert_error(term, binary_decode_err)),
+                Err(_binary_decode_err) => Err(XqliteError::UnsupportedDataType { term_type }),
             },
         },
         TermType::Map => match blob_struct_bytes(term) {

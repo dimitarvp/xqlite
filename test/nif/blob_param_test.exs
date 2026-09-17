@@ -244,6 +244,19 @@ defmodule Xqlite.NIF.BlobParamTest do
         assert_bits_bind(conn, bits, rem(bit_size(bits), 8))
       end
     end
+
+    test "a wrapper built at runtime without bytes still reaches the binder", %{conn: conn} do
+      assert {:error, {:invalid_blob_bytes, %{position: 1, type: :atom}}} =
+               NIF.query(conn, "SELECT ?1", [struct(Blob, [])])
+
+      assert {:error, {:invalid_blob_bytes, %{position: 1, type: :atom}}} =
+               NIF.query(conn, "SELECT ?1", [struct!(Blob, bytes: nil)])
+    end
+  end
+
+  test "the wrapper cannot be built without bytes" do
+    assert_raise ArgumentError, fn -> Code.eval_string("%Xqlite.Blob{}") end
+    assert_raise ArgumentError, fn -> struct!(Blob, []) end
   end
 
   defp payload_bits do

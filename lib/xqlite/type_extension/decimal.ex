@@ -10,7 +10,10 @@ if Code.ensure_loaded?(Decimal) do
     Deciding that a numeric-looking string should become a `Decimal` (rather
     than a float, integer, or plain string) is application-specific divination
     the library refuses to guess — load your stored decimals with an
-    `Ecto.Type` or an explicit `Decimal.new/1` at the call site.
+    `Ecto.Type` or an explicit `Decimal.new/1` at the call site. So a column
+    written through this extension reads back as what it is stored as, a
+    string: the text carries no mark saying a `Decimal` wrote it, unlike the
+    shapes the decoding extensions recognise.
 
     ## Precision caveat
 

@@ -4,6 +4,13 @@ defmodule Xqlite.Pragma do
 
   This module deliberately omits the PRAGMAs that are deprecated, or are used with non-standard
   sqlite compile options, or are intended for testing sqlite.
+
+  Two kinds of bad input, two answers. An argument of the wrong type raises
+  `FunctionClauseError` at the call: the guards on these functions state what
+  each one takes, and a term that does not match is a mistake in the calling
+  code, not a condition to handle. A value of the right type that this library
+  or SQLite refuses is an answer instead — `{:error, reason}`, with the reason
+  saying what was wrong.
   """
 
   alias Xqlite.PragmaSpec

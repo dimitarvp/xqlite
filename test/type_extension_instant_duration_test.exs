@@ -54,6 +54,14 @@ defmodule Xqlite.TypeExtensionInstantDurationTest do
                  type_extensions: [TypeExtension.Instant]
                )
     end
+
+    test "decode/1 skips every storage form an instant can land in" do
+      assert :skip = TypeExtension.Instant.decode(1_234_567_890)
+      assert :skip = TypeExtension.Instant.decode("2026-07-14T12:00:00Z")
+      assert :skip = TypeExtension.Instant.decode(1.5)
+      assert :skip = TypeExtension.Instant.decode(<<0, 1, 2>>)
+      assert :skip = TypeExtension.Instant.decode(nil)
+    end
   end
 
   if Code.ensure_loaded?(Duration) do
@@ -89,6 +97,14 @@ defmodule Xqlite.TypeExtensionInstantDurationTest do
                  Xqlite.execute(conn, "INSERT INTO t (v) VALUES (?1)", [d],
                    type_extensions: [TypeExtension.Duration]
                  )
+      end
+
+      test "decode/1 skips every storage form a duration can land in" do
+        assert :skip = TypeExtension.Duration.decode(3_630_000_000_000)
+        assert :skip = TypeExtension.Duration.decode("PT1H30S")
+        assert :skip = TypeExtension.Duration.decode(1.5)
+        assert :skip = TypeExtension.Duration.decode(<<0, 1, 2>>)
+        assert :skip = TypeExtension.Duration.decode(nil)
       end
     end
   end

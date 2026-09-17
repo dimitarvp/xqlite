@@ -47,6 +47,21 @@ defmodule Xqlite.NIF.CancellationTest do
     assert :ok = NIF.cancel_operation(token)
   end
 
+  test "is_cancel_token/1 knows a token from any other term" do
+    assert {:ok, token} = NIF.create_cancel_token()
+
+    assert NIF.is_cancel_token(token)
+
+    refute NIF.is_cancel_token(make_ref())
+    refute NIF.is_cancel_token(:bogus)
+    refute NIF.is_cancel_token(42)
+    refute NIF.is_cancel_token("token")
+    refute NIF.is_cancel_token(nil)
+    refute NIF.is_cancel_token(self())
+    refute NIF.is_cancel_token([token])
+    refute NIF.is_cancel_token(%{token: token})
+  end
+
   # --- Shared test code (generated via `for` loop) ---
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix}" do
@@ -61,6 +76,18 @@ defmodule Xqlite.NIF.CancellationTest do
       end
 
       # --- Cancellation Tests ---
+
+      test "is_cancel_token/1 refuses every other resource handle", %{conn: conn} do
+        assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT 1")
+        assert {:ok, stream} = NIF.stream_open(conn, "SELECT 1", [])
+
+        refute NIF.is_cancel_token(conn)
+        refute NIF.is_cancel_token(stmt)
+        refute NIF.is_cancel_token(stream)
+
+        assert :ok = NIF.stmt_finalize(stmt)
+        assert :ok = NIF.stream_close(stream)
+      end
 
       test "query_cancellable/4 successfully cancels a running query", %{conn: conn} do
         assert_cancellation(conn, fn conn, token ->

@@ -29,9 +29,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a string, which used to raise. `@type error_reason` follows:
   `{:unknown_pragma, atom() | String.t()}` and
   `{:invalid_pragma_name, term()}`.
+- **A bitstring parameter is refused by its kind, not by Rust's debug text.**
+  A value whose bit size is not a whole number of bytes — `<<1::7>>` — used to
+  answer `{:cannot_convert_to_sqlite_value, "<<1:7>>", "{error, badarg}"}`,
+  two strings the Rust side wrote for a human. It now answers
+  `{:unsupported_data_type, :bitstring}`, the shape every other term the
+  binder cannot store already uses. A whole number of bytes is untouched: it
+  still binds as TEXT or BLOB by its UTF-8 validity.
+- **`%Xqlite.Blob{}` needs its bytes.** `bytes` is an enforced key, so the
+  wrapper literal without it no longer compiles and `struct!(Xqlite.Blob, [])`
+  raises. `struct/2` with no bytes and `struct!(Xqlite.Blob, bytes: nil)` still
+  build a wrapper holding `nil`, which the binder refuses as before. A pattern
+  is unaffected.
+- **`Xqlite.close/1` and `XqliteNIF.close/1` say they can fail.** Both specs
+  are `:ok | error()` now. What they do did not change: the one error is
+  `{:lock_error, message}`, after a panic inside the NIF broke a lock the close
+  needs, which this library's own Rust cannot produce. Both docs now say which
+  two locks those are and what each one leaves behind.
 
 ### Fixed
 
+- **A cancel token that is not one is refused, not raised.** Every door that
+  takes tokens — `Xqlite.query_cancellable/5`, `execute_cancellable/5`,
+  `execute_batch_cancellable/3`, `query_with_changes_cancellable/5`,
+  `multi_step_cancellable/3`, `backup_with_progress/6`, `stream/4` and
+  `cancel_operation/1` — now answers `{:error, {:invalid_cancel_tokens,
+  value}}`, carrying the value you passed unchanged. They used to raise
+  `ArgumentError` (`FunctionClauseError` for `cancel_operation/1`) on anything
+  that was not a live token, `:bogus` and a plain `make_ref()` alike. The new
+  NIF `XqliteNIF.is_cancel_token/1` answers whether a term is a token; the raw
+  `XqliteNIF` functions still raise, as every raw NIF does on a wrong-typed
+  argument. `cancel_tokens: nil` used to mean "no tokens" and is refused now —
+  pass `[]`.
+- **The telemetry guide names the metadata each event really carries.** Its two
+  tables named a few keys per event where the `Xqlite.Telemetry` moduledoc
+  names all of them; the stream-open row named one key of five. Every row now
+  names every start-metadata key except `conn` and `sql`, and a test keeps the
+  guide and the moduledoc in step.
 - **A blob wrapper holding a bitstring says so.**
   `%Xqlite.Blob{bytes: <<1::7>>}` is rejected with `type: :bitstring` instead
   of `type: :binary`: the BEAM has one term type for binaries and bitstrings

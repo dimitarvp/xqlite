@@ -103,8 +103,9 @@ fn term_type_to_atom(term_type: TermType) -> Atom {
 }
 
 /// The BEAM reports a bitstring as `TermType::Binary`, and the only term the
-/// `Binary` decoder refuses there is one whose bit size is not a whole number
-/// of bytes, so this arm can name that case where the shared table cannot.
+/// `Binary` decoder refuses is one whose bit size is not a whole number of
+/// bytes, so a refusal from that decoder can name the case the shared table
+/// cannot.
 fn blob_bytes_type_atom(term_type: TermType) -> Atom {
     match term_type {
         TermType::Binary => atoms::bitstring(),
@@ -314,7 +315,7 @@ impl Display for XqliteError {
             XqliteError::UnsupportedDataType { term_type } => {
                 let name = match term_type {
                     TermType::Atom => "atom",
-                    TermType::Binary => "binary",
+                    TermType::Binary => "bitstring",
                     TermType::Float => "float",
                     TermType::Fun => "function",
                     TermType::Integer => "integer",
@@ -534,7 +535,7 @@ impl Encoder for XqliteError {
             }
             XqliteError::UnsupportedDataType { term_type } => (
                 atoms::unsupported_data_type(),
-                term_type_to_atom(*term_type),
+                blob_bytes_type_atom(*term_type),
             )
                 .encode(env),
             XqliteError::CannotExecute(reason) => {

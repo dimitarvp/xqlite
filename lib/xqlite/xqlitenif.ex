@@ -23,6 +23,10 @@ defmodule XqliteNIF do
   Most functions return `{:ok, value}` or `:ok` on success, and
   `{:error, reason_tuple}` on failure. The `reason_tuple` provides structured
   error information (e.g., `{:sqlite_failure, code, extended_code, message}`).
+  An argument of the wrong type never gets that far: these are raw NIFs, so a
+  term the native function cannot decode raises `ArgumentError` at the call.
+  The `Xqlite` wrappers check such arguments first and answer
+  `{:error, reason}` instead.
 
   **Usage note:**
   These are low-level functions. For more idiomatic Elixir usage, consider
@@ -397,9 +401,18 @@ defmodule XqliteNIF do
 
   `conn` is the database connection resource.
 
-  Returns `:ok`.
+  Returns `:ok`. The one error it can answer is
+  `{:error, {:lock_error, message}}`, after a thread panicked inside the NIF
+  while holding a lock the close needs (Rust marks such a lock broken for
+  good). Two locks can produce it and they leave different states behind: the
+  connection's own lock, where the SQLite handle is never freed and the
+  connection is abandoned; and the lock over the statements, streams and blobs
+  opened on it, which close takes first, so the connection stays open, stays
+  usable, and every later close repeats the same error. Neither is reachable
+  today, and a broken lock is never repaired — after a panic SQLite's own
+  state may be half written and must not be touched.
   """
-  @spec close(conn :: Xqlite.conn()) :: :ok
+  @spec close(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def close(_conn), do: err()
 
   @doc """
@@ -860,6 +873,18 @@ defmodule XqliteNIF do
   def create_cancel_token(), do: err()
 
   @doc """
+  Returns `true` when `term` is a token from `create_cancel_token/0`.
+
+  Every other term answers `false`, including a plain `make_ref/0`, a
+  connection, statement, stream or blob handle, and anything that is not a
+  reference at all. Takes the term undecoded, so it answers rather than
+  raising — it is what `Xqlite` asks before handing tokens to a cancellable
+  operation.
+  """
+  @spec is_cancel_token(term :: term()) :: boolean()
+  def is_cancel_token(_term), do: err()
+
+  @doc """
   Returns `true` when `conn` is in auto-commit mode (no active transaction),
   `false` otherwise.
 
@@ -1128,8 +1153,10 @@ defmodule XqliteNIF do
   guarantee that the operation has already stopped. The cancellable NIF function
   will return `{:error, :operation_cancelled}` when it actually terminates due
   to the cancellation.
-  Returns `{:error, reason}` if the provided `token_resource` is not a valid
-  cancellation token resource (e.g., a different type of reference).
+  A term that is not a cancellation token raises `ArgumentError`, as a
+  wrong-typed argument does on every raw NIF; `Xqlite.cancel_operation/1`
+  asks `is_cancel_token/1` first and answers
+  `{:error, {:invalid_cancel_tokens, value}}` instead.
   """
   @spec cancel_operation(token_resource :: reference()) :: :ok | Xqlite.error()
   def cancel_operation(_token_resource), do: err()

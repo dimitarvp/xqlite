@@ -39,6 +39,13 @@ defmodule Xqlite.Blob do
   `:bitstring` is a bitstring whose bit size is not a whole number of bytes —
   a binary is accepted, so `t` is never `:binary`.
 
+  `bytes` is a required key: `%Xqlite.Blob{}` without it does not compile, and
+  `struct!(Xqlite.Blob, [])` raises. The two doors that stay open are
+  `struct/2` with no `bytes` and `struct!(Xqlite.Blob, bytes: nil)` — both
+  build a wrapper holding `nil`, which the binder refuses at bind time with
+  `type: :atom`. A pattern is unaffected: `%Xqlite.Blob{}` still matches any
+  wrapper.
+
   ## A value read back is never wrapped
 
   A result row carries plain Elixir values, so a `BLOB` column comes back as
@@ -48,6 +55,7 @@ defmodule Xqlite.Blob do
   again.
   """
 
+  @enforce_keys [:bytes]
   defstruct [:bytes]
 
   @typedoc """

@@ -265,12 +265,15 @@ tokens to one cancellable op is a separate, supported feature — OR-semantics
 across several live tokens — and unrelated to reuse; each token in the list is
 still single-use.)
 
-One thing xqlite cannot check for you: a cancel token *is* an Erlang reference,
-and so is any other reference, so `:cancel_tokens` can only be validated as
-"a reference or a list of references". Anything else — `:cancel_tokens: :bogus`
-— is `{:error, {:invalid_cancel_tokens, value}}` at stream open, but a plain
-`make_ref()` gets through and raises `ArgumentError` on the first fetch, which
-is what every other cancellable entry point does with one too.
+A cancel token *is* an Erlang reference, and so is any other reference, so
+Elixir alone cannot tell one from the other — the NIF is asked instead
+(`XqliteNIF.is_cancel_token/1`). Every entry point that takes tokens checks
+before it does any work: anything that is not a live token, a plain
+`make_ref()` and `:bogus` alike, and any list holding one, answers
+`{:error, {:invalid_cancel_tokens, value}}` with the value you passed
+unchanged. `Xqlite.stream/4` answers it at stream open, the others at the
+call. The raw `XqliteNIF` functions do no such checking: like every raw NIF,
+a wrong-typed argument raises `ArgumentError` there.
 
 ### Delete sessions before the connection
 

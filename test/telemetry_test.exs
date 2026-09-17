@@ -11,6 +11,14 @@ defmodule Xqlite.TelemetryTest do
   # A bracketed event name as the docs write it, e.g. `[:xqlite, :pragma, :get]`.
   @documented_name ~r/\[:xqlite\s*,([^\[\]]*)\]/
 
+  # A line of the moduledoc holding an event name and nothing else, and the
+  # labelled metadata maps under it.
+  @event_block ~r/^[ \t]*\[:xqlite[^\]]*\][ \t]*$/m
+  @metadata_map ~r/(start metadata|stop metadata|metadata):[ \t]*%\{([^}]*)\}/
+
+  # Every event carries these, so the guide leaves them out of most rows.
+  @common_metadata ["conn", "sql"]
+
   @endless_sql "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT count(*) FROM n"
 
   @reachable_operations [
@@ -379,6 +387,15 @@ defmodule Xqlite.TelemetryTest do
       assert documented -- Enum.uniq(documented) == []
       assert MapSet.new(documented) == MapSet.new(expanded_catalogue())
     end
+
+    test "the guide's metadata column agrees with the moduledoc's maps" do
+      metadata = documented_metadata()
+      rows = guide_metadata_rows()
+
+      assert rows != []
+      assert Enum.reject(rows, &keys_are_documented?(&1, metadata)) == []
+      assert Enum.reject(rows, &start_keys_are_listed?(&1, metadata)) == []
+    end
   end
 
   describe "every catalogued event is reachable" do
@@ -648,6 +665,125 @@ defmodule Xqlite.TelemetryTest do
   end
 
   defp documented_token?(token), do: Regex.match?(~r/^:(\*|[a-z_][a-zA-Z_0-9]*[?!]?)$/, token)
+
+  # ---- the metadata the docs promise ----------------------------------------
+
+  defp documented_metadata do
+    assert {:docs_v1, _, _, _, %{"en" => moduledoc}, _, _} = Code.fetch_docs(Telemetry)
+
+    moduledoc
+    |> String.replace("\r\n", "\n")
+    |> event_surface()
+    |> split_on_event_names()
+    |> Enum.drop(1)
+    |> Enum.chunk_every(2)
+    |> Enum.flat_map(&block_entries/1)
+    |> Map.new()
+  end
+
+  defp split_on_event_names(text), do: Regex.split(@event_block, text, include_captures: true)
+
+  defp block_entries([name_line, body]) do
+    keys = block_keys(body)
+
+    name_line
+    |> documented_names()
+    |> Enum.map(&{&1, keys})
+  end
+
+  defp block_entries(_chunk), do: []
+
+  defp block_keys(body) do
+    labelled = Regex.scan(@metadata_map, body)
+    start_keys = labelled |> Enum.filter(&start_label?/1) |> keys_of()
+    stop_keys = labelled |> Enum.filter(&stop_label?/1) |> keys_of()
+
+    %{start: start_keys, all: MapSet.union(start_keys, stop_keys)}
+  end
+
+  defp start_label?([_whole, label, _inside]), do: label != "stop metadata"
+  defp start_label?(_match), do: false
+
+  defp stop_label?([_whole, label, _inside]), do: label == "stop metadata"
+  defp stop_label?(_match), do: false
+
+  defp keys_of(matches) do
+    matches
+    |> Enum.flat_map(&map_keys/1)
+    |> MapSet.new()
+  end
+
+  defp map_keys([_whole, _label, inside]) do
+    inside
+    |> drop_parentheticals()
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp map_keys(_match), do: []
+
+  defp drop_parentheticals(text), do: String.replace(text, ~r/\([^)]*\)/, "")
+
+  defp guide_metadata_rows do
+    assert {:ok, guide} =
+             File.read(Path.join([__DIR__, "..", "guides", "wiring_telemetry.md"]))
+
+    guide
+    |> String.replace("\r\n", "\n")
+    |> event_surface()
+    |> String.split("\n")
+    |> Enum.filter(&table_row?/1)
+    |> Enum.map(&metadata_row/1)
+    |> Enum.reject(&nameless_row?/1)
+  end
+
+  defp table_row?(line), do: line |> String.trim() |> String.starts_with?("|")
+
+  defp metadata_row(line) do
+    cells = line |> String.trim() |> String.split("|", trim: true)
+    names = cells |> List.first("") |> documented_names()
+    keys = cells |> List.last("") |> cell_keys()
+
+    {names, keys}
+  end
+
+  defp nameless_row?({names, _keys}), do: names == []
+
+  defp cell_keys(cell) do
+    cell
+    |> drop_parentheticals()
+    |> then(&Regex.scan(~r/`:([a-z_][a-zA-Z_0-9]*[?!]?)`/, &1))
+    |> MapSet.new(&captured_key/1)
+  end
+
+  defp captured_key([_whole, key]), do: key
+  defp captured_key(_match), do: ""
+
+  defp keys_are_documented?({names, keys}, metadata) do
+    allowed = union_of(names, metadata, :all)
+    MapSet.subset?(keys, allowed)
+  end
+
+  defp start_keys_are_listed?({names, keys}, metadata) do
+    required = names |> union_of(metadata, :start) |> without_common()
+    MapSet.subset?(required, keys)
+  end
+
+  defp union_of(names, metadata, which) do
+    names
+    |> Enum.map(&event_keys(&1, metadata, which))
+    |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+  end
+
+  defp without_common(keys), do: MapSet.difference(keys, MapSet.new(@common_metadata))
+
+  defp event_keys(name, metadata, which) do
+    case Map.fetch(metadata, name) do
+      {:ok, keys} -> Map.fetch!(keys, which)
+      :error -> MapSet.new()
+    end
+  end
 
   defp expand_token(":*"), do: [:start, :stop, :exception]
 

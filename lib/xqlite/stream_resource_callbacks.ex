@@ -41,22 +41,10 @@ defmodule Xqlite.StreamResourceCallbacks do
     end
   end
 
-  # A cancel token IS a reference, and so is any other reference, so this can
-  # only check the container; a reference that is not a token raises
-  # ArgumentError at the first fetch, like every cancellable NIF call.
   defp validate_cancel_tokens(opts) do
-    case Keyword.get(opts, :cancel_tokens, []) do
-      token when is_reference(token) -> :ok
-      tokens when is_list(tokens) -> validate_token_list(tokens)
-      other -> {:error, {:invalid_cancel_tokens, other}}
-    end
-  end
-
-  defp validate_token_list(tokens) do
-    case Enum.all?(tokens, &is_reference/1) do
-      true -> :ok
-      false -> {:error, {:invalid_cancel_tokens, tokens}}
-    end
+    opts
+    |> Keyword.get(:cancel_tokens, [])
+    |> Xqlite.validate_cancel_tokens()
   end
 
   defp open_stream(conn, sql, params, opts, on_error) do

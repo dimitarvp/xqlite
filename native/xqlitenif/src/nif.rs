@@ -498,6 +498,14 @@ fn create_cancel_token() -> Result<ResourceArc<XqliteCancelToken>, XqliteError> 
     Ok(ResourceArc::new(XqliteCancelToken::new()))
 }
 
+// Takes the term undecoded: a cancel token is a reference and so is every
+// other resource handle, so only the resource decode can tell them apart, and
+// a typed argument would raise instead of answering.
+#[rustler::nif]
+fn is_cancel_token(term: Term<'_>) -> bool {
+    term.decode::<ResourceArc<XqliteCancelToken>>().is_ok()
+}
+
 #[rustler::nif]
 fn cancel_operation(env: Env<'_>, token: ResourceArc<XqliteCancelToken>) -> Term<'_> {
     token.cancel();

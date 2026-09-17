@@ -12,6 +12,11 @@ defmodule Xqlite.SqliteValueLawTest do
   member added or dropped fails here. The property then drives generated
   values and the three SQL forms of a non-finite REAL through every read
   path and checks each cell against the row union's members.
+
+  The same introspection carries a second law, over the NIFs that answer a
+  bare `:ok`. Every one of them shares the encoder that turns a failure into
+  `{:error, reason}`, so the Elixir spec of each must say both; the list of
+  those functions is read out of the Rust source rather than written here.
   """
 
   use ExUnit.Case, async: true
@@ -40,6 +45,21 @@ defmodule Xqlite.SqliteValueLawTest do
   test "the parameter union holds exactly what the binder takes" do
     assert union_members(:param_value) ==
              Enum.sort([:integer, :float, :binary, :boolean, nil, {Xqlite.Blob, :t}])
+  end
+
+  test "every NIF that answers a bare :ok is specced :ok or an error" do
+    returns = stub_returns()
+    names = bare_ok_nif_names()
+
+    assert names != []
+    assert Enum.reject(names, &Map.has_key?(returns, &1)) == []
+    assert Enum.reject(names, &ok_or_error_spec?(&1, returns)) == []
+  end
+
+  test "the close wrapper declares the same union as its stub" do
+    assert {:ok, specs} = Code.Typespec.fetch_specs(Xqlite)
+    assert {_key, forms} = Enum.find(specs, &spec_for?(&1, :close, 1))
+    assert Enum.all?(forms, &ok_or_error_return?/1)
   end
 
   test "neither sentinel atom can be bound as a parameter", %{conn: conn} do
@@ -125,6 +145,70 @@ defmodule Xqlite.SqliteValueLawTest do
       StreamData.constant(nil)
     ])
   end
+
+  # ---- the bare-ok family ----------------------------------------------------
+
+  defp bare_ok_nif_names do
+    "native/xqlitenif/src/nif.rs"
+    |> File.read!()
+    |> String.replace("\r\n", "\n")
+    |> String.split("\n")
+    |> Enum.reduce({[], nil}, &scan_rust_line/2)
+    |> collected_names()
+  end
+
+  defp scan_rust_line(line, {names, current}) do
+    case Regex.run(~r/^fn ([a-z0-9_]+)/, line) do
+      [_whole, name] -> {names, String.to_atom(name)}
+      nil -> {tally_bare_ok(line, names, current), current}
+    end
+  end
+
+  defp tally_bare_ok(_line, names, nil), do: names
+
+  defp tally_bare_ok(line, names, current) do
+    case String.contains?(line, "singular_ok_or_error_tuple") do
+      true -> [current | names]
+      false -> names
+    end
+  end
+
+  defp collected_names({names, _current}), do: names |> Enum.uniq() |> Enum.sort()
+
+  defp stub_returns do
+    assert {:ok, specs} = Code.Typespec.fetch_specs(XqliteNIF)
+
+    specs
+    |> Enum.group_by(&spec_name/1, &spec_returns/1)
+    |> Map.new(&flattened_entry/1)
+  end
+
+  defp spec_name({{name, _arity}, _forms}), do: name
+  defp spec_returns({{_name, _arity}, forms}), do: Enum.map(forms, &spec_return/1)
+  defp flattened_entry({name, nested}), do: {name, List.flatten(nested)}
+  defp spec_return({:type, _line, :fun, [_args, return]}), do: return
+  defp spec_for?({{name, arity}, _forms}, name, arity), do: true
+  defp spec_for?(_entry, _name, _arity), do: false
+  defp ok_or_error_return?(form), do: form |> spec_return() |> ok_or_error?()
+
+  defp ok_or_error_spec?(name, returns) do
+    returns |> Map.fetch!(name) |> Enum.all?(&ok_or_error?/1)
+  end
+
+  defp ok_or_error?({:type, _line, :union, members}) do
+    Enum.any?(members, &ok_atom?/1) and Enum.any?(members, &error_type?/1)
+  end
+
+  defp ok_or_error?(_form), do: false
+
+  defp ok_atom?({:atom, _line, :ok}), do: true
+  defp ok_atom?(_member), do: false
+
+  defp error_type?({:remote_type, _line, [{:atom, _, Xqlite}, {:atom, _, :error}, []]}),
+    do: true
+
+  defp error_type?({:user_type, _line, :error, []}), do: true
+  defp error_type?(_member), do: false
 
   defp union_members(name) do
     assert {:ok, types} = Code.Typespec.fetch_types(Xqlite)

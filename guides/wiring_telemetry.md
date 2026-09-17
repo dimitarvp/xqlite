@@ -60,25 +60,25 @@ counts).
 measurement and metadata key. A `:*` below stands for the span's
 `:start`, `:stop` and `:exception` events.
 
-| Event | Trigger | Key metadata |
+| Event | Trigger | Metadata (every start key, plus the stop-only ones worth naming) |
 |---|---|---|
 | `[:xqlite, :open, :*]` | `Xqlite.open/2` and the other `open_*` functions | `:path`, `:mode` |
 | `[:xqlite, :close, :*]` | `Xqlite.close/1` | `:conn`, `:path` |
-| `[:xqlite, :query, :*]` | `Xqlite.query/4`, `Xqlite.query_cancellable/4` | `:sql`, `:cancellable?`, `:num_rows` (on stop) |
-| `[:xqlite, :execute, :*]` | `Xqlite.execute/4` and cancellable variant | `:sql`, `:affected_rows` (on stop) |
-| `[:xqlite, :execute_batch, :*]` | `Xqlite.execute_batch/2` and cancellable variant | `:sql_batch_size_bytes` |
-| `[:xqlite, :query_with_changes, :*]` | `Xqlite.query_with_changes_cancellable/4` | `:sql`, `:num_rows`, `:changes` (on stop) |
-| `[:xqlite, :explain_analyze, :*]` | `Xqlite.explain_analyze/3` | `:wall_time_ns`, `:rows_produced`, `:scan_count` |
+| `[:xqlite, :query, :*]` | `Xqlite.query/4`, `Xqlite.query_cancellable/4` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows` (on stop) |
+| `[:xqlite, :execute, :*]` | `Xqlite.execute/4` and cancellable variant | `:sql`, `:params_count`, `:cancellable?`, `:affected_rows` (on stop) |
+| `[:xqlite, :execute_batch, :*]` | `Xqlite.execute_batch/2` and cancellable variant | `:sql_batch_size_bytes`, `:cancellable?` |
+| `[:xqlite, :query_with_changes, :*]` | `Xqlite.query_with_changes_cancellable/4` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows`, `:changes` (on stop) |
+| `[:xqlite, :explain_analyze, :*]` | `Xqlite.explain_analyze/3` | `:params_count`, `:wall_time_ns`, `:rows_produced`, `:scan_count` |
 | `[:xqlite, :transaction, :begin / :commit / :rollback]` | `Xqlite.begin/2`, `commit/1`, `rollback/1` | `:mode` (begin), `:reason` (rollback) |
 | `[:xqlite, :savepoint, :create / :release / :rollback_to]` | `Xqlite.savepoint/2` etc. | `:name` |
-| `[:xqlite, :stream, :open, :*]` | `Xqlite.stream/4` opens a NIF stream | `:batch_size` |
+| `[:xqlite, :stream, :open, :*]` | `Xqlite.stream/4` opens a NIF stream | `:batch_size`, `:type_extensions_count`, `:cancellable?` |
 | `[:xqlite, :stream, :fetch]` | every batch (potentially thousands per stream) | `:stream_handle`, `:done?` |
 | `[:xqlite, :stream, :close]` | stream consumed / dropped | `:stream_handle`, `:reason` (`:drained` / `:halted` / `:errored`), `:close_error` (only when the close itself failed) |
-| `[:xqlite, :backup, :*]` | `Xqlite.backup/3` | `:dest_path`, `:byte_size` |
-| `[:xqlite, :restore, :*]` | `Xqlite.restore/3` | `:src_path` |
-| `[:xqlite, :wal_checkpoint, :*]` | `Xqlite.wal_checkpoint/3` | `:mode`, `:log_pages`, `:checkpointed_pages`, `:busy?` |
-| `[:xqlite, :serialize, :*]` | `Xqlite.serialize/2` | `:byte_size` |
-| `[:xqlite, :deserialize, :*]` | `Xqlite.deserialize/4` | `:read_only?`, `:byte_size` |
+| `[:xqlite, :backup, :*]` | `Xqlite.backup/3` | `:schema`, `:dest_path`, `:byte_size` |
+| `[:xqlite, :restore, :*]` | `Xqlite.restore/3` | `:schema`, `:src_path` |
+| `[:xqlite, :wal_checkpoint, :*]` | `Xqlite.wal_checkpoint/3` | `:schema`, `:mode`, `:log_pages`, `:checkpointed_pages`, `:busy?` |
+| `[:xqlite, :serialize, :*]` | `Xqlite.serialize/2` | `:schema`, `:byte_size` |
+| `[:xqlite, :deserialize, :*]` | `Xqlite.deserialize/4` | `:schema`, `:read_only?`, `:byte_size` |
 | `[:xqlite, :extension, :load, :*]` | `Xqlite.load_extension/3` | `:path`, `:entry_point` |
 | `[:xqlite, :extension, :enable]` | `Xqlite.enable_load_extension/2` | `:enabled` |
 | `[:xqlite, :pragma, :get / :set]` | `Xqlite.get_pragma/2`, `Xqlite.set_pragma/3` | `:name`, `:value` (on set) |
@@ -112,15 +112,15 @@ Pass `hooks: :all` for the full set. For the global SQLite log hook,
 use `Xqlite.Telemetry.bridge_log/1` — it is process-wide, not
 per-connection, so it takes no `conn`.
 
-| Event | Fires when | Key metadata |
+| Event | Fires when | Metadata (every key, and the measurements named) |
 |---|---|---|
 | `[:xqlite, :hook, :commit]` | a transaction commits on the bridged connection | `:conn`, `:tag` |
 | `[:xqlite, :hook, :rollback]` | a transaction rolls back | `:conn`, `:tag` |
-| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:action`, `:db_name`, `:table`, `:rowid` |
-| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:db_name`; measurement `pages` |
-| `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:hook_tag`; measurements `count`, `elapsed` |
+| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:tag`, `:action`, `:db_name`, `:table`, `:rowid` |
+| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:tag`, `:db_name`; measurement `pages` |
+| `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:tag`, `:hook_tag`; measurements `count`, `elapsed` |
 | `[:xqlite, :hook, :busy]` | the connection meets a lock another one holds | `:conn`, `:tag`; measurements `retries`, `elapsed` |
-| `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:code`, `:base_code`, `:message` |
+| `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:tag`, `:code`, `:base_code`, `:message` |
 
 Only the *observer* half of busy handling is bridged. The retry
 policy stays a single slot per connection and is set with

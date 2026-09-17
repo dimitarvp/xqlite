@@ -2,6 +2,13 @@ defmodule Xqlite do
   @moduledoc ~S"""
   This is the central module of this library. All SQLite operations can be performed from here.
   Note that they delegate to other modules which you can also use directly.
+
+  Two kinds of bad input, two answers. An argument of the wrong type raises
+  `FunctionClauseError` at the call: the guards on these functions state what
+  each one takes, and a term that does not match is a mistake in the calling
+  code, not a condition to handle. A value of the right type that this library
+  or SQLite refuses is an answer instead — `{:error, reason}`, with the reason
+  saying what was wrong.
   """
 
   import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
@@ -156,6 +163,13 @@ defmodule Xqlite do
   the atoms `Xqlite.Blob` lists. `:unknown_pragma` carries the caller's own
   atom or string for a PRAGMA the typed schema does not know.
   `:invalid_pragma_name` carries a key that is neither an atom nor a string.
+
+  `:unsupported_data_type` names the kind of term handed to the binder when no
+  SQLite value can hold it: `:bitstring`, `:function`, `:list`, `:map`, `:pid`,
+  `:port`, `:reference` or `:tuple`. `:bitstring` is a value whose bit size is
+  not a whole number of bytes — a binary is stored as TEXT or BLOB, so the atom
+  is never `:binary` — and an atom other than `nil`, `true` and `false` has its
+  own shape, `{:unsupported_atom, text}`.
   """
   @type error_reason ::
           :connection_closed
@@ -363,9 +377,21 @@ defmodule Xqlite do
   `:ok`. A session is not covered — delete sessions before closing (see
   `XqliteNIF.session_delete/1`).
 
+  The one error it can answer is `{:error, {:lock_error, message}}`, after a
+  thread panicked inside the NIF while holding a lock the close needs (Rust
+  marks such a lock broken for good). Two locks can produce it and they leave
+  different states behind: the connection's own lock, where the SQLite handle
+  is never freed and the connection is abandoned; and the lock over the
+  statements, streams and blobs opened on it, which close takes first, so the
+  connection stays open, stays usable, and every later close repeats the same
+  error. Neither is reachable today — this library's own Rust has no
+  `unwrap`, `expect`, `panic!` or indexing outside its unit tests — and a
+  broken lock is never repaired, because after a panic SQLite's own state may
+  be half written and must not be touched.
+
   Emits `[:xqlite, :close, :start | :stop]` telemetry.
   """
-  @spec close(conn()) :: :ok
+  @spec close(conn()) :: :ok | error()
   def close(conn) do
     start_md = %{conn: conn, path: current_db_path(conn)}
 
@@ -1422,11 +1448,11 @@ defmodule Xqlite do
       Rows already read in the same batch are discarded with it. Tokens are
       single-use, so a token you have already signalled kills the next
       stream you hand it to on its first fetch — create a fresh one per
-      stream. A value that is neither a reference nor a list of references
-      returns `{:error, {:invalid_cancel_tokens, value}}` at stream open;
-      a reference that is not a cancel token cannot be told apart in
-      Elixir and raises `ArgumentError` at the first fetch, as every other
-      cancellable entry point does.
+      stream. Any value that is not a live token, or a list holding one,
+      returns `{:error, {:invalid_cancel_tokens, value}}` at stream open,
+      carrying the value you passed unchanged — a plain `make_ref/0`
+      included, which the NIF tells apart from a token where Elixir
+      cannot.
 
   ## Examples
 
@@ -1638,10 +1664,15 @@ defmodule Xqlite do
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
   decoded form.
   """
-  @spec multi_step_cancellable(stmt(), pos_integer(), reference() | [reference()]) ::
+  @spec multi_step_cancellable(stmt(), pos_integer(), term()) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
   def multi_step_cancellable(stmt, batch_size, token_or_tokens) when is_integer(batch_size) do
-    XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, List.wrap(token_or_tokens))
+    tokens = List.wrap(token_or_tokens)
+
+    case validate_cancel_tokens(token_or_tokens) do
+      :ok -> XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, tokens)
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc """
@@ -2335,8 +2366,15 @@ defmodule Xqlite do
   operation; see the "Cancel tokens are single-use" section of the Gotchas
   guide.
   """
-  @spec cancel_operation(reference()) :: :ok | error()
-  def cancel_operation(token) when is_reference(token) do
+  @spec cancel_operation(term()) :: :ok | error()
+  def cancel_operation(token) do
+    case XqliteNIF.is_cancel_token(token) do
+      true -> signal_cancellation(token)
+      false -> {:error, {:invalid_cancel_tokens, token}}
+    end
+  end
+
+  defp signal_cancellation(token) do
     case XqliteNIF.cancel_operation(token) do
       :ok = ok ->
         emit(
@@ -2371,13 +2409,13 @@ defmodule Xqlite do
           conn(),
           String.t(),
           list() | keyword(),
-          reference() | [reference()]
+          term()
         ) :: {:ok, query_result()} | error()
   @spec query_cancellable(
           conn(),
           String.t(),
           list() | keyword() | nil,
-          reference() | [reference()],
+          term(),
           keyword()
         ) :: {:ok, query_result()} | error()
   def query_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
@@ -2386,8 +2424,10 @@ defmodule Xqlite do
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :query], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
-        {:ok, bound} -> run_query_cancellable(conn, sql, bound, tokens, extensions, start_md)
+      with :ok <- validate_cancel_tokens(token_or_tokens),
+           {:ok, bound} <- Xqlite.TypeExtension.encode_params(params, extensions) do
+        run_query_cancellable(conn, sql, bound, tokens, extensions, start_md)
+      else
         {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
     end
@@ -2430,13 +2470,13 @@ defmodule Xqlite do
           conn(),
           String.t(),
           list(),
-          reference() | [reference()]
+          term()
         ) :: {:ok, non_neg_integer()} | error()
   @spec execute_cancellable(
           conn(),
           String.t(),
           list() | keyword() | nil,
-          reference() | [reference()],
+          term(),
           keyword()
         ) :: {:ok, non_neg_integer()} | error()
   def execute_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
@@ -2445,8 +2485,10 @@ defmodule Xqlite do
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
-        {:ok, bound} -> run_execute_cancellable(conn, sql, bound, tokens, start_md)
+      with :ok <- validate_cancel_tokens(token_or_tokens),
+           {:ok, bound} <- Xqlite.TypeExtension.encode_params(params, extensions) do
+        run_execute_cancellable(conn, sql, bound, tokens, start_md)
+      else
         {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
       end
     end
@@ -2474,7 +2516,7 @@ defmodule Xqlite do
   @doc """
   Cancellable `execute_batch/2`. Accepts either a single cancel token or a list.
   """
-  @spec execute_batch_cancellable(conn(), String.t(), reference() | [reference()]) ::
+  @spec execute_batch_cancellable(conn(), String.t(), term()) ::
           :ok | error()
   def execute_batch_cancellable(conn, sql_batch, token_or_tokens) do
     tokens = List.wrap(token_or_tokens)
@@ -2486,19 +2528,29 @@ defmodule Xqlite do
     }
 
     span_with_stop_metadata [:xqlite, :execute_batch], start_md do
-      case XqliteNIF.execute_batch_cancellable(conn, sql_batch, tokens) do
-        :ok = ok ->
-          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+      case validate_cancel_tokens(token_or_tokens) do
+        :ok ->
+          run_execute_batch_cancellable(conn, sql_batch, tokens, start_md)
 
-        {:error, :operation_cancelled} = err ->
-          emit_cancel_honored(conn, :execute_batch, tokens)
-
-          {err,
-           Map.merge(start_md, %{result_class: :error, error_reason: :operation_cancelled})}
-
-        {:error, reason} = err ->
-          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+        {:error, reason} ->
+          {{:error, reason},
+           Map.merge(start_md, %{result_class: :error, error_reason: reason})}
       end
+    end
+  end
+
+  defp run_execute_batch_cancellable(conn, sql_batch, tokens, start_md) do
+    case XqliteNIF.execute_batch_cancellable(conn, sql_batch, tokens) do
+      :ok = ok ->
+        {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+
+      {:error, :operation_cancelled} = err ->
+        emit_cancel_honored(conn, :execute_batch, tokens)
+
+        {err, Map.merge(start_md, %{result_class: :error, error_reason: :operation_cancelled})}
+
+      {:error, reason} = err ->
+        {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
     end
   end
 
@@ -2518,13 +2570,13 @@ defmodule Xqlite do
           conn(),
           String.t(),
           list() | keyword(),
-          reference() | [reference()]
+          term()
         ) :: {:ok, map()} | error()
   @spec query_with_changes_cancellable(
           conn(),
           String.t(),
           list() | keyword() | nil,
-          reference() | [reference()],
+          term(),
           keyword()
         ) :: {:ok, map()} | error()
   def query_with_changes_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
@@ -2533,8 +2585,10 @@ defmodule Xqlite do
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :query_with_changes], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
-        {:ok, bound} -> run_changes_cancellable(conn, sql, bound, tokens, extensions, start_md)
+      with :ok <- validate_cancel_tokens(token_or_tokens),
+           {:ok, bound} <- Xqlite.TypeExtension.encode_params(params, extensions) do
+        run_changes_cancellable(conn, sql, bound, tokens, extensions, start_md)
+      else
         {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
     end
@@ -2580,17 +2634,18 @@ defmodule Xqlite do
           String.t(),
           pid(),
           pos_integer(),
-          reference() | [reference()]
+          term()
         ) :: :ok | error()
   def backup_with_progress(conn, schema, dest_path, pid, pages_per_step, token_or_tokens) do
-    XqliteNIF.backup_with_progress(
-      conn,
-      schema,
-      dest_path,
-      pid,
-      pages_per_step,
-      List.wrap(token_or_tokens)
-    )
+    tokens = List.wrap(token_or_tokens)
+
+    case validate_cancel_tokens(token_or_tokens) do
+      :ok ->
+        XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages_per_step, tokens)
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
@@ -2941,6 +2996,23 @@ defmodule Xqlite do
 
   defp params_count(params) when is_list(params), do: length(params)
   defp params_count(_), do: 0
+
+  @doc false
+  # Public so the stream callbacks module validates through the same helper.
+  @spec validate_cancel_tokens(term()) :: :ok | error()
+  def validate_cancel_tokens(tokens) when is_list(tokens) do
+    case Enum.all?(tokens, &XqliteNIF.is_cancel_token/1) do
+      true -> :ok
+      false -> {:error, {:invalid_cancel_tokens, tokens}}
+    end
+  end
+
+  def validate_cancel_tokens(token) do
+    case XqliteNIF.is_cancel_token(token) do
+      true -> :ok
+      false -> {:error, {:invalid_cancel_tokens, token}}
+    end
+  end
 
   @doc false
   # Public so the stream callbacks module emits this event through the same
