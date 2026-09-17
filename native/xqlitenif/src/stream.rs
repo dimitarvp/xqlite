@@ -133,6 +133,28 @@ impl Drop for XqliteStream {
     }
 }
 
+/// Why a single step produced no row to deliver. The two are not
+/// interchangeable: only `Unreadable` leaves a run that can carry on.
+pub(crate) enum StepFailure {
+    /// `sqlite3_step` returned neither a row nor done — a locked database, an
+    /// I/O error, a runtime error in the SQL, a trigger's RAISE, a
+    /// cancellation. No row was stepped past and the statement is finished
+    /// where SQLite left it.
+    Failed(XqliteError),
+    /// A row came back and could not be turned into terms. SQLite has already
+    /// stepped past it, so the run continues at the row after it.
+    Unreadable(XqliteError),
+}
+
+impl From<StepFailure> for XqliteError {
+    fn from(failure: StepFailure) -> Self {
+        match failure {
+            StepFailure::Failed(error) => error,
+            StepFailure::Unreadable(error) => error,
+        }
+    }
+}
+
 /// Steps a prepared statement once and returns the row data if available.
 ///
 /// The column count is read AFTER the step, not taken from a prepare-time
@@ -149,7 +171,7 @@ pub(crate) unsafe fn process_single_step<'a>(
     env: Env<'a>,
     stmt_ptr: *mut ffi::sqlite3_stmt,
     db_handle_for_error_reporting: *mut ffi::sqlite3,
-) -> Result<Option<Vec<Term<'a>>>, XqliteError> {
+) -> Result<Option<Vec<Term<'a>>>, StepFailure> {
     // SAFETY: Caller guarantees stmt_ptr and db_handle are valid and exclusively held.
     let step_result = unsafe { ffi::sqlite3_step(stmt_ptr) };
 
@@ -160,7 +182,9 @@ pub(crate) unsafe fn process_single_step<'a>(
             // decode this row.
             let column_count = unsafe { ffi::sqlite3_column_count(stmt_ptr) } as usize;
             // SAFETY: stmt_ptr is valid and we just confirmed SQLITE_ROW.
-            unsafe { sqlite_row_to_elixir_terms(env, stmt_ptr, column_count) }.map(Some)
+            unsafe { sqlite_row_to_elixir_terms(env, stmt_ptr, column_count) }
+                .map(Some)
+                .map_err(StepFailure::Unreadable)
         }
         ffi::SQLITE_DONE => Ok(None),
         err_code => {
@@ -179,7 +203,7 @@ pub(crate) unsafe fn process_single_step<'a>(
                 ffi::Error::new(err_code),
                 Some(specific_message),
             );
-            Err(XqliteError::from(rusqlite_err))
+            Err(StepFailure::Failed(XqliteError::from(rusqlite_err)))
         }
     }
 }
@@ -256,11 +280,38 @@ fn bind_value_to_raw_stmt(
     Ok(())
 }
 
+/// Refuses a positional parameter list whose length is not the statement's
+/// own parameter count, before anything is bound.
+///
+/// SQLite itself refuses neither shape: a parameter nothing was bound to
+/// reads as NULL, so a short list silently writes NULLs, and a long one only
+/// fails at the first index past the last parameter. Every raw-FFI door goes
+/// through here so that all of them answer what rusqlite's checked binding
+/// already answers for `query`, `execute` and `query_with_changes`.
+///
+/// The caller holds the connection Mutex and `raw_stmt_ptr` is a live
+/// prepared statement of that connection.
+pub(crate) fn require_parameter_count(
+    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
+    provided: usize,
+) -> Result<(), XqliteError> {
+    // SAFETY: raw_stmt_ptr is a live prepared statement and the connection
+    // Mutex is held, per this function's contract.
+    let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) } as usize;
+
+    match provided == expected {
+        true => Ok(()),
+        false => Err(XqliteError::InvalidParameterCount { provided, expected }),
+    }
+}
+
 pub(crate) fn bind_positional_params_ffi(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     params: &[Value],
     db_handle: *mut ffi::sqlite3,
 ) -> Result<(), XqliteError> {
+    require_parameter_count(raw_stmt_ptr, params.len())?;
+
     for (i, value) in params.iter().enumerate() {
         // SQLite bind indices are 1-based
         bind_value_to_raw_stmt(raw_stmt_ptr, (i + 1) as c_int, value, db_handle)?;

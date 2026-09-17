@@ -247,6 +247,11 @@ defmodule XqliteNIF do
   The feature requires SQLite to be built with `SQLITE_ENABLE_STMT_SCANSTATUS`,
   which `xqlite` enables in its bundled build.
 
+  The statement runs for real, so a positional list whose length is not the
+  statement's own parameter count is `{:invalid_parameter_count, %{expected:
+  _, provided: _}}` and nothing runs; `[]` and `nil` count as zero
+  parameters.
+
   Returns `{:ok, report}` where `report` is a map with the shape:
 
       %{
@@ -1188,6 +1193,11 @@ defmodule XqliteNIF do
   statement after the first is `:multiple_statements`, so no stream is ever
   opened over half a string. A trailing comment, extra semicolons and
   whitespace are accepted.
+
+  A positional list whose length is not the statement's own parameter count
+  is `{:invalid_parameter_count, %{expected: _, provided: _}}` and no stream
+  is opened; `[]` and `nil` count as zero parameters. A named parameter the
+  caller leaves out keeps SQLite's rule and stays NULL.
   """
   @spec stream_open(
           conn :: Xqlite.conn(),
@@ -1316,8 +1326,10 @@ defmodule XqliteNIF do
   Most users want `Xqlite.bind/2`. Accepts a plain list (positional `?1`,
   `?2`, … — the count must match or `{:error, {:invalid_parameter_count,
   %{provided: _, expected: _}}}` is returned) or a keyword list (named
-  parameters). After stepping has started, `stmt_reset/1` must run before
-  rebinding (SQLite lifecycle).
+  parameters). `[]` and `nil` both mean no parameters and count as zero, so
+  a statement that takes any refuses them; a named parameter the caller
+  leaves out keeps SQLite's rule and stays NULL. After stepping has started,
+  `stmt_reset/1` must run before rebinding (SQLite lifecycle).
 
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise; wrap it as `%Xqlite.Blob{bytes: bytes}` to store a `BLOB`

@@ -142,26 +142,41 @@ defmodule Xqlite.NIF.StreamTest do
                  NIF.stream_open(conn, sql, params)
       end
 
-      test "stream_open/3 with too few positional params returns handle and correct columns",
-           %{conn: conn} do
+      test "stream_open/3 with too few positional params is refused", %{conn: conn} do
         sql = "SELECT id, name FROM stream_items WHERE id = ?1 AND name = ?2;"
-        params = [1]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, params)
-        assert is_reference(stream_handle)
-        assert {:ok, ["id", "name"]} == NIF.stream_get_columns(stream_handle)
-        assert :ok == NIF.stream_close(stream_handle)
+
+        assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 1}}} =
+                 NIF.stream_open(conn, sql, [1])
+
+        assert :ok = NIF.close(conn)
       end
 
       test "stream_open/3 with too many positional params returns an error", %{conn: conn} do
         sql = "SELECT id FROM stream_items WHERE id = ?1;"
         params = [1, "extra_param"]
 
-        assert {:error, {:sqlite_failure, _, 25, _msg}} =
+        assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 2}}} =
                  NIF.stream_open(conn, sql, params)
 
-        # The bind failed after the statement was prepared; SQLite refuses the
-        # close of a connection that still owns one.
+        # The parameters were refused after the statement was prepared; SQLite
+        # refuses the close of a connection that still owns one.
         assert :ok = NIF.close(conn)
+      end
+
+      test "an empty or nil parameter list is refused by a statement that takes one",
+           %{conn: conn} do
+        sql = "UPDATE stream_items SET name = ?1;"
+
+        for params <- [[], nil] do
+          assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 0}}} =
+                   NIF.stream_open(conn, sql, params)
+
+          assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 0}}} =
+                   Xqlite.stream(conn, sql, params)
+        end
+
+        assert {:ok, %{rows: [["Item 1"]]}} =
+                 NIF.query(conn, "SELECT name FROM stream_items WHERE id = 1", [])
       end
 
       test "stream_open/3 refuses a params term that is no list, and nothing is prepared", %{
@@ -287,13 +302,21 @@ defmodule Xqlite.NIF.StreamTest do
         assert :done == NIF.stream_fetch(stream_handle, 1)
       end
 
-      test "stream_fetch/2 with too few positional params results in :done (due to NULL comparison)",
+      # A short list used to bind NULL into the parameters nothing reached, so
+      # an UPDATE ran with NULLs and reported success. The stored row is the
+      # oracle: it is untouched, because the stream never opened.
+      test "an UPDATE whose parameter list is short is refused before any fetch",
            %{conn: conn} do
-        sql = "SELECT id, name FROM stream_items WHERE id = ?1 AND name = ?2;"
-        params = [1]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, params)
-        assert :done == NIF.stream_fetch(stream_handle, 1)
-        assert :ok == NIF.stream_close(stream_handle)
+        sql = "UPDATE stream_items SET name = ?2 WHERE id = ?1;"
+
+        assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 1}}} =
+                 NIF.stream_open(conn, sql, [1])
+
+        assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 1}}} =
+                 Xqlite.stream(conn, sql, [1])
+
+        assert {:ok, %{rows: [["Item 1"]]}} =
+                 NIF.query(conn, "SELECT name FROM stream_items WHERE id = 1", [])
       end
 
       test "stream_fetch/2 reads non-finite floats as sentinel atoms", %{conn: conn} do

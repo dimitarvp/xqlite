@@ -16,11 +16,13 @@ defmodule Mix.Tasks.Verify do
   5. Sobelow static security analysis (`mix sobelow`)
   6. Rust clippy with denied warnings
   7. Rust unit tests (`cargo test`)
-  8. Panic strategy (`scripts/panic_strategy.exs` reads the undefined
-     symbols of `priv/native/xqlitenif.so`, the library both mix
-     environments load: a panic has to unwind, or rustler's guard cannot
-     turn it into `:nif_panicked`. Without a tool that lists symbols the
-     step fails rather than passing unread)
+  8. Panic strategy (`scripts/panic_strategy.exs` reads
+     `priv/native/xqlitenif.so`, the library both mix environments load: a
+     panic has to unwind, or rustler's guard cannot turn it into
+     `:nif_panicked`. An ELF or Mach-O library is read for its undefined
+     symbols, a Windows `.dll` for its import table, each family with its
+     own tool. Without a tool that can read the family the step fails
+     rather than passing unread)
   9. Dialyzer type checks
   10. Full Elixir test suite (`mix test.seq`)
   11. Verify stamp (`scripts/tree_fingerprint.exs --stamp` records the

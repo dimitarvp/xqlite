@@ -762,27 +762,20 @@ fn stmt_bind<'a>(
     stmt_handle: ResourceArc<XqliteStatement>,
     params_term: Term<'a>,
 ) -> Term<'a> {
-    use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
+    use crate::stream::{
+        bind_named_params_ffi, bind_positional_params_ffi, require_parameter_count,
+    };
     use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
         match crate::util::walk_params(params_term)? {
-            Params::Empty => Ok(()),
+            Params::Empty => require_parameter_count(stmt_ptr, 0),
             Params::Named(items) => {
                 let named = decode_exec_keyword_params(env, &items)?;
                 bind_named_params_ffi(stmt_ptr, &named, db_handle)
             }
             Params::Positional(items) => {
                 let positional = decode_plain_list_params(env, &items)?;
-                // SAFETY: with_live_stmt holds the connection mutex and
-                // proved stmt_ptr live.
-                let expected = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) } as usize;
-                if positional.len() != expected {
-                    return Err(XqliteError::InvalidParameterCount {
-                        provided: positional.len(),
-                        expected,
-                    });
-                }
                 bind_positional_params_ffi(stmt_ptr, &positional, db_handle)
             }
         }
@@ -795,9 +788,17 @@ fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
     use crate::stream::process_single_step;
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
-        // SAFETY: with_live_stmt holds the connection mutex and proved
-        // stmt_ptr live.
-        unsafe { process_single_step(env, stmt_ptr, db_handle) }
+        // An earlier batch read a row it could not decode after it had handed
+        // back the rows it already had. Every door that reads a row answers
+        // that error first and empties the slot; the statement itself carries
+        // on at the row after the one SQLite stepped past.
+        match stmt_handle.take_pending_error() {
+            Some(pending) => Err(pending),
+            // SAFETY: with_live_stmt holds the connection mutex and proved
+            // stmt_ptr live.
+            None => unsafe { process_single_step(env, stmt_ptr, db_handle) }
+                .map_err(XqliteError::from),
+        }
     });
 
     match result {
@@ -835,7 +836,7 @@ fn stmt_multi_step_impl<'a>(
     batch_size: i64,
     token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Term<'a> {
-    use crate::stream::process_single_step;
+    use crate::stream::{StepFailure, process_single_step};
 
     if batch_size < 1 {
         let details = map_new(env)
@@ -858,7 +859,7 @@ fn stmt_multi_step_impl<'a>(
     let mut done = false;
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
-        // An earlier batch ended on a value read that failed after it had
+        // An earlier batch ended on a row it could not decode after it had
         // handed back the rows it already had. Answer that error now and
         // empty the slot: the statement itself carries on at the row after
         // the one SQLite stepped past.
@@ -884,12 +885,16 @@ fn stmt_multi_step_impl<'a>(
                     done = true;
                     break;
                 }
-                Err(e) => {
-                    // A cancellation discards the batch, as the cancellable
-                    // door's contract says. Any other error hands back the
-                    // rows this batch had already read and waits for the next
-                    // call — unless there are none, when it answers now.
-                    if rows.is_empty() || matches!(e, XqliteError::OperationCancelled) {
+                // The step itself failed, so no row was stepped past and the
+                // statement is finished where SQLite left it: answer now and
+                // discard the batch's rows, exactly as a cancellation does.
+                Err(StepFailure::Failed(e)) => return Err(e),
+                Err(StepFailure::Unreadable(e)) => {
+                    // The row is lost either way. Hand back the rows this
+                    // batch had already read and hold the error for the next
+                    // call that reads a row — unless there are none, when it
+                    // is answered now.
+                    if rows.is_empty() {
                         return Err(e);
                     }
 
@@ -1002,11 +1007,13 @@ fn bind_stream_params<'a>(
     db_handle: *mut ffi::sqlite3,
     params_term: Term<'a>,
 ) -> Result<(), XqliteError> {
-    use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
+    use crate::stream::{
+        bind_named_params_ffi, bind_positional_params_ffi, require_parameter_count,
+    };
     use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
 
     match crate::util::walk_params(params_term)? {
-        Params::Empty => Ok(()),
+        Params::Empty => require_parameter_count(stmt_ptr, 0),
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
             bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle)
@@ -1256,7 +1263,11 @@ fn stream_fetch_impl<'a>(
                         let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
                         break;
                     }
-                    Err(e) => {
+                    // The stream finalizes its statement on every error and is
+                    // finished once it has reported, so both failure kinds are
+                    // held back the same way here.
+                    Err(failure) => {
+                        let e = XqliteError::from(failure);
                         stream_definitively_exhausted = true;
                         // SAFETY: conn_lock_guard is held for the whole loop. The
                         // registry result is dropped in favour of the step error.

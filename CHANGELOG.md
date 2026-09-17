@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A parameter list one element short wrote NULL through `stream/4`.** The
+  three doors that bind through SQLite's C API directly — `stream/4` and
+  `XqliteNIF.stream_open/3`, `explain_analyze/4`, and `bind/3` — never
+  counted the list they were handed, and SQLite reads a parameter nothing
+  was bound to as NULL. `Xqlite.stream(conn, "UPDATE t SET v = ?2 WHERE id
+  = ?1", [1])` therefore wrote NULL over the stored text and reported
+  success, where `query/4` refuses the same call; `[]` and `nil` did it to
+  every row of the table. All three now answer
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before
+  a value is bound, the too-long list included — that one used to leak
+  SQLite's own "column index out of range". `[]` and `nil` count as zero
+  parameters, so they pass only on a statement that takes none:
+  `XqliteNIF.stmt_bind(stmt, nil)` on a statement with a parameter is now
+  refused instead of leaving it NULL. Named parameters are unchanged and
+  keep SQLite's rule — a name the statement lacks is
+  `{:invalid_parameter_name, _}`, a name left out stays NULL.
+
 - **`multi_step/2` no longer throws away the rows it had already read.** A
   value SQLite hands back that cannot be read — a TEXT column holding bytes
   that are not valid UTF-8 — used to lose every row the same batch had read
@@ -18,12 +35,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `done: false`, holds the error, and answers it on the next call; the
   statement then carries on at the row after the bad one. `reset/1` starts
   the statement over and drops a held-back error. A cancellation still
-  discards the rows of the batch it lands in, which is the one failure that
-  throws rows away. `multi_step_cancellable/3` shares all of it, and `step/1`
-  reads one row and is unchanged.
+  discards the rows of the batch it lands in. `multi_step_cancellable/3`
+  shares all of it. Two corrections since: the error a batch holds back is
+  answered by the next call that reads a row, whichever door makes it —
+  `step/1` used to walk straight past it, so the bad row vanished with no
+  error at all and, when it was the last row, `finalize/1` swallowed the
+  error for good. And a `sqlite3_step` that fails outright — a locked
+  database, an I/O error, a runtime error in the SQL such as
+  `abs(-9223372036854775808)`, a trigger's `RAISE` — is answered at once
+  instead of being held back: no row was stepped past, so there is nothing
+  to continue at. Such a failure discards the batch's rows, exactly as a
+  cancellation does, so a result set that fails part-way now hands back no
+  rows at all through `multi_step/2` (`step/1` and `stream/4` still deliver
+  the rows before the failure). It used to hold the error back and then
+  alternate for ever between the rows from the top and the error, never
+  reaching `done: true`. After such a failure the statement is left where
+  SQLite left it: the next step is SQLite's own rerun from the top, which
+  meets the same failure, and `reset/1` changes nothing.
 
 ### Changed
 
+- **The panic-strategy check reads a Windows DLL the right way.**
+  `scripts/panic_strategy.exs` looked for `_Unwind_RaiseException` with `nm`
+  whatever the library was. An MSVC-built `.dll` keeps no symbol table `nm`
+  can read and unwinds through Windows exceptions instead, so the check
+  reported an abort build on every Windows runner. A `.dll` is now read with
+  `objdump -p` (or `llvm-objdump`) and passes when its import table names
+  `_CxxThrowException` or `__CxxFrameHandler3`; every other library is read
+  with `nm -u` (or `llvm-nm`) as before. Both families look for their tool on
+  `PATH` and in the rustup sysroot where `rustup component add llvm-tools`
+  puts the LLVM ones, `XQLITE_SYMBOL_TOOL` still names a tool to use instead,
+  and a failed verdict now names the tool, the library and every readout line
+  mentioning unwinding, so one CI log is enough to tell a wrong marker from a
+  real abort build. The release workflow's report names the tools it resolved
+  and the library it found, and says the readout was empty instead of
+  reporting a missing marker.
 - **`XqliteNIF.stream_open/4` is `XqliteNIF.stream_open/3`.** The fourth
   argument was reserved for stream options that never arrived, and nothing
   read it — `stream_open(conn, sql, [], :garbage)` opened a stream. It is
@@ -51,10 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `query`, `execute`, `query_with_changes`, `explain_analyze` and
   `stream_open` all took a parameter term of `nil` as "no parameters" while
   `stmt_bind` answered `{:expected_list, _}` for it. One rule now, in one
-  place: `stmt_bind(stmt, nil)` answers `:ok` and binds nothing, which leaves
-  a statement's parameter NULL instead of refusing the call.
-  `Xqlite.bind/2,3` still guards `is_list/1`, so `nil` raises at the typed
-  door as before.
+  place: `stmt_bind(stmt, nil)` means zero parameters, so it answers `:ok` on
+  a statement that takes none and `{:invalid_parameter_count, _}` on one that
+  takes any (see the parameter-count fix above). `Xqlite.bind/2,3` still
+  guards `is_list/1`, so `nil` raises at the typed door as before.
 - **`Xqlite.Pragma` judges its options.** The options position — the last
   argument of `get/4` and `put/4`, and the third argument of `get/4` when it
   is a keyword list, the two being merged — used to reach `Keyword.get/3`

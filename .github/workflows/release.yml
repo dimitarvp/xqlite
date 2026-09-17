@@ -84,6 +84,12 @@ jobs:
           tar -xzf "${{ steps.build-crate.outputs.file-path }}" -C "${UNPACKED}"
           LIBRARY="$(find "${UNPACKED}" -type f \( -name '*.so' -o -name '*.dll' -o -name '*.dylib' \) | head -n 1)"
 
+          if [ -n "${LIBRARY}" ]; then
+            LIBRARY_LINE="${LIBRARY}"
+          else
+            LIBRARY_LINE="none found under ${UNPACKED}"
+          fi
+
           READOUT="$({
             "${NM}" "${LIBRARY}"
             "${NM}" --dynamic "${LIBRARY}"
@@ -91,22 +97,32 @@ jobs:
           } 2>&1 || true)"
           MARKERS="$(printf '%s\n' "${READOUT}" | grep -E 'Unwind|CxxThrow|CxxFrameHandler|rust_panic|panic_unwind' || true)"
 
-          if printf '%s\n' "${READOUT}" | grep -q '_Unwind_RaiseException'; then
-            UNWIND="yes — _Unwind_RaiseException is there (ELF and Mach-O)"
+          # An empty readout is "could not read", not "the marker is absent":
+          # a library that was never found reads as a negative verdict
+          # otherwise, which is the opposite of what it means.
+          if [ -z "${READOUT//[[:space:]]/}" ]; then
+            UNWIND="could not read (empty readout)"
+            THROW="could not read (empty readout)"
           else
-            UNWIND="no _Unwind_RaiseException"
-          fi
+            if printf '%s\n' "${READOUT}" | grep -q '_Unwind_RaiseException'; then
+              UNWIND="yes — _Unwind_RaiseException is there (ELF and Mach-O)"
+            else
+              UNWIND="no _Unwind_RaiseException"
+            fi
 
-          if printf '%s\n' "${READOUT}" | grep -q '_CxxThrowException'; then
-            THROW="yes — _CxxThrowException is imported (MSVC)"
-          else
-            THROW="no _CxxThrowException"
+            if printf '%s\n' "${READOUT}" | grep -q '_CxxThrowException'; then
+              THROW="yes — _CxxThrowException is imported (MSVC)"
+            else
+              THROW="no _CxxThrowException"
+            fi
           fi
 
           {
             echo "### Panic strategy — ${{ matrix.job.target }}"
             echo
-            echo "Library: $(basename "${LIBRARY}")"
+            echo "Library: ${LIBRARY_LINE}"
+            echo "Symbol tool: ${NM}"
+            echo "Import-table tool: ${OBJDUMP}"
             echo
             echo "- unwinding runtime: ${UNWIND}"
             echo "- Windows exceptions: ${THROW}"

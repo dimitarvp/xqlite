@@ -1,6 +1,8 @@
 use crate::atoms;
 use crate::error::XqliteError;
-use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
+use crate::stream::{
+    bind_named_params_ffi, bind_positional_params_ffi, require_parameter_count,
+};
 use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params, walk_params};
 use rusqlite::Connection;
 use rusqlite::ffi;
@@ -130,7 +132,7 @@ fn bind_params<'a>(
     params_term: Term<'a>,
 ) -> Result<(), XqliteError> {
     match walk_params(params_term)? {
-        Params::Empty => Ok(()),
+        Params::Empty => require_parameter_count(stmt_ptr, 0),
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
             bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle)

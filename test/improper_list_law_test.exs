@@ -104,14 +104,17 @@ defmodule Xqlite.ImproperListLawTest do
     assert {:row, [1]} = NIF.stmt_step(stmt)
   end
 
-  # Binding nothing to a statement that has a parameter leaves it NULL, the
-  # same as an empty list does, rather than counting the parameters.
-  test "nil leaves the parameter of a one-parameter statement NULL" do
+  # `nil` means no parameters, so a statement that has one is a count
+  # mismatch, exactly as an empty list is.
+  test "nil on a one-parameter statement is a count mismatch" do
     conn = fresh_conn()
 
     assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT ?1")
-    assert :ok = NIF.stmt_bind(stmt, nil)
-    assert {:row, [nil]} = NIF.stmt_step(stmt)
+
+    assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 0}}} =
+             NIF.stmt_bind(stmt, nil)
+
+    assert :ok = NIF.stmt_finalize(stmt)
   end
 
   property "a term that is no list at all is refused as such" do

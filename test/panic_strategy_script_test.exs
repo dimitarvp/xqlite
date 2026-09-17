@@ -43,6 +43,35 @@ defmodule Xqlite.PanicStrategyScriptTest do
     assert output =~ "rustup component add llvm-tools"
   end
 
+  # A .dll is read through its import table rather than its symbol table, so
+  # its family names its own tools when none of them is on the machine. The
+  # file only has to exist and be named like a DLL; nothing reads it here.
+  test "a missing tool for the Windows library family names that family's tools" do
+    library = Path.join(System.tmp_dir!(), "xqlite_family_probe.dll")
+    File.write!(library, "not a library, only a name")
+    on_exit(fn -> File.rm(library) end)
+
+    env = [{"XQLITE_SYMBOL_TOOL", "xqlite_no_such_symbol_tool"}]
+
+    assert {output, 1} = run([library], env)
+    assert output =~ "objdump"
+    assert output =~ "llvm-objdump"
+    assert output =~ "rustup component add llvm-tools"
+  end
+
+  # A tool that runs but reads nothing the check understands must fail it, and
+  # say which tool it used. `elixir` itself is the stand-in: every platform the
+  # suite runs on has it, and it answers nothing about a library.
+  test "a symbol tool that reads nothing useful fails the check, and is named" do
+    tool = System.find_executable("elixir")
+    assert is_binary(tool)
+
+    assert {output, 1} = run([loaded_library()], [{"XQLITE_SYMBOL_TOOL", tool}])
+    assert output =~ tool
+    assert output =~ loaded_library()
+    assert output =~ "nothing was checked"
+  end
+
   defp run(arguments, env \\ []) do
     System.cmd("elixir", [@script | arguments], env: env, stderr_to_stdout: true)
   end

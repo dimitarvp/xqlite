@@ -162,6 +162,26 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
+    # An empty list used to bind nothing at all and answer `:ok`, so the
+    # statement ran with NULL in every parameter. The stored rows are the
+    # oracle: they are untouched, because the bind was refused.
+    test "an empty or nil parameter list on a parameterised statement is refused",
+         %{conn: conn} do
+      seed(conn, 2)
+      {:ok, stmt} = Xqlite.prepare(conn, "UPDATE items SET label = ?1")
+
+      assert {:error, {:invalid_parameter_count, %{provided: 0, expected: 1}}} =
+               Xqlite.bind(stmt, [])
+
+      assert {:error, {:invalid_parameter_count, %{provided: 0, expected: 1}}} =
+               NIF.stmt_bind(stmt, nil)
+
+      assert :ok = Xqlite.finalize(stmt)
+
+      assert {:ok, %{rows: [["v1"], ["v2"]]}} =
+               Xqlite.query(conn, "SELECT label FROM items ORDER BY id", [])
+    end
+
     # -------------------------------------------------------------------
     # prepare rejections
     # -------------------------------------------------------------------

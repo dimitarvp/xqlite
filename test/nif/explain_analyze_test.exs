@@ -175,6 +175,31 @@ defmodule Xqlite.NIF.ExplainAnalyzeTest do
         assert {:error, {:cannot_execute, reason}} = NIF.explain_analyze(conn, "   ", [])
         assert is_binary(reason)
       end
+
+      # Profiling runs the statement for real, so a parameter list of the
+      # wrong length used to write NULLs through it. The stored rows are the
+      # oracle: nothing ran.
+      test "a positional parameter list of the wrong length is refused", %{conn: conn} do
+        setup_t(conn)
+        sql = "UPDATE t SET name = ?2 WHERE id = ?1"
+
+        assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 1}}} =
+                 NIF.explain_analyze(conn, sql, [1])
+
+        assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 3}}} =
+                 NIF.explain_analyze(conn, sql, [1, "x", "y"])
+
+        for params <- [[], nil] do
+          assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 0}}} =
+                   NIF.explain_analyze(conn, sql, params)
+
+          assert {:error, {:invalid_parameter_count, %{expected: 2, provided: 0}}} =
+                   Xqlite.explain_analyze(conn, sql, params)
+        end
+
+        assert {:ok, %{rows: [["a"], ["b"], ["c"]]}} =
+                 NIF.query(conn, "SELECT name FROM t ORDER BY id", [])
+      end
     end
   end
 end

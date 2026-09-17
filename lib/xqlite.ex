@@ -1406,6 +1406,12 @@ defmodule Xqlite do
   `{:error, {:cannot_execute, _}}` rather than a report of zeroes, and a
   second statement after the first is `{:error, :multiple_statements}`.
 
+  The statement runs for real, so parameters follow `query/4`'s rule: a
+  positional list whose length is not the statement's own parameter count is
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before
+  anything is bound, `[]` and `nil` count as zero parameters, and a named
+  parameter the caller leaves out stays NULL.
+
   ## Options
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
@@ -1535,6 +1541,16 @@ defmodule Xqlite do
   as returning a stream that silently errors on first consume would hide
   setup failures (e.g., invalid SQL, closed connection).
 
+  Parameters follow `query/4`'s rule. A plain list is positional (`?1`,
+  `?2`, …) and its length must be the statement's own parameter count;
+  anything else is `{:error, {:invalid_parameter_count, %{expected: _,
+  provided: _}}}` at stream open, before a value is bound. `[]` and `nil`
+  count as zero parameters, so they pass only on a statement that takes
+  none. A keyword list is named, and named parameters keep SQLite's own
+  rule: a name the statement does not have is
+  `{:error, {:invalid_parameter_name, _}}`, while a name the caller leaves
+  out stays NULL.
+
   The SQL must hold exactly one statement, the same rule `prepare/2` and
   `query/3` apply: SQL holding no statement at all — empty, whitespace or
   comments — is `{:error, {:cannot_execute, _}}` rather than a stream with
@@ -1656,8 +1672,11 @@ defmodule Xqlite do
   Accepts a plain list for positional placeholders (`?1`, `?2`, …; the
   count must match, otherwise `{:error, {:invalid_parameter_count,
   %{provided: _, expected: _}}}`) or a keyword list for named placeholders.
-  Once stepping has started, call `reset/1` before rebinding — SQLite
-  rejects mid-run rebinds.
+  An empty list counts as zero parameters, so it is refused by a statement
+  that takes any. Named parameters keep SQLite's own rule: a name the
+  statement does not have is `{:error, {:invalid_parameter_name, _}}`, while
+  a name left out stays NULL. Once stepping has started, call `reset/1`
+  before rebinding — SQLite rejects mid-run rebinds.
 
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise. Pass `%Xqlite.Blob{bytes: bytes}` in either form — a
@@ -1697,13 +1716,36 @@ defmodule Xqlite do
   `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
   stepped past, so that row is never delivered. `step/1` reports it at once;
   `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
-  before it in the same batch first, with `done: false`, and report the
-  error on the next call. After the error every door carries on at the row
-  that follows the bad one — `:done`, or `done: true` with no rows, when the
-  bad row was the last. `reset/1` starts the statement over, dropping an
-  error that was held back, and the same row errors again. A stream
-  (`stream/4`) delivers the rows before the bad one, reports the error on
-  the next fetch, and is finished after that.
+  before it in the same batch first, with `done: false`, and hold the error
+  back. The next call that reads a row answers it — `step/1`,
+  `multi_step/2` or `multi_step_cancellable/3`, whichever door the caller
+  uses — and every door then carries on at the row after the bad one:
+  `:done`, or `done: true` with no rows, when the bad row was the last.
+  `reset/1` drops a held-back error, a reset run being a new run, and
+  `finalize/1` drops it and answers its own result; a caller that finalizes
+  after `done: false` chose to stop, and that is the one way a held-back
+  error is never seen. A stream (`stream/4`) delivers the rows before the
+  bad one, reports the error on the next fetch, and is finished after that.
+
+  A `sqlite3_step` that fails outright is a different thing: a locked
+  database, an I/O error, a runtime error in the SQL such as
+  `abs(-9223372036854775808)` (`{:error, {:sqlite_failure, _, _, _}}`), or a
+  trigger's `RAISE` (`{:error, {:constraint_violation, :constraint_trigger,
+  _}}`). No row was stepped past, so nothing is held back: the error is
+  answered at once and `multi_step/2` discards the rows of the batch it
+  lands in, exactly as a cancellation does. A result set that fails part-way
+  therefore hands back no rows at all through `multi_step/2`, while `step/1`
+  and `stream/4` deliver the rows read before the failure. The statement is
+  left where SQLite left it and the run is over: the next step is SQLite's
+  own rerun from the top, which meets the same failure, and `reset/1`
+  changes nothing. What that rerun answers depends on the failure — the
+  `abs()` overflow hands back the rows before the bad one and then the error
+  again, a trigger's `RAISE` answers the error and never a row — so a caller
+  stops on such an error rather than stepping on.
+
+  A statement stepped with nothing bound runs with every parameter NULL.
+  That is SQLite's own rule and no bind door was involved, so the parameter
+  count `bind/3` checks cannot catch it.
 
   The values come back exactly as SQLite stored them: no type extension
   runs on them, whatever `bind/3` was given. Pass them through
@@ -1728,13 +1770,36 @@ defmodule Xqlite do
   `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
   stepped past, so that row is never delivered. `step/1` reports it at once;
   `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
-  before it in the same batch first, with `done: false`, and report the
-  error on the next call. After the error every door carries on at the row
-  that follows the bad one — `:done`, or `done: true` with no rows, when the
-  bad row was the last. `reset/1` starts the statement over, dropping an
-  error that was held back, and the same row errors again. A stream
-  (`stream/4`) delivers the rows before the bad one, reports the error on
-  the next fetch, and is finished after that.
+  before it in the same batch first, with `done: false`, and hold the error
+  back. The next call that reads a row answers it — `step/1`,
+  `multi_step/2` or `multi_step_cancellable/3`, whichever door the caller
+  uses — and every door then carries on at the row after the bad one:
+  `:done`, or `done: true` with no rows, when the bad row was the last.
+  `reset/1` drops a held-back error, a reset run being a new run, and
+  `finalize/1` drops it and answers its own result; a caller that finalizes
+  after `done: false` chose to stop, and that is the one way a held-back
+  error is never seen. A stream (`stream/4`) delivers the rows before the
+  bad one, reports the error on the next fetch, and is finished after that.
+
+  A `sqlite3_step` that fails outright is a different thing: a locked
+  database, an I/O error, a runtime error in the SQL such as
+  `abs(-9223372036854775808)` (`{:error, {:sqlite_failure, _, _, _}}`), or a
+  trigger's `RAISE` (`{:error, {:constraint_violation, :constraint_trigger,
+  _}}`). No row was stepped past, so nothing is held back: the error is
+  answered at once and `multi_step/2` discards the rows of the batch it
+  lands in, exactly as a cancellation does. A result set that fails part-way
+  therefore hands back no rows at all through `multi_step/2`, while `step/1`
+  and `stream/4` deliver the rows read before the failure. The statement is
+  left where SQLite left it and the run is over: the next step is SQLite's
+  own rerun from the top, which meets the same failure, and `reset/1`
+  changes nothing. What that rerun answers depends on the failure — the
+  `abs()` overflow hands back the rows before the bad one and then the error
+  again, a trigger's `RAISE` answers the error and never a row — so a caller
+  stops on such an error rather than stepping on.
+
+  A statement stepped with nothing bound runs with every parameter NULL.
+  That is SQLite's own rule and no bind door was involved, so the parameter
+  count `bind/3` checks cannot catch it.
 
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
@@ -1753,21 +1818,44 @@ defmodule Xqlite do
   token aborts with `{:error, :operation_cancelled}`). Cancellation rides
   the connection's progress handler, exactly like `query_cancellable/4`.
   After a cancellation, `reset/1` the statement before stepping it again; a
-  cancellation discards the rows its batch had already read, which is the
-  one failure that throws rows away.
+  cancellation discards the rows its batch had already read, as any failed
+  step does.
 
   A value SQLite hands back that cannot be read — a TEXT column holding
   bytes that are not valid UTF-8 — is reported as
   `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
   stepped past, so that row is never delivered. `step/1` reports it at once;
   `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
-  before it in the same batch first, with `done: false`, and report the
-  error on the next call. After the error every door carries on at the row
-  that follows the bad one — `:done`, or `done: true` with no rows, when the
-  bad row was the last. `reset/1` starts the statement over, dropping an
-  error that was held back, and the same row errors again. A stream
-  (`stream/4`) delivers the rows before the bad one, reports the error on
-  the next fetch, and is finished after that.
+  before it in the same batch first, with `done: false`, and hold the error
+  back. The next call that reads a row answers it — `step/1`,
+  `multi_step/2` or `multi_step_cancellable/3`, whichever door the caller
+  uses — and every door then carries on at the row after the bad one:
+  `:done`, or `done: true` with no rows, when the bad row was the last.
+  `reset/1` drops a held-back error, a reset run being a new run, and
+  `finalize/1` drops it and answers its own result; a caller that finalizes
+  after `done: false` chose to stop, and that is the one way a held-back
+  error is never seen. A stream (`stream/4`) delivers the rows before the
+  bad one, reports the error on the next fetch, and is finished after that.
+
+  A `sqlite3_step` that fails outright is a different thing: a locked
+  database, an I/O error, a runtime error in the SQL such as
+  `abs(-9223372036854775808)` (`{:error, {:sqlite_failure, _, _, _}}`), or a
+  trigger's `RAISE` (`{:error, {:constraint_violation, :constraint_trigger,
+  _}}`). No row was stepped past, so nothing is held back: the error is
+  answered at once and `multi_step/2` discards the rows of the batch it
+  lands in, exactly as a cancellation does. A result set that fails part-way
+  therefore hands back no rows at all through `multi_step/2`, while `step/1`
+  and `stream/4` deliver the rows read before the failure. The statement is
+  left where SQLite left it and the run is over: the next step is SQLite's
+  own rerun from the top, which meets the same failure, and `reset/1`
+  changes nothing. What that rerun answers depends on the failure — the
+  `abs()` overflow hands back the rows before the bad one and then the error
+  again, a trigger's `RAISE` answers the error and never a row — so a caller
+  stops on such an error rather than stepping on.
+
+  A statement stepped with nothing bound runs with every parameter NULL.
+  That is SQLite's own rule and no bind door was involved, so the parameter
+  count `bind/3` checks cannot catch it.
 
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
@@ -1790,6 +1878,10 @@ defmodule Xqlite do
   Bindings are preserved (SQLite semantics); use `clear_bindings/1` to drop
   them to NULL. Always returns `:ok` for a live statement — `sqlite3_reset`'s
   return code echoes the most recent step error, not the reset itself.
+
+  An unreadable-value error a batch held back is dropped here: the run it
+  belonged to is over. After a step that failed outright a reset changes
+  nothing — the statement was already back at the top.
   """
   @spec reset(stmt()) :: :ok | error()
   def reset(stmt), do: XqliteNIF.stmt_reset(stmt)
@@ -1816,6 +1908,9 @@ defmodule Xqlite do
   Idempotent — repeated finalization returns `:ok`. Prefer explicit
   finalization over relying on garbage collection, and finalize before
   closing the owning connection (see `prepare/2`).
+
+  An unreadable-value error a batch held back is dropped with the statement:
+  this answers the lifecycle result, never a leftover value error.
   """
   @spec finalize(stmt()) :: :ok | error()
   def finalize(stmt), do: XqliteNIF.stmt_finalize(stmt)
