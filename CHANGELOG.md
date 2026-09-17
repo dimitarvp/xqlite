@@ -91,6 +91,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A PRAGMA key that is no name is an answer at every door.**
+  `Xqlite.get_pragma/2` and `Xqlite.set_pragma/3` handed the key to
+  `to_string/1` before anything judged it, which raised
+  `Protocol.UndefinedError` for a tuple, a map, a pid or a reference and
+  `ArgumentError` for a list of atoms. Both answer
+  `{:error, {:invalid_pragma_name, key}}` now, with the key unchanged, the
+  way `Xqlite.Pragma.get/2,3,4` and `Xqlite.Pragma.put/3,4` always did. A
+  charlist changes with them: `Xqlite.set_pragma(conn, ~c"user_version", 77)`
+  used to write, because `to_string/1` turns a charlist into the text of its
+  characters, and is refused now — write the name as a string or an atom.
+- **The openers judge their options list.** `Xqlite.open/2` and
+  `Xqlite.open_in_memory/1` raised `Protocol.UndefinedError` from
+  `Enum.find/2` for options that are not a list. Both carry
+  `when is_list(opts)` now, so the raise is the `FunctionClauseError` the
+  `Xqlite` moduledoc names, and it happens before the telemetry span opens:
+  `[:xqlite, :open, :start]` and `[:xqlite, :open, :exception]` no longer
+  fire for options the guard refuses. An element of the list that is not a
+  `{key, value}` pair raised `FunctionClauseError` from inside `Enum.find/2`
+  and answers `{:error, {:invalid_open_option, %{key: nil,
+  reason: :not_a_pair, value: element}}}` now. `@type error_reason` gains
+  the shape.
+- **A number in the PRAGMA argument position reaches SQLite as a number.**
+  `Xqlite.Pragma.get/3,4` quoted every argument into a name, so
+  `get(conn, :integrity_check, 1)` built `PRAGMA integrity_check("1")` and
+  answered `{:error, {:no_such_table, "1"}}` where SQLite answers `["ok"]`,
+  and `:optimize` and `:incremental_vacuum` lost the bitmask and the page
+  count they were handed. An integer is written as a number now, a string or
+  an atom as a quoted name.
+- **`{:cannot_execute_pragma, name, reason}` carries the name, never the
+  statement.** Two of the three places that build it passed the whole
+  statement text as the first element — `XqliteNIF.get_pragma(conn, "42")`
+  answered `{:cannot_execute_pragma, "PRAGMA 42;", _}` — while the third
+  passed the bare name. All three pass the name now. A shape's payload
+  changes, which is a break; xqlite is pre-1.0 and takes it.
+- **A PRAGMA name folds by ASCII letters, the way SQLite folds it.**
+  `Xqlite.Pragma` matched a name with `String.downcase/1`, a Unicode fold,
+  so a name spelled with the Kelvin sign (U+212A) where a `k` belongs
+  resolved to the PRAGMA it folds onto. Only ASCII letters fold now, and
+  such a name answers `{:error, {:unknown_pragma, key}}`.
 - **A cancel token that is not one is refused, not raised.** Every door that
   takes tokens — `Xqlite.query_cancellable/5`, `execute_cancellable/5`,
   `execute_batch_cancellable/3`, `query_with_changes_cancellable/5`,

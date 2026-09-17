@@ -280,6 +280,18 @@ defmodule XqlitePragmaTest do
       assert {:error, {:authorization_denied, _code, _msg}} = P.get(db, :busy_timeout)
     end
 
+    # SQLite folds a PRAGMA name by ASCII letters alone. The Kelvin sign
+    # folds to "k" under Unicode rules, so a Unicode fold would let it in.
+    test "a name only a Unicode fold turns into a known one is unknown", %{db: db} do
+      kelvin = "foreign_" <> <<0x212A::utf8>> <> "eys"
+      kelvin_atom = String.to_atom(kelvin)
+
+      assert {:error, {:unknown_pragma, ^kelvin}} = P.get(db, kelvin)
+      assert {:error, {:unknown_pragma, ^kelvin}} = P.put(db, kelvin, 1)
+      assert {:error, {:unknown_pragma, ^kelvin_atom}} = P.get(db, kelvin_atom)
+      assert {:error, {:unknown_pragma, ^kelvin_atom}} = P.put(db, kelvin_atom, 1)
+    end
+
     property "no name outside the schema reaches SQLite", %{db: db} do
       assert :ok = Xqlite.set_authorizer(db, [:pragma])
 
@@ -377,6 +389,50 @@ defmodule XqlitePragmaTest do
     end
   end
 
+  # SQLite reads the argument of four of these PRAGMAs as a number and of the
+  # rest as a name, so the statement has to carry each as what it is.
+  describe "a number in the argument position" do
+    setup do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+
+      :ok =
+        NIF.execute_batch(db, "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);")
+
+      {:ok, db: db}
+    end
+
+    test "the anchor: a number reaches the PRAGMA that reads one", %{db: db} do
+      assert {:ok, ["ok"]} = P.get(db, :integrity_check, 1)
+    end
+
+    test "the anchor: a name no table carries reads empty", %{db: db} do
+      assert {:ok, []} = P.table_info(db, "no_such")
+    end
+
+    # The getter flattens single-column rows; the values are SQLite's own.
+    property "a number-reading PRAGMA answers what the raw statement answers", %{db: db} do
+      check all(
+              name <-
+                StreamData.member_of([
+                  :integrity_check,
+                  :quick_check,
+                  :optimize,
+                  :incremental_vacuum
+                ]),
+              number <- StreamData.integer(1..8),
+              max_runs: 2000
+            ) do
+        assert {:ok, rows} = P.get(db, name, number)
+
+        assert {:ok, %Xqlite.Result{rows: raw_rows}} =
+                 Xqlite.query(db, "PRAGMA #{name}(#{number});", [])
+
+        assert List.flatten(rows) == List.flatten(raw_rows)
+      end
+    end
+  end
+
   # The five shapes the argument position can take.
   defp argument_shape do
     StreamData.one_of([
@@ -464,6 +520,54 @@ defmodule XqlitePragmaTest do
         assert door_answers(spelling, name) == Map.get(canonical, name)
       end
     end
+  end
+
+  # A key that is no name is no spelling of one either: every door refuses it
+  # with the key the caller wrote, and builds nothing.
+  describe "a key that is neither an atom nor a string" do
+    setup do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+      {:ok, db: db}
+    end
+
+    test "the anchor: a charlist is a list, and nothing is written", %{db: db} do
+      assert {:ok, 0} = Xqlite.get_pragma(db, :user_version)
+
+      assert {:error, {:invalid_pragma_name, ~c"user_version"}} =
+               Xqlite.set_pragma(db, ~c"user_version", 77)
+
+      assert {:ok, 0} = Xqlite.get_pragma(db, :user_version)
+    end
+
+    property "every door refuses it, with the key unchanged", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+
+      check all(key <- non_name_key(), max_runs: 2000) do
+        assert {:error, {:invalid_pragma_name, ^key}} = P.get(db, key)
+        assert {:error, {:invalid_pragma_name, ^key}} = P.put(db, key, 1)
+        assert {:error, {:invalid_pragma_name, ^key}} = Xqlite.get_pragma(db, key)
+        assert {:error, {:invalid_pragma_name, ^key}} = Xqlite.set_pragma(db, key, 1)
+      end
+
+      # The denying authorizer turns any PRAGMA that really reaches SQLite
+      # into an authorization error, so the refusals above built nothing.
+      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
+    end
+  end
+
+  # Every kind of term a PRAGMA name cannot be.
+  defp non_name_key do
+    StreamData.one_of([
+      StreamData.tuple({StreamData.atom(:alphanumeric), StreamData.atom(:alphanumeric)}),
+      StreamData.map(StreamData.atom(:alphanumeric), fn key -> %{key => 1} end),
+      StreamData.constant(self()),
+      StreamData.map(StreamData.constant(:ref), fn _ -> make_ref() end),
+      StreamData.map(StreamData.member_of(P.all()), &Atom.to_charlist/1),
+      StreamData.integer(),
+      StreamData.scale(StreamData.float(), fn size -> min(size, 10) end),
+      StreamData.list_of(StreamData.atom(:alphanumeric), max_length: 3)
+    ])
   end
 
   defp unknown_pragma_name do

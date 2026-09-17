@@ -37,7 +37,7 @@ pub(crate) fn get<'a>(
     match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
         Ok(value) => encode_val(env, value),
         Err(RusqliteError::QueryReturnedNoRows) => Ok(atoms::no_value().to_term(env)),
-        Err(e) => Err(pragma_exec_error(read_sql, e)),
+        Err(e) => Err(pragma_exec_error(pragma_name.to_string(), e)),
     }
 }
 
@@ -52,7 +52,7 @@ pub(crate) fn set<'a>(
     let write_sql = format!("PRAGMA {pragma_name} = {value_literal};");
     let mut write_stmt = conn
         .prepare(&write_sql)
-        .map_err(|e| pragma_exec_error(write_sql, e))?;
+        .map_err(|e| pragma_exec_error(pragma_name.to_string(), e))?;
     let mut rows = write_stmt.query([])?;
     match rows.next()? {
         Some(row) => {

@@ -173,6 +173,19 @@ defmodule Xqlite.NIF.PragmaTest do
     test "set_pragma accepts valid pragma names", %{conn: conn} do
       assert {:ok, _} = NIF.set_pragma(conn, "cache_size", -1000)
     end
+
+    # A name of digits passes the name check and then fails SQLite's parser,
+    # which is the only way to reach the two arms that carry the statement.
+    test "a refused PRAGMA names itself, whichever step refused it", %{conn: conn} do
+      assert {:error, {:cannot_execute_pragma, "42", _read_reason}} =
+               NIF.get_pragma(conn, "42")
+
+      assert {:error, {:cannot_execute_pragma, "42", _write_reason}} =
+               NIF.set_pragma(conn, "42", 1)
+
+      assert {:error, {:cannot_execute_pragma, "user_version", _value_reason}} =
+               NIF.set_pragma(conn, "user_version", <<255>>)
+    end
   end
 
   describe "using Temporary Disk DB (Specific PRAGMA tests)" do

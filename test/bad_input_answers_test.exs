@@ -34,6 +34,40 @@ defmodule Xqlite.BadInputAnswersTest do
 
     test "a pragma key that is neither an atom nor a string is an answer", %{conn: conn} do
       assert {:error, {:invalid_pragma_name, 42}} = P.get(conn, 42)
+
+      assert {:error, {:invalid_pragma_name, {:not, :a, :name}}} =
+               Xqlite.get_pragma(conn, {:not, :a, :name})
+
+      assert {:error, {:invalid_pragma_name, {:not, :a, :name}}} =
+               Xqlite.set_pragma(conn, {:not, :a, :name}, 1)
+    end
+
+    test "open options that are not a list raise from a guard" do
+      path = Xqlite.TestUtil.tmp_db_path("bad_open_opts")
+
+      assert_raise FunctionClauseError, fn -> apply(Xqlite, :open, [path, :atom]) end
+
+      assert_raise FunctionClauseError, fn ->
+        apply(Xqlite, :open, [path, %{busy_timeout: 100}])
+      end
+
+      assert_raise FunctionClauseError, fn -> apply(Xqlite, :open_in_memory, [:atom]) end
+
+      assert_raise FunctionClauseError, fn ->
+        apply(Xqlite, :open_in_memory, [%{busy_timeout: 100}])
+      end
+    end
+
+    test "an option that is not a key-value pair is an answer" do
+      path = Xqlite.TestUtil.tmp_db_path("bad_open_opts")
+
+      assert {:error,
+              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+               Xqlite.open(path, [:busy_timeout])
+
+      assert {:error,
+              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+               Xqlite.open_in_memory([:busy_timeout])
     end
 
     test "a value no pragma takes is an answer", %{conn: conn} do

@@ -162,15 +162,25 @@ defmodule Xqlite do
   `:invalid_blob_bytes` names the term found in a wrapper's `bytes`, one of
   the atoms `Xqlite.Blob` lists. `:unknown_pragma` carries the caller's own
   atom or string for a PRAGMA the typed schema does not know.
-  `:invalid_pragma_name` carries a key that is neither an atom nor a string.
+  `:invalid_pragma_name` carries one of two things: the caller's key when it
+  is neither an atom nor a string, or the name itself when it holds a byte
+  outside `A-Z`, `a-z`, `0-9` and `_`, which the native side refuses because
+  it writes the name into the statement.
 
-  Two more name the option or argument that was wrong and why.
+  Three more name the option or argument that was wrong and why.
   `:invalid_hook_option` carries the option key a hook registration could not
   take, its value, and `:invalid_value`. `:invalid_pragma_argument` carries
   the PRAGMA, the argument and one of `:not_a_scalar` (a term no PRAGMA
   argument can be, a list included), `:missing` (a PRAGMA that reads only
   with an argument, called without one) and `:takes_no_argument` (a PRAGMA
   with no one-argument read form, called with one).
+  `:invalid_open_option` carries an option key the openers do not know with
+  `:unknown_key`, a value they refuse with `:invalid_value`, or, for an
+  element of the options list that is not a `{key, value}` pair, that
+  element with `:not_a_pair` and no key.
+
+  `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
+  never the statement built around it — and why it could not run.
 
   `:unsupported_data_type` names the kind of term handed to the binder when no
   SQLite value can hold it: `:bitstring`, `:function`, `:list`, `:map`, `:pid`,
@@ -218,7 +228,8 @@ defmodule Xqlite do
           | {:invalid_on_error, term()}
           | {:invalid_open_option,
              %{key: atom(), reason: :unknown_key, allowed: [atom()], value: nil}
-             | %{key: atom(), reason: :invalid_value, value: term(), message: String.t()}}
+             | %{key: atom(), reason: :invalid_value, value: term(), message: String.t()}
+             | %{key: nil, reason: :not_a_pair, value: term()}}
           | {:invalid_pages_per_step, integer()}
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
@@ -278,7 +289,7 @@ defmodule Xqlite do
 
   """
   @spec open(String.t(), keyword()) :: {:ok, conn()} | error()
-  def open(path, opts \\ []) do
+  def open(path, opts \\ []) when is_list(opts) do
     start_md = %{path: path, mode: :file}
 
     span_with_stop_metadata [:xqlite, :open], start_md do
@@ -299,7 +310,7 @@ defmodule Xqlite do
   Accepts the same options as `open/2`.
   """
   @spec open_in_memory(keyword()) :: {:ok, conn()} | error()
-  def open_in_memory(opts \\ []) do
+  def open_in_memory(opts \\ []) when is_list(opts) do
     start_md = %{path: ":memory:", mode: :memory}
 
     span_with_stop_metadata [:xqlite, :open], start_md do
@@ -444,27 +455,43 @@ defmodule Xqlite do
   defp validate_open_opts(opts) do
     allowed = allowed_open_opt_keys()
 
-    case Enum.find(opts, fn {k, _v} -> k not in allowed end) do
-      {unknown_key, _v} ->
+    case Enum.find_value(opts, fn element -> open_opt_fault(element, allowed) end) do
+      nil ->
+        validated_open_opts(opts)
+
+      {:unknown_key, key} ->
         {:error,
          {:invalid_open_option,
-          %{key: unknown_key, reason: :unknown_key, allowed: allowed, value: nil}}}
+          %{key: key, reason: :unknown_key, allowed: allowed, value: nil}}}
 
-      nil ->
-        case NimbleOptions.validate(opts, @open_opts_schema) do
-          {:ok, _validated} = ok ->
-            ok
+      {:not_a_pair, element} ->
+        {:error, {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: element}}}
+    end
+  end
 
-          {:error, %NimbleOptions.ValidationError{} = err} ->
-            {:error,
-             {:invalid_open_option,
-              %{
-                key: err.key,
-                reason: :invalid_value,
-                value: err.value,
-                message: Exception.message(err)
-              }}}
-        end
+  defp open_opt_fault({key, _value}, allowed) do
+    case key in allowed do
+      true -> nil
+      false -> {:unknown_key, key}
+    end
+  end
+
+  defp open_opt_fault(element, _allowed), do: {:not_a_pair, element}
+
+  defp validated_open_opts(opts) do
+    case NimbleOptions.validate(opts, @open_opts_schema) do
+      {:ok, _validated} = ok ->
+        ok
+
+      {:error, %NimbleOptions.ValidationError{} = err} ->
+        {:error,
+         {:invalid_open_option,
+          %{
+            key: err.key,
+            reason: :invalid_value,
+            value: err.value,
+            message: Exception.message(err)
+          }}}
     end
   end
 
@@ -1966,10 +1993,16 @@ defmodule Xqlite do
   @doc """
   Reads a PRAGMA value from the connection.
 
+  A name outside the typed schema of `Xqlite.Pragma` is handed to SQLite as
+  written and reads back whatever SQLite answers, which is `{:ok, :no_value}`
+  for a word SQLite parses and ignores. A key that is neither an atom nor a
+  string is refused with
+  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged.
+
   Wraps `XqliteNIF.get_pragma/2` and emits `[:xqlite, :pragma, :get]`.
   """
   @spec get_pragma(conn(), String.t() | atom()) :: {:ok, term()} | error()
-  def get_pragma(conn, name) do
+  def get_pragma(conn, name) when is_atom(name) or is_binary(name) do
     name_str = to_string(name)
 
     case XqliteNIF.get_pragma(conn, name_str) do
@@ -1987,6 +2020,8 @@ defmodule Xqlite do
     end
   end
 
+  def get_pragma(_conn, name), do: {:error, {:invalid_pragma_name, name}}
+
   @doc """
   Sets a PRAGMA value on the connection.
 
@@ -2001,13 +2036,15 @@ defmodule Xqlite do
   setting at its fallback.
 
   A PRAGMA `Xqlite.Pragma` does not model keeps the raw path: its value
-  reaches SQLite as written, and SQLite decides.
+  reaches SQLite as written, and SQLite decides. A key that is neither an
+  atom nor a string never reaches that path: it is refused with
+  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged.
 
   Wraps `XqliteNIF.set_pragma/3` and emits `[:xqlite, :pragma, :set]` after
   a successful write, with the caller's own value in the metadata.
   """
   @spec set_pragma(conn(), String.t() | atom(), term()) :: {:ok, term()} | error()
-  def set_pragma(conn, name, value) do
+  def set_pragma(conn, name, value) when is_atom(name) or is_binary(name) do
     name_str = to_string(name)
 
     case Xqlite.Pragma.check_value(name, value) do
@@ -2016,8 +2053,7 @@ defmodule Xqlite do
     end
   end
 
-  defp unmodelled_or_refusal(conn, name_str, value, {:invalid_pragma_name, _name}),
-    do: write_pragma(conn, name_str, value, value)
+  def set_pragma(_conn, name, _value), do: {:error, {:invalid_pragma_name, name}}
 
   defp unmodelled_or_refusal(conn, name_str, value, {:unknown_pragma, _name}),
     do: write_pragma(conn, name_str, value, value)

@@ -15,7 +15,7 @@ defmodule Xqlite.Pragma do
 
   alias Xqlite.PragmaSpec
 
-  @type name :: String.t()
+  @type name :: String.t() | atom()
   @type pragma_opts :: keyword()
   @type pragma_key :: String.t() | atom()
   @type pragma_value :: String.t() | integer() | boolean() | atom()
@@ -436,9 +436,10 @@ defmodule Xqlite.Pragma do
     * `{:error, {:read_only_pragma, name}}` — the pragma cannot be written.
     * `{:error, {:unknown_pragma, name}}` for a name this module does not
       model, atom or string alike, and `{:error, {:invalid_pragma_name,
-      key}}` for a key that is neither. `Xqlite.set_pragma/3` treats both as
-      "not mine" and hands the value to SQLite as written; `put/4` refuses
-      them.
+      key}}` for a key that is neither. `Xqlite.set_pragma/3` treats an
+      unknown name as "not mine" and hands the value to SQLite as written —
+      it refuses a key that is no name before this check runs — and `put/4`
+      refuses both.
   """
   @spec check_value(pragma_key(), term()) :: {:ok, pragma_value()} | Xqlite.error()
   def check_value(key, value) do
@@ -456,7 +457,7 @@ defmodule Xqlite.Pragma do
   end
 
   defp resolve_name(key) when is_binary(key) do
-    case Map.fetch(@string_to_atom_map, String.downcase(key)) do
+    case Map.fetch(@string_to_atom_map, String.downcase(key, :ascii)) do
       {:ok, name} -> {:ok, name}
       :error -> {:error, {:unknown_pragma, key}}
     end
@@ -467,7 +468,7 @@ defmodule Xqlite.Pragma do
   defp downcased_name(key) do
     key
     |> Atom.to_string()
-    |> String.downcase()
+    |> String.downcase(:ascii)
   end
 
   defp writable_spec(name) do
@@ -626,6 +627,18 @@ defmodule Xqlite.Pragma do
   with no one-argument form called with an argument answers
   `reason: :takes_no_argument` — SQLite reads `PRAGMA name(value)` on a
   writable pragma as a write, so a getter must not build it.
+
+  An integer argument is written into the statement as a number and a string
+  or an atom as a quoted name, which is what each PRAGMA reads: `:optimize`
+  takes a bitmask, `:incremental_vacuum` a page count, `:integrity_check`
+  and `:quick_check` the most errors to report, `:wal_checkpoint` the name
+  of an attached schema, and the rest the name of a table or an index. For
+  `:table_info`, `:table_xinfo`, `:index_list`, `:index_info`,
+  `:index_xinfo` and `:foreign_key_list`, a name that is not in the database
+  is SQLite's own empty answer, `{:ok, []}`; `:foreign_key_check`,
+  `:integrity_check` and `:quick_check` answer
+  `{:error, {:no_such_table, name}}` instead, and a number handed to
+  `:foreign_key_check`, which reads a table name, is one of those names.
   """
   @spec get(Xqlite.conn(), pragma_key(), term(), pragma_opts()) :: get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
@@ -714,23 +727,50 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  @doc "Returns the list of indexes for the given table."
+  @doc """
+  Returns the list of indexes for the given table.
+
+  A name that is not in the database answers `{:ok, []}`: SQLite answers no
+  rows for a name it cannot find.
+  """
   @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_list(db, name, opts \\ []), do: get(db, :index_list, name, opts)
 
-  @doc "Returns column information for the given index."
+  @doc """
+  Returns column information for the given index.
+
+  A name that is not in the database answers `{:ok, []}`: SQLite answers no
+  rows for a name it cannot find.
+  """
   @spec index_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_info(db, name, opts \\ []), do: get(db, :index_info, name, opts)
 
-  @doc "Returns extended column information for the given index, including key vs auxiliary columns."
+  @doc """
+  Returns extended column information for the given index, including key vs
+  auxiliary columns.
+
+  A name that is not in the database answers `{:ok, []}`: SQLite answers no
+  rows for a name it cannot find.
+  """
   @spec index_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_xinfo(db, name, opts \\ []), do: get(db, :index_xinfo, name, opts)
 
-  @doc "Returns column information for the given table."
+  @doc """
+  Returns column information for the given table.
+
+  A name that is not in the database answers `{:ok, []}`: SQLite answers no
+  rows for a name it cannot find.
+  """
   @spec table_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_info(db, name, opts \\ []), do: get(db, :table_info, name, opts)
 
-  @doc "Returns extended column information for the given table, including hidden and generated columns."
+  @doc """
+  Returns extended column information for the given table, including hidden
+  and generated columns.
+
+  A name that is not in the database answers `{:ok, []}`: SQLite answers no
+  rows for a name it cannot find.
+  """
   @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_xinfo(db, name, opts \\ []), do: get(db, :table_xinfo, name, opts)
 
@@ -805,16 +845,20 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_query(db, key, arg, opts) do
-    prefix = pragma_prefix(opts)
-
     sql =
-      case arg do
-        nil -> "PRAGMA #{prefix}#{key};"
-        _ -> "PRAGMA #{prefix}#{key}(#{quote_name(to_string(arg))});"
-      end
+      opts
+      |> pragma_prefix()
+      |> pragma_sql(key, arg)
 
     db |> XqliteNIF.query(sql, []) |> query_to_pragma_result()
   end
+
+  defp pragma_sql(prefix, key, nil), do: "PRAGMA #{prefix}#{key};"
+
+  defp pragma_sql(prefix, key, arg) when is_integer(arg), do: "PRAGMA #{prefix}#{key}(#{arg});"
+
+  defp pragma_sql(prefix, key, arg),
+    do: "PRAGMA #{prefix}#{key}(#{quote_name(to_string(arg))});"
 
   defp pragma_prefix(opts) do
     case Keyword.get(opts, :db_name) do
