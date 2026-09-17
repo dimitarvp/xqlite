@@ -5,6 +5,108 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-09-17
+
+### Added
+
+- **`:type_extensions` reaches every function that takes parameters.**
+  `Xqlite.bind/3`, `Xqlite.explain_analyze/4`,
+  `Xqlite.query_cancellable/5`, `Xqlite.execute_cancellable/5` and
+  `Xqlite.query_with_changes_cancellable/5` each gained a trailing
+  options list carrying `:type_extensions`, so the same chain
+  `query/4` runs applies to them. The two cancellable query forms also
+  decode their result rows, in place on the plain map they already
+  return. Callers passing the old number of arguments are unaffected;
+  an empty extension list leaves all five exactly as they were.
+
+### Changed
+
+- **A type extension can refuse a value.** `Xqlite.TypeExtension`'s
+  `encode/1` callback gained a third answer, `{:error, reason}`, meaning
+  "this value is mine and it cannot be stored". `:skip` still means "not
+  mine, ask the next extension". A refusal ends the call with
+  `{:error, {:type_extension_refused, %{position: n, extension: module,
+  reason: reason}}}`, where `n` is the parameter's 1-based place in the
+  list, before any SQL runs, and inside the call's telemetry span. To
+  make that unambiguous, `Xqlite.TypeExtension.encode_value/2` now
+  answers `{:ok, value}` or `{:error, %{extension: _, reason: _}}` and
+  `Xqlite.TypeExtension.encode_params/2` answers `{:ok, params}` or the
+  refusal tuple, where both used to return the encoded value directly.
+  Code that calls either of them by hand needs the tuple unwrapped.
+  `decode/1` is unchanged: a value no extension converts still comes
+  back as SQLite stored it.
+- **PRAGMA values are checked once, in one place.**
+  `Xqlite.Pragma.check_value/2` is the single rule
+  `Xqlite.set_pragma/3`, `Xqlite.Pragma.put/4` and the connection
+  options of `Xqlite.open/2` all apply. A true/false PRAGMA takes
+  `true`, `false`, `1`, `0` and the words `on`, `off`, `yes`, `no`,
+  `true`, `false` as atoms or strings in any case; a numeric PRAGMA
+  takes an integer inside its range and refuses a boolean; a mode
+  PRAGMA takes its words as atoms or strings in any case, and the
+  integers its spec lists. `nil` is refused everywhere, which changes
+  its error from `{:cannot_execute_pragma, _, _}` to
+  `{:invalid_pragma_value, _}`. A PRAGMA `Xqlite.Pragma` does not model
+  keeps the raw path through `Xqlite.set_pragma/3`.
+
+### Fixed
+
+- **A stream no longer drops the rows it had already read.** When a
+  fetch failed part-way through its batch — an invalid-UTF-8 TEXT
+  value, an integer overflow in the SELECT — every row read before the
+  failing one was thrown away with the error. At the default batch size
+  of 500 a stream over fifteen rows whose last one was bad yielded no
+  rows at all, in every `:on_error` mode. The batch now ends early: the
+  rows already read come back as an ordinary batch and the error
+  follows on the next fetch, so `:emit_error` yields them as
+  `{:ok, row}` and then the terminal `{:error, reason}`, `:halt` stops
+  after them and `:raise` raises after them. No row is delivered twice
+  and no row from the failing one on is read. A cancellation keeps its
+  documented behaviour and still discards the batch it lands in.
+- **A `Decimal` that is not a number is refused instead of stored as a
+  word.** `Xqlite.TypeExtension.Decimal` wrote `NaN`, `-NaN`,
+  `Infinity` and `-Infinity` as those words into a TEXT column, where
+  nothing could tell them from data. Each now answers
+  `{:error, {:non_finite, kind}}` with `kind` one of `:nan`,
+  `:negative_nan`, `:infinity`, `:negative_infinity`.
+- **A very long `Decimal` is refused instead of raising.** A value whose
+  plain form needs more than 6178 digit characters used to escape
+  `query/4`, `execute/4` and `stream/4` as an `ArgumentError` from the
+  `:decimal` library, against their `@spec`. It now answers
+  `{:error, {:too_many_digits, %{digits: n, maximum: 6178}}}`, counted
+  the way the library counts and without calling the raising function.
+  Everything within the ceiling is written exactly as before.
+- **The JSON extension says why it declined.** A map or list
+  `Jason.encode/1` could not encode — one holding bytes that are not
+  valid UTF-8, or a tuple, pid, reference or function — used to fall
+  through to the NIF and produce the same `{:unsupported_data_type,
+  :map}` as a map with no extension loaded. It now answers
+  `{:error, {:json_encode_failed, %{reason: reason}}}` carrying Jason's
+  own error, and the caller hears which parameter it was.
+- **`Xqlite.set_pragma/3` no longer reports success for a value SQLite
+  ignored.** `set_pragma(conn, "foreign_keys", :maybe)` answered
+  `{:ok, nil}` while foreign keys stayed off, and
+  `set_pragma(conn, "user_version", :garbage)` answered `{:ok, nil}`
+  while the version became 0. Both are now
+  `{:error, {:invalid_pragma_value, %{pragma: name, value: value}}}`
+  and the setting is untouched. The lower-case and atom spellings that
+  only the unchecked path used to accept — `:wal`, `"wal"`, `:memory`,
+  `:normal`, `:on`, `:off` — now work through `Xqlite.Pragma.put/4` too.
+- **A boolean on a numeric PRAGMA is refused.**
+  `Xqlite.Pragma.put(db, :user_version, true)` answered `{:ok, nil}`
+  and wrote 0, because the check accepted the boolean and then handed
+  SQLite the word `ON`.
+- **A PRAGMA that can only be read is refused.**
+  `Xqlite.Pragma.put(db, :page_count, 5)` and
+  `Xqlite.Pragma.put(db, :integrity_check, 5)` answered `{:ok, _}` and
+  changed nothing; both now answer
+  `{:error, {:read_only_pragma, name}}`.
+- **A connection option past what SQLite stores is refused at open.**
+  `Xqlite.open_in_memory(busy_timeout: 3_000_000_000)` opened and read
+  the timeout back as 0 — no wait at all — and `cache_size:
+  -10_000_000_000` and `wal_autocheckpoint: 3_000_000_000` did the
+  same. All three now fail the open with
+  `{:error, {:invalid_pragma_value, _}}`.
+
 ## [0.13.0] - 2026-09-17
 
 ### Changed
@@ -1243,6 +1345,7 @@ Initial public release. The supported SQLite functionality:
   callers).
 - **SQLite introspection** — `compile_options` and `sqlite_version`.
 
+[0.14.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.14.0
 [0.13.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.13.0
 [0.12.2]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.2
 [0.12.1]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.1

@@ -40,6 +40,9 @@ defmodule Xqlite.Pragma do
   @nonzero_u32 1..0x7FFFFFFF
   @bool 0..1
 
+  @true_words ~w(on yes true)
+  @false_words ~w(off no false)
+
   @schema %{
     application_id: %PragmaSpec{
       return_type: :int,
@@ -147,7 +150,7 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @signed_i32
+      valid_values: @u32
     },
     auto_vacuum: %PragmaSpec{
       return_type: :int,
@@ -401,6 +404,145 @@ defmodule Xqlite.Pragma do
   @spec valid_write_arg_values() :: %{atom() => Range.t() | list()}
   def valid_write_arg_values, do: @valid_write_arg_values
 
+  @doc ~S"""
+  Checks a value against a PRAGMA's spec and answers the form SQLite is given.
+
+  This is the one rule `Xqlite.set_pragma/3`, `put/4` and the connection
+  options of `Xqlite.open/2` all apply, so no two of them can drift apart.
+  The name is matched without regard to case; the value is judged by what
+  the pragma stores:
+
+    * a true/false pragma takes `true`, `false`, `1`, `0`, and the words
+      `on`, `off`, `yes`, `no`, `true` and `false` as atoms or strings in
+      any case. It answers `1` or `0`.
+    * a pragma that stores a number takes an integer inside the range its
+      spec gives and nothing else — a boolean is refused, because SQLite
+      would write it as `ON` and store zero.
+    * a pragma that names a mode takes the words its spec lists, as atoms
+      or strings in any case, and the integers its spec lists. It answers
+      the spec's own upper-case spelling of the word.
+
+  Answers `{:ok, value_for_sqlite}`, or one of:
+
+    * `{:error, {:invalid_pragma_value, %{pragma: name, value: value}}}` —
+      including for `nil`, which no pragma takes.
+    * `{:error, {:read_only_pragma, name}}` — the pragma cannot be written.
+    * `{:error, {:invalid_pragma_name, name}}` for a string and
+      `{:error, {:unknown_pragma, name}}` for an atom this module does not
+      model. `Xqlite.set_pragma/3` treats both as "not mine" and hands the
+      value to SQLite as written; `put/4` refuses them.
+  """
+  @spec check_value(pragma_key(), term()) :: {:ok, pragma_value()} | Xqlite.error()
+  def check_value(key, value) do
+    with {:ok, name} <- resolve_name(key),
+         {:ok, spec} <- writable_spec(name) do
+      check_spec_value(name, spec, value)
+    end
+  end
+
+  defp resolve_name(key) when is_atom(key) do
+    case Map.fetch(@string_to_atom_map, downcased_name(key)) do
+      {:ok, name} -> {:ok, name}
+      :error -> {:error, {:unknown_pragma, key}}
+    end
+  end
+
+  defp resolve_name(key) when is_binary(key) do
+    case Map.fetch(@string_to_atom_map, String.downcase(key)) do
+      {:ok, name} -> {:ok, name}
+      :error -> {:error, {:invalid_pragma_name, key}}
+    end
+  end
+
+  defp resolve_name(key), do: {:error, {:invalid_pragma_name, key}}
+
+  defp downcased_name(key) do
+    key
+    |> Atom.to_string()
+    |> String.downcase()
+  end
+
+  defp writable_spec(name) do
+    case Map.get(@schema, name) do
+      %PragmaSpec{writable: true} = spec -> {:ok, spec}
+      %PragmaSpec{} -> {:error, {:read_only_pragma, name}}
+      nil -> {:error, {:unknown_pragma, name}}
+    end
+  end
+
+  defp check_spec_value(name, %PragmaSpec{return_type: :bool}, value) do
+    case boolean_form(value) do
+      {:ok, _} = ok -> ok
+      :error -> invalid_value(name, value)
+    end
+  end
+
+  defp check_spec_value(name, %PragmaSpec{valid_values: values}, value) when is_list(values) do
+    case listed_form(values, value) do
+      {:ok, _} = ok -> ok
+      :error -> invalid_value(name, value)
+    end
+  end
+
+  defp check_spec_value(name, %PragmaSpec{valid_values: range}, value)
+       when is_struct(range, Range) and is_integer(value) do
+    case value in range do
+      true -> {:ok, value}
+      false -> invalid_value(name, value)
+    end
+  end
+
+  defp check_spec_value(name, _spec, value), do: invalid_value(name, value)
+
+  defp invalid_value(name, value) do
+    {:error, {:invalid_pragma_value, %{pragma: name, value: value}}}
+  end
+
+  defp boolean_form(true), do: {:ok, 1}
+  defp boolean_form(false), do: {:ok, 0}
+  defp boolean_form(1), do: {:ok, 1}
+  defp boolean_form(0), do: {:ok, 0}
+
+  defp boolean_form(value) when is_atom(value) or is_binary(value) do
+    value
+    |> word_of()
+    |> boolean_word()
+  end
+
+  defp boolean_form(_value), do: :error
+
+  defp boolean_word(word) when word in @true_words, do: {:ok, 1}
+  defp boolean_word(word) when word in @false_words, do: {:ok, 0}
+  defp boolean_word(_word), do: :error
+
+  defp listed_form(values, value) when is_integer(value) do
+    case value in values do
+      true -> {:ok, value}
+      false -> :error
+    end
+  end
+
+  defp listed_form(values, value) when is_atom(value) or is_binary(value) do
+    word = word_of(value)
+
+    case Enum.find(values, fn listed ->
+           is_binary(listed) and String.downcase(listed) == word
+         end) do
+      nil -> :error
+      listed -> {:ok, listed}
+    end
+  end
+
+  defp listed_form(_values, _value), do: :error
+
+  defp word_of(value) when is_binary(value), do: String.downcase(value)
+
+  defp word_of(value) when is_atom(value) do
+    value
+    |> Atom.to_string()
+    |> String.downcase()
+  end
+
   @doc "Returns the names of all PRAGMAs supported by this library."
   @spec all() :: [atom()]
   def all, do: @all
@@ -564,6 +706,12 @@ defmodule Xqlite.Pragma do
   parses an unknown PRAGMA and ignores it, so letting one through would
   report success while changing nothing.
 
+  The value goes through `check_value/2`, so a value the PRAGMA cannot take
+  is refused with `{:error, {:invalid_pragma_value, %{pragma: name, value:
+  value}}}` and a PRAGMA that can only be read is refused with
+  `{:error, {:read_only_pragma, name}}`. What SQLite is given is the form
+  `check_value/2` answered, never the caller's spelling.
+
   ## Options
 
     * `:db_name` (string) - Target a specific attached database schema.
@@ -585,28 +733,24 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_put(db, key_atom, val, opts) do
-    case Map.get(@schema, key_atom) do
-      nil -> {:error, {:unknown_pragma, key_atom}}
-      spec -> put_checked(db, key_atom, spec, val, opts)
+    case check_value(key_atom, val) do
+      {:ok, checked} -> put_checked(db, key_atom, checked, opts)
+      {:error, _reason} = err -> err
     end
   end
 
-  defp put_checked(db, key_atom, spec, val, opts) do
-    if valid_pragma_value?(spec, val) do
-      case Keyword.get(opts, :db_name) do
-        nil ->
-          XqliteNIF.set_pragma(db, to_string(key_atom), val)
+  defp put_checked(db, key_atom, val, opts) do
+    case Keyword.get(opts, :db_name) do
+      nil ->
+        XqliteNIF.set_pragma(db, to_string(key_atom), val)
 
-        db_name ->
-          sql = "PRAGMA #{quote_name(db_name)}.#{key_atom} = #{format_pragma_value(val)};"
+      db_name ->
+        sql = "PRAGMA #{quote_name(db_name)}.#{key_atom} = #{format_pragma_value(val)};"
 
-          case XqliteNIF.execute_batch(db, sql) do
-            :ok -> {:ok, nil}
-            error -> error
-          end
-      end
-    else
-      {:error, {:invalid_pragma_value, %{pragma: key_atom, value: val}}}
+        case XqliteNIF.execute_batch(db, sql) do
+          :ok -> {:ok, nil}
+          error -> error
+        end
     end
   end
 
@@ -690,31 +834,9 @@ defmodule Xqlite.Pragma do
   # A PRAGMA takes no bound parameter, so a string value is quoted into the
   # statement text; the quote inside it has to be doubled or the value ends
   # the literal early.
+  # Only what `check_value/2` answers reaches this: an integer or a word.
   defp format_pragma_value(val) when is_binary(val), do: "'#{String.replace(val, "'", "''")}'"
   defp format_pragma_value(val) when is_integer(val), do: Integer.to_string(val)
-  defp format_pragma_value(true), do: "1"
-  defp format_pragma_value(false), do: "0"
-  defp format_pragma_value(:on), do: "ON"
-  defp format_pragma_value(:off), do: "OFF"
-  defp format_pragma_value(val) when is_atom(val), do: Atom.to_string(val)
-
-  # A nil spec means an unknown pragma — pass it through unvalidated.
-  defp valid_pragma_value?(%PragmaSpec{valid_values: nil}, _val), do: true
-
-  defp valid_pragma_value?(%PragmaSpec{valid_values: spec}, val) when is_boolean(val) do
-    if(val, do: 1, else: 0) in spec
-  end
-
-  defp valid_pragma_value?(%PragmaSpec{valid_values: spec}, val) when is_list(spec) do
-    val in spec
-  end
-
-  defp valid_pragma_value?(%PragmaSpec{valid_values: spec}, val)
-       when is_struct(spec, Range) and is_integer(val) do
-    val in spec
-  end
-
-  defp valid_pragma_value?(_spec, _val), do: false
 
   @spec int2bool(0 | 1) :: boolean()
   defp int2bool(0), do: false

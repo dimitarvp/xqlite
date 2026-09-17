@@ -424,6 +424,39 @@ defmodule Xqlite.TelemetryTest do
       detach(handler_id)
     end
 
+    test "a partial batch reports its rows, and the error fetch reports none" do
+      handler_id = attach_capture([[:xqlite, :stream, :fetch], [:xqlite, :stream, :close]])
+
+      {:ok, conn} = Xqlite.open_in_memory()
+      :ok = Xqlite.execute_batch(conn, "CREATE TABLE pb(id INTEGER PRIMARY KEY, v);")
+
+      for id <- 1..4 do
+        {:ok, _} = Xqlite.execute(conn, "INSERT INTO pb VALUES (?1, 'g')", [id])
+      end
+
+      {:ok, _} = Xqlite.execute(conn, "INSERT INTO pb VALUES (5, CAST(X'FF41' AS TEXT))", [])
+
+      stream =
+        Xqlite.stream(conn, "SELECT id, v FROM pb ORDER BY id", [],
+          on_error: :emit_error,
+          batch_size: 500
+        )
+
+      assert [{:ok, _}, {:ok, _}, {:ok, _}, {:ok, _}, {:error, _}] = Enum.to_list(stream)
+
+      assert_receive {:telemetry_event, [:xqlite, :stream, :fetch], %{rows_returned: 4},
+                      %{done?: false}}
+
+      assert_receive {:telemetry_event, [:xqlite, :stream, :fetch], %{rows_returned: 0},
+                      %{done?: true}}
+
+      assert_receive {:telemetry_event, [:xqlite, :stream, :close], %{total_rows: 4},
+                      %{reason: :errored}}
+
+      :ok = Xqlite.close(conn)
+      detach(handler_id)
+    end
+
     test "backup, restore, serialize, checkpoint and extension events fire" do
       handler_id = attach_capture(@reachable_io)
 

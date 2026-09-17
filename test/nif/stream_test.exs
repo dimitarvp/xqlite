@@ -375,6 +375,75 @@ defmodule Xqlite.NIF.StreamTest do
   end
 
   # --- Edge case: non-UTF-8 text via streaming ---
+  # ---------------------------------------------------------------------------
+  # A step error ends the batch early: the rows already read are delivered and
+  # the error waits for the next fetch.
+  # ---------------------------------------------------------------------------
+
+  defp open_partial_stream(good_rows, batch_size) do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE pb_t (id INTEGER PRIMARY KEY, v)", [])
+
+    for id <- 1..good_rows//1 do
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO pb_t VALUES (?1, 'g')", [id])
+    end
+
+    {:ok, 1} =
+      NIF.execute(conn, "INSERT INTO pb_t VALUES (?1, CAST(X'FF41' AS TEXT))", [good_rows + 1])
+
+    {:ok, stream} = NIF.stream_open(conn, "SELECT id, v FROM pb_t ORDER BY id", [], [])
+    {conn, stream, batch_size}
+  end
+
+  test "isolated: a batch that fails mid-way delivers the rows it already read" do
+    {conn, stream, batch_size} = open_partial_stream(14, 500)
+
+    assert {:ok, %{rows: rows}} = NIF.stream_fetch(stream, batch_size)
+    assert length(rows) == 14
+    assert {:error, {:utf8_error, _, _}} = NIF.stream_fetch(stream, batch_size)
+    assert :done = NIF.stream_fetch(stream, batch_size)
+
+    NIF.stream_close(stream)
+    NIF.close(conn)
+  end
+
+  for bs <- [1, 3, 500] do
+    test "isolated: a bad value opening its batch answers at once (batch size #{bs})" do
+      {conn, stream, batch_size} = open_partial_stream(0, unquote(bs))
+
+      assert {:error, {:utf8_error, _, _}} = NIF.stream_fetch(stream, batch_size)
+      assert :done = NIF.stream_fetch(stream, batch_size)
+
+      NIF.stream_close(stream)
+      NIF.close(conn)
+    end
+  end
+
+  test "isolated: a fetch after closing a stream that errored is :done" do
+    {conn, stream, batch_size} = open_partial_stream(3, 2)
+
+    assert {:ok, %{rows: [_, _]}} = NIF.stream_fetch(stream, batch_size)
+    assert {:ok, %{rows: [_]}} = NIF.stream_fetch(stream, batch_size)
+    assert {:error, {:utf8_error, _, _}} = NIF.stream_fetch(stream, batch_size)
+
+    assert :ok = NIF.stream_close(stream)
+    assert :done = NIF.stream_fetch(stream, batch_size)
+
+    NIF.close(conn)
+  end
+
+  test "isolated: a fetch after the connection closed under an errored stream is closed" do
+    {conn, stream, batch_size} = open_partial_stream(4, 500)
+
+    assert {:ok, %{rows: rows}} = NIF.stream_fetch(stream, batch_size)
+    assert length(rows) == 4
+
+    assert :ok = NIF.close(conn)
+    assert {:error, :connection_closed} = NIF.stream_fetch(stream, batch_size)
+
+    NIF.stream_close(stream)
+  end
+
   test "isolated: returns utf8_error for invalid UTF-8 in TEXT column via stream" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE utf8_t (val TEXT)", [])

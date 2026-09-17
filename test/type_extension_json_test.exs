@@ -51,11 +51,20 @@ defmodule Xqlite.TypeExtension.JSONTest do
       assert :skip = JSONExt.encode(:an_atom)
     end
 
-    # A map whose value is an invalid-UTF-8 binary is a real term that Jason
-    # returns {:error, _} for (verified against the pinned jason version). We
-    # skip so the term passes through to the NIF's own structured rejection.
-    test "skips terms Jason cannot encode" do
-      assert :skip = JSONExt.encode(%{"k" => <<0xFF, 0xFE>>})
+    test "refuses a map whose bytes are not valid UTF-8, and says why" do
+      assert {:error, {:json_encode_failed, %{reason: %Jason.EncodeError{}}}} =
+               JSONExt.encode(%{"k" => <<0xFF, 0xFE>>})
+
+      assert {:error, {:json_encode_failed, %{reason: %Jason.EncodeError{}}}} =
+               JSONExt.encode(%{<<0xFF, 0xFE>> => 1})
+    end
+
+    test "refuses a map holding a term with no JSON form, and says why" do
+      assert {:error, {:json_encode_failed, %{reason: %Protocol.UndefinedError{}}}} =
+               JSONExt.encode(%{"k" => {1, 2}})
+
+      assert {:error, {:json_encode_failed, %{reason: %Protocol.UndefinedError{}}}} =
+               JSONExt.encode(%{"k" => self()})
     end
   end
 
@@ -118,7 +127,7 @@ defmodule Xqlite.TypeExtension.JSONTest do
 
     test "map round-trips via encode_params + stream decode", %{conn: conn} do
       doc = %{"name" => "alice", "age" => 30, "tags" => ["x", "y"]}
-      params = TypeExtension.encode_params([1, doc], [JSONExt])
+      {:ok, params} = TypeExtension.encode_params([1, doc], [JSONExt])
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO je_test (id, doc) VALUES (?1, ?2)", params)
 
@@ -133,7 +142,7 @@ defmodule Xqlite.TypeExtension.JSONTest do
 
     test "list round-trips via encode_params + stream decode", %{conn: conn} do
       doc = [1, "two", %{"three" => 3}]
-      params = TypeExtension.encode_params([2, doc], [JSONExt])
+      {:ok, params} = TypeExtension.encode_params([2, doc], [JSONExt])
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO je_test (id, doc) VALUES (?1, ?2)", params)
 
@@ -147,7 +156,7 @@ defmodule Xqlite.TypeExtension.JSONTest do
     end
 
     test "stream without the extension returns the raw JSON text", %{conn: conn} do
-      params = TypeExtension.encode_params([3, %{"a" => 1}], [JSONExt])
+      {:ok, params} = TypeExtension.encode_params([3, %{"a" => 1}], [JSONExt])
       {:ok, 1} = NIF.execute(conn, "INSERT INTO je_test (id, doc) VALUES (?1, ?2)", params)
 
       [row] =
@@ -155,6 +164,24 @@ defmodule Xqlite.TypeExtension.JSONTest do
         |> Enum.to_list()
 
       assert {:ok, %{"a" => 1}} = Jason.decode(row["doc"])
+    end
+
+    test "a map the extension cannot encode is refused, naming the extension", %{conn: conn} do
+      doc = %{"k" => <<0xFF, 0xFE>>}
+
+      assert {:error,
+              {:type_extension_refused,
+               %{position: 2, extension: JSONExt, reason: {:json_encode_failed, %{reason: _}}}}} =
+               Xqlite.execute(conn, "INSERT INTO je_test (id, doc) VALUES (?1, ?2)", [4, doc],
+                 type_extensions: [JSONExt]
+               )
+    end
+
+    test "the same map with no extension keeps the NIF's own refusal", %{conn: conn} do
+      doc = %{"k" => <<0xFF, 0xFE>>}
+
+      assert {:error, {:unsupported_data_type, :map}} =
+               Xqlite.execute(conn, "INSERT INTO je_test (id, doc) VALUES (?1, ?2)", [5, doc])
     end
   end
 end

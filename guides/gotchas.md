@@ -73,6 +73,33 @@ column, or a TEXT tag. See
 [SQLite — Datatypes](https://www.sqlite.org/datatype3.html) for the five storage
 classes.
 
+### A non-finite `Decimal` is refused, not written as a word
+
+`Xqlite.TypeExtension.Decimal` has the same problem one level up, and answers
+it the other way. `Decimal` *can* hold `NaN` and the infinities, and
+`Decimal.to_string/2` writes them as the words `"NaN"`, `"-NaN"`, `"Infinity"`
+and `"-Infinity"` — text no later reader could tell apart from data somebody
+stored on purpose. So the extension refuses them:
+
+```elixir
+{:ok, conn} = Xqlite.open_in_memory()
+:ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t (amount TEXT);")
+
+{value, ""} = Decimal.parse("Infinity")
+
+Xqlite.execute(conn, "INSERT INTO t VALUES (?1)", [value],
+  type_extensions: [Xqlite.TypeExtension.Decimal])
+#=> {:error, {:type_extension_refused,
+#=>   %{position: 1, extension: Xqlite.TypeExtension.Decimal,
+#=>     reason: {:non_finite, :infinity}}}}
+```
+
+The same refusal covers a number whose plain form would need more than 6178
+digit characters, as `{:too_many_digits, %{digits: n, maximum: 6178}}`. Both
+happen in Elixir, before any SQL runs, so the table is untouched. Round the
+value, store its scientific form as your own TEXT, or keep a companion column
+that says "this one was not a number".
+
 ### `length()` stops at the first interior NUL
 
 xqlite hands you the *entire* stored TEXT value on read, interior NUL bytes
@@ -151,6 +178,12 @@ the `:on_error` option. The choice also fixes the stream's **element shape**:
 - **`:emit_error`** — a uniformly tagged stream: every row arrives as
   `{:ok, row}`, and a failure arrives as a single terminal `{:error, reason}`
   before the stream ends.
+
+Whichever mode you pick, the rows read before the failing one are delivered
+first, whatever the `:batch_size`. Only the failing row and everything after
+it are never read. A cancellation is the one exception: signalling a token
+from `:cancel_tokens` throws away the rows read in the batch it lands in,
+along with the rest of the result set.
 
 `:emit_error` is the mode to use when you want to handle failure inside the
 pipeline rather than with a `try`:

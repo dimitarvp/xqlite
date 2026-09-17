@@ -308,4 +308,209 @@ defmodule XqlitePragmaTest do
     ExUnit.Callbacks.on_exit(fn -> NIF.close(db) end)
     db
   end
+
+  # ---------------------------------------------------------------------------
+  # Value checking: Xqlite.set_pragma/3 and Xqlite.Pragma.put/4 share one rule
+  # ---------------------------------------------------------------------------
+
+  @writable_names P.writable()
+
+  @accepted_spellings Map.new(P.writable(), fn name ->
+                        spec = Map.fetch!(P.schema(), name)
+
+                        forms =
+                          case spec do
+                            %{return_type: :bool} ->
+                              [true, false, 1, 0, :on, :off, "ON", "off", "yes", "No", "TRUE"]
+
+                            %{valid_values: %Range{}} ->
+                              []
+
+                            %{valid_values: values} ->
+                              Enum.flat_map(values, fn
+                                value when is_binary(value) ->
+                                  [
+                                    value,
+                                    String.downcase(value),
+                                    String.upcase(value),
+                                    String.to_atom(String.downcase(value))
+                                  ]
+
+                                value ->
+                                  [value]
+                              end)
+                          end
+
+                        {name, forms}
+                      end)
+
+  @hostile_values [
+    :maybe,
+    :garbage,
+    nil,
+    {1, 2},
+    "99",
+    "not-a-word",
+    1.5,
+    -1.5,
+    3_000_000_000,
+    -3_000_000_000
+  ]
+
+  defp accepted_value(name) do
+    case Map.fetch!(@accepted_spellings, name) do
+      [] -> name |> integer_range() |> StreamData.integer()
+      forms -> StreamData.member_of(forms)
+    end
+  end
+
+  defp integer_range(name) do
+    %{valid_values: range} = Map.fetch!(P.schema(), name)
+    range
+  end
+
+  defp accepted_pair do
+    StreamData.bind(StreamData.member_of(@writable_names), fn name ->
+      StreamData.map(accepted_value(name), fn value -> {name, value} end)
+    end)
+  end
+
+  describe "Xqlite.set_pragma/3 checks the value" do
+    setup do
+      {:ok, conn} = Xqlite.open_in_memory()
+      on_exit(fn -> NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "a word no boolean pragma takes is refused, and the setting stands", %{conn: conn} do
+      assert {:ok, 1} = Xqlite.get_pragma(conn, "foreign_keys")
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :foreign_keys, value: :maybe}}} =
+               Xqlite.set_pragma(conn, "foreign_keys", :maybe)
+
+      assert {:ok, 1} = Xqlite.get_pragma(conn, "foreign_keys")
+    end
+
+    test "a word no integer pragma takes is refused, and the setting stands", %{conn: conn} do
+      {:ok, _} = Xqlite.set_pragma(conn, "user_version", 99)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: :garbage}}} =
+               Xqlite.set_pragma(conn, "user_version", :garbage)
+
+      assert {:ok, 99} = Xqlite.get_pragma(conn, "user_version")
+    end
+
+    test "a boolean on an integer pragma is refused by both setters", %{conn: conn} do
+      {:ok, _} = Xqlite.set_pragma(conn, "user_version", 7)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: true}}} =
+               P.put(conn, :user_version, true)
+
+      assert {:ok, 7} = Xqlite.get_pragma(conn, "user_version")
+    end
+
+    test "a pragma the spec marks read-only is refused", %{conn: conn} do
+      assert {:error, {:read_only_pragma, :page_count}} = P.put(conn, :page_count, 5)
+      assert {:error, {:read_only_pragma, :integrity_check}} = P.put(conn, :integrity_check, 5)
+    end
+
+    test "every spelling of a word pragma reaches SQLite", %{conn: conn} do
+      for spelling <- ["WAL", "wal", :wal] do
+        assert {:ok, mode} = Xqlite.set_pragma(conn, "journal_mode", spelling)
+        assert mode in ["wal", "memory"]
+      end
+    end
+
+    test "an upper-case pragma name keeps working", %{conn: conn} do
+      assert {:ok, _} = Xqlite.set_pragma(conn, "FOREIGN_KEYS", 1)
+      assert {:ok, 1} = Xqlite.get_pragma(conn, "foreign_keys")
+    end
+
+    test "a name the spec does not model keeps the raw path", %{conn: conn} do
+      assert {:ok, _} = Xqlite.set_pragma(conn, "case_sensitive_like", 1)
+
+      assert {:ok, %Xqlite.Result{rows: [[0]]}} =
+               Xqlite.query(conn, "SELECT 'A' LIKE 'a'", [])
+    end
+
+    property "a value outside the spec is refused by both setters, and nothing moves", %{
+      conn: conn
+    } do
+      check all(
+              name <- StreamData.member_of(@writable_names),
+              value <- StreamData.member_of(@hostile_values),
+              max_runs: 2000
+            ) do
+        before = Xqlite.get_pragma(conn, name)
+
+        assert {:error, {:invalid_pragma_value, %{pragma: ^name, value: ^value}}} =
+                 Xqlite.set_pragma(conn, name, value)
+
+        assert {:error, {:invalid_pragma_value, %{pragma: ^name, value: ^value}}} =
+                 P.put(conn, name, value)
+
+        assert Xqlite.get_pragma(conn, name) == before
+      end
+    end
+
+    property "a spelling the spec lists is accepted the same way by both setters" do
+      check all({name, value} <- accepted_pair(), max_runs: 2000) do
+        {:ok, raw_db} = NIF.open_in_memory(":memory:")
+        {:ok, typed_db} = NIF.open_in_memory(":memory:")
+
+        assert Xqlite.set_pragma(raw_db, name, value) == P.put(typed_db, name, value)
+        assert Xqlite.get_pragma(raw_db, name) == Xqlite.get_pragma(typed_db, name)
+
+        NIF.close(raw_db)
+        NIF.close(typed_db)
+      end
+    end
+  end
+
+  describe "the open path checks its values through the same rule" do
+    test "every documented option value opens" do
+      for opts <- [
+            [journal_mode: :wal],
+            [journal_mode: :delete],
+            [journal_mode: :truncate],
+            [journal_mode: :memory],
+            [journal_mode: :off],
+            [busy_timeout: 0],
+            [busy_timeout: 5_000],
+            [busy_timeout: :infinity],
+            [foreign_keys: true],
+            [foreign_keys: false],
+            [synchronous: :off],
+            [synchronous: :normal],
+            [synchronous: :full],
+            [synchronous: :extra],
+            [cache_size: -64_000],
+            [cache_size: 2_000],
+            [temp_store: :default],
+            [temp_store: :file],
+            [temp_store: :memory],
+            [wal_autocheckpoint: 0],
+            [wal_autocheckpoint: 1_000],
+            [mmap_size: 0],
+            [auto_vacuum: :none],
+            [auto_vacuum: :full],
+            [auto_vacuum: :incremental],
+            []
+          ] do
+        assert {:ok, conn} = Xqlite.open_in_memory(opts)
+        NIF.close(conn)
+      end
+    end
+
+    test "an option past what SQLite stores is refused at open" do
+      assert {:error, {:invalid_pragma_value, %{pragma: :busy_timeout}}} =
+               Xqlite.open_in_memory(busy_timeout: 3_000_000_000)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :cache_size}}} =
+               Xqlite.open_in_memory(cache_size: -10_000_000_000)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :wal_autocheckpoint}}} =
+               Xqlite.open_in_memory(wal_autocheckpoint: 3_000_000_000)
+    end
+  end
 end

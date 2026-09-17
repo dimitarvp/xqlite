@@ -480,8 +480,11 @@ defmodule XqliteNIF do
   autocheckpoint (see `register_wal_hook/2`). Raw-SQL `PRAGMA` statements
   get no such repair.
 
-  The `Xqlite.Pragma` module provides higher-level helpers for setting many
-  common PRAGMAs with more type safety.
+  This function checks nothing: the value is formatted and handed to SQLite,
+  which parses what it can of it and reports success even when it stored its
+  own fallback instead. `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4`
+  check the value against the PRAGMA's definition first and refuse what it
+  cannot take; use one of them unless you mean to reach SQLite unchecked.
   """
   @spec set_pragma(conn :: Xqlite.conn(), name :: String.t(), value :: term()) ::
           {:ok, term()} | Xqlite.error()
@@ -1189,11 +1192,17 @@ defmodule XqliteNIF do
       row, the outer list the batch.
     - `:done` once the stream is exhausted. The underlying SQLite statement
       is finalized at that moment, so every later fetch also answers `:done`.
-    - `{:error, reason}` when a read fails. Rows already read in the same
-      batch are discarded with it. Such a failure finalizes the statement
-      too, so the fetch after it is `:done` — except `:connection_closed`,
-      which leaves the stream open and repeats on every fetch until
-      `stream_close/1`.
+    - `{:ok, %{rows: [[term()]]}}` with fewer rows than asked for when a read
+      failed part-way through the batch: the rows read before the failing one
+      come back now and the error is answered by the next fetch. The statement
+      is finalized either way, so no row is ever read twice and no row from the
+      failing one on is read at all.
+    - `{:error, reason}` when a read fails with no row of that batch in hand,
+      and on the fetch after a partial batch. Such a failure finalizes the
+      statement too, so the fetch after the error is `:done` — except
+      `:connection_closed`, which leaves the stream open and repeats on every
+      fetch until `stream_close/1`. `stream_close/1` drops a held-back error,
+      so a fetch after the close answers `:done`.
 
   `Xqlite.stream/4` drives all of this; use it unless you are stepping the
   stream by hand.
@@ -1215,7 +1224,8 @@ defmodule XqliteNIF do
   `{:error, :operation_cancelled}` — OR-semantics across the list — and
   finalizes the statement, so the next fetch is `:done` and
   `stream_close/1` still answers `:ok`. Rows read before the cancel in the
-  same batch are discarded, exactly as any mid-batch error discards them.
+  same batch are discarded with it; a cancellation is the one failure that
+  throws rows away, while every other mid-batch error hands them back first.
   A token signalled before the call cancels during the first batch. Tokens
   are single-use, so a signalled token ends every stream it is handed to.
 

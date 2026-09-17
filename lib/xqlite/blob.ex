@@ -26,8 +26,10 @@ defmodule Xqlite.Blob do
   It is accepted everywhere a parameter value is accepted — in a positional
   list and as the value of a keyword pair — by `Xqlite.query/4`,
   `Xqlite.execute/4`, their cancellable forms, `Xqlite.stream/4`,
-  `Xqlite.bind/2`, `Xqlite.explain_analyze/3` and the matching `XqliteNIF`
-  functions. `execute_batch/2` takes no parameters and is unaffected.
+  `Xqlite.bind/3`, `Xqlite.explain_analyze/4` and the matching `XqliteNIF`
+  functions. `execute_batch/2` takes no parameters and is unaffected. No
+  built-in type extension claims it, so it passes the chain untouched even
+  with `:type_extensions` set.
 
   `bytes` must be a binary. Anything else is refused with
   `{:error, {:invalid_blob_bytes, %{position: n, type: t}}}`, where `n` is

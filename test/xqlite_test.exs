@@ -1,5 +1,6 @@
 defmodule XqliteTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import ExUnit.CaptureLog, only: [with_log: 1]
 
@@ -256,6 +257,49 @@ defmodule XqliteTest do
                  Xqlite.stream(conn, sql, [], cancel_tokens: [:bogus])
       end
     end
+
+    describe "Xqlite.stream/4 partial batches using #{prefix}" do
+      @describetag type_tag
+
+      setup context do
+        {mod, fun, args} = TestUtil.find_opener_mfa!(context)
+        assert {:ok, conn} = apply(mod, fun, args)
+        on_exit(fn -> NIF.close(conn) end)
+        {:ok, conn: conn}
+      end
+
+      test "the rows read before a bad value are delivered at the default batch size", %{
+        conn: conn
+      } do
+        sql = seed_step_error_table(conn, :utf8, 14, 0)
+        stream = Xqlite.stream(conn, sql, [], on_error: :emit_error)
+
+        {rows, tail} =
+          stream
+          |> Enum.to_list()
+          |> Enum.split(14)
+
+        assert Enum.map(rows, &row_id/1) == Enum.to_list(1..14)
+        assert [{:error, {:utf8_error, _, _}}] = tail
+      end
+
+      property "every mode delivers the good rows and stops right after them", %{conn: conn} do
+        check all(
+                good <- StreamData.integer(0..20),
+                after_bad <- StreamData.integer(0..5),
+                batch_size <- StreamData.integer(1..25),
+                kind <- StreamData.member_of([:utf8, :overflow]),
+                mode <- StreamData.member_of([:emit_error, :halt, :raise]),
+                max_runs: 2000
+              ) do
+          sql = seed_step_error_table(conn, kind, good, after_bad)
+          opts = [on_error: mode, batch_size: batch_size]
+          expected_ids = Enum.to_list(1..good//1)
+
+          assert_stream_outcome(Xqlite.stream(conn, sql, [], opts), mode, expected_ids, kind)
+        end
+      end
+    end
   end
 
   describe "disable_foreign_key_enforcement/1" do
@@ -395,5 +439,71 @@ defmodule XqliteTest do
 
     {:ok, 1} = NIF.execute(conn, "INSERT INTO bad_utf8 (id, v) VALUES (4, 'g4');", [])
     :ok
+  end
+
+  # `good` readable rows, then one row the read fails on, then `after_bad` more.
+  # Returns the SELECT whose scan hits the failure.
+  defp seed_step_error_table(conn, kind, good, after_bad) do
+    total = good + 1 + after_bad
+    values = Enum.map_join(1..total, ", ", fn id -> "(#{id}, #{cell(kind, id, good + 1)})" end)
+
+    :ok =
+      NIF.execute_batch(conn, """
+      DROP TABLE IF EXISTS step_error;
+      CREATE TABLE step_error (id INTEGER PRIMARY KEY, n);
+      INSERT INTO step_error (id, n) VALUES #{values};
+      """)
+
+    select_sql(kind)
+  end
+
+  defp cell(:utf8, id, bad_id) when id == bad_id, do: "CAST(X'FF41' AS TEXT)"
+  defp cell(:utf8, id, _bad_id), do: "'g#{id}'"
+  defp cell(:overflow, id, bad_id) when id == bad_id, do: "-9223372036854775808"
+  defp cell(:overflow, _id, _bad_id), do: "1"
+
+  defp select_sql(:utf8), do: "SELECT id, n AS v FROM step_error ORDER BY id;"
+  defp select_sql(:overflow), do: "SELECT id, abs(n) AS v FROM step_error ORDER BY id;"
+
+  defp row_id({:ok, row}), do: row["id"]
+  defp row_id(row) when is_map(row), do: row["id"]
+  defp row_id(other), do: other
+
+  defp assert_step_error(reason, :utf8) do
+    assert {:utf8_error, _, _} = reason
+  end
+
+  defp assert_step_error(reason, :overflow) do
+    assert {:sqlite_failure, _, _, _} = reason
+  end
+
+  defp assert_stream_outcome(stream, :emit_error, expected_ids, kind) do
+    {rows, tail} =
+      stream
+      |> Enum.to_list()
+      |> Enum.split(length(expected_ids))
+
+    assert Enum.map(rows, &row_id/1) == expected_ids
+    assert [{:error, reason}] = tail
+    assert_step_error(reason, kind)
+  end
+
+  defp assert_stream_outcome(stream, :halt, expected_ids, _kind) do
+    {rows, _log} = with_log(fn -> Enum.to_list(stream) end)
+    assert Enum.map(rows, &row_id/1) == expected_ids
+  end
+
+  defp assert_stream_outcome(stream, :raise, expected_ids, kind) do
+    Process.put(:seen_ids, [])
+
+    error =
+      assert_raise(Xqlite.StreamError, fn ->
+        Enum.each(stream, fn row ->
+          Process.put(:seen_ids, [row_id(row) | Process.get(:seen_ids)])
+        end)
+      end)
+
+    assert Enum.reverse(Process.get(:seen_ids)) == expected_ids
+    assert_step_error(error.reason, kind)
   end
 end

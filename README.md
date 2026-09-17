@@ -64,16 +64,16 @@ XQLITE_BUILD=true mix deps.compile xqlite
 
 Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access. See [hexdocs](https://hexdocs.pm/xqlite) for the full API.
 
-- **Queries & execution:** `query/4`, `query_cancellable/4`, `query_with_changes/3`, `execute/4`, `execute_batch/2` and cancellable variants; `query/4` and `execute/4` take optional `:type_extensions`
+- **Queries & execution:** `query/4`, `query_cancellable/5`, `query_with_changes/3`, `execute/4`, `execute_batch/2` and cancellable variants; every function that takes parameters takes optional `:type_extensions`
 - **Streaming:** `Xqlite.stream/4` (with optional `:type_extensions`) and the lower-level `stream_open/fetch/close`
 - **Transactions:** `:deferred`/`:immediate`/`:exclusive` modes, savepoints with release and rollback-to
 - **Cancellation:** per-operation, progress-handler-based, any process can cancel
 - **Schema introspection:** `schema_databases/1`, `schema_list_objects/2`, `schema_columns/2`, `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`, `get_create_sql/2`
-- **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 57 PRAGMAs, 34 of them writable
-- **Type extensions:** bidirectional encode/decode; nine built in -- `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), `Instant` and `Duration` (int64 nanoseconds, encode-only), and `Decimal` (encode-only, needs the optional `:decimal` dep)
+- **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 57 PRAGMAs, 34 of them writable. `Xqlite.set_pragma/3`, `Xqlite.Pragma.put/4` and the connection options of `open/2` share one value check, so a value a PRAGMA cannot take is refused rather than quietly replaced by SQLite's fallback
+- **Type extensions:** bidirectional encode/decode; nine built in -- `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), `Instant` and `Duration` (int64 nanoseconds, encode-only), and `Decimal` (encode-only, needs the optional `:decimal` dep). The chain runs on `query/4`, `execute/4`, `stream/4`, `bind/3`, `explain_analyze/4`, `query_cancellable/5`, `execute_cancellable/5` and `query_with_changes_cancellable/5`. An extension that claims a value but cannot store it -- a `Decimal` that is `NaN` or `Infinity`, a map holding bytes that are not valid UTF-8 -- fails the call with `{:error, {:type_extension_refused, %{position: n, extension: mod, reason: why}}}` instead of writing a word or a wrong value
 - **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy retry policy (`set_busy_policy/2`) plus any number of busy observers receiving `{:xqlite_busy, ...}`
 - **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, extended_code, msg}`. xqlite shares the slot: while the busy slot is held it adds two rules of its own, so a `busy_timeout` write is rejected as `{:busy_timeout_write_refused, %{policy: _, observers: _}}` and its own `PRAGMA busy_timeout` read passes a `:pragma` deny
-- **Manual statement lifecycle:** `prepare/2`, `bind/2` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
+- **Manual statement lifecycle:** `prepare/2`, `bind/3` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
 - **Telemetry (opt-in):** compile-time-flagged `:telemetry` events for every operation (spans with nanosecond timings), cancellation lifecycle events, and a bridge that re-emits hook fan-outs as `[:xqlite, :hook, :*]` -- see the "Wiring xqlite telemetry" guide
 - **Serialize / deserialize:** atomic in-memory snapshots to/from binary
 - **Extensions:** opt-in `load_extension/2` and `load_extension/3`
@@ -93,7 +93,7 @@ Errors are structured tuples: `{:error, {:constraint_violation, :constraint_uniq
 alias Xqlite.TypeExtension
 
 extensions = [TypeExtension.DateTime, TypeExtension.Date, TypeExtension.Time]
-params = TypeExtension.encode_params([~U[2024-01-15 10:30:00Z], ~D[2024-06-15]], extensions)
+{:ok, params} = TypeExtension.encode_params([~U[2024-01-15 10:30:00Z], ~D[2024-06-15]], extensions)
 {:ok, 1} = XqliteNIF.execute(conn, "INSERT INTO events (ts, day) VALUES (?1, ?2)", params)
 
 Xqlite.stream(conn, "SELECT ts, day FROM events", [],

@@ -51,6 +51,22 @@ defmodule Xqlite.TypeExtensionTest do
     def decode(_), do: :skip
   end
 
+  # Claims the marker atom and refuses it: the third answer of the callback.
+  defmodule Refuser do
+    @behaviour TypeExtension
+
+    @marker :refuse_me
+
+    def marker, do: @marker
+
+    @impl true
+    def encode(@marker), do: {:error, :nope}
+    def encode(_), do: :skip
+
+    @impl true
+    def decode(_), do: :skip
+  end
+
   # ---------------------------------------------------------------------------
   # Unit tests: DateTime extension
   # ---------------------------------------------------------------------------
@@ -320,30 +336,42 @@ defmodule Xqlite.TypeExtensionTest do
 
   describe "encode_value/2" do
     test "returns original value when no extensions" do
-      assert TypeExtension.encode_value(42, []) == 42
-      assert TypeExtension.encode_value("hello", []) == "hello"
-      assert TypeExtension.encode_value(nil, []) == nil
+      assert TypeExtension.encode_value(42, []) == {:ok, 42}
+      assert TypeExtension.encode_value("hello", []) == {:ok, "hello"}
+      assert TypeExtension.encode_value(nil, []) == {:ok, nil}
     end
 
     test "first matching extension wins" do
       value = 10
-      assert TypeExtension.encode_value(value, [IntDoubler, SkipAllExtension]) == 20
+      assert TypeExtension.encode_value(value, [IntDoubler, SkipAllExtension]) == {:ok, 20}
     end
 
     test "skips non-matching extensions and tries next" do
-      assert TypeExtension.encode_value("hello", [IntDoubler, StringUppercase]) == "HELLO"
+      assert TypeExtension.encode_value("hello", [IntDoubler, StringUppercase]) ==
+               {:ok, "HELLO"}
     end
 
     test "returns original value when all extensions skip" do
-      assert TypeExtension.encode_value(:an_atom, [IntDoubler, StringUppercase]) == :an_atom
+      assert TypeExtension.encode_value(:an_atom, [IntDoubler, StringUppercase]) ==
+               {:ok, :an_atom}
     end
 
     test "single extension that matches" do
-      assert TypeExtension.encode_value(5, [IntDoubler]) == 10
+      assert TypeExtension.encode_value(5, [IntDoubler]) == {:ok, 10}
     end
 
     test "single extension that skips" do
-      assert TypeExtension.encode_value("hi", [IntDoubler]) == "hi"
+      assert TypeExtension.encode_value("hi", [IntDoubler]) == {:ok, "hi"}
+    end
+
+    test "a refusal stops the chain and names the extension" do
+      assert TypeExtension.encode_value(Refuser.marker(), [Refuser, IntDoubler]) ==
+               {:error, %{extension: Refuser, reason: :nope}}
+    end
+
+    test "a value that is itself an error tuple is data, not a refusal" do
+      assert TypeExtension.encode_value({:error, :boom}, [IntDoubler]) ==
+               {:ok, {:error, :boom}}
     end
   end
 
@@ -367,30 +395,33 @@ defmodule Xqlite.TypeExtensionTest do
 
   describe "encode_params/2" do
     test "empty list unchanged" do
-      assert TypeExtension.encode_params([], [IntDoubler]) == []
+      assert TypeExtension.encode_params([], [IntDoubler]) == {:ok, []}
     end
 
     test "no extensions returns params unchanged" do
-      assert TypeExtension.encode_params([1, 2, 3], []) == [1, 2, 3]
+      assert TypeExtension.encode_params([1, 2, 3], []) == {:ok, [1, 2, 3]}
+    end
+
+    test "nil params are accepted and stay nil" do
+      assert TypeExtension.encode_params(nil, [IntDoubler]) == {:ok, nil}
+      assert TypeExtension.encode_params(nil, []) == {:ok, nil}
     end
 
     test "encodes positional params" do
-      assert TypeExtension.encode_params([5, "hi"], [IntDoubler, StringUppercase]) == [
-               10,
-               "HI"
-             ]
+      assert TypeExtension.encode_params([5, "hi"], [IntDoubler, StringUppercase]) ==
+               {:ok, [10, "HI"]}
     end
 
     test "encodes keyword params preserving keys" do
       params = [id: 5, name: "hello"]
       result = TypeExtension.encode_params(params, [IntDoubler, StringUppercase])
-      assert result == [id: 10, name: "HELLO"]
+      assert result == {:ok, [id: 10, name: "HELLO"]}
     end
 
     test "mixed types with partial matching" do
       params = [42, "text", nil, 3.14]
       result = TypeExtension.encode_params(params, [IntDoubler])
-      assert result == [84, "text", nil, 3.14]
+      assert result == {:ok, [84, "text", nil, 3.14]}
     end
 
     test "DateTime encoding in params" do
@@ -403,13 +434,13 @@ defmodule Xqlite.TypeExtensionTest do
           Xqlite.TypeExtension.Date
         ])
 
-      assert result == [1, "2024-01-15T10:30:00Z", "other"]
+      assert result == {:ok, [1, "2024-01-15T10:30:00Z", "other"]}
     end
 
     test "Date encoding in keyword params" do
       params = [start: ~D[2024-01-15], end: ~D[2024-12-31]]
       result = TypeExtension.encode_params(params, [Xqlite.TypeExtension.Date])
-      assert result == [start: "2024-01-15", end: "2024-12-31"]
+      assert result == {:ok, [start: "2024-01-15", end: "2024-12-31"]}
     end
 
     # Positional or keyword is decided once, from the first element, exactly as
@@ -418,13 +449,67 @@ defmodule Xqlite.TypeExtensionTest do
     test "a positional list starting with a blob wrapper encodes every later element" do
       wrapper = %Xqlite.Blob{bytes: <<1, 2>>}
 
-      assert TypeExtension.encode_params([wrapper, 5], [IntDoubler]) == [wrapper, 10]
+      assert TypeExtension.encode_params([wrapper, 5], [IntDoubler]) == {:ok, [wrapper, 10]}
     end
 
     test "a keyword list encodes every pair's value, whatever its key" do
       params = [{:a, 5}, {"b", 5}]
 
-      assert TypeExtension.encode_params(params, [IntDoubler]) == [{:a, 10}, {"b", 10}]
+      assert TypeExtension.encode_params(params, [IntDoubler]) == {:ok, [{:a, 10}, {"b", 10}]}
+    end
+  end
+
+  describe "encode_params/2 refusals" do
+    test "a refused positional parameter reports its 1-based position" do
+      params = [1, Refuser.marker(), 3]
+
+      assert TypeExtension.encode_params(params, [Refuser]) ==
+               {:error,
+                {:type_extension_refused, %{position: 2, extension: Refuser, reason: :nope}}}
+    end
+
+    test "a refused keyword parameter reports the pair's position" do
+      params = [a: 1, b: Refuser.marker()]
+
+      assert TypeExtension.encode_params(params, [Refuser]) ==
+               {:error,
+                {:type_extension_refused, %{position: 2, extension: Refuser, reason: :nope}}}
+    end
+
+    test "a blob wrapper counts as one position" do
+      params = [%Xqlite.Blob{bytes: <<1>>}, 2, Refuser.marker()]
+
+      assert {:error, {:type_extension_refused, %{position: 3}}} =
+               TypeExtension.encode_params(params, [Refuser])
+    end
+
+    test "the first extension that answers decides" do
+      params = [Refuser.marker()]
+
+      assert {:ok, [_]} = TypeExtension.encode_params(params, [SkipAllExtension, IntDoubler])
+
+      assert {:error, {:type_extension_refused, %{extension: Refuser}}} =
+               TypeExtension.encode_params(params, [SkipAllExtension, Refuser])
+    end
+
+    test "a parameter that is itself an error tuple is encoded, not read as a refusal" do
+      params = [{:error, :boom}]
+
+      assert TypeExtension.encode_params(params, [Refuser]) == {:ok, [{:error, :boom}]}
+    end
+
+    property "the reported position is the refused parameter's own place in the list" do
+      check all(
+              before <- StreamData.list_of(StreamData.integer(), max_length: 8),
+              rest <- StreamData.list_of(StreamData.integer(), max_length: 8),
+              max_runs: 2000
+            ) do
+        params = before ++ [Refuser.marker()] ++ rest
+        expected = length(before) + 1
+
+        assert {:error, {:type_extension_refused, %{position: ^expected, reason: :nope}}} =
+                 TypeExtension.encode_params(params, [IntDoubler, Refuser])
+      end
     end
   end
 
@@ -498,18 +583,20 @@ defmodule Xqlite.TypeExtensionTest do
 
       result = TypeExtension.encode_params(params, @all_extensions)
 
-      assert result == [
-               "2024-01-15T10:30:00Z",
-               "2024-01-15T10:30:00",
-               "2024-01-15",
-               "10:30:00"
-             ]
+      assert result ==
+               {:ok,
+                [
+                  "2024-01-15T10:30:00Z",
+                  "2024-01-15T10:30:00",
+                  "2024-01-15",
+                  "10:30:00"
+                ]}
     end
 
     test "native SQLite values pass through encode unchanged" do
       params = [42, 3.14, "plain text", nil]
       result = TypeExtension.encode_params(params, @all_extensions)
-      assert result == [42, 3.14, "plain text", nil]
+      assert result == {:ok, [42, 3.14, "plain text", nil]}
     end
 
     test "integers and floats pass through decode unchanged" do
@@ -571,7 +658,7 @@ defmodule Xqlite.TypeExtensionTest do
       test "DateTime round-trip with encode_params", %{conn: conn} do
         dt = ~U[2024-01-15 10:30:00Z]
         extensions = [Xqlite.TypeExtension.DateTime]
-        params = TypeExtension.encode_params([1, dt], extensions)
+        {:ok, params} = TypeExtension.encode_params([1, dt], extensions)
 
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO type_ext_test (id, dt_val) VALUES (?1, ?2)", params)
@@ -585,7 +672,7 @@ defmodule Xqlite.TypeExtensionTest do
       test "NaiveDateTime round-trip", %{conn: conn} do
         ndt = ~N[2024-03-20 08:45:30.654321]
         extensions = [Xqlite.TypeExtension.NaiveDateTime]
-        params = TypeExtension.encode_params([1, ndt], extensions)
+        {:ok, params} = TypeExtension.encode_params([1, ndt], extensions)
 
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO type_ext_test (id, ndt_val) VALUES (?1, ?2)", params)
@@ -599,7 +686,7 @@ defmodule Xqlite.TypeExtensionTest do
       test "Date round-trip", %{conn: conn} do
         d = ~D[2024-02-29]
         extensions = [Xqlite.TypeExtension.Date]
-        params = TypeExtension.encode_params([1, d], extensions)
+        {:ok, params} = TypeExtension.encode_params([1, d], extensions)
 
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO type_ext_test (id, d_val) VALUES (?1, ?2)", params)
@@ -613,7 +700,7 @@ defmodule Xqlite.TypeExtensionTest do
       test "Time round-trip", %{conn: conn} do
         t = ~T[23:59:59.999999]
         extensions = [Xqlite.TypeExtension.Time]
-        params = TypeExtension.encode_params([1, t], extensions)
+        {:ok, params} = TypeExtension.encode_params([1, t], extensions)
 
         {:ok, 1} =
           NIF.execute(conn, "INSERT INTO type_ext_test (id, t_val) VALUES (?1, ?2)", params)
@@ -637,7 +724,7 @@ defmodule Xqlite.TypeExtensionTest do
           Xqlite.TypeExtension.Time
         ]
 
-        params = TypeExtension.encode_params([1, dt, ndt, d, t], extensions)
+        {:ok, params} = TypeExtension.encode_params([1, dt, ndt, d, t], extensions)
 
         {:ok, 1} =
           NIF.execute(
@@ -661,7 +748,7 @@ defmodule Xqlite.TypeExtensionTest do
         extensions = [Xqlite.TypeExtension.DateTime]
         dt = ~U[2024-01-15 10:30:00Z]
 
-        params = TypeExtension.encode_params([1, dt, 42, 3.14, "plain"], extensions)
+        {:ok, params} = TypeExtension.encode_params([1, dt, 42, 3.14, "plain"], extensions)
 
         {:ok, 1} =
           NIF.execute(

@@ -84,6 +84,22 @@ defmodule Xqlite.NIF.BlobParamTest do
                )
     end
 
+    test "execute_cancellable/5 stores the wrapper as a BLOB", %{conn: conn} do
+      {:ok, token} = NIF.create_cancel_token()
+
+      assert {:ok, 1} =
+               Xqlite.execute_cancellable(
+                 conn,
+                 "INSERT INTO blob_param (id, v) VALUES (7, ?1)",
+                 [%Blob{bytes: @raw_bytes}],
+                 token,
+                 type_extensions: [Xqlite.TypeExtension.UUID]
+               )
+
+      assert {:ok, %{rows: [["blob", @raw_bytes]]}} =
+               NIF.query(conn, "SELECT typeof(v), v FROM blob_param WHERE id = 7", [])
+    end
+
     test "execute/3 stores the wrapper as a BLOB", %{conn: conn} do
       assert {:ok, 1} =
                NIF.execute(conn, "INSERT INTO blob_param (id, v) VALUES (1, ?1)", [

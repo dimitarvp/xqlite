@@ -191,6 +191,45 @@ defmodule Xqlite.NIF.CancellationTest do
         assert {:ok, %{rows: [["normal_batch"]]}} =
                  NIF.query(conn, "SELECT data FROM #{@batch_cancel_table} WHERE id = 0;", [])
       end
+
+      test "the extension chain runs on a cancellable form a live token leaves alone", %{
+        conn: conn
+      } do
+        exts = [type_extensions: [Xqlite.TypeExtension.Date]]
+        :ok = NIF.execute_batch(conn, "CREATE TABLE cancel_ext_test (id INTEGER, day TEXT);")
+
+        {:ok, insert_token} = NIF.create_cancel_token()
+
+        assert {:ok, 1} =
+                 Xqlite.execute_cancellable(
+                   conn,
+                   "INSERT INTO cancel_ext_test (id, day) VALUES (1, ?1)",
+                   [~D[2026-02-03]],
+                   insert_token,
+                   exts
+                 )
+
+        {:ok, read_token} = NIF.create_cancel_token()
+
+        assert {:ok, %{rows: [[~D[2026-02-03]]]}} =
+                 Xqlite.query_cancellable(
+                   conn,
+                   "SELECT day FROM cancel_ext_test WHERE day = ?1",
+                   [~D[2026-02-03]],
+                   read_token,
+                   exts
+                 )
+      end
+
+      test "a signalled token still wins over the extension chain", %{conn: conn} do
+        {:ok, token} = NIF.create_cancel_token()
+        :ok = Xqlite.cancel_operation(token)
+
+        assert {:error, :operation_cancelled} =
+                 Xqlite.query_cancellable(conn, @slow_query, [], token,
+                   type_extensions: [Xqlite.TypeExtension.Date]
+                 )
+      end
     end
   end
 

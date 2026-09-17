@@ -8,9 +8,14 @@ defmodule Xqlite.TypeExtension.JSON do
 
   Structs are deliberately *not* encoded — a `Date`, `NaiveDateTime`, `Decimal`,
   etc. belongs to its own extension, and capturing it here would shadow the more
-  specific converter. Terms `Jason` cannot encode (for example a map holding an
-  invalid-UTF-8 binary value) return `:skip`, so they fall through to the NIF's
-  own structured rejection instead of being swallowed.
+  specific converter.
+
+  A map or list `Jason` cannot encode — one holding an invalid-UTF-8 binary, or
+  a tuple, pid, reference or function, which JSON has no form for — is refused
+  with `{:error, {:json_encode_failed, %{reason: reason}}}`, where `reason` is
+  the `Jason.EncodeError` or `Protocol.UndefinedError` Jason returned. The
+  caller hears which parameter and why, instead of the same
+  `{:unsupported_data_type, :map}` a map with no extension loaded produces.
 
   ## Round-trip caveat
 
@@ -45,7 +50,7 @@ defmodule Xqlite.TypeExtension.JSON do
   defp encode_json(value) do
     case Jason.encode(value) do
       {:ok, json} -> {:ok, json}
-      {:error, _} -> :skip
+      {:error, reason} -> {:error, {:json_encode_failed, %{reason: reason}}}
     end
   end
 

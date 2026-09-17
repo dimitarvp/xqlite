@@ -1055,11 +1055,11 @@ fn stream_open<'a>(
                 return Err(e);
             }
 
-            Ok(XqliteStream {
-                atomic_raw_stmt: cell,
-                conn_resource_arc: conn_resource_arc_clone,
+            Ok(XqliteStream::new(
+                cell,
+                conn_resource_arc_clone,
                 column_names,
-            })
+            ))
         }
     })
     .map(ResourceArc::new)
@@ -1194,6 +1194,15 @@ fn stream_fetch_impl<'a>(
         Some(conn) => conn,
         None => return (error(), XqliteError::ConnectionClosed).encode(env),
     };
+
+    // An earlier batch ended on a step error after handing back the rows it
+    // had read. Answer that error now, before the loop: the statement is
+    // already finalized, so its null pointer would otherwise report `:done`
+    // and the stream would look complete.
+    if let Some(pending) = stream_handle.take_pending_error() {
+        return (error(), pending).encode(env);
+    }
+
     // SAFETY: conn_ref is valid (checked above). The handle is used only
     // for sqlite3_errmsg within process_single_step.
     let db_handle_for_errors = unsafe { conn_ref.handle() };
@@ -1244,7 +1253,19 @@ fn stream_fetch_impl<'a>(
                         // SAFETY: conn_lock_guard is held for the whole loop. The
                         // registry result is dropped in favour of the step error.
                         let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
-                        return Err(e);
+
+                        // A cancellation discards the batch, as the stream's
+                        // contract says. Any other error hands back the rows
+                        // this batch had already read and waits for the next
+                        // fetch — unless there are none, when it answers now.
+                        if fetched_rows.is_empty()
+                            || matches!(e, XqliteError::OperationCancelled)
+                        {
+                            return Err(e);
+                        }
+
+                        stream_handle.store_pending_error(e);
+                        break;
                     }
                 }
             }

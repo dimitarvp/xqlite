@@ -187,6 +187,7 @@ defmodule Xqlite do
           | {:no_such_table, String.t()}
           | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
           | {:read_only_database, integer(), String.t()}
+          | {:read_only_pragma, atom()}
           | {:rowid_shadowed, String.t()}
           | {:schema_changed, integer(), String.t()}
           | {:schema_parsing_error, String.t(), {:unexpected_value, String.t()}}
@@ -194,6 +195,8 @@ defmodule Xqlite do
           | {:sqlite_failure, integer(), integer(), String.t() | nil}
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
+          | {:type_extension_refused,
+             %{position: pos_integer(), extension: module(), reason: term()}}
           | {:unknown_pragma, atom()}
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
@@ -411,38 +414,24 @@ defmodule Xqlite do
     end)
   end
 
+  # The option names SQLite has no word for become the number it stores; the
+  # checked clause below then judges every one of them by the same rule.
   defp set_pragma_value(conn, :busy_timeout, :infinity),
-    do: XqliteNIF.set_pragma(conn, "busy_timeout", 2_147_483_647)
+    do: set_pragma_value(conn, :busy_timeout, 2_147_483_647)
 
-  defp set_pragma_value(conn, :busy_timeout, ms),
-    do: XqliteNIF.set_pragma(conn, "busy_timeout", ms)
+  defp set_pragma_value(conn, :auto_vacuum, :none), do: set_pragma_value(conn, :auto_vacuum, 0)
 
-  defp set_pragma_value(conn, :foreign_keys, true),
-    do: XqliteNIF.set_pragma(conn, "foreign_keys", :on)
-
-  defp set_pragma_value(conn, :foreign_keys, false),
-    do: XqliteNIF.set_pragma(conn, "foreign_keys", :off)
-
-  defp set_pragma_value(conn, :auto_vacuum, :none),
-    do: XqliteNIF.set_pragma(conn, "auto_vacuum", 0)
-
-  defp set_pragma_value(conn, :auto_vacuum, :full),
-    do: XqliteNIF.set_pragma(conn, "auto_vacuum", 1)
+  defp set_pragma_value(conn, :auto_vacuum, :full), do: set_pragma_value(conn, :auto_vacuum, 1)
 
   defp set_pragma_value(conn, :auto_vacuum, :incremental),
-    do: XqliteNIF.set_pragma(conn, "auto_vacuum", 2)
+    do: set_pragma_value(conn, :auto_vacuum, 2)
 
-  defp set_pragma_value(conn, :temp_store, :default),
-    do: XqliteNIF.set_pragma(conn, "temp_store", 0)
-
-  defp set_pragma_value(conn, :temp_store, :file),
-    do: XqliteNIF.set_pragma(conn, "temp_store", 1)
-
-  defp set_pragma_value(conn, :temp_store, :memory),
-    do: XqliteNIF.set_pragma(conn, "temp_store", 2)
-
-  defp set_pragma_value(conn, key, value),
-    do: XqliteNIF.set_pragma(conn, Atom.to_string(key), value)
+  defp set_pragma_value(conn, key, value) do
+    case Xqlite.Pragma.check_value(key, value) do
+      {:ok, checked} -> XqliteNIF.set_pragma(conn, Atom.to_string(key), checked)
+      {:error, _reason} = err -> err
+    end
+  end
 
   @doc """
   Checks an existing table for everything that would stop it becoming STRICT.
@@ -1104,47 +1093,60 @@ defmodule Xqlite do
       Parameters are encoded through the chain before binding and result
       rows are decoded through it after fetching (first match wins, same
       semantics as `stream/4`). Default: `[]` (values pass through
-      untouched).
+      untouched). An extension that claims a parameter but cannot store it
+      fails the call with
+      `{:error, {:type_extension_refused, %{position: n, extension: module,
+      reason: reason}}}` before any SQL runs; `n` is the parameter's 1-based
+      place in the list.
   """
   @spec query(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def query(conn, sql, params \\ [], opts \\ []) do
     extensions = Keyword.get(opts, :type_extensions, [])
-    bound_params = Xqlite.TypeExtension.encode_params(params, extensions)
 
     start_md = %{
       conn: conn,
       sql: sql,
-      params_count: params_count(bound_params),
+      params_count: params_count(params),
       cancellable?: false
     }
 
     span_with_stop_metadata [:xqlite, :query], start_md do
-      case XqliteNIF.query_with_changes(conn, sql, bound_params) do
-        {:ok, map} ->
-          result =
-            map
-            |> Xqlite.Result.from_map()
-            |> decode_result_rows(extensions)
-
-          {{:ok, result},
-           Map.merge(start_md, %{
-             result_class: :ok,
-             error_reason: nil,
-             num_rows: result.num_rows,
-             changes: result.changes
-           })}
-
-        {:error, reason} = err ->
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: reason,
-             num_rows: nil,
-             changes: nil
-           })}
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, bound_params} -> run_query(conn, sql, bound_params, extensions, start_md)
+        {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
     end
+  end
+
+  defp run_query(conn, sql, bound_params, extensions, start_md) do
+    case XqliteNIF.query_with_changes(conn, sql, bound_params) do
+      {:ok, map} ->
+        result =
+          map
+          |> Xqlite.Result.from_map()
+          |> decode_result_rows(extensions)
+
+        {{:ok, result},
+         Map.merge(start_md, %{
+           result_class: :ok,
+           error_reason: nil,
+           num_rows: result.num_rows,
+           changes: result.changes
+         })}
+
+      {:error, reason} = err ->
+        {err, query_error_metadata(start_md, reason)}
+    end
+  end
+
+  defp query_error_metadata(start_md, reason) do
+    Map.merge(start_md, %{
+      result_class: :error,
+      error_reason: reason,
+      num_rows: nil,
+      changes: nil
+    })
   end
 
   @doc """
@@ -1156,47 +1158,58 @@ defmodule Xqlite do
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
       parameters are encoded through the chain before binding (there are
-      no result rows to decode). Default: `[]`.
+      no result rows to decode). Default: `[]`. A parameter an extension
+      refuses fails the call with `{:error, {:type_extension_refused, _}}`,
+      as described in `query/4`.
   """
   @spec execute(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def execute(conn, sql, params \\ [], opts \\ []) do
     extensions = Keyword.get(opts, :type_extensions, [])
-    bound_params = Xqlite.TypeExtension.encode_params(params, extensions)
 
     start_md = %{
       conn: conn,
       sql: sql,
-      params_count: params_count(bound_params),
+      params_count: params_count(params),
       cancellable?: false
     }
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
-      case XqliteNIF.execute(conn, sql, bound_params) do
-        {:ok, affected} ->
-          result = %Xqlite.Result{
-            columns: [],
-            rows: [],
-            num_rows: 0,
-            changes: affected
-          }
-
-          {{:ok, result},
-           Map.merge(start_md, %{
-             result_class: :ok,
-             error_reason: nil,
-             affected_rows: affected
-           })}
-
-        {:error, reason} = err ->
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: reason,
-             affected_rows: nil
-           })}
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, bound_params} -> run_execute(conn, sql, bound_params, start_md)
+        {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
       end
     end
+  end
+
+  defp run_execute(conn, sql, bound_params, start_md) do
+    case XqliteNIF.execute(conn, sql, bound_params) do
+      {:ok, affected} ->
+        result = %Xqlite.Result{
+          columns: [],
+          rows: [],
+          num_rows: 0,
+          changes: affected
+        }
+
+        {{:ok, result},
+         Map.merge(start_md, %{
+           result_class: :ok,
+           error_reason: nil,
+           affected_rows: affected
+         })}
+
+      {:error, reason} = err ->
+        {err, execute_error_metadata(start_md, reason)}
+    end
+  end
+
+  defp execute_error_metadata(start_md, reason) do
+    Map.merge(start_md, %{
+      result_class: :error,
+      error_reason: reason,
+      affected_rows: nil
+    })
   end
 
   defp decode_result_rows(%Xqlite.Result{} = result, []), do: result
@@ -1204,6 +1217,16 @@ defmodule Xqlite do
   defp decode_result_rows(%Xqlite.Result{rows: rows} = result, extensions) do
     %{result | rows: Xqlite.TypeExtension.decode_rows(rows, extensions)}
   end
+
+  # The cancellable forms answer a plain map, not a struct: the rows are
+  # rewritten in place so the term keeps its shape.
+  defp decode_map_rows(map, []), do: map
+
+  defp decode_map_rows(%{rows: rows} = map, extensions) do
+    %{map | rows: Xqlite.TypeExtension.decode_rows(rows, extensions)}
+  end
+
+  defp decode_map_rows(map, _extensions), do: map
 
   @doc """
   Executes a SQL batch (multiple statements separated by semicolons).
@@ -1250,6 +1273,14 @@ defmodule Xqlite do
   `{:error, {:cannot_execute, _}}` rather than a report of zeroes, and a
   second statement after the first is `{:error, :multiple_statements}`.
 
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
+      parameters are encoded through the chain before binding, as in
+      `query/4`, so the statement profiled here is the one the application
+      runs. A parameter an extension refuses returns
+      `{:error, {:type_extension_refused, _}}`. Default: `[]`.
+
   ## Examples
 
       iex> {:ok, conn} = Xqlite.open_in_memory()
@@ -1261,34 +1292,50 @@ defmodule Xqlite do
   """
   @spec explain_analyze(conn(), String.t(), list() | keyword()) ::
           {:ok, Xqlite.ExplainAnalyze.t()} | error()
-  def explain_analyze(conn, sql, params \\ []) do
+  @spec explain_analyze(conn(), String.t(), list() | keyword() | nil, keyword()) ::
+          {:ok, Xqlite.ExplainAnalyze.t()} | error()
+  def explain_analyze(conn, sql, params \\ [], opts \\ []) do
+    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params)}
 
     span_with_stop_metadata [:xqlite, :explain_analyze], start_md do
-      case XqliteNIF.explain_analyze(conn, sql, params) do
-        {:ok, map} ->
-          report = Xqlite.ExplainAnalyze.from_map(map)
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, bound_params} ->
+          run_explain_analyze(conn, sql, bound_params, start_md)
 
-          {{:ok, report},
-           Map.merge(start_md, %{
-             result_class: :ok,
-             error_reason: nil,
-             wall_time_ns: report.wall_time_ns,
-             rows_produced: report.rows_produced,
-             scan_count: length(report.scans)
-           })}
-
-        {:error, reason} = err ->
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: reason,
-             wall_time_ns: nil,
-             rows_produced: nil,
-             scan_count: nil
-           })}
+        {:error, reason} ->
+          {{:error, reason}, explain_analyze_error_metadata(start_md, reason)}
       end
     end
+  end
+
+  defp run_explain_analyze(conn, sql, bound_params, start_md) do
+    case XqliteNIF.explain_analyze(conn, sql, bound_params) do
+      {:ok, map} ->
+        report = Xqlite.ExplainAnalyze.from_map(map)
+
+        {{:ok, report},
+         Map.merge(start_md, %{
+           result_class: :ok,
+           error_reason: nil,
+           wall_time_ns: report.wall_time_ns,
+           rows_produced: report.rows_produced,
+           scan_count: length(report.scans)
+         })}
+
+      {:error, reason} = err ->
+        {err, explain_analyze_error_metadata(start_md, reason)}
+    end
+  end
+
+  defp explain_analyze_error_metadata(start_md, reason) do
+    Map.merge(start_md, %{
+      result_class: :error,
+      error_reason: reason,
+      wall_time_ns: nil,
+      rows_produced: nil,
+      scan_count: nil
+    })
   end
 
   @doc """
@@ -1305,17 +1352,25 @@ defmodule Xqlite do
     * `:type_extensions` (list of modules, default: `[]`) - A list of modules
       implementing the `Xqlite.TypeExtension` behaviour. Parameters are encoded
       before binding, and result values are decoded as rows are fetched.
-      Extensions are applied in list order; the first match wins.
+      Extensions are applied in list order; the first match wins. A parameter
+      an extension refuses returns `{:error, {:type_extension_refused, _}}` at
+      stream open, before any statement is prepared, as described in
+      `query/4`.
     * `:on_error` (`:raise` | `:halt` | `:emit_error`, default: `:raise`) -
       How a mid-fetch error (e.g. an invalid-UTF-8 TEXT value) is surfaced.
-      The stream's element shape FOLLOWS the mode:
+      Every row read before the failing one is delivered first, whatever
+      the mode and whatever the batch size; only the rows from the failing
+      one on are never read. A cancellation is the one exception: it
+      discards the rows read in the batch it lands in (see `:cancel_tokens`
+      below). The stream's element shape FOLLOWS the mode:
         * `:raise` (default) - happy path yields raw row maps; a mid-fetch
           error raises `Xqlite.StreamError`, whose `:reason` field holds the
-          structured error term. A failed read can never masquerade as a
-          completed stream.
+          structured error term, after the rows read before it. A failed
+          read can never masquerade as a completed stream.
         * `:halt` - happy path yields raw row maps; a mid-fetch error is
-          logged and the stream stops. LOSSY: the result set is silently
-          truncated and the consumer receives no error signal.
+          logged and the stream stops after the rows read before it. LOSSY:
+          the rows from the failure on are missing and the consumer receives
+          no error signal.
         * `:emit_error` - yields a uniformly tagged stream: `{:ok, row}` for
           each row, followed by a terminal `{:error, reason}` on failure.
       An unsupported value returns `{:error, {:invalid_on_error, value}}` at
@@ -1362,7 +1417,6 @@ defmodule Xqlite do
           Enumerable.t() | error()
   def stream(conn, sql, params \\ [], opts \\ []) do
     type_extensions = Keyword.get(opts, :type_extensions, [])
-    encoded_params = Xqlite.TypeExtension.encode_params(params, type_extensions)
     batch_size = Keyword.get(opts, :batch_size, 500)
 
     cancel_tokens =
@@ -1378,20 +1432,31 @@ defmodule Xqlite do
       cancellable?: cancel_tokens != []
     }
 
+    span_with_stop_metadata [:xqlite, :stream, :open], start_md do
+      case Xqlite.TypeExtension.encode_params(params, type_extensions) do
+        {:ok, encoded_params} -> open_stream(conn, sql, encoded_params, opts, start_md)
+        {:error, reason} -> {{:error, reason}, stream_error_metadata(start_md, reason)}
+      end
+    end
+  end
+
+  defp open_stream(conn, sql, encoded_params, opts, start_md) do
     start_fun = &Xqlite.StreamResourceCallbacks.start_fun/1
     next_fun = &Xqlite.StreamResourceCallbacks.next_fun/1
     after_fun = &Xqlite.StreamResourceCallbacks.after_fun/1
 
-    span_with_stop_metadata [:xqlite, :stream, :open], start_md do
-      case start_fun.({conn, sql, encoded_params, opts}) do
-        {:ok, acc} ->
-          {Stream.resource(fn -> acc end, next_fun, after_fun),
-           Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+    case start_fun.({conn, sql, encoded_params, opts}) do
+      {:ok, acc} ->
+        {Stream.resource(fn -> acc end, next_fun, after_fun),
+         Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
-        {:error, reason} = error ->
-          {error, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
-      end
+      {:error, reason} = error ->
+        {error, stream_error_metadata(start_md, reason)}
     end
+  end
+
+  defp stream_error_metadata(start_md, reason) do
+    Map.merge(start_md, %{result_class: :error, error_reason: reason})
   end
 
   @doc """
@@ -1465,10 +1530,26 @@ defmodule Xqlite do
   `BLOB` otherwise. Pass `%Xqlite.Blob{bytes: bytes}` in either form — a
   positional element or a keyword pair's value — to store a `BLOB` whatever
   the bytes are.
+
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
+      parameters are encoded through the chain before binding, as in
+      `query/4`, and a parameter an extension refuses returns
+      `{:error, {:type_extension_refused, _}}`. Default: `[]`. The rows
+      `step/1` and `multi_step/2` return are never decoded — run them
+      through `Xqlite.TypeExtension.decode_rows/2` yourself if you want the
+      decoded form.
   """
   @spec bind(stmt(), list() | keyword()) :: :ok | error()
-  def bind(stmt, params) when is_list(params) do
-    XqliteNIF.stmt_bind(stmt, params)
+  @spec bind(stmt(), list() | keyword(), keyword()) :: :ok | error()
+  def bind(stmt, params, opts \\ []) when is_list(params) do
+    extensions = Keyword.get(opts, :type_extensions, [])
+
+    case Xqlite.TypeExtension.encode_params(params, extensions) do
+      {:ok, bound_params} -> XqliteNIF.stmt_bind(stmt, bound_params)
+      {:error, _reason} = err -> err
+    end
   end
 
   @doc """
@@ -1477,6 +1558,10 @@ defmodule Xqlite do
   Returns `{:row, values}`, `:done` when exhausted, or `{:error, reason}`.
   Stepping past `:done` without a `reset/1` returns whatever SQLite reports
   for the re-step (a fresh automatic rerun on modern SQLite).
+
+  The values come back exactly as SQLite stored them: no type extension
+  runs on them, whatever `bind/3` was given. Pass them through
+  `Xqlite.TypeExtension.decode_rows/2` for the decoded form.
   """
   @spec step(stmt()) :: {:row, [sqlite_value()]} | :done | error()
   def step(stmt), do: XqliteNIF.stmt_step(stmt)
@@ -1491,6 +1576,10 @@ defmodule Xqlite do
   Calling again after `done: true` without a `reset/1` RERUNS the query
   from the top (v2-prepared statements auto-reset when stepped past done —
   SQLite semantics, same as `step/1`).
+
+  The rows come back exactly as SQLite stored them: no type extension runs
+  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
+  decoded form.
   """
   @spec multi_step(stmt(), pos_integer()) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
@@ -1803,18 +1892,47 @@ defmodule Xqlite do
   @doc """
   Sets a PRAGMA value on the connection.
 
-  Wraps `XqliteNIF.set_pragma/3` and emits `[:xqlite, :pragma, :set]`.
+  The value is checked against the PRAGMA's definition first, through
+  `Xqlite.Pragma.check_value/2` — the same check `Xqlite.Pragma.put/4` and
+  the connection options of `open/2` apply. A value the PRAGMA cannot take
+  is refused with
+  `{:error, {:invalid_pragma_value, %{pragma: name, value: value}}}` and
+  nothing is sent to SQLite; a PRAGMA that can only be read is refused with
+  `{:error, {:read_only_pragma, name}}`. Without the check SQLite would
+  parse what it could of the word and answer `{:ok, nil}` while leaving the
+  setting at its fallback.
+
+  A PRAGMA `Xqlite.Pragma` does not model keeps the raw path: its value
+  reaches SQLite as written, and SQLite decides.
+
+  Wraps `XqliteNIF.set_pragma/3` and emits `[:xqlite, :pragma, :set]` after
+  a successful write, with the caller's own value in the metadata.
   """
   @spec set_pragma(conn(), String.t() | atom(), term()) :: {:ok, term()} | error()
   def set_pragma(conn, name, value) do
     name_str = to_string(name)
 
-    case XqliteNIF.set_pragma(conn, name_str, value) do
+    case Xqlite.Pragma.check_value(name, value) do
+      {:ok, checked} -> write_pragma(conn, name_str, checked, value)
+      {:error, reason} -> unmodelled_or_refusal(conn, name_str, value, reason)
+    end
+  end
+
+  defp unmodelled_or_refusal(conn, name_str, value, {:invalid_pragma_name, _name}),
+    do: write_pragma(conn, name_str, value, value)
+
+  defp unmodelled_or_refusal(conn, name_str, value, {:unknown_pragma, _name}),
+    do: write_pragma(conn, name_str, value, value)
+
+  defp unmodelled_or_refusal(_conn, _name_str, _value, reason), do: {:error, reason}
+
+  defp write_pragma(conn, name_str, sent, reported) do
+    case XqliteNIF.set_pragma(conn, name_str, sent) do
       {:ok, _new_value} = ok ->
         emit(
           [:xqlite, :pragma, :set],
           %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
-          %{conn: conn, name: name_str, value: value}
+          %{conn: conn, name: name_str, value: reported}
         )
 
         ok
@@ -2190,6 +2308,15 @@ defmodule Xqlite do
   tokens; OR-semantics — any signalled token interrupts the query.
 
   See `XqliteNIF.query_cancellable/4` for the raw NIF (list form only).
+
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
+      parameters are encoded through the chain before binding and the
+      result's rows are decoded through it, as in `query/4`. The result
+      stays a plain map — only its `:rows` are rewritten. A parameter an
+      extension refuses returns `{:error, {:type_extension_refused, _}}`.
+      Default: `[]`.
   """
   @spec query_cancellable(
           conn(),
@@ -2197,46 +2324,58 @@ defmodule Xqlite do
           list() | keyword(),
           reference() | [reference()]
         ) :: {:ok, query_result()} | error()
-  def query_cancellable(conn, sql, params, token_or_tokens) do
+  @spec query_cancellable(
+          conn(),
+          String.t(),
+          list() | keyword() | nil,
+          reference() | [reference()],
+          keyword()
+        ) :: {:ok, query_result()} | error()
+  def query_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
     tokens = List.wrap(token_or_tokens)
+    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :query], start_md do
-      case XqliteNIF.query_cancellable(conn, sql, params, tokens) do
-        {:ok, result} ->
-          {{:ok, result},
-           Map.merge(start_md, %{
-             result_class: :ok,
-             error_reason: nil,
-             num_rows: Map.get(result, :num_rows, 0),
-             changes: nil
-           })}
-
-        {:error, :operation_cancelled} = err ->
-          emit_cancel_honored(conn, :query, tokens)
-
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: :operation_cancelled,
-             num_rows: nil,
-             changes: nil
-           })}
-
-        {:error, reason} = err ->
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: reason,
-             num_rows: nil,
-             changes: nil
-           })}
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, bound} -> run_query_cancellable(conn, sql, bound, tokens, extensions, start_md)
+        {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
+    end
+  end
+
+  defp run_query_cancellable(conn, sql, bound_params, tokens, extensions, start_md) do
+    case XqliteNIF.query_cancellable(conn, sql, bound_params, tokens) do
+      {:ok, result} ->
+        decoded = decode_map_rows(result, extensions)
+
+        {{:ok, decoded},
+         Map.merge(start_md, %{
+           result_class: :ok,
+           error_reason: nil,
+           num_rows: Map.get(decoded, :num_rows, 0),
+           changes: nil
+         })}
+
+      {:error, :operation_cancelled} = err ->
+        emit_cancel_honored(conn, :query, tokens)
+        {err, query_error_metadata(start_md, :operation_cancelled)}
+
+      {:error, reason} = err ->
+        {err, query_error_metadata(start_md, reason)}
     end
   end
 
   @doc """
   Cancellable `execute/3`. Accepts either a single cancel token or a list.
+
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
+      parameters are encoded through the chain before binding, as in
+      `query/4` (there are no result rows to decode). A parameter an
+      extension refuses returns `{:error, {:type_extension_refused, _}}`.
+      Default: `[]`.
   """
   @spec execute_cancellable(
           conn(),
@@ -2244,38 +2383,42 @@ defmodule Xqlite do
           list(),
           reference() | [reference()]
         ) :: {:ok, non_neg_integer()} | error()
-  def execute_cancellable(conn, sql, params, token_or_tokens) do
+  @spec execute_cancellable(
+          conn(),
+          String.t(),
+          list() | keyword() | nil,
+          reference() | [reference()],
+          keyword()
+        ) :: {:ok, non_neg_integer()} | error()
+  def execute_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
     tokens = List.wrap(token_or_tokens)
+    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
-      case XqliteNIF.execute_cancellable(conn, sql, params, tokens) do
-        {:ok, affected} = ok ->
-          {ok,
-           Map.merge(start_md, %{
-             result_class: :ok,
-             error_reason: nil,
-             affected_rows: affected
-           })}
-
-        {:error, :operation_cancelled} = err ->
-          emit_cancel_honored(conn, :execute, tokens)
-
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: :operation_cancelled,
-             affected_rows: nil
-           })}
-
-        {:error, reason} = err ->
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: reason,
-             affected_rows: nil
-           })}
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, bound} -> run_execute_cancellable(conn, sql, bound, tokens, start_md)
+        {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
       end
+    end
+  end
+
+  defp run_execute_cancellable(conn, sql, bound_params, tokens, start_md) do
+    case XqliteNIF.execute_cancellable(conn, sql, bound_params, tokens) do
+      {:ok, affected} = ok ->
+        {ok,
+         Map.merge(start_md, %{
+           result_class: :ok,
+           error_reason: nil,
+           affected_rows: affected
+         })}
+
+      {:error, :operation_cancelled} = err ->
+        emit_cancel_honored(conn, :execute, tokens)
+        {err, execute_error_metadata(start_md, :operation_cancelled)}
+
+      {:error, reason} = err ->
+        {err, execute_error_metadata(start_md, reason)}
     end
   end
 
@@ -2312,6 +2455,15 @@ defmodule Xqlite do
 
   @doc """
   Cancellable `query_with_changes/3`. Accepts either a single cancel token or a list.
+
+  ## Options
+
+    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
+      parameters are encoded through the chain before binding and the
+      result's rows are decoded through it, as in `query/4`. The result
+      stays a plain map — only its `:rows` are rewritten. A parameter an
+      extension refuses returns `{:error, {:type_extension_refused, _}}`.
+      Default: `[]`.
   """
   @spec query_with_changes_cancellable(
           conn(),
@@ -2319,41 +2471,45 @@ defmodule Xqlite do
           list() | keyword(),
           reference() | [reference()]
         ) :: {:ok, map()} | error()
-  def query_with_changes_cancellable(conn, sql, params, token_or_tokens) do
+  @spec query_with_changes_cancellable(
+          conn(),
+          String.t(),
+          list() | keyword() | nil,
+          reference() | [reference()],
+          keyword()
+        ) :: {:ok, map()} | error()
+  def query_with_changes_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
     tokens = List.wrap(token_or_tokens)
+    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :query_with_changes], start_md do
-      case XqliteNIF.query_with_changes_cancellable(conn, sql, params, tokens) do
-        {:ok, map} ->
-          {{:ok, map},
-           Map.merge(start_md, %{
-             result_class: :ok,
-             error_reason: nil,
-             num_rows: Map.get(map, :num_rows, 0),
-             changes: Map.get(map, :changes, 0)
-           })}
-
-        {:error, :operation_cancelled} = err ->
-          emit_cancel_honored(conn, :query_with_changes, tokens)
-
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: :operation_cancelled,
-             num_rows: nil,
-             changes: nil
-           })}
-
-        {:error, reason} = err ->
-          {err,
-           Map.merge(start_md, %{
-             result_class: :error,
-             error_reason: reason,
-             num_rows: nil,
-             changes: nil
-           })}
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, bound} -> run_changes_cancellable(conn, sql, bound, tokens, extensions, start_md)
+        {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
+    end
+  end
+
+  defp run_changes_cancellable(conn, sql, bound_params, tokens, extensions, start_md) do
+    case XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens) do
+      {:ok, map} ->
+        decoded = decode_map_rows(map, extensions)
+
+        {{:ok, decoded},
+         Map.merge(start_md, %{
+           result_class: :ok,
+           error_reason: nil,
+           num_rows: Map.get(decoded, :num_rows, 0),
+           changes: Map.get(decoded, :changes, 0)
+         })}
+
+      {:error, :operation_cancelled} = err ->
+        emit_cancel_honored(conn, :query_with_changes, tokens)
+        {err, query_error_metadata(start_md, :operation_cancelled)}
+
+      {:error, reason} = err ->
+        {err, query_error_metadata(start_md, reason)}
     end
   end
 

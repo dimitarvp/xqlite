@@ -122,7 +122,7 @@ defmodule Xqlite.TypeExtension.UUIDTest do
     end
 
     test "canonical text encodes to a compact BLOB and decodes back", %{conn: conn} do
-      [1, %Xqlite.Blob{bytes: bytes} = encoded] =
+      {:ok, [1, %Xqlite.Blob{bytes: bytes} = encoded]} =
         TypeExtension.encode_params([1, @canonical], [UUIDExt])
 
       assert byte_size(bytes) == 16
@@ -145,7 +145,7 @@ defmodule Xqlite.TypeExtension.UUIDTest do
 
     test "uppercase input round-trips to lowercase output", %{conn: conn} do
       upper = String.upcase(@canonical)
-      params = TypeExtension.encode_params([2, upper], [UUIDExt])
+      {:ok, params} = TypeExtension.encode_params([2, upper], [UUIDExt])
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO uuid_test (id, u) VALUES (?1, ?2)", params)
 
@@ -167,7 +167,7 @@ defmodule Xqlite.TypeExtension.UUIDTest do
       nil_uuid = "00000000-0000-0000-0000-000000000000"
 
       for {id, text} <- [{10, @canonical}, {11, nil_uuid}] do
-        params = TypeExtension.encode_params([id, text], [UUIDExt])
+        {:ok, params} = TypeExtension.encode_params([id, text], [UUIDExt])
         {:ok, 1} = NIF.execute(conn, "INSERT INTO uuid_test (id, u) VALUES (?1, ?2)", params)
       end
 
