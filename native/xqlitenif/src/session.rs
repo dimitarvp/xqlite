@@ -1,4 +1,4 @@
-use crate::connection::XqliteConn;
+use crate::connection::{self, XqliteConn};
 use crate::error::XqliteError;
 use rusqlite::session::Session;
 use rustler::{Resource, ResourceArc, resource_impl};
@@ -94,7 +94,11 @@ where
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
     match guard.as_ref() {
-        Some(session) => func(session),
+        Some(session) => {
+            connection::with_busy_timeout_rule(&session_handle.conn_resource_arc, || {
+                func(session)
+            })
+        }
         None => Err(XqliteError::ConnectionClosed),
     }
 }
@@ -120,7 +124,11 @@ where
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
     match guard.as_mut() {
-        Some(session) => func(session),
+        Some(session) => {
+            connection::with_busy_timeout_rule(&session_handle.conn_resource_arc, || {
+                func(session)
+            })
+        }
         None => Err(XqliteError::ConnectionClosed),
     }
 }

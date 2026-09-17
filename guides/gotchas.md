@@ -288,23 +288,38 @@ and `:max_elapsed_ms` as the hard wall-time cap per contention.
 :ok = Xqlite.set_busy_policy(conn, max_retries: 1_000, max_elapsed_ms: 400, sleep_ms: 5)
 ```
 
-### `PRAGMA busy_timeout` silently replaces your busy policy
+### A `busy_timeout` write is rejected while the busy slot is held
 
 SQLite has exactly **one** busy-handler slot per connection. xqlite uses it for
 both the busy retry policy (`Xqlite.set_busy_policy/2`) and the busy observers
-(`Xqlite.register_busy_observer/2`) — both ride that single C callback. Running
-`PRAGMA busy_timeout = N`, whether as raw SQL or via
-`XqliteNIF.set_pragma(conn, "busy_timeout", ms)`, installs SQLite's *built-in*
-sleep-and-retry handler into that same slot, overwriting xqlite's. The effect is
-silent: the retry policy stops applying, and every registered observer stops
-receiving its `{:xqlite_busy, ...}` messages, with no error and no warning.
+(`Xqlite.register_busy_observer/2`) — both ride that single C callback. A
+`PRAGMA busy_timeout = N` installs SQLite's *built-in* sleep-and-retry handler
+into that same slot, overwriting xqlite's, which would stop the retry policy
+applying and silence every registered observer.
 
-Nothing leaks — xqlite reclaims the displaced state on the next slot change or
-at connection close — but the behavior change is invisible until you notice the
-observers have gone quiet. If you want plain-timeout semantics, switch to them
-deliberately with `Xqlite.busy_timeout/2`, which removes the policy first and
-keeps xqlite's bookkeeping consistent. Do not interleave a raw
-`PRAGMA busy_timeout` with `set_busy_policy/2` on the same connection.
+So while a policy or at least one observer is installed, xqlite rejects that
+write. It fails as the statement is *prepared* — SQLite applies the PRAGMA
+during code generation, so `Xqlite.prepare/2` alone would already have done the
+damage — and the call answers
+
+```elixir
+{:error, {:busy_timeout_write_refused, %{policy: true, observers: 0}}}
+```
+
+The map says what is holding the slot. Every path that prepares SQL on the
+connection reports it the same way: `query/4`, `execute/4`, `execute_batch/2`
+(the statements before the rejected one have run), `prepare/2`, `stream/4`, and
+the typed `Xqlite.set_pragma(conn, :busy_timeout, ms)` /
+`XqliteNIF.set_pragma/3`. Every spelling is covered, including
+`PRAGMA busy_timeout(N)`, a quoted name, a `main.` or `temp.` prefix, and a
+value of `0` or less — SQLite treats anything at or below zero as "stop
+waiting" and drops the callback just as destructively.
+
+Reading is untouched: `PRAGMA busy_timeout` still works and reads `0` while the
+slot is held, because SQLite zeroes the stored value whenever a callback is
+installed. To change the wait, use `Xqlite.busy_timeout/2` — it goes through the
+slot, keeps your observers, and works whether the slot is held or empty. With
+the slot empty the raw PRAGMA is accepted as before.
 
 ### A busy retry and the WAL autocheckpoint pin the connection
 

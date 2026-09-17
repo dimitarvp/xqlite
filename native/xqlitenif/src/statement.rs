@@ -1,4 +1,4 @@
-use crate::connection::XqliteConn;
+use crate::connection::{self, XqliteConn};
 use crate::error::{self, XqliteError};
 use crate::stream::take_and_finalize_raw;
 use rusqlite::ffi;
@@ -199,7 +199,7 @@ impl XqliteStatement {
         // Connection alive (and the connection exclusively ours) for the
         // whole duration of `f`.
         let db = unsafe { conn.handle() };
-        f(ptr, db)
+        connection::with_busy_timeout_rule(&self.conn_resource_arc, || f(ptr, db))
     }
 }
 

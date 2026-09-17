@@ -1,5 +1,6 @@
 use crate::atoms;
-use crate::busy_handler::BusySlotState;
+use crate::authorizer::ActionKind;
+use crate::busy_handler::{BusySlotFlags, BusySlotState};
 use crate::commit_hook::{self, CommitSubscriber};
 use crate::error::XqliteError;
 use crate::hook_util::{self, HookList};
@@ -11,7 +12,7 @@ use crate::wal_hook::{self, WalDispatch};
 use rusqlite::ffi;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -90,6 +91,14 @@ pub(crate) struct XqliteConn {
     // compose) plus any number of observer subscribers, one C callback
     // serving both halves. Installed lazily, removed when both empty.
     pub(crate) busy_handler: AtomicPtr<BusySlotState>,
+
+    // What the busy slot holds, readable without touching the pointer
+    // above. The authorizer closure owns a clone.
+    pub(crate) busy_flags: Arc<BusySlotFlags>,
+
+    // The action kinds `set_authorizer` denies, `None` when the caller
+    // asked for none. One composed closure serves these and the busy slot.
+    pub(crate) denied_actions: Mutex<Option<HashSet<ActionKind>>>,
 
     // Multi-subscriber per-connection hook lists. Each holds N
     // `HookEntry<T>`s, one per registered subscriber. A master closure
@@ -243,6 +252,8 @@ pub(crate) fn handle_open_result(
                 children: Mutex::new(HashMap::new()),
                 extensions_enabled: AtomicBool::new(false),
                 busy_handler: AtomicPtr::new(std::ptr::null_mut()),
+                busy_flags: Arc::new(BusySlotFlags::default()),
+                denied_actions: Mutex::new(None),
                 wal_hook: WalDispatch::new(),
                 update_hook: Arc::clone(&update_hook_list),
                 commit_hook: Arc::clone(&commit_hook_list),
@@ -323,6 +334,34 @@ pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), X
     }
 }
 
+/// Runs `func` and names the denial the busy slot caused: while the slot is
+/// held, xqlite's own authorizer rule rejects a `busy_timeout` write, and the
+/// caller hears that instead of the generic authorization error. Every path
+/// that can prepare SQL goes through here, so the two are never confused.
+/// Callers hold the connection Mutex for the whole call.
+#[inline]
+pub(crate) fn with_busy_timeout_rule<F, R>(
+    handle: &XqliteConn,
+    func: F,
+) -> Result<R, XqliteError>
+where
+    F: FnOnce() -> Result<R, XqliteError>,
+{
+    handle.busy_flags.clear_write_refused();
+    let result = func();
+    let refused = handle.busy_flags.take_write_refused();
+
+    match result {
+        Err(XqliteError::AuthorizationDenied { .. }) if refused => {
+            Err(XqliteError::BusyTimeoutWriteRefused {
+                policy: handle.busy_flags.policy(),
+                observers: handle.busy_flags.observers(),
+            })
+        }
+        other => other,
+    }
+}
+
 #[inline]
 pub(crate) fn with_conn<F, R>(
     handle: &ResourceArc<XqliteConn>,
@@ -336,7 +375,7 @@ where
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
     match conn_guard.as_ref() {
-        Some(conn) => func(conn),
+        Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
         None => Err(XqliteError::ConnectionClosed),
     }
 }
@@ -354,7 +393,7 @@ where
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
     match conn_guard.as_mut() {
-        Some(conn) => func(conn),
+        Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
         None => Err(XqliteError::ConnectionClosed),
     }
 }

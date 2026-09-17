@@ -219,6 +219,12 @@ pub(crate) enum XqliteError {
         extended_code: i32,
         message: String,
     },
+    BusyTimeoutWriteRefused {
+        // SQLITE_AUTH raised by xqlite's own rule: a `busy_timeout` write
+        // while the busy slot holds a policy or observers.
+        policy: bool,
+        observers: usize,
+    },
 
     InvalidColumnIndex(usize),
     InvalidColumnName(String),
@@ -366,6 +372,12 @@ impl Display for XqliteError {
                 message,
             } => {
                 write!(f, "Authorization denied: {message}")
+            }
+            XqliteError::BusyTimeoutWriteRefused { policy, observers } => {
+                write!(
+                    f,
+                    "busy_timeout write rejected: the busy slot is held (policy: {policy}, observers: {observers})"
+                )
             }
             XqliteError::CannotOpenDatabase {
                 path,
@@ -544,6 +556,21 @@ impl Encoder for XqliteError {
                 extended_code,
                 message,
             } => (atoms::authorization_denied(), extended_code, message).encode(env),
+            XqliteError::BusyTimeoutWriteRefused { policy, observers } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::policy(), policy)
+                    .and_then(|map| map.map_put(atoms::observers(), observers));
+                match map_result {
+                    Ok(map) => (atoms::busy_timeout_write_refused(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for BusyTimeoutWriteRefused"
+                                .to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
             XqliteError::CannotOpenDatabase {
                 path,
                 code,

@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-09-17
+
+### Changed
+
+- **A `busy_timeout` write is rejected while the busy slot is held.** While
+  a busy retry policy (`Xqlite.set_busy_policy/2`) or at least one busy
+  observer (`Xqlite.register_busy_observer/2`) is installed, a statement
+  that writes `busy_timeout` now fails as it is prepared with `{:error,
+  {:busy_timeout_write_refused, %{policy: boolean, observers: count}}}`.
+  It used to be accepted and to silently replace xqlite's busy callback
+  with SQLite's built-in one: the policy stopped applying and every
+  observer stopped receiving `{:xqlite_busy, ...}` messages, with no
+  error. Every spelling is covered — a quoted name, a `main.` or `temp.`
+  prefix, `PRAGMA busy_timeout(N)`, a leading comment, and a value of `0`
+  or less — on every path that prepares SQL: `query/4`, `execute/4`,
+  `execute_batch/2`, `prepare/2`, `stream/4`, and the typed
+  `Xqlite.set_pragma(conn, :busy_timeout, ms)` / `XqliteNIF.set_pragma/3`.
+  Reading `PRAGMA busy_timeout` is still allowed and still reads `0` while
+  the slot is held, `Xqlite.busy_timeout/2` still changes the wait, and
+  with the slot empty the write is accepted as before.
+- **The connection carries one authorizer for both jobs.** While the busy
+  slot is held, `Xqlite.set_authorizer/2`'s denied kinds and xqlite's own
+  two rules share the single authorizer SQLite gives a connection. Your
+  rules are unchanged for every action other than a `busy_timeout` write,
+  and removing your list while the slot is held keeps xqlite's rules.
+  Taking or emptying the slot now installs or clears an authorizer, which
+  expires the connection's prepared statements; SQLite re-prepares them at
+  their next step with no change of outcome.
+
+### Fixed
+
+- **An authorizer denying `:pragma` no longer costs the connection its
+  wait.** Taking the busy slot reads `PRAGMA busy_timeout` to remember the
+  wait it displaces. That read used to be denied by the caller's own
+  authorizer and silently treated as "nothing to remember", so the
+  connection stopped waiting on contention for good and emptying the slot
+  put nothing back — losing the 5000 ms every connection starts with.
+  xqlite's own read now passes the caller's authorizer, and a read that
+  fails for any other reason takes nothing and answers the read's own
+  error instead of remembering zero.
+- **`XqliteNIF.set_busy_policy/4`'s doc stated the wrong ceiling.**
+  `max_elapsed_ms` is the wall-time budget for a single busy event, reset
+  at the first callback of each fresh contention, as `Xqlite.set_busy_policy/2`
+  and the gotchas guide already said — not an absolute ceiling from the
+  slot's first installation.
+
 ## [0.12.2] - 2026-09-18
 
 ### Added
@@ -1197,6 +1243,7 @@ Initial public release. The supported SQLite functionality:
   callers).
 - **SQLite introspection** — `compile_options` and `sqlite_version`.
 
+[0.13.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.13.0
 [0.12.2]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.2
 [0.12.1]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.1
 [0.12.0]: https://github.com/dimitarvp/xqlite/releases/tag/v0.12.0

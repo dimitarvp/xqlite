@@ -3,11 +3,35 @@ defmodule Xqlite.NIF.BusyHandlerTest do
   # two connections to the SAME file-backed database to force real lock
   # contention; in-memory connections have separate lock domains.
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
   import Xqlite.TestUtil, only: [tmp_db_path: 1]
 
   alias XqliteNIF, as: NIF
+
+  @moduletag timeout: 300_000
+
+  # Every spelling of a `busy_timeout` write SQLite accepts: the name arrives
+  # at the authorizer as it was typed, with quotes removed and the schema
+  # carried separately. `<N>` is the generated value; the last form is fixed
+  # because any value at or below zero turns the wait off.
+  @write_forms [
+    "PRAGMA busy_timeout = <N>",
+    "PRAGMA BUSY_TIMEOUT=<N>",
+    "pragma main.busy_timeout = <N>",
+    "PRAGMA main.busy_timeout = <N>",
+    "PRAGMA busy_timeout(<N>)",
+    "PRAGMA \"busy_timeout\" = <N>",
+    "PRAGMA temp.busy_timeout = <N>",
+    "  /*c*/ PRAGMA busy_timeout = <N>",
+    "PRAGMA busy_timeout = -5"
+  ]
+
+  # The wait each generated case starts from. Small, so a contended write
+  # with no policy is over in milliseconds; not zero, so putting it back is
+  # visible.
+  @remembered_ms 5
 
   setup do
     {:ok, path: tmp_db_path("busy")}
@@ -568,9 +592,254 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
+  test "a raw busy_timeout write is rejected while an observer holds the slot",
+       %{path: path} do
+    {:ok, probe} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(probe, 300)
+    {:ok, handle} = Xqlite.register_busy_observer(probe, self())
+
+    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
+             Xqlite.query(probe, "PRAGMA busy_timeout = 1500")
+
+    assert {:ok, %Xqlite.Result{rows: [[0]]}} = Xqlite.query(probe, "PRAGMA busy_timeout")
+
+    :ok = Xqlite.unregister_busy_observer(probe, handle)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    :ok = NIF.close(probe)
+  end
+
+  property "a busy_timeout write is rejected in every spelling the slot is held for",
+           %{path: path} do
+    {holder, probe} = open_contended_pair(path)
+
+    check all(
+            has_policy <- StreamData.boolean(),
+            observer_count <- StreamData.integer(0..3),
+            form <- StreamData.member_of(@write_forms),
+            value <- StreamData.integer(0..2_147_483_647),
+            max_runs: 2_000
+          ) do
+      {sql, applied} = write_form(form, value)
+      :ok = Xqlite.busy_timeout(probe, @remembered_ms)
+      handles = take_slot(probe, has_policy, observer_count)
+
+      case has_policy or observer_count > 0 do
+        true ->
+          assert {:error,
+                  {:busy_timeout_write_refused,
+                   %{policy: ^has_policy, observers: ^observer_count}}} =
+                   Xqlite.query(probe, sql)
+
+          assert {:ok, %Xqlite.Result{rows: [[0]]}} =
+                   Xqlite.query(probe, "PRAGMA busy_timeout")
+
+          witness_observers(probe, observer_count)
+          empty_slot(probe, has_policy, handles)
+
+          assert {:ok, %Xqlite.Result{rows: [[@remembered_ms]]}} =
+                   Xqlite.query(probe, "PRAGMA busy_timeout")
+
+        false ->
+          assert {:ok, %Xqlite.Result{}} = Xqlite.query(probe, sql)
+
+          assert {:ok, %Xqlite.Result{rows: [[^applied]]}} =
+                   Xqlite.query(probe, "PRAGMA busy_timeout")
+      end
+    end
+
+    close_contended_pair(holder, probe)
+  end
+
+  test "execute_batch rejects the write and keeps what ran before it", %{path: path} do
+    {:ok, conn} = NIF.open(path)
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER)")
+    :ok = Xqlite.set_busy_policy(conn, max_retries: 0, max_elapsed_ms: 0, sleep_ms: 0)
+
+    batch = "INSERT INTO t VALUES (1); PRAGMA busy_timeout = 5; INSERT INTO t VALUES (2)"
+
+    assert {:error, {:busy_timeout_write_refused, %{policy: true, observers: 0}}} =
+             Xqlite.execute_batch(conn, batch)
+
+    assert {:ok, %Xqlite.Result{rows: [[1]]}} = Xqlite.query(conn, "SELECT id FROM t")
+
+    :ok = NIF.close(conn)
+  end
+
+  test "prepare and the typed set_pragma are rejected while the slot is held",
+       %{path: path} do
+    {:ok, conn} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(conn, 300)
+    {:ok, handle} = Xqlite.register_busy_observer(conn, self())
+
+    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
+             Xqlite.prepare(conn, "PRAGMA busy_timeout = 1500")
+
+    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
+             Xqlite.set_pragma(conn, :busy_timeout, 1500)
+
+    :ok = Xqlite.unregister_busy_observer(conn, handle)
+    assert {:ok, 1500} = Xqlite.set_pragma(conn, :busy_timeout, 1500)
+
+    :ok = NIF.close(conn)
+  end
+
+  test "a statement prepared before the slot was taken is rejected at its next step",
+       %{path: path} do
+    {:ok, conn} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(conn, 300)
+    {:ok, stmt} = NIF.stmt_prepare(conn, "PRAGMA busy_timeout = 1500")
+    {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
+
+    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
+             NIF.stmt_step(stmt)
+
+    :ok = NIF.stmt_finalize(stmt)
+    :ok = NIF.close(conn)
+  end
+
+  test "a stream opened before the slot was taken is rejected at its next fetch",
+       %{path: path} do
+    {:ok, conn} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(conn, 300)
+    {:ok, stream} = NIF.stream_open(conn, "PRAGMA busy_timeout = 1500", [])
+    {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
+
+    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
+             NIF.stream_fetch(stream, 1)
+
+    :ok = NIF.stream_close(stream)
+    :ok = NIF.close(conn)
+  end
+
+  test "a rejected write does not colour the next statement on the connection",
+       %{path: path} do
+    {:ok, conn} = NIF.open(path)
+
+    :ok = Xqlite.set_busy_policy(conn, max_retries: 0, max_elapsed_ms: 0, sleep_ms: 0)
+
+    assert {:error, {:busy_timeout_write_refused, _}} =
+             Xqlite.query(conn, "PRAGMA busy_timeout = 1500")
+
+    assert {:ok, %Xqlite.Result{rows: [[1]]}} = Xqlite.query(conn, "SELECT 1")
+
+    :ok = NIF.close(conn)
+  end
+
+  test "an observer registered under a :pragma deny keeps the connection's wait",
+       %{path: path} do
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    :ok = Xqlite.busy_timeout(probe, 300)
+    :ok = Xqlite.set_authorizer(probe, [:pragma])
+
+    assert {:ok, handle} = Xqlite.register_busy_observer(probe, self())
+
+    assert {:error, {:database_busy_or_locked, _code, _msg}} =
+             NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+
+    # The callback fires a second time only when a wait is remembered: with
+    # nothing remembered it fires once, at retry 0, and gives up.
+    assert_receive {:xqlite_busy, 1, _}, 5_000
+
+    :ok = Xqlite.remove_authorizer(probe)
+    :ok = Xqlite.unregister_busy_observer(probe, handle)
+    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "a policy set under a :pragma deny gives the wait back when it is removed",
+       %{path: path} do
+    {:ok, conn} = NIF.open(path)
+
+    :ok = Xqlite.busy_timeout(conn, 300)
+    :ok = Xqlite.set_authorizer(conn, [:pragma])
+    :ok = Xqlite.set_busy_policy(conn, max_retries: 1, max_elapsed_ms: 50, sleep_ms: 0)
+    :ok = Xqlite.remove_busy_policy(conn)
+    :ok = Xqlite.remove_authorizer(conn)
+
+    assert {:ok, 300} = NIF.get_pragma(conn, "busy_timeout")
+
+    :ok = NIF.close(conn)
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  defp open_contended_pair(path) do
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+
+    :ok = NIF.execute_batch(holder, "PRAGMA synchronous = OFF; CREATE TABLE t(id INTEGER)")
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+
+    {holder, probe}
+  end
+
+  defp close_contended_pair(holder, probe) do
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  defp write_form("PRAGMA busy_timeout = -5" = form, _value), do: {form, 0}
+
+  defp write_form(form, value) do
+    text = Integer.to_string(value)
+    {String.replace(form, "<N>", text), value}
+  end
+
+  defp take_slot(probe, has_policy, observer_count) do
+    :ok = set_policy_if(probe, has_policy)
+
+    for _ <- 1..observer_count//1 do
+      {:ok, handle} = Xqlite.register_busy_observer(probe, self())
+      handle
+    end
+  end
+
+  defp empty_slot(probe, has_policy, handles) do
+    for handle <- handles, do: :ok = Xqlite.unregister_busy_observer(probe, handle)
+    :ok = remove_policy_if(probe, has_policy)
+  end
+
+  defp set_policy_if(probe, true) do
+    Xqlite.set_busy_policy(probe, max_retries: 0, max_elapsed_ms: 0, sleep_ms: 0)
+  end
+
+  defp set_policy_if(_probe, false), do: :ok
+
+  defp remove_policy_if(probe, true), do: Xqlite.remove_busy_policy(probe)
+  defp remove_policy_if(_probe, false), do: :ok
+
+  defp witness_observers(_probe, 0), do: :ok
+
+  defp witness_observers(probe, observer_count) do
+    assert {:error, {:database_busy_or_locked, _code, _msg}} =
+             Xqlite.query(probe, "INSERT INTO t VALUES (1)")
+
+    for _ <- 1..observer_count, do: assert_receive({:xqlite_busy, _, _}, 5_000)
+    drain_busy()
+  end
+
+  defp drain_busy do
+    receive do
+      {:xqlite_busy, _, _} -> drain_busy()
+    after
+      0 -> :ok
+    end
+  end
 
   defp spawn_collector do
     spawn(fn -> collector_loop([]) end)

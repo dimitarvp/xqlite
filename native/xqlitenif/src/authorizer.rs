@@ -1,9 +1,12 @@
 use crate::atoms;
+use crate::busy_handler::BusySlotFlags;
+use crate::connection::XqliteConn;
 use crate::error::XqliteError;
 use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rustler::Atom;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// A single authorizer action *kind*.
 ///
@@ -145,25 +148,126 @@ pub(crate) fn parse_denied(actions: Vec<Atom>) -> Result<HashSet<ActionKind>, Xq
     actions.into_iter().map(ActionKind::from_atom).collect()
 }
 
-/// Install a deny-list authorizer, replacing any previous one (single slot).
-///
-/// The closure owns the denied set and only reads it, so it is `Fn` (hence
-/// `FnMut`), `Send`, and `'static` — exactly what rusqlite's safe authorizer
-/// API requires. Callers must hold the connection Mutex.
-pub(crate) fn set(conn: &Connection, denied: HashSet<ActionKind>) -> Result<(), XqliteError> {
-    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
-        if denied.contains(&ActionKind::of(&ctx.action)) {
+/// A `PRAGMA busy_timeout` statement, and whether it carries a value.
+enum BusyTimeout {
+    Read,
+    Write,
+}
+
+/// Recognise `PRAGMA busy_timeout` however it was typed. SQLite hands the
+/// callback the name as written, quotes removed, with any schema prefix
+/// carried separately — so the compare is on the bare name and ignores case,
+/// and a value is present exactly when the statement writes.
+fn busy_timeout_action(action: &AuthAction<'_>) -> Option<BusyTimeout> {
+    match action {
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value,
+            ..
+        } if pragma_name.eq_ignore_ascii_case("busy_timeout") => match pragma_value {
+            Some(_value) => Some(BusyTimeout::Write),
+            None => Some(BusyTimeout::Read),
+        },
+        _ => None,
+    }
+}
+
+/// The answer for one action: the busy slot's own rules about `busy_timeout`
+/// first, then the kinds the caller denied.
+fn decide(
+    action: &AuthAction<'_>,
+    denied: &HashSet<ActionKind>,
+    flags: &BusySlotFlags,
+) -> Authorization {
+    match busy_timeout_action(action) {
+        Some(BusyTimeout::Read) if flags.reading_own_timeout() => Authorization::Allow,
+        Some(BusyTimeout::Write) if flags.slot_held() => {
+            flags.note_write_refused();
             Authorization::Deny
-        } else {
-            Authorization::Allow
         }
+        _ => user_decision(action, denied),
+    }
+}
+
+/// The caller's own deny-list: the only rule that looks at the action kind.
+fn user_decision(action: &AuthAction<'_>, denied: &HashSet<ActionKind>) -> Authorization {
+    if denied.contains(&ActionKind::of(action)) {
+        Authorization::Deny
+    } else {
+        Authorization::Allow
+    }
+}
+
+/// Record the action kinds the caller denies and make the connection's
+/// authorizer match. Callers must hold the connection Mutex.
+pub(crate) fn set(
+    conn: &Connection,
+    handle: &XqliteConn,
+    denied: HashSet<ActionKind>,
+) -> Result<(), XqliteError> {
+    store_denied(handle, Some(denied))?;
+    sync(conn, handle)
+}
+
+/// Forget the caller's action kinds; the busy slot's own rules stay.
+/// Callers must hold the connection Mutex.
+pub(crate) fn remove(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
+    store_denied(handle, None)?;
+    sync(conn, handle)
+}
+
+fn store_denied(
+    handle: &XqliteConn,
+    denied: Option<HashSet<ActionKind>>,
+) -> Result<(), XqliteError> {
+    let mut guard = handle
+        .denied_actions
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    *guard = denied;
+    Ok(())
+}
+
+/// Install or clear the connection's single authorizer so it carries what is
+/// asked of it now: the caller's denied kinds, the busy slot's rules, or
+/// neither. Callers must hold the connection Mutex, and must not call this
+/// from inside a row-mapping closure of the same connection — rusqlite
+/// borrows the connection mutably to install.
+pub(crate) fn sync(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
+    let denied = {
+        let guard = handle
+            .denied_actions
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        guard.clone()
+    };
+
+    match (denied, handle.busy_flags.slot_held()) {
+        (None, false) => clear(conn),
+        (user_denied, _) => {
+            let flags = Arc::clone(&handle.busy_flags);
+            install(conn, user_denied.unwrap_or_default(), flags)
+        }
+    }
+}
+
+/// Install the composed closure. It owns the denied set and a handle on the
+/// busy slot's flags, which makes it `FnMut`, `Send` and `'static` — what
+/// rusqlite's safe authorizer API requires.
+fn install(
+    conn: &Connection,
+    denied: HashSet<ActionKind>,
+    flags: Arc<BusySlotFlags>,
+) -> Result<(), XqliteError> {
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+        decide(&ctx.action, &denied, &flags)
     }))
     .map_err(XqliteError::from)
 }
 
 /// Clear any installed authorizer. Idempotent. Callers must hold the
 /// connection Mutex.
-pub(crate) fn clear(conn: &Connection) -> Result<(), XqliteError> {
+fn clear(conn: &Connection) -> Result<(), XqliteError> {
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .map_err(XqliteError::from)
 }

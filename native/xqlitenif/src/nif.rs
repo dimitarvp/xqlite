@@ -261,16 +261,15 @@ fn set_busy_policy(
         sleep_ms,
     };
     let result = connection::with_conn(&handle, |conn| {
-        busy_handler::set_policy(conn, &handle.busy_handler, policy)
+        busy_handler::set_policy(conn, &handle, policy)
     });
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn remove_busy_policy(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let result = connection::with_conn(&handle, |conn| {
-        busy_handler::remove_policy(conn, &handle.busy_handler)
-    });
+    let result =
+        connection::with_conn(&handle, |conn| busy_handler::remove_policy(conn, &handle));
     singular_ok_or_error_tuple(env, result)
 }
 
@@ -281,7 +280,7 @@ fn register_busy_observer(
     pid: rustler::LocalPid,
 ) -> Term<'_> {
     let result = connection::with_conn(&handle, |conn| {
-        busy_handler::register_observer(conn, &handle.busy_handler, pid)
+        busy_handler::register_observer(conn, &handle, pid)
     });
     match result {
         Ok(id) => (ok(), id).encode(env),
@@ -296,16 +295,15 @@ fn unregister_busy_observer(
     observer_handle: u64,
 ) -> Term<'_> {
     let result = connection::with_conn(&handle, |conn| {
-        busy_handler::unregister_observer(conn, &handle.busy_handler, observer_handle)
+        busy_handler::unregister_observer(conn, &handle, observer_handle)
     });
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn set_busy_timeout(env: Env<'_>, handle: ResourceArc<XqliteConn>, ms: u64) -> Term<'_> {
-    let result = connection::with_conn(&handle, |conn| {
-        busy_handler::set_timeout(conn, &handle.busy_handler, ms)
-    });
+    let result =
+        connection::with_conn(&handle, |conn| busy_handler::set_timeout(conn, &handle, ms));
     singular_ok_or_error_tuple(env, result)
 }
 
@@ -321,13 +319,13 @@ fn set_authorizer<'a>(
         Ok(set) => set,
         Err(e) => return (error(), e).encode(env),
     };
-    let result = connection::with_conn(&handle, |conn| authorizer::set(conn, denied));
+    let result = connection::with_conn(&handle, |conn| authorizer::set(conn, &handle, denied));
     singular_ok_or_error_tuple(env, result)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn remove_authorizer(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
-    let result = connection::with_conn(&handle, authorizer::clear);
+    let result = connection::with_conn(&handle, |conn| authorizer::remove(conn, &handle));
     singular_ok_or_error_tuple(env, result)
 }
 
@@ -1174,7 +1172,6 @@ fn stream_fetch_impl<'a>(
     // single row is read (a pathological value requests petabytes up front).
     // Grow on demand instead, exactly like `stmt_multi_step_impl`.
     let mut fetched_rows: Vec<Vec<Term<'a>>> = Vec::new();
-    let mut an_error_occurred: Option<XqliteError> = None;
     let mut stream_definitively_exhausted = false;
 
     let conn_lock_guard = match stream_handle.conn_resource_arc.conn.lock() {
@@ -1216,39 +1213,46 @@ fn stream_fetch_impl<'a>(
         token_bools,
     );
 
-    for _ in 0..batch_size {
-        let current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
-        if current_stmt_ptr.is_null() {
-            stream_definitively_exhausted = true;
-            break;
-        }
+    let fetch_outcome =
+        connection::with_busy_timeout_rule(&stream_handle.conn_resource_arc, || {
+            for _ in 0..batch_size {
+                let current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
+                if current_stmt_ptr.is_null() {
+                    stream_definitively_exhausted = true;
+                    break;
+                }
 
-        // SAFETY: current_stmt_ptr was loaded non-null from the AtomicPtr above.
-        // conn_lock_guard is held, so the db_handle is valid for error reporting.
-        match unsafe { process_single_step(env, current_stmt_ptr, db_handle_for_errors) } {
-            Ok(Some(row_terms)) => {
-                fetched_rows.push(row_terms);
+                // SAFETY: current_stmt_ptr was loaded non-null from the AtomicPtr
+                // above. conn_lock_guard is held, so the db_handle is valid for
+                // error reporting.
+                match unsafe {
+                    process_single_step(env, current_stmt_ptr, db_handle_for_errors)
+                } {
+                    Ok(Some(row_terms)) => {
+                        fetched_rows.push(row_terms);
+                    }
+                    Ok(None) => {
+                        stream_definitively_exhausted = true;
+                        // SAFETY: conn_lock_guard is held for the whole loop. The
+                        // registry result is dropped: the caller is being told the
+                        // stream is done, which is the answer that matters here.
+                        let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
+                        break;
+                    }
+                    Err(e) => {
+                        stream_definitively_exhausted = true;
+                        // SAFETY: conn_lock_guard is held for the whole loop. The
+                        // registry result is dropped in favour of the step error.
+                        let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
+                        return Err(e);
+                    }
+                }
             }
-            Ok(None) => {
-                stream_definitively_exhausted = true;
-                // SAFETY: conn_lock_guard is held for the whole loop. The
-                // registry result is dropped: the caller is being told the
-                // stream is done, which is the answer that matters here.
-                let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
-                break;
-            }
-            Err(e) => {
-                stream_definitively_exhausted = true;
-                // SAFETY: conn_lock_guard is held for the whole loop. The
-                // registry result is dropped in favour of the step error.
-                let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
-                an_error_occurred = Some(e);
-                break;
-            }
-        }
-    }
 
-    if let Some(err) = an_error_occurred {
+            Ok(())
+        });
+
+    if let Err(err) = fetch_outcome {
         return (error(), err).encode(env);
     }
 

@@ -468,6 +468,11 @@ defmodule XqliteNIF do
   executing the PRAGMA statement (e.g., unsupported Elixir type for `value`,
   syntax error).
 
+  Setting `busy_timeout` while a busy policy or a busy observer is
+  installed returns `{:error, {:busy_timeout_write_refused, %{policy:
+  boolean, observers: count}}}`: the PRAGMA would replace xqlite's busy
+  callback. `Xqlite.busy_timeout/2` changes the wait instead.
+
   Setting `wal_autocheckpoint` through this function additionally repairs
   the WAL hook slot: the PRAGMA installs SQLite's internal autocheckpoint
   callback in place of xqlite's master WAL callback, so this NIF
@@ -964,21 +969,23 @@ defmodule XqliteNIF do
 
     * `max_retries` — stop after this many retries and let the caller
       see `SQLITE_BUSY`.
-    * `max_elapsed_ms` — absolute time ceiling in milliseconds from the
-      slot's first installation.
+    * `max_elapsed_ms` — the wall-time ceiling in milliseconds for a
+      single busy event; the clock resets at the first callback of each
+      fresh contention, like `max_retries`.
     * `sleep_ms` — milliseconds to sleep between retries. Zero disables
       the pause.
 
   Replacing an existing policy is atomic; observers are unaffected.
 
-  > #### Warning — PRAGMA busy_timeout silently replaces the callback {: .warning}
+  > #### Note — a raw PRAGMA busy_timeout write is rejected here {: .info}
   >
-  > `PRAGMA busy_timeout` / `sqlite3_busy_timeout` replaces the whole
-  > installed callback at the SQLite C level without going through our
-  > atomic slot — the policy stops applying AND observers stop
-  > receiving messages. No memory is leaked (the internal state is
-  > reclaimed on the next slot mutation or connection close). Prefer
-  > `Xqlite.busy_timeout/2` to switch to plain-timeout semantics.
+  > While the policy is installed, a statement writing `busy_timeout` —
+  > raw SQL in any spelling, or `set_pragma(conn, "busy_timeout", ms)` —
+  > fails as it is prepared with `{:error, {:busy_timeout_write_refused,
+  > %{policy: boolean, observers: count}}}`. It would otherwise replace
+  > the installed callback at the SQLite C level and the policy would
+  > stop applying. Use `Xqlite.busy_timeout/2` to switch to a plain
+  > timeout.
 
   Returns `:ok`.
   """
@@ -1016,8 +1023,11 @@ defmodule XqliteNIF do
   not a retry policy is installed. With no policy, the connection waits
   up to the `busy_timeout` that was in effect when the busy slot was
   taken (5000 ms unless you set it) before surfacing `SQLITE_BUSY`;
-  unregistering the last observer puts that timeout back. See
-  `Xqlite.register_busy_observer/2` for the full slot rules.
+  unregistering the last observer puts that timeout back. While the
+  slot is held, a statement writing `busy_timeout` is rejected with
+  `{:error, {:busy_timeout_write_refused, %{policy: boolean, observers:
+  count}}}`. See `Xqlite.register_busy_observer/2` for the full slot
+  rules.
 
   Returns `{:ok, handle}`.
   """
@@ -1047,6 +1057,11 @@ defmodule XqliteNIF do
   one keeps this timeout. With no observers, SQLite's own timeout
   handler takes the slot. `0` disables waiting.
 
+  This is the one way to change the wait while the slot is held: it
+  calls `sqlite3_busy_timeout` directly, so no authorizer is consulted,
+  while a `busy_timeout` write in SQL is rejected (see
+  `set_busy_policy/4`).
+
   Returns `:ok`.
   """
   @spec set_busy_timeout(conn :: Xqlite.conn(), ms :: non_neg_integer()) ::
@@ -1069,6 +1084,10 @@ defmodule XqliteNIF do
   unrecognized atom returns `{:error, {:invalid_authorizer_action, atom}}`
   and installs nothing. Single slot per connection — a second call replaces
   the previous list.
+
+  xqlite shares that slot: while a busy policy or a busy observer is
+  installed the connection carries one authorizer holding your list plus
+  two rules of xqlite's own. See `Xqlite.set_authorizer/2`.
 
   Returns `:ok`.
   """

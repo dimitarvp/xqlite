@@ -72,7 +72,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 57 PRAGMAs, 34 of them writable
 - **Type extensions:** bidirectional encode/decode; nine built in -- `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), `Instant` and `Duration` (int64 nanoseconds, encode-only), and `Decimal` (encode-only, needs the optional `:decimal` dep)
 - **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy retry policy (`set_busy_policy/2`) plus any number of busy observers receiving `{:xqlite_busy, ...}`
-- **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, extended_code, msg}`
+- **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, extended_code, msg}`. xqlite shares the slot: while the busy slot is held it adds two rules of its own, so a `busy_timeout` write is rejected as `{:busy_timeout_write_refused, %{policy: _, observers: _}}` and its own `PRAGMA busy_timeout` read passes a `:pragma` deny
 - **Manual statement lifecycle:** `prepare/2`, `bind/2` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
 - **Telemetry (opt-in):** compile-time-flagged `:telemetry` events for every operation (spans with nanosecond timings), cancellation lifecycle events, and a bridge that re-emits hook fan-outs as `[:xqlite, :hook, :*]` -- see the "Wiring xqlite telemetry" guide
 - **Serialize / deserialize:** atomic in-memory snapshots to/from binary
@@ -177,12 +177,14 @@ The policy is single-slot by design (a retry decision cannot compose);
 observation is fan-out, and the telemetry bridge re-emits it as
 `[:xqlite, :hook, :busy]`.
 
-> **Warning.** `PRAGMA busy_timeout` / `sqlite3_busy_timeout` silently
-> replaces the whole callback at the SQLite C level: the policy stops
-> applying and every observer's `{:xqlite_busy, …}` stream goes quiet.
-> No memory is leaked (state is reclaimed on the next slot mutation or
-> connection close). Use `Xqlite.busy_timeout/2` — it clears the policy
-> cleanly first, then installs the plain timeout.
+> **Note.** While a policy or an observer is installed, a statement
+> writing `busy_timeout` — `PRAGMA busy_timeout = N` in any spelling, or
+> `XqliteNIF.set_pragma(conn, "busy_timeout", ms)` — is rejected as it is
+> prepared, with `{:error, {:busy_timeout_write_refused, %{policy:
+> boolean, observers: count}}}`. It would otherwise replace the whole
+> callback at the SQLite C level: the policy would stop applying and
+> every observer's `{:xqlite_busy, …}` stream would go quiet. Use
+> `Xqlite.busy_timeout/2` — it works whether the slot is held or not.
 >
 > The other direction is handled for you. Installing a policy or a busy
 > observer takes SQLite's single busy callback, which zeroes whatever
