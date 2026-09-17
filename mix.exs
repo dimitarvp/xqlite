@@ -6,7 +6,7 @@ defmodule Xqlite.MixProject do
   def project do
     [
       app: :xqlite,
-      version: "0.12.1",
+      version: "0.12.2",
       elixir: "~> 1.17",
       name: @name,
       start_permanent: Mix.env() == :prod,
@@ -79,7 +79,7 @@ defmodule Xqlite.MixProject do
       main: "readme",
       name: "Xqlite",
       source_url: "https://github.com/dimitarvp/xqlite",
-      source_ref: "v0.12.1",
+      source_ref: "v0.12.2",
       skip_undefined_reference_warnings_on: &(&1 == "CHANGELOG.md"),
       extras: [
         "README.md",
@@ -94,6 +94,7 @@ defmodule Xqlite.MixProject do
       groups_for_modules: [
         "High-Level API": [
           Xqlite,
+          Xqlite.Blob,
           Xqlite.Pragma,
           Xqlite.Result,
           Xqlite.ExplainAnalyze
