@@ -5,6 +5,17 @@
 # estimated rows, which drive `Xqlite.explain_analyze/3`.
 LIBSQLITE3_FLAGS = { value = "-DSQLITE_ENABLE_STMT_SCANSTATUS=1", force = true }
 
+# rustler wraps every NIF — argument decoding included — in `catch_unwind`, so
+# a Rust panic becomes a catchable `:nif_panicked` instead of killing the VM.
+# That guard only works while panics unwind. A cargo config file outranks the
+# manifest's `[profile.*]`, so a machine-wide `panic = "abort"` would silently
+# disarm it; these two lines outrank that one.
+[profile.release]
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"
+
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 

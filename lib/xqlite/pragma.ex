@@ -11,6 +11,16 @@ defmodule Xqlite.Pragma do
   pragma cannot take `{:error, {:invalid_pragma_argument, _}}`. The one term
   these functions do not judge is the connection: a term that is not one
   raises `ArgumentError` from the native function it is handed to.
+
+  ## The two heap limits
+
+  `soft_heap_limit` and `hard_heap_limit` belong to the operating-system
+  process, not to the connection they are written through: every connection in
+  the same process sees the same limit. SQLite applies a hard limit only when
+  the value lowers the current one, and it never releases it — a write of 0
+  answers the limit already in force and changes nothing. A small hard limit is
+  therefore permanent for the life of the process, and everything that
+  allocates after it fails with an out-of-memory error.
   """
 
   alias Xqlite.PragmaSpec
@@ -44,8 +54,17 @@ defmodule Xqlite.Pragma do
 
   @signed_i32 -2_147_483_648..0x7FFFFFFF
   @u32 0..0x7FFFFFFF
-  @nonzero_u32 1..0x7FFFFFFF
   @bool 0..1
+
+  # SQLite's own domains, where they are wider or narrower than the shared
+  # 32-bit constants above, each measured by writing the value and reading it
+  # back: a page count up to 2^32 - 2, a heap limit up to 2^63 - 1, a worker
+  # count capped at the compile-time maximum, and -1 for "no limit" where every
+  # other negative is stored as -1 anyway.
+  @page_count 1..4_294_967_294
+  @heap_limit 0..0x7FFFFFFFFFFFFFFF
+  @worker_threads 0..8
+  @journal_size -1..0x7FFFFFFFFFFFFFFF
 
   @true_words ~w(on yes true)
   @false_words ~w(off no false)
@@ -77,6 +96,8 @@ defmodule Xqlite.Pragma do
       writable: true,
       valid_values: @signed_i32
     },
+    # A value between 1 and the cache's own page count is stored as written but
+    # reads back as that page count, so a read after a write can differ.
     cache_spill: %PragmaSpec{
       return_type: :int,
       read_arities: [0],
@@ -93,7 +114,7 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @u32
+      valid_values: @heap_limit
     },
     incremental_vacuum: %PragmaSpec{
       return_type: :int,
@@ -105,7 +126,7 @@ defmodule Xqlite.Pragma do
       read_arities: [0],
       schema_prefix: true,
       writable: true,
-      valid_values: @signed_i32
+      valid_values: @journal_size
     },
     legacy_file_format: %PragmaSpec{return_type: :int, read_arities: [0]},
     max_page_count: %PragmaSpec{
@@ -113,7 +134,7 @@ defmodule Xqlite.Pragma do
       read_arities: [0],
       schema_prefix: true,
       writable: true,
-      valid_values: @nonzero_u32
+      valid_values: @page_count
     },
     mmap_size: %PragmaSpec{
       return_type: :int,
@@ -138,13 +159,13 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @u32
+      valid_values: @heap_limit
     },
     threads: %PragmaSpec{
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @u32
+      valid_values: @worker_threads
     },
     user_version: %PragmaSpec{
       return_type: :int,
@@ -172,7 +193,9 @@ defmodule Xqlite.Pragma do
       read_arities: [0],
       schema_prefix: true,
       writable: true,
-      valid_values: 0..2,
+      # SQLite reads a non-zero integer here as the boolean "true", so 2 stores
+      # 1: the "fast" mode is reachable by its word alone.
+      valid_values: 0..1,
       int_mapping: %{0 => false, 1 => true, 2 => :fast}
     },
     synchronous: %PragmaSpec{
@@ -449,6 +472,18 @@ defmodule Xqlite.Pragma do
     end
   end
 
+  @doc """
+  Answers the name this module knows a key by, with its case folded the way
+  `get/3,4` and `put/4` fold it: `{:ok, :foreign_keys}` for `"FOREIGN_KEYS"`.
+
+  A name outside the typed schema answers `{:error, {:unknown_pragma, key}}`
+  and a key that is neither an atom nor a string
+  `{:error, {:invalid_pragma_name, key}}`, so a caller that hands SQLite the
+  name itself can still do so, spelled as the caller wrote it.
+  """
+  @spec canonical_name(pragma_key()) :: {:ok, atom()} | Xqlite.error()
+  def canonical_name(key), do: resolve_name(key)
+
   defp resolve_name(key) when is_atom(key) do
     case Map.fetch(@string_to_atom_map, downcased_name(key)) do
       {:ok, name} -> {:ok, name}
@@ -486,6 +521,18 @@ defmodule Xqlite.Pragma do
     end
   end
 
+  # A spec that maps its integers to words takes those words too, as an atom or
+  # a string, in any case, and answers the spec's own spelling of the word.
+  # SQLite reads `secure_delete = 2` as the boolean "true", so the word is the
+  # only form that reaches the third mode: the word is what gets written.
+  defp check_spec_value(name, %PragmaSpec{int_mapping: mapping}, value)
+       when is_map(mapping) and (is_atom(value) or is_binary(value)) do
+    case mapped_word(mapping, value) do
+      {:ok, _} = ok -> ok
+      :error -> invalid_value(name, value)
+    end
+  end
+
   defp check_spec_value(name, %PragmaSpec{valid_values: values}, value) when is_list(values) do
     case listed_form(values, value) do
       {:ok, _} = ok -> ok
@@ -505,6 +552,26 @@ defmodule Xqlite.Pragma do
 
   defp invalid_value(name, value) do
     {:error, {:invalid_pragma_value, %{pragma: name, value: value}}}
+  end
+
+  defp mapped_word(mapping, value) do
+    word = word_of(value)
+
+    mapping
+    |> Map.values()
+    |> Enum.find(fn mapped -> word_of(mapped) == word end)
+    |> canonical_word()
+  end
+
+  defp canonical_word(nil), do: :error
+
+  defp canonical_word(mapped) do
+    word =
+      mapped
+      |> to_string()
+      |> String.upcase(:ascii)
+
+    {:ok, word}
   end
 
   defp boolean_form(true), do: {:ok, 1}

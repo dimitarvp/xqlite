@@ -97,6 +97,11 @@ defmodule Xqlite.TypeExtensionQueryTest do
       check all(bytes <- StreamData.binary(length: 16), max_runs: 2000) do
         uuid = uuid_text(bytes)
 
+        # Each run starts from an empty table: shrinking re-runs this body
+        # with new values, and a row left behind would make the next run fail
+        # on the leftover instead of on what it generated.
+        assert {:ok, _} = Xqlite.execute(conn, "DELETE FROM holders", [])
+
         assert {:ok, %Xqlite.Result{changes: 1}} =
                  Xqlite.execute(
                    conn,

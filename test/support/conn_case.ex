@@ -45,7 +45,10 @@ defmodule Xqlite.ConnCase do
             {mod, fun, args} = Xqlite.TestUtil.find_opener_mfa!(context)
             assert {:ok, conn} = apply(mod, fun, args)
 
-            on_exit(fn -> XqliteNIF.close(conn) end)
+            # SQLite refuses a close while the connection still owns a
+            # prepared statement or a backup, so asserting here turns every
+            # test in the suite into a detector for a handle nobody freed.
+            on_exit(fn -> assert :ok = XqliteNIF.close(conn) end)
             {:ok, conn: conn}
           end
 

@@ -195,11 +195,25 @@ xqlite's standing guarantee is that a call into the library does not crash
 the BEAM. It holds through two layers.
 
 First, every NIF invocation is wrapped so a Rust panic is caught before it
-can unwind into C. A panic inside a NIF body — or inside the code that
-encodes a return value back to an Elixir term — is turned into a `raise`
-of `:nif_panicked` *in the calling process*, which that process can catch
-like any other error; the VM stays up. (This is Rustler's documented
-behavior, and xqlite relies on it.)
+can unwind into C. The wrapper covers the whole call — reading the
+arguments, the body, and encoding the return value back to an Elixir term
+— and turns a panic into a `raise` of `:nif_panicked` *in the calling
+process*, which that process can catch like any other error; the VM stays
+up. (This is Rustler's documented behavior, and xqlite relies on it.)
+
+That wrapper works by catching an unwinding panic, so it is only as good
+as the panic strategy the library was built with: a build that aborts on a
+panic kills the operating-system process instead, VM and all. The crate
+pins `panic = "unwind"` in `native/xqlitenif/.cargo/config.toml`, where it
+outranks any machine-wide cargo setting, and `mix verify` reads the built
+library's symbols to check that the pin held.
+
+Two limits to that guarantee are worth naming. A caught panic costs you
+the connection it happened on, not just the call: the Rust lock that
+serialises access to it is left poisoned, and every later call on that
+connection — `close/1` included — answers `{:error, {:lock_error, _}}`.
+And nothing in xqlite panics on purpose: an input it cannot read is a
+structured error, so a panic would be a bug, not a documented answer.
 
 Second, and distinct from panics: xqlite's own *expected* failures are
 never raised and never panics. They come back as structured `{:error,

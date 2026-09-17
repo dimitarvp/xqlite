@@ -4,7 +4,7 @@ use crate::connection::XqliteConn;
 use crate::error::XqliteError;
 use rusqlite::Connection;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rustler::Atom;
+use rustler::{Atom, Term};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -142,10 +142,21 @@ impl ActionKind {
     }
 }
 
-/// Build the denied-kind set from user atoms, rejecting any unrecognized atom
-/// before an authorizer is touched.
-pub(crate) fn parse_denied(actions: Vec<Atom>) -> Result<HashSet<ActionKind>, XqliteError> {
-    actions.into_iter().map(ActionKind::from_atom).collect()
+/// Build the denied-kind set from the caller's list, rejecting an element that
+/// is no atom, and an atom that names no action, before an authorizer is
+/// touched. The list is walked by hand, so a broken tail is refused too.
+pub(crate) fn parse_denied(actions: Term<'_>) -> Result<HashSet<ActionKind>, XqliteError> {
+    let items = crate::util::walk_list(actions)?;
+    let mut denied = HashSet::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let action: Atom = item
+            .decode()
+            .map_err(|_not_an_atom| XqliteError::bad_element(index + 1, *item))?;
+        denied.insert(ActionKind::from_atom(action)?);
+    }
+
+    Ok(denied)
 }
 
 /// A `PRAGMA busy_timeout` statement, and whether it carries a value.

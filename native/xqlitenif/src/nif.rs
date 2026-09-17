@@ -20,7 +20,7 @@ use rusqlite::Connection;
 use rusqlite::ffi;
 use rusqlite::session::{ConflictAction, ConflictType};
 use rustler::{
-    Encoder, Env, ResourceArc, Term, TermType,
+    Encoder, Env, ResourceArc, Term,
     types::{
         atom::{error, ok},
         map::map_new,
@@ -140,10 +140,12 @@ fn query_with_changes_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+    tokens_term: Term<'a>,
 ) -> Term<'a> {
-    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        tokens.iter().map(|t| t.0.clone()).collect();
+    let token_bools = match crate::cancel::decode_tokens(tokens_term) {
+        Ok(flags) => flags,
+        Err(e) => return (error(), e).encode(env),
+    };
     let result = connection::with_conn(&handle, |conn| {
         let _guard =
             crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
@@ -162,10 +164,9 @@ fn query_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+    tokens_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        tokens.iter().map(|t| t.0.clone()).collect();
+    let token_bools = crate::cancel::decode_tokens(tokens_term)?;
     connection::with_conn(&handle, |conn| {
         let _guard =
             crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
@@ -179,10 +180,9 @@ fn execute_cancellable<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+    tokens_term: Term<'a>,
 ) -> Result<usize, XqliteError> {
-    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        tokens.iter().map(|t| t.0.clone()).collect();
+    let token_bools = crate::cancel::decode_tokens(tokens_term)?;
     connection::with_conn(&handle, |conn| {
         let _guard =
             crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
@@ -191,14 +191,16 @@ fn execute_cancellable<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn execute_batch_cancellable(
-    env: Env<'_>,
+fn execute_batch_cancellable<'a>(
+    env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     sql_batch: String,
-    tokens: Vec<ResourceArc<XqliteCancelToken>>,
-) -> Term<'_> {
-    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        tokens.iter().map(|t| t.0.clone()).collect();
+    tokens_term: Term<'a>,
+) -> Term<'a> {
+    let token_bools = match crate::cancel::decode_tokens(tokens_term) {
+        Ok(flags) => flags,
+        Err(e) => return (error(), e).encode(env),
+    };
     let execution_result = connection::with_conn(&handle, |conn| {
         let _guard =
             crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
@@ -311,7 +313,7 @@ fn set_busy_timeout(env: Env<'_>, handle: ResourceArc<XqliteConn>, ms: u64) -> T
 fn set_authorizer<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    denied_actions: Vec<rustler::Atom>,
+    denied_actions: Term<'a>,
 ) -> Term<'a> {
     // Validate the whole list before touching the connection, so an
     // unrecognized atom installs nothing.
@@ -761,34 +763,28 @@ fn stmt_bind<'a>(
     params_term: Term<'a>,
 ) -> Term<'a> {
     use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
-    use crate::util::{decode_exec_keyword_params, decode_plain_list_params, is_keyword};
+    use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
-        match params_term.get_type() {
-            TermType::List => {
-                if params_term.is_empty_list() {
-                    Ok(())
-                } else if is_keyword(params_term) {
-                    let named = decode_exec_keyword_params(env, params_term)?;
-                    bind_named_params_ffi(stmt_ptr, &named, db_handle)
-                } else {
-                    let positional = decode_plain_list_params(env, params_term)?;
-                    // SAFETY: with_live_stmt holds the connection mutex and
-                    // proved stmt_ptr live.
-                    let expected =
-                        unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) } as usize;
-                    if positional.len() != expected {
-                        return Err(XqliteError::InvalidParameterCount {
-                            provided: positional.len(),
-                            expected,
-                        });
-                    }
-                    bind_positional_params_ffi(stmt_ptr, &positional, db_handle)
-                }
+        match crate::util::walk_params(params_term)? {
+            Params::Empty => Ok(()),
+            Params::Named(items) => {
+                let named = decode_exec_keyword_params(env, &items)?;
+                bind_named_params_ffi(stmt_ptr, &named, db_handle)
             }
-            _ => Err(XqliteError::ExpectedList {
-                value_str: format!("Parameters term was not a list: {params_term:?}"),
-            }),
+            Params::Positional(items) => {
+                let positional = decode_plain_list_params(env, &items)?;
+                // SAFETY: with_live_stmt holds the connection mutex and
+                // proved stmt_ptr live.
+                let expected = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) } as usize;
+                if positional.len() != expected {
+                    return Err(XqliteError::InvalidParameterCount {
+                        provided: positional.len(),
+                        expected,
+                    });
+                }
+                bind_positional_params_ffi(stmt_ptr, &positional, db_handle)
+            }
         }
     });
     singular_ok_or_error_tuple(env, result)
@@ -825,11 +821,12 @@ fn stmt_multi_step_cancellable<'a>(
     env: Env<'a>,
     stmt_handle: ResourceArc<XqliteStatement>,
     batch_size: i64,
-    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+    tokens_term: Term<'a>,
 ) -> Term<'a> {
-    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        tokens.iter().map(|t| t.0.clone()).collect();
-    stmt_multi_step_impl(env, stmt_handle, batch_size, token_bools)
+    match crate::cancel::decode_tokens(tokens_term) {
+        Ok(token_bools) => stmt_multi_step_impl(env, stmt_handle, batch_size, token_bools),
+        Err(e) => (error(), e).encode(env),
+    }
 }
 
 fn stmt_multi_step_impl<'a>(
@@ -974,6 +971,34 @@ fn stmt_finalize(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
     singular_ok_or_error_tuple(env, stmt_handle.take_and_finalize())
 }
 
+/// Binds a stream's parameters onto a statement that is already prepared.
+/// `nil` and an empty list both mean "no parameters", as everywhere else.
+fn bind_stream_params<'a>(
+    env: Env<'a>,
+    stmt_ptr: *mut ffi::sqlite3_stmt,
+    db_handle: *mut ffi::sqlite3,
+    params_term: Term<'a>,
+) -> Result<(), XqliteError> {
+    use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
+    use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
+
+    if params_term == rustler::types::atom::nil().to_term(env) {
+        return Ok(());
+    }
+
+    match crate::util::walk_params(params_term)? {
+        Params::Empty => Ok(()),
+        Params::Named(items) => {
+            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle)
+        }
+        Params::Positional(items) => {
+            let positional_params_vec = decode_plain_list_params(env, &items)?;
+            bind_positional_params_ffi(stmt_ptr, &positional_params_vec, db_handle)
+        }
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn stream_open<'a>(
     env: Env<'a>,
@@ -982,8 +1007,7 @@ fn stream_open<'a>(
     params_term: Term<'a>,
     _reserved_future_opts: Term<'a>,
 ) -> Result<ResourceArc<XqliteStream>, XqliteError> {
-    use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
-    use crate::util::{decode_exec_keyword_params, decode_plain_list_params, is_keyword};
+    use crate::statement::PreparedStmt;
 
     let conn_resource_arc_clone = conn_handle.clone();
 
@@ -991,77 +1015,34 @@ fn stream_open<'a>(
         // SAFETY: with_conn holds the connection mutex for the duration of
         // this closure. All FFI calls below operate on the db_handle and
         // the statement prepare_one returned, both owned by this connection.
-        // Statement ownership is transferred to XqliteStream's AtomicPtr on
-        // success, or finalized on error before returning.
+        // The statement is owned by a holder that finalizes it on every path
+        // out of this closure, until the stream takes it over.
         unsafe {
             let db_handle = conn.handle();
-            let non_null_raw_stmt = statement::prepare_one(db_handle, &sql)?;
+            let held = PreparedStmt::new(statement::prepare_one(db_handle, &sql)?);
 
-            let bind_result: Result<(), XqliteError> = match params_term.get_type() {
-                TermType::List => {
-                    if params_term.is_empty_list() {
-                        Ok(())
-                    } else if is_keyword(params_term) {
-                        let named_params_vec =
-                            decode_exec_keyword_params(env, params_term)?;
-                        bind_named_params_ffi(
-                            non_null_raw_stmt.as_ptr(),
-                            &named_params_vec,
-                            db_handle,
-                        )
-                    } else {
-                        let positional_params_vec =
-                            decode_plain_list_params(env, params_term)?;
-                        bind_positional_params_ffi(
-                            non_null_raw_stmt.as_ptr(),
-                            &positional_params_vec,
-                            db_handle,
-                        )
-                    }
-                }
-                _ if params_term == rustler::types::atom::nil().to_term(env) => Ok(()),
-                _ => Err(XqliteError::ExpectedList {
-                    value_str: format!(
-                        "Parameters term was not a list: {params_term:?}"
-                    ),
-                }),
-            };
+            bind_stream_params(env, held.as_ptr(), db_handle, params_term)?;
 
-            if let Err(e) = bind_result {
-                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
-                return Err(e);
-            }
-
-            let column_count =
-                ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
+            let column_count = ffi::sqlite3_column_count(held.as_ptr()) as usize;
             let mut column_names = Vec::with_capacity(column_count);
 
-            if column_count > 0 {
-                for i in 0..column_count {
-                    let name_ptr = ffi::sqlite3_column_name(
-                        non_null_raw_stmt.as_ptr(),
-                        i as std::os::raw::c_int,
-                    );
-                    if name_ptr.is_null() {
-                        ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
-                        return Err(XqliteError::InternalEncodingError {
-                            context: format!(
-                                "SQLite returned null column name for index {i} during stream open"
-                            ),
-                        });
-                    }
-                    let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
-                    column_names.push(name_c_str.to_string_lossy().into_owned());
+            for i in 0..column_count {
+                let name_ptr =
+                    ffi::sqlite3_column_name(held.as_ptr(), i as std::os::raw::c_int);
+                if name_ptr.is_null() {
+                    return Err(XqliteError::InternalEncodingError {
+                        context: format!(
+                            "SQLite returned null column name for index {i} during stream open"
+                        ),
+                    });
                 }
+                let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
+                column_names.push(name_c_str.to_string_lossy().into_owned());
             }
 
-            let cell = Arc::new(AtomicPtr::new(non_null_raw_stmt.as_ptr()));
-            let registration =
-                conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)));
-            if let Err(e) = registration {
-                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
-                return Err(e);
-            }
+            let cell = Arc::new(AtomicPtr::new(held.as_ptr()));
+            conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)))?;
+            held.release();
 
             Ok(XqliteStream::new(
                 cell,
@@ -1110,11 +1091,12 @@ fn stream_fetch_cancellable<'a>(
     env: Env<'a>,
     stream_handle: ResourceArc<XqliteStream>,
     batch_size_term: Term<'a>,
-    tokens: Vec<ResourceArc<XqliteCancelToken>>,
+    tokens_term: Term<'a>,
 ) -> Term<'a> {
-    let token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        tokens.iter().map(|t| t.0.clone()).collect();
-    stream_fetch_impl(env, stream_handle, batch_size_term, token_bools)
+    match crate::cancel::decode_tokens(tokens_term) {
+        Ok(token_bools) => stream_fetch_impl(env, stream_handle, batch_size_term, token_bools),
+        Err(e) => (error(), e).encode(env),
+    }
 }
 
 fn stream_fetch_impl<'a>(
@@ -1625,7 +1607,7 @@ fn backup_with_progress<'a>(
     dest_path: String,
     pid: rustler::types::LocalPid,
     pages_per_step: i32,
-    cancel_tokens: Vec<ResourceArc<XqliteCancelToken>>,
+    cancel_tokens_term: Term<'a>,
 ) -> Term<'a> {
     // A non-positive step count is out of the documented `pos_integer()`
     // contract: `sqlite3_backup_step(0)` copies nothing yet reports "more", so
@@ -1638,6 +1620,12 @@ fn backup_with_progress<'a>(
         )
             .encode(env);
     }
+
+    let cancel_flags = match crate::cancel::decode_tokens(cancel_tokens_term) {
+        Ok(flags) => flags,
+        Err(e) => return (error(), e).encode(env),
+    };
+
     let result = connection::with_conn(&handle, |conn| {
         let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
         let backup =
@@ -1645,7 +1633,7 @@ fn backup_with_progress<'a>(
 
         loop {
             // OR-semantics: any signalled token cancels the backup.
-            let cancelled = cancel_tokens.iter().any(|t| t.0.load(Ordering::Acquire));
+            let cancelled = cancel_flags.iter().any(|t| t.load(Ordering::Acquire));
             if cancelled {
                 return Err(XqliteError::OperationCancelled);
             }

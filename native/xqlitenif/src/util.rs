@@ -3,14 +3,16 @@ use crate::error::XqliteError;
 use rusqlite::ffi;
 use rusqlite::{Rows, types::Value};
 use rustler::{
-    Atom, Binary, Encoder, Env, Error as RustlerError, ListIterator, Resource, ResourceArc,
-    Term, TermType, resource_impl,
+    Atom, Binary, Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term, TermType,
+    resource_impl,
+    sys::enif_get_list_cell,
     types::{
         atom::{error, false_, nil, ok, true_},
         binary::OwnedBinary,
         elixir_struct::get_ex_struct_name,
     },
 };
+use std::mem::MaybeUninit;
 use std::ops::DerefMut;
 
 #[derive(Debug)]
@@ -264,18 +266,85 @@ fn elixir_term_to_rusqlite_value<'a>(
     }
 }
 
+/// One cons cell of a caller's list, read by hand.
+///
+/// rustler's `ListIterator` panics when a tail is not a list, and a panic
+/// inside a NIF that holds the connection Mutex leaves that connection
+/// unusable for the rest of the process — so no rustler list decoder is ever
+/// handed a caller's term.
+#[inline]
+fn list_cell<'a>(term: Term<'a>) -> Option<(Term<'a>, Term<'a>)> {
+    let env = term.get_env();
+    let mut head = MaybeUninit::uninit();
+    let mut tail = MaybeUninit::uninit();
+
+    // SAFETY: `enif_get_list_cell` reads `term` in the environment that term
+    // belongs to, and writes `head` and `tail` only when it answers 1; both
+    // are then terms of that same environment, which is what `'a` names.
+    unsafe {
+        let found = enif_get_list_cell(
+            env.as_c_arg(),
+            term.as_c_arg(),
+            head.as_mut_ptr(),
+            tail.as_mut_ptr(),
+        );
+
+        match found {
+            1 => Some((
+                Term::new(env, head.assume_init()),
+                Term::new(env, tail.assume_init()),
+            )),
+            _no_cell => None,
+        }
+    }
+}
+
+/// Walks a caller's list and answers its elements, refusing a term that is no
+/// list and one whose tail stops being a list part-way through.
+pub(crate) fn walk_list<'a>(term: Term<'a>) -> Result<Vec<Term<'a>>, XqliteError> {
+    let mut items: Vec<Term<'a>> = Vec::new();
+    let mut cursor = term;
+
+    loop {
+        match list_cell(cursor) {
+            Some((head, tail)) => {
+                items.push(head);
+                cursor = tail;
+            }
+            None if cursor.is_empty_list() => break Ok(items),
+            None if items.is_empty() => break Err(XqliteError::not_a_list(term)),
+            None => break Err(XqliteError::improper_tail(cursor)),
+        }
+    }
+}
+
+/// A caller's parameter list after one walk. The first element decides how the
+/// list is read, and the elements it collected feed the decode, so the list is
+/// never walked twice.
+pub(crate) enum Params<'a> {
+    Empty,
+    Named(Vec<Term<'a>>),
+    Positional(Vec<Term<'a>>),
+}
+
+pub(crate) fn walk_params<'a>(term: Term<'a>) -> Result<Params<'a>, XqliteError> {
+    let keyword = is_keyword(term);
+
+    match walk_list(term) {
+        Ok(items) if items.is_empty() => Ok(Params::Empty),
+        Ok(items) if keyword => Ok(Params::Named(items)),
+        Ok(items) => Ok(Params::Positional(items)),
+        Err(e) if keyword => Err(e.about_keyword_list()),
+        Err(e) => Err(e),
+    }
+}
+
 pub(crate) fn decode_exec_keyword_params<'a>(
     env: Env<'a>,
-    list_term: Term<'a>,
+    items: &[Term<'a>],
 ) -> Result<Vec<(String, Value)>, XqliteError> {
-    let iter: ListIterator<'a> =
-        list_term
-            .decode()
-            .map_err(|_| XqliteError::ExpectedKeywordList {
-                value_str: format!("{list_term:?}"),
-            })?;
     let mut params: Vec<(String, Value)> = Vec::new();
-    for (index, term_item) in iter.enumerate() {
+    for (index, term_item) in items.iter().enumerate() {
         let (key_atom, value_term): (Atom, Term<'a>) =
             term_item
                 .decode()
@@ -295,15 +364,11 @@ pub(crate) fn decode_exec_keyword_params<'a>(
 
 pub(crate) fn decode_plain_list_params<'a>(
     env: Env<'a>,
-    list_term: Term<'a>,
+    items: &[Term<'a>],
 ) -> Result<Vec<Value>, XqliteError> {
-    let iter: ListIterator<'a> =
-        list_term.decode().map_err(|_| XqliteError::ExpectedList {
-            value_str: format!("{list_term:?}"),
-        })?;
-    let mut values = Vec::new();
-    for (index, term) in iter.enumerate() {
-        values.push(elixir_term_to_rusqlite_value(env, term, index + 1)?);
+    let mut values = Vec::with_capacity(items.len());
+    for (index, term) in items.iter().enumerate() {
+        values.push(elixir_term_to_rusqlite_value(env, *term, index + 1)?);
     }
     Ok(values)
 }
@@ -368,13 +433,12 @@ fn non_text_pragma_value(pragma_name: &str, term: Term<'_>) -> XqliteError {
     }
 }
 
+/// A parameter list is read as a keyword list exactly when its first element
+/// is a `{atom, value}` tuple. Only the first cell is read, and by hand.
 pub(crate) fn is_keyword<'a>(list_term: Term<'a>) -> bool {
-    match list_term.decode::<ListIterator<'a>>() {
-        Ok(mut iter) => match iter.next() {
-            Some(first_el) => first_el.decode::<(Atom, Term<'a>)>().is_ok(),
-            None => false,
-        },
-        Err(_) => false,
+    match list_cell(list_term) {
+        Some((first_el, _tail)) => first_el.decode::<(Atom, Term<'a>)>().is_ok(),
+        None => false,
     }
 }
 

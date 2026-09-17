@@ -7,7 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An improper list no longer takes the VM down.** A list whose tail is not a
+  list (`[1 | 2]`) handed to any of the nineteen functions that read a list —
+  the parameter lists of `Xqlite.stream/4`, `Xqlite.bind/2,3`, `query`,
+  `execute`, `query_with_changes`, `explain_analyze`, `stmt_bind` and
+  `stream_open`, the cancel-token lists of the seven cancellable functions and
+  `backup_with_progress/6`, and `set_authorizer/2`'s action list — used to
+  reach a decoder that panics: on a build that aborts on a panic, the whole
+  operating-system process died. Every one of those lists is now walked by
+  hand and a broken tail is `{:error, {:expected_list, %{reason:
+  :improper_tail, value_type: type}}}`.
+- **A stream open that refuses a parameter frees its statement.**
+  `Xqlite.stream/4` prepares the SQL before it reads the parameters, and a
+  parameter it could not read used to leave that prepared statement behind
+  with nothing referencing it. SQLite then refused to close the connection —
+  `{:error, {:database_busy_or_locked, 5, _}}` — for the life of the process,
+  one statement leaked per refused open.
+- **Three PRAGMA domains SQLite accepts but the gate refused.**
+  `max_page_count` takes `1..4294967294` (its own default is 4294967294, which
+  a fresh connection could not write back), `soft_heap_limit` and
+  `hard_heap_limit` take `0..(2^63 - 1)`, and `threads` is capped at 8, which
+  is where SQLite caps it. `journal_size_limit` takes -1 for "no limit".
+- **A PRAGMA that names its values takes those names.** `auto_vacuum` and
+  `secure_delete` accept `:none`, `:full`, `:incremental`, `true`, `false` and
+  `:fast`, as atoms or strings in any case, the way `synchronous` and
+  `temp_store` already did — so reading one and writing it back works.
+  `secure_delete`'s integer domain is `0..1`: SQLite reads any other non-zero
+  integer as "true", so `2` used to mean `true` while asking for `:fast`,
+  which is reachable by its word alone.
+- **Every door hands SQLite the same PRAGMA name.** `Xqlite.get_pragma/2` and
+  `Xqlite.set_pragma/3` resolve a known name to the spelling the typed schema
+  uses before the native call, so an error payload names `"function_list"`
+  whatever case the caller wrote.
+
 ### Changed
+
+- **`{:expected_list, _}` and `{:expected_keyword_list, _}` carry a map, not
+  text.** Both used to carry a Rust debug rendering of the term; they now
+  carry `%{reason: :not_a_list | :improper_tail | :bad_element, value_type:
+  atom()}`, with a one-based `:position` when a single element is at fault.
+  `@type Xqlite.list_refusal` names the shape.
+- **A raw cancellable function refuses a bad token itself.** An element of a
+  cancel-token list that is not a token used to raise `ArgumentError` from the
+  native call; it now answers `{:error, {:invalid_cancel_tokens, %{position:
+  n}}}`, and a `set_authorizer/2` action that is not an atom answers
+  `{:error, {:expected_list, %{reason: :bad_element, position: n, value_type:
+  type}}}`.
+- **The crate pins its panic strategy.** `native/xqlitenif/.cargo/config.toml`
+  sets `panic = "unwind"` for the release and dev profiles, where it outranks
+  a machine-wide cargo setting. Rustler's guard turns a panic into a catchable
+  `:nif_panicked` only while panics unwind; a build that aborts instead kills
+  the VM. `mix verify` gained a step that reads the built library's symbols
+  and fails when the pin did not hold.
 
 - **A PRAGMA argument is a scalar, and the PRAGMA's own read forms decide the
   rest.** `Xqlite.Pragma.get/3,4` and the named accessors

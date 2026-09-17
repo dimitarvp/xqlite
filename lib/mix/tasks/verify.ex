@@ -16,9 +16,12 @@ defmodule Mix.Tasks.Verify do
   5. Sobelow static security analysis (`mix sobelow`)
   6. Rust clippy with denied warnings
   7. Rust unit tests (`cargo test`)
-  8. Dialyzer type checks
-  9. Full Elixir test suite (`mix test.seq`)
-  10. Verify stamp (`scripts/tree_fingerprint.exs --stamp` records the
+  8. Panic strategy (`scripts/panic_strategy.exs` reads the built
+     library's undefined symbols: a panic has to unwind, or rustler's
+     guard cannot turn it into `:nif_panicked`)
+  9. Dialyzer type checks
+  10. Full Elixir test suite (`mix test.seq`)
+  11. Verify stamp (`scripts/tree_fingerprint.exs --stamp` records the
       fingerprint of the tree that passed, for the commit hook)
 
   ## Usage
@@ -38,6 +41,7 @@ defmodule Mix.Tasks.Verify do
     {"Sobelow static analysis", &__MODULE__.check_sobelow/0},
     {"Rust clippy", &__MODULE__.check_rust_clippy/0},
     {"Rust tests", &__MODULE__.check_rust_tests/0},
+    {"Panic strategy", &__MODULE__.check_panic_strategy/0},
     {"Dialyzer", &__MODULE__.check_dialyzer/0},
     {"Elixir tests", &__MODULE__.check_tests/0},
     {"Verify stamp", &__MODULE__.write_stamp/0}
@@ -98,6 +102,10 @@ defmodule Mix.Tasks.Verify do
 
   def check_rust_tests do
     run_cargo(["test"])
+  end
+
+  def check_panic_strategy do
+    run_cmd("elixir", ["scripts/panic_strategy.exs"])
   end
 
   def check_dialyzer do

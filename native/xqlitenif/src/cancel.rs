@@ -1,5 +1,7 @@
+use crate::error::XqliteError;
 use crate::progress_dispatch::{CancelSubscriber, ProgressDispatch};
-use rustler::{Resource, resource_impl};
+use crate::util::walk_list;
+use rustler::{Resource, ResourceArc, Term, resource_impl};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +19,29 @@ impl XqliteCancelToken {
     pub(crate) fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
+}
+
+/// Reads a caller's list of cancel tokens and answers the flags they carry.
+///
+/// The list is walked by hand, so a broken tail is a structured refusal rather
+/// than a panic, and an element that is no cancel token names its own position,
+/// one-based.
+pub(crate) fn decode_tokens(term: Term<'_>) -> Result<Vec<Arc<AtomicBool>>, XqliteError> {
+    let items = walk_list(term)?;
+    let mut flags = Vec::with_capacity(items.len());
+
+    for (index, item) in items.iter().enumerate() {
+        match item.decode::<ResourceArc<XqliteCancelToken>>() {
+            Ok(token) => flags.push(token.0.clone()),
+            Err(_not_a_token) => {
+                return Err(XqliteError::InvalidCancelTokens {
+                    position: index + 1,
+                });
+            }
+        }
+    }
+
+    Ok(flags)
 }
 
 // The guard pushes one cancel subscriber per token onto

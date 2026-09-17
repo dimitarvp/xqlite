@@ -78,6 +78,13 @@ defmodule Xqlite.TestUtil do
     Path.join([__DIR__, "ext", "xqlite_test_ext"])
   end
 
+  @doc """
+  Fills in the verify function a PRAGMA write-test row may leave out, so a
+  row of two elements generates its tests like a row of three.
+  """
+  def write_case({name, values, verify_fun}), do: {name, values, verify_fun}
+  def write_case({name, values}), do: {name, values, nil}
+
   def normalize_test_values(values) do
     Enum.map(values, fn
       {set, expected} -> {set, expected}
@@ -93,6 +100,16 @@ defmodule Xqlite.TestUtil do
     do: is_integer(fetched_val)
 
   def verify_is_atom(_context, _set_val, fetched_val, _expected_val), do: is_atom(fetched_val)
+
+  # Two journal modes SQLite will not leave a database in, measured: an
+  # in-memory database keeps "memory" for every mode but "off", and a
+  # temporary file database cannot use WAL, staying on "delete".
+  def verify_journal_mode(:memory_private, "OFF", fetched, _expected), do: fetched == "off"
+  def verify_journal_mode(:memory_private, _set, fetched, _expected), do: fetched == "memory"
+  def verify_journal_mode(:file_temp, "WAL", fetched, _expected), do: fetched == "delete"
+
+  def verify_journal_mode(_context, _set, fetched, expected),
+    do: fetched in List.wrap(expected)
 
   def verify_mmap_size_value(:memory_private, _set_val, actual, _expected_val),
     do: actual == :no_value

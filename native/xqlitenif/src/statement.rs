@@ -68,6 +68,51 @@ pub(crate) unsafe fn prepare_one(
     }
 }
 
+/// Owns a freshly prepared statement until something else takes it over.
+///
+/// A statement that is prepared and then dropped without being registered
+/// anywhere is a statement nothing can ever finalize, and SQLite refuses to
+/// close a connection that still owns one — for the life of the process. The
+/// holder makes that impossible: every way out of the scope it lives in, an
+/// error included, finalizes it, and the one path that hands the statement to
+/// a resource calls `release` first. It must stay a local of the closure that
+/// holds the connection Mutex, because `sqlite3_finalize` runs in its drop.
+pub(crate) struct PreparedStmt {
+    ptr: *mut ffi::sqlite3_stmt,
+}
+
+impl PreparedStmt {
+    pub(crate) fn new(stmt: NonNull<ffi::sqlite3_stmt>) -> Self {
+        PreparedStmt { ptr: stmt.as_ptr() }
+    }
+
+    pub(crate) fn as_ptr(&self) -> *mut ffi::sqlite3_stmt {
+        self.ptr
+    }
+
+    /// Gives the statement up: the caller owns it from here, and this holder
+    /// finalizes nothing.
+    pub(crate) fn release(mut self) -> *mut ffi::sqlite3_stmt {
+        let released = self.ptr;
+        self.ptr = std::ptr::null_mut();
+        released
+    }
+}
+
+impl Drop for PreparedStmt {
+    fn drop(&mut self) {
+        if self.ptr.is_null() {
+            return;
+        }
+
+        // SAFETY: the pointer came from `sqlite3_prepare_v2` on the connection
+        // whose Mutex the holder's scope holds, nothing else owns it — that is
+        // what `release` is for — and this runs once, the pointer being nulled
+        // as it is taken.
+        unsafe { ffi::sqlite3_finalize(self.ptr) };
+    }
+}
+
 fn no_statement() -> XqliteError {
     XqliteError::CannotExecute("SQL contains no statement".to_string())
 }

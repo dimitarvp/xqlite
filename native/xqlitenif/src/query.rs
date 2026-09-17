@@ -1,12 +1,12 @@
 use crate::connection::XqliteQueryResult;
 use crate::error::XqliteError;
 use crate::util::{
-    decode_exec_keyword_params, decode_plain_list_params, is_keyword, process_rows,
+    Params, decode_exec_keyword_params, decode_plain_list_params, process_rows, walk_params,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, Statement, ToSql};
 use rustler::types::atom::nil;
-use rustler::{Env, Term, TermType};
+use rustler::{Env, Term};
 
 /// Reject SQL text containing an interior NUL byte before it reaches SQLite.
 ///
@@ -62,30 +62,25 @@ pub(crate) fn core_query<'a>(
         stmt.column_names().iter().map(|s| s.to_string()).collect();
     let column_count = column_names.len();
 
-    let rows_result = match params_term.get_type() {
-        TermType::List => {
-            if params_term.is_empty_list() {
-                stmt.query([])
-            } else if is_keyword(params_term) {
-                let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+    let rows_result = if params_term == nil().to_term(env) {
+        stmt.query([])
+    } else {
+        match walk_params(params_term)? {
+            Params::Empty => stmt.query([]),
+            Params::Named(items) => {
+                let named_params_vec = decode_exec_keyword_params(env, &items)?;
                 let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                     .iter()
                     .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
                     .collect();
                 stmt.query(params_for_rusqlite.as_slice())
-            } else {
-                let positional_values: Vec<Value> =
-                    decode_plain_list_params(env, params_term)?;
+            }
+            Params::Positional(items) => {
+                let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
                 let params_slice: Vec<&dyn ToSql> =
                     positional_values.iter().map(|v| v as &dyn ToSql).collect();
                 stmt.query(params_slice.as_slice())
             }
-        }
-        _ if params_term == nil().to_term(env) => stmt.query([]),
-        _ => {
-            return Err(XqliteError::ExpectedList {
-                value_str: format!("{params_term:?}"),
-            });
         }
     };
     let rows = rows_result?;
@@ -137,30 +132,25 @@ pub(crate) fn core_execute<'a>(
     let mut stmt = conn.prepare(sql)?;
     reject_no_statement(&stmt)?;
 
-    let affected_rows = match params_term.get_type() {
-        TermType::List => {
-            if params_term.is_empty_list() {
-                stmt.execute([])
-            } else if is_keyword(params_term) {
-                let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+    let affected_rows = if params_term == nil().to_term(env) {
+        stmt.execute([])
+    } else {
+        match walk_params(params_term)? {
+            Params::Empty => stmt.execute([]),
+            Params::Named(items) => {
+                let named_params_vec = decode_exec_keyword_params(env, &items)?;
                 let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                     .iter()
                     .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
                     .collect();
                 stmt.execute(params_for_rusqlite.as_slice())
-            } else {
-                let positional_values: Vec<Value> =
-                    decode_plain_list_params(env, params_term)?;
+            }
+            Params::Positional(items) => {
+                let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
                 let params_slice: Vec<&dyn ToSql> =
                     positional_values.iter().map(|v| v as &dyn ToSql).collect();
                 stmt.execute(params_slice.as_slice())
             }
-        }
-        _ if params_term == nil().to_term(env) => stmt.execute([]),
-        _ => {
-            return Err(XqliteError::ExpectedList {
-                value_str: format!("{params_term:?}"),
-            });
         }
     }?;
 

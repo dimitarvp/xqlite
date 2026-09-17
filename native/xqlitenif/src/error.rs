@@ -113,6 +113,49 @@ fn blob_bytes_type_atom(term_type: TermType) -> Atom {
     }
 }
 
+fn refusal_atom(refusal: &ListRefusal) -> Atom {
+    match refusal {
+        ListRefusal::NotAList => atoms::not_a_list(),
+        ListRefusal::ImproperTail => atoms::improper_tail(),
+        ListRefusal::BadElement { .. } => atoms::bad_element(),
+    }
+}
+
+fn refusal_text(refusal: &ListRefusal) -> String {
+    match refusal {
+        ListRefusal::NotAList => "the term is no list".to_string(),
+        ListRefusal::ImproperTail => "its tail is no list".to_string(),
+        ListRefusal::BadElement { position } => {
+            format!("element {position} does not belong in it")
+        }
+    }
+}
+
+fn encode_list_refusal<'a>(
+    env: Env<'a>,
+    tag: Atom,
+    refusal: &ListRefusal,
+    value_type: TermType,
+) -> Term<'a> {
+    let map_result = map_new(env)
+        .map_put(atoms::reason(), refusal_atom(refusal))
+        .and_then(|map| map.map_put(atoms::value_type(), term_type_to_atom(value_type)))
+        .and_then(|map| match refusal {
+            ListRefusal::BadElement { position } => map.map_put(atoms::position(), position),
+            _no_position => Ok(map),
+        });
+
+    match map_result {
+        Ok(map) => (tag, map).encode(env),
+        Err(_) => {
+            let err = XqliteError::InternalEncodingError {
+                context: "Failed map create for a list refusal".to_string(),
+            };
+            err.encode(env)
+        }
+    }
+}
+
 fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
     match t {
         rusqlite::types::Type::Null => nil(),
@@ -121,6 +164,16 @@ fn sqlite_type_to_atom(t: rusqlite::types::Type) -> Atom {
         rusqlite::types::Type::Text => atoms::text(),
         rusqlite::types::Type::Blob => atoms::binary(),
     }
+}
+
+/// Why a term a caller passed is no list this library can read: it is no list
+/// at all, its tail stops being one part-way through, or one of its elements
+/// is not what the list is for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ListRefusal {
+    NotAList,
+    ImproperTail,
+    BadElement { position: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -133,13 +186,18 @@ pub(crate) enum XqliteError {
         reason: String,
     },
     ExpectedKeywordList {
-        value_str: String,
+        refusal: ListRefusal,
+        value_type: TermType,
     },
     ExpectedKeywordTuple {
         value_str: String,
     },
     ExpectedList {
-        value_str: String,
+        refusal: ListRefusal,
+        value_type: TermType,
+    },
+    InvalidCancelTokens {
+        position: usize,
     },
     UnsupportedAtom {
         atom_value: String,
@@ -287,6 +345,44 @@ pub(crate) enum XqliteError {
     },
 }
 
+impl XqliteError {
+    pub(crate) fn not_a_list(term: Term<'_>) -> Self {
+        XqliteError::ExpectedList {
+            refusal: ListRefusal::NotAList,
+            value_type: term.get_type(),
+        }
+    }
+
+    pub(crate) fn improper_tail(tail: Term<'_>) -> Self {
+        XqliteError::ExpectedList {
+            refusal: ListRefusal::ImproperTail,
+            value_type: tail.get_type(),
+        }
+    }
+
+    pub(crate) fn bad_element(position: usize, element: Term<'_>) -> Self {
+        XqliteError::ExpectedList {
+            refusal: ListRefusal::BadElement { position },
+            value_type: element.get_type(),
+        }
+    }
+
+    /// The same refusal, told about a list whose first element made it a
+    /// keyword list.
+    pub(crate) fn about_keyword_list(self) -> Self {
+        match self {
+            XqliteError::ExpectedList {
+                refusal,
+                value_type,
+            } => XqliteError::ExpectedKeywordList {
+                refusal,
+                value_type,
+            },
+            other => other,
+        }
+    }
+}
+
 impl Display for XqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -297,17 +393,30 @@ impl Display for XqliteError {
             XqliteError::ToSqlConversionFailure { reason } => {
                 write!(f, "Cannot convert Rust value to SQLite type: {reason}")
             }
-            XqliteError::ExpectedKeywordList { value_str } => write!(
+            XqliteError::ExpectedKeywordList {
+                refusal,
+                value_type,
+            } => write!(
                 f,
-                "Expected a keyword list for named parameters, got: {value_str}"
+                "Expected a keyword list for named parameters: {} ({value_type:?})",
+                refusal_text(refusal)
             ),
             XqliteError::ExpectedKeywordTuple { value_str } => write!(
                 f,
                 "Expected a {{atom, value}} tuple inside keyword list, got: {value_str}"
             ),
-            XqliteError::ExpectedList { value_str } => {
-                write!(f, "Expected a List for parameters, got: {value_str}")
-            }
+            XqliteError::ExpectedList {
+                refusal,
+                value_type,
+            } => write!(
+                f,
+                "Expected a list: {} ({value_type:?})",
+                refusal_text(refusal)
+            ),
+            XqliteError::InvalidCancelTokens { position } => write!(
+                f,
+                "Expected a cancel token at position {position} of the list"
+            ),
             XqliteError::UnsupportedAtom { atom_value } => write!(
                 f,
                 "Unsupported atom value '{atom_value}'. Allowed values: nil, true, false"
@@ -521,14 +630,31 @@ impl Encoder for XqliteError {
             XqliteError::ToSqlConversionFailure { reason } => {
                 (atoms::to_sql_conversion_failure(), reason).encode(env)
             }
-            XqliteError::ExpectedKeywordList { value_str } => {
-                (atoms::expected_keyword_list(), value_str).encode(env)
+            XqliteError::ExpectedKeywordList {
+                refusal,
+                value_type,
+            } => {
+                encode_list_refusal(env, atoms::expected_keyword_list(), refusal, *value_type)
             }
             XqliteError::ExpectedKeywordTuple { value_str } => {
                 (atoms::expected_keyword_tuple(), value_str).encode(env)
             }
-            XqliteError::ExpectedList { value_str } => {
-                (atoms::expected_list(), value_str).encode(env)
+            XqliteError::ExpectedList {
+                refusal,
+                value_type,
+            } => encode_list_refusal(env, atoms::expected_list(), refusal, *value_type),
+            XqliteError::InvalidCancelTokens { position } => {
+                let map_result = map_new(env).map_put(atoms::position(), position);
+
+                match map_result {
+                    Ok(map) => (atoms::invalid_cancel_tokens(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidCancelTokens".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
             XqliteError::UnsupportedAtom { atom_value } => {
                 (atoms::unsupported_atom(), atom_value).encode(env)

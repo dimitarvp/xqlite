@@ -210,9 +210,9 @@ defmodule Xqlite do
           | {:cannot_open_database, String.t(), integer(), String.t()}
           | {:constraint_violation, constraint_kind(), constraint_details()}
           | {:database_busy_or_locked, integer(), String.t()}
-          | {:expected_keyword_list, String.t()}
+          | {:expected_keyword_list, list_refusal()}
           | {:expected_keyword_tuple, String.t()}
-          | {:expected_list, String.t()}
+          | {:expected_list, list_refusal()}
           | {:from_sql_conversion_failure, non_neg_integer(), atom(), String.t()}
           | {:index_exists, String.t()}
           | {:integral_value_out_of_range, non_neg_integer(), integer()}
@@ -264,6 +264,20 @@ defmodule Xqlite do
           | {:unsupported_data_type, atom()}
           | {:utf8_error, non_neg_integer(), String.t()}
           | {:without_rowid_unsupported, String.t()}
+
+  @typedoc """
+  Why a term handed to a function that takes a list is no list it can read.
+
+  `:not_a_list` is a term that is no list at all, `:improper_tail` a list whose
+  tail stops being one part-way through (`[1 | 2]`), and `:bad_element` an
+  element that does not belong in that list, at its one-based `:position`.
+  `:value_type` names the kind of term that stopped the walk.
+  """
+  @type list_refusal :: %{
+          :reason => :not_a_list | :improper_tail | :bad_element,
+          :value_type => atom(),
+          optional(:position) => pos_integer()
+        }
 
   @type error :: {:error, error_reason()}
 
@@ -521,13 +535,6 @@ defmodule Xqlite do
   # checked clause below then judges every one of them by the same rule.
   defp set_pragma_value(conn, :busy_timeout, :infinity),
     do: set_pragma_value(conn, :busy_timeout, 2_147_483_647)
-
-  defp set_pragma_value(conn, :auto_vacuum, :none), do: set_pragma_value(conn, :auto_vacuum, 0)
-
-  defp set_pragma_value(conn, :auto_vacuum, :full), do: set_pragma_value(conn, :auto_vacuum, 1)
-
-  defp set_pragma_value(conn, :auto_vacuum, :incremental),
-    do: set_pragma_value(conn, :auto_vacuum, 2)
 
   defp set_pragma_value(conn, key, value) do
     case Xqlite.Pragma.check_value(key, value) do
@@ -2009,7 +2016,7 @@ defmodule Xqlite do
   """
   @spec get_pragma(conn(), String.t() | atom()) :: {:ok, term()} | error()
   def get_pragma(conn, name) when is_atom(name) or is_binary(name) do
-    name_str = to_string(name)
+    name_str = pragma_name_string(name)
 
     case XqliteNIF.get_pragma(conn, name_str) do
       {:ok, _value} = ok ->
@@ -2051,7 +2058,7 @@ defmodule Xqlite do
   """
   @spec set_pragma(conn(), String.t() | atom(), term()) :: {:ok, term()} | error()
   def set_pragma(conn, name, value) when is_atom(name) or is_binary(name) do
-    name_str = to_string(name)
+    name_str = pragma_name_string(name)
 
     case Xqlite.Pragma.check_value(name, value) do
       {:ok, checked} -> write_pragma(conn, name_str, checked, value)
@@ -2060,6 +2067,16 @@ defmodule Xqlite do
   end
 
   def set_pragma(_conn, name, _value), do: {:error, {:invalid_pragma_name, name}}
+
+  # A name the typed schema knows goes to SQLite the way the schema spells it,
+  # whatever case the caller wrote, so every door's answer names it the same.
+  # A name outside the schema goes as written; there is no other spelling.
+  defp pragma_name_string(name) do
+    case Xqlite.Pragma.canonical_name(name) do
+      {:ok, canonical} -> Atom.to_string(canonical)
+      {:error, _reason} -> to_string(name)
+    end
+  end
 
   defp unmodelled_or_refusal(conn, name_str, value, {:unknown_pragma, _name}),
     do: write_pragma(conn, name_str, value, value)

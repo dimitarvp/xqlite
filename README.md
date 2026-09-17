@@ -8,7 +8,7 @@
 [![Coverage](https://coveralls.io/repos/github/dimitarvp/xqlite/badge.svg?branch=main)](https://coveralls.io/github/dimitarvp/xqlite?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Low-level, fast, panic-free NIF bindings to SQLite 3 for Elixir. Will never crash the BEAM VM. Powered by Rust with [rusqlite](https://crates.io/crates/rusqlite) and [rustler](https://github.com/rusterlium/rustler). Bundled SQLite 3.53.2 -- no need to have SQLite already installed on your machine.
+Low-level, fast NIF bindings to SQLite 3 for Elixir. A term it cannot read and a value it cannot store come back as structured `{:error, reason}` tuples, never as a crash -- see [the security guide](guides/security.md) for how far that reaches. Powered by Rust with [rusqlite](https://crates.io/crates/rusqlite) and [rustler](https://github.com/rusterlium/rustler). Bundled SQLite 3.53.2 -- no need to have SQLite already installed on your machine.
 
 For Ecto 3.x integration see [xqlite_ecto3](https://github.com/dimitarvp/xqlite_ecto3), built on top of xqlite (work in progress).
 

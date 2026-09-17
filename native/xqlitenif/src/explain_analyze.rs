@@ -1,12 +1,12 @@
 use crate::atoms;
 use crate::error::XqliteError;
 use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
-use crate::util::{decode_exec_keyword_params, decode_plain_list_params, is_keyword};
+use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params, walk_params};
 use rusqlite::Connection;
 use rusqlite::ffi;
 use rusqlite::types::Value;
 use rustler::types::atom::nil;
-use rustler::{Encoder, Env, Term, TermType, types::map::map_new};
+use rustler::{Encoder, Env, Term, types::map::map_new};
 use std::ffi::CStr;
 use std::os::raw::c_int;
 use std::time::Instant;
@@ -130,20 +130,20 @@ fn bind_params<'a>(
     db_handle: *mut ffi::sqlite3,
     params_term: Term<'a>,
 ) -> Result<(), XqliteError> {
-    match params_term.get_type() {
-        TermType::List if params_term.is_empty_list() => Ok(()),
-        TermType::List if is_keyword(params_term) => {
-            let named_params_vec = decode_exec_keyword_params(env, params_term)?;
+    if params_term == nil().to_term(env) {
+        return Ok(());
+    }
+
+    match walk_params(params_term)? {
+        Params::Empty => Ok(()),
+        Params::Named(items) => {
+            let named_params_vec = decode_exec_keyword_params(env, &items)?;
             bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle)
         }
-        TermType::List => {
-            let positional_values: Vec<Value> = decode_plain_list_params(env, params_term)?;
+        Params::Positional(items) => {
+            let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
             bind_positional_params_ffi(stmt_ptr, &positional_values, db_handle)
         }
-        _ if params_term == nil().to_term(env) => Ok(()),
-        _ => Err(XqliteError::ExpectedList {
-            value_str: format!("{params_term:?}"),
-        }),
     }
 }
 

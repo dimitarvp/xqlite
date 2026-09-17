@@ -17,6 +17,8 @@ defmodule Xqlite.ArgumentValidationLawTest do
 
   import Xqlite.ConnCase
 
+  alias XqliteNIF, as: NIF
+
   @begin_modes [:deferred, :immediate, :exclusive]
   @checkpoint_modes [:passive, :full, :restart, :truncate]
 
@@ -57,6 +59,30 @@ defmodule Xqlite.ArgumentValidationLawTest do
         assert {:error, :invalid_transaction_mode} == Xqlite.begin(conn, mode)
         assert {:ok, true} == Xqlite.autocommit(conn)
       end
+    end
+
+    # Every door prepares the SQL before it reads the parameters, so a call
+    # that is wrong in both ways reports the SQL. One example per door keeps
+    # that order visible: a change to it shows up here, not in a user's code.
+    test "a bad SQL and a bad parameter together answer the SQL error", %{conn: conn} do
+      sql = "this is not sql"
+      params = [<<1::1>>]
+
+      answers = [
+        {:nif_query, NIF.query(conn, sql, params)},
+        {:nif_execute, NIF.execute(conn, sql, params)},
+        {:nif_query_with_changes, NIF.query_with_changes(conn, sql, params)},
+        {:nif_explain_analyze, NIF.explain_analyze(conn, sql, params)},
+        {:nif_stream_open, NIF.stream_open(conn, sql, params, [])},
+        {:query, Xqlite.query(conn, sql, params)},
+        {:stream, Xqlite.stream(conn, sql, params)}
+      ]
+
+      for {door, answer} <- answers do
+        assert {^door, {:error, {:sql_input_error, %{code: 1}}}} = {door, answer}
+      end
+
+      assert :ok = Xqlite.close(conn)
     end
 
     test "begin/2 accepts its three modes and leaves the measured state", %{conn: conn} do

@@ -158,6 +158,22 @@ defmodule Xqlite.NIF.StreamTest do
 
         assert {:error, {:sqlite_failure, _, 25, _msg}} =
                  NIF.stream_open(conn, sql, params, [])
+
+        # The bind failed after the statement was prepared; SQLite refuses the
+        # close of a connection that still owns one.
+        assert :ok = NIF.close(conn)
+      end
+
+      test "stream_open/4 refuses a params term that is no list, and nothing is prepared", %{
+        conn: conn
+      } do
+        sql = "SELECT id FROM stream_items WHERE id = ?1;"
+
+        for term <- [{:a, 1}, 7, %{a: 1}] do
+          assert {:error, {:expected_list, _payload}} = NIF.stream_open(conn, sql, term, [])
+        end
+
+        assert :ok = NIF.close(conn)
       end
 
       # --- stream_fetch/2 Tests ---

@@ -58,7 +58,9 @@ defmodule XqlitePragmaTest do
        {2, :memory}
      ]},
     {:auto_vacuum, [{0, :none}, {1, :full}, {2, :incremental}], &verify_is_atom/4},
-    {:secure_delete, [{0, false}, {1, true}, {2, :fast}]},
+    # SQLite reads `secure_delete = 2` as the boolean "true", so the third
+    # mode is reachable by its word only.
+    {:secure_delete, [{0, false}, {1, true}, {"FAST", :fast}]},
 
     # PRAGMAs with platform-dependent results
     {:journal_mode,
@@ -71,7 +73,7 @@ defmodule XqlitePragmaTest do
        # On in-memory, WAL falls back to memory
        {"WAL", ~w(wal memory)},
        {"OFF", "off"}
-     ]},
+     ], &verify_journal_mode/4},
     {:locking_mode, [{"NORMAL", "normal"}, {"EXCLUSIVE", "exclusive"}]},
     {:encoding,
      [
@@ -85,8 +87,12 @@ defmodule XqlitePragmaTest do
     # Advisory values
     # Test with a positive, negative (if applicable), and zero value
     {:cache_size, [0, 8, -16], &verify_is_integer/4},
-    {:soft_heap_limit, [0, 1024 * 1024], &verify_is_integer/4},
-    {:hard_heap_limit, [0, 1024 * 1024], &verify_is_integer/4},
+    # Both heap limits belong to the operating-system process, not to the
+    # connection, and a hard limit is never released once it is lowered: a
+    # small one here would make every later test in this process fail with
+    # "out of memory". Only values that lower nothing are written.
+    {:soft_heap_limit, [0, 9_223_372_036_854_775_807], &verify_is_integer/4},
+    {:hard_heap_limit, [0, 9_223_372_036_854_775_807], &verify_is_integer/4},
     {:threads, [0, 1, 8], &verify_is_integer/4},
     {:wal_autocheckpoint, [0, 1000], &verify_is_integer/4},
     {:mmap_size, [0, 256 * 1024], &verify_mmap_size_value/4}
@@ -142,9 +148,10 @@ defmodule XqlitePragmaTest do
 
       # All writable PRAGMAs with one arg.
 
-      for {name, values_to_test, verify_fun} <- @write_test_cases,
-          verify_fun = Macro.escape(verify_fun) do
-        verify_fun = verify_fun || (&default_verify_values/4)
+      # The escape belongs in the body: as a comprehension clause it is a
+      # filter, and it dropped every row that names no verify function.
+      for {name, values_to_test, verify_fun} <- Enum.map(@write_test_cases, &write_case/1) do
+        verify_fun = Macro.escape(verify_fun || (&default_verify_values/4))
 
         # Generate a test for each value to be set for a given PRAGMA
         for {set_val, expected_val} <- normalize_test_values(values_to_test) do
@@ -530,6 +537,22 @@ defmodule XqlitePragmaTest do
                door_answers(:foreign_keys, :foreign_keys)
     end
 
+    # A door resolves the caller's spelling to the name this module knows, so
+    # what SQLite is given — and what an error payload then reports — is the
+    # same string whatever the caller wrote.
+    test "the anchor: a door hands SQLite the name the spec spells" do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+
+      handler_id = Xqlite.Telemetry.TestSupport.attach_capture([[:xqlite, :pragma, :get]])
+      on_exit(fn -> Xqlite.Telemetry.TestSupport.detach(handler_id) end)
+
+      assert {:ok, _value} = Xqlite.get_pragma(db, :FUNCTION_LIST)
+
+      assert_receive {:telemetry_event, [:xqlite, :pragma, :get], _measurements,
+                      %{name: "function_list"}}
+    end
+
     property "every door answers what the canonical atom answers", %{canonical: canonical} do
       check all(
               name <- StreamData.member_of(P.all()),
@@ -723,12 +746,39 @@ defmodule XqlitePragmaTest do
     -3_000_000_000
   ]
 
+  # A heap limit belongs to the operating-system process, and a hard one is
+  # never released: a small generated value would cap every test that runs
+  # after it. These stay above a gigabyte, where they cap nothing.
+  defp accepted_value(name) when name in [:hard_heap_limit, :soft_heap_limit] do
+    _first..last//_ = integer_range(name)
+    StreamData.integer(1_073_741_824..last)
+  end
+
   defp accepted_value(name) do
     case Map.fetch!(@accepted_spellings, name) do
       [] -> name |> integer_range() |> StreamData.integer()
       forms -> StreamData.member_of(forms)
     end
   end
+
+  # A value is hostile to a PRAGMA only when its own spec has no room for it;
+  # the two 64-bit domains hold integers the 32-bit ones refuse.
+  defp hostile_pair do
+    StreamData.bind(StreamData.member_of(@writable_names), fn name ->
+      name
+      |> hostile_values_for()
+      |> StreamData.member_of()
+      |> StreamData.map(fn value -> {name, value} end)
+    end)
+  end
+
+  defp hostile_values_for(name) do
+    %{valid_values: valid} = Map.fetch!(P.schema(), name)
+    Enum.reject(@hostile_values, fn value -> inside?(valid, value) end)
+  end
+
+  defp inside?(%Range{} = range, value) when is_integer(value), do: value in range
+  defp inside?(_valid_values, _value), do: false
 
   defp integer_range(name) do
     %{valid_values: range} = Map.fetch!(P.schema(), name)
@@ -775,6 +825,17 @@ defmodule XqlitePragmaTest do
       assert {:ok, 7} = Xqlite.get_pragma(conn, "user_version")
     end
 
+    # The hard limit belongs to the operating-system process and SQLite applies
+    # it only when it lowers the limit in force, so the only value that is safe
+    # to write here is one that lowers nothing. A write of 0 does not release
+    # it either: it answers the limit already in force.
+    test "hard_heap_limit takes a 64-bit value, and zero does not release it", %{conn: conn} do
+      assert {:ok, limit} = P.put(conn, :hard_heap_limit, 9_223_372_036_854_775_807)
+      assert is_integer(limit)
+      assert {:ok, ^limit} = P.put(conn, :hard_heap_limit, 0)
+      assert {:ok, ^limit} = P.get(conn, :hard_heap_limit)
+    end
+
     test "a pragma the spec marks read-only is refused", %{conn: conn} do
       assert {:error, {:read_only_pragma, :page_count}} = P.put(conn, :page_count, 5)
       assert {:error, {:read_only_pragma, :integrity_check}} = P.put(conn, :integrity_check, 5)
@@ -802,11 +863,7 @@ defmodule XqlitePragmaTest do
     property "a value outside the spec is refused by both setters, and nothing moves", %{
       conn: conn
     } do
-      check all(
-              name <- StreamData.member_of(@writable_names),
-              value <- StreamData.member_of(@hostile_values),
-              max_runs: 2000
-            ) do
+      check all({name, value} <- hostile_pair(), max_runs: 2000) do
         before = Xqlite.get_pragma(conn, name)
 
         assert {:error, {:invalid_pragma_value, %{pragma: ^name, value: ^value}}} =
