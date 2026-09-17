@@ -88,6 +88,32 @@ defmodule Xqlite.ImproperListLawTest do
     end
   end
 
+  # `nil` is the one non-list term every parameter door reads as "no
+  # parameters at all", so it is the exception the law above leaves out.
+  test "nil binds nothing on every parameter door" do
+    conn = fresh_conn()
+
+    assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT 1", nil)
+    assert {:error, :execute_returned_results} = NIF.execute(conn, "SELECT 1", nil)
+    assert {:ok, %{rows: [[1]]}} = NIF.query_with_changes(conn, "SELECT 1", nil)
+    assert {:ok, _report} = NIF.explain_analyze(conn, "SELECT 1", nil)
+    assert {:ok, _stream} = NIF.stream_open(conn, "SELECT 1", nil)
+
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT 1")
+    assert :ok = NIF.stmt_bind(stmt, nil)
+    assert {:row, [1]} = NIF.stmt_step(stmt)
+  end
+
+  # Binding nothing to a statement that has a parameter leaves it NULL, the
+  # same as an empty list does, rather than counting the parameters.
+  test "nil leaves the parameter of a one-parameter statement NULL" do
+    conn = fresh_conn()
+
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT ?1")
+    assert :ok = NIF.stmt_bind(stmt, nil)
+    assert {:row, [nil]} = NIF.stmt_step(stmt)
+  end
+
   property "a term that is no list at all is refused as such" do
     check all(term <- tail(), max_runs: 2000) do
       type = type_of(term)
@@ -164,8 +190,7 @@ defmodule Xqlite.ImproperListLawTest do
     NIF.stmt_bind(stmt, list)
   end
 
-  defp call(:nif_stream_open_params, conn, list),
-    do: NIF.stream_open(conn, "SELECT ?1", list, [])
+  defp call(:nif_stream_open_params, conn, list), do: NIF.stream_open(conn, "SELECT ?1", list)
 
   defp call(:nif_explain_analyze_params, conn, list),
     do: NIF.explain_analyze(conn, "SELECT ?1", list)
@@ -188,7 +213,7 @@ defmodule Xqlite.ImproperListLawTest do
   end
 
   defp call(:nif_stream_fetch_cancellable_tokens, conn, list) do
-    assert {:ok, stream} = NIF.stream_open(conn, "SELECT 1", [], [])
+    assert {:ok, stream} = NIF.stream_open(conn, "SELECT 1", [])
     NIF.stream_fetch_cancellable(stream, 1, list)
   end
 

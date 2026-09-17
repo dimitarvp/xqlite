@@ -746,11 +746,11 @@ fn stmt_prepare(
                 return Err(e);
             }
 
-            Ok(XqliteStatement {
-                atomic_raw_stmt: cell,
-                conn_resource_arc: conn_resource_arc_clone,
+            Ok(XqliteStatement::new(
+                cell,
+                conn_resource_arc_clone,
                 column_names,
-            })
+            ))
         }
     })
     .map(ResourceArc::new)
@@ -858,6 +858,14 @@ fn stmt_multi_step_impl<'a>(
     let mut done = false;
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        // An earlier batch ended on a value read that failed after it had
+        // handed back the rows it already had. Answer that error now and
+        // empty the slot: the statement itself carries on at the row after
+        // the one SQLite stepped past.
+        if let Some(pending) = stmt_handle.take_pending_error() {
+            return Err(pending);
+        }
+
         // Registers the cancel tokens on the connection's progress dispatch
         // for the duration of the step loop (RAII; empty input is a no-op
         // guard). with_live_stmt holds the connection Mutex, satisfying the
@@ -870,10 +878,22 @@ fn stmt_multi_step_impl<'a>(
         for _ in 0..batch_size {
             // SAFETY: with_live_stmt holds the connection mutex and proved
             // stmt_ptr live.
-            match unsafe { process_single_step(env, stmt_ptr, db_handle) }? {
-                Some(row_terms) => rows.push(row_terms),
-                None => {
+            match unsafe { process_single_step(env, stmt_ptr, db_handle) } {
+                Ok(Some(row_terms)) => rows.push(row_terms),
+                Ok(None) => {
                     done = true;
+                    break;
+                }
+                Err(e) => {
+                    // A cancellation discards the batch, as the cancellable
+                    // door's contract says. Any other error hands back the
+                    // rows this batch had already read and waits for the next
+                    // call — unless there are none, when it answers now.
+                    if rows.is_empty() || matches!(e, XqliteError::OperationCancelled) {
+                        return Err(e);
+                    }
+
+                    stmt_handle.store_pending_error(e);
                     break;
                 }
             }
@@ -903,6 +923,10 @@ fn stmt_multi_step_impl<'a>(
 #[rustler::nif(schedule = "DirtyIo")]
 fn stmt_reset(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'_> {
     let result = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
+        // The statement starts from the top, so an error held back from an
+        // earlier batch belongs to a run that is over.
+        let _ = stmt_handle.take_pending_error();
+
         // SAFETY: with_live_stmt holds the connection mutex and proved
         // stmt_ptr live. sqlite3_reset's return code echoes the most recent
         // step error rather than reporting the reset itself — resetting a
@@ -972,7 +996,6 @@ fn stmt_finalize(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
 }
 
 /// Binds a stream's parameters onto a statement that is already prepared.
-/// `nil` and an empty list both mean "no parameters", as everywhere else.
 fn bind_stream_params<'a>(
     env: Env<'a>,
     stmt_ptr: *mut ffi::sqlite3_stmt,
@@ -981,10 +1004,6 @@ fn bind_stream_params<'a>(
 ) -> Result<(), XqliteError> {
     use crate::stream::{bind_named_params_ffi, bind_positional_params_ffi};
     use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
-
-    if params_term == rustler::types::atom::nil().to_term(env) {
-        return Ok(());
-    }
 
     match crate::util::walk_params(params_term)? {
         Params::Empty => Ok(()),
@@ -1005,7 +1024,6 @@ fn stream_open<'a>(
     conn_handle: ResourceArc<XqliteConn>,
     sql: String,
     params_term: Term<'a>,
-    _reserved_future_opts: Term<'a>,
 ) -> Result<ResourceArc<XqliteStream>, XqliteError> {
     use crate::statement::PreparedStmt;
 

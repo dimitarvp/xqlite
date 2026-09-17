@@ -5,6 +5,94 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`multi_step/2` no longer throws away the rows it had already read.** A
+  value SQLite hands back that cannot be read — a TEXT column holding bytes
+  that are not valid UTF-8 — used to lose every row the same batch had read
+  before it: four rows with the unreadable one second answered the error and
+  row one never reached the caller. The statement door now does what the
+  stream door has done for a while: it hands back the rows it read, with
+  `done: false`, holds the error, and answers it on the next call; the
+  statement then carries on at the row after the bad one. `reset/1` starts
+  the statement over and drops a held-back error. A cancellation still
+  discards the rows of the batch it lands in, which is the one failure that
+  throws rows away. `multi_step_cancellable/3` shares all of it, and `step/1`
+  reads one row and is unchanged.
+
+### Changed
+
+- **`XqliteNIF.stream_open/4` is `XqliteNIF.stream_open/3`.** The fourth
+  argument was reserved for stream options that never arrived, and nothing
+  read it — `stream_open(conn, sql, [], :garbage)` opened a stream. It is
+  gone, so a raw caller passing four arguments has to drop the last one.
+  `Xqlite.stream/4` is unaffected.
+- **`{:expected_keyword_tuple, _}` carries the same map as its siblings.** An
+  element of a keyword parameter list that is not an `{atom, value}` pair used
+  to come back as the Rust debug text of the caller's own element — which put
+  the caller's data, a password in a named parameter included, inside an error
+  term, and threw away the position the decoder had in hand. It is now
+  `%{reason: :bad_element, position: n, value_type: type}`, the map
+  `{:expected_list, _}` and `{:expected_keyword_list, _}` already carry, with
+  `n` the one-based position of the element and `type` its kind.
+- **`{:invalid_cancel_tokens, _}` holds the same map on every door.** The
+  Elixir doors used to answer with the caller's own value and the raw NIFs
+  with `%{position: n}`. Both now answer
+  `%{reason: :bad_element, position: n, value_type: type}` for an element that
+  is no live token; the Elixir doors, which take one token or a list of them,
+  answer position 1 for a single term that is no token and
+  `%{reason: :improper_tail, value_type: type}` for a list whose tail is not
+  `[]`. `Xqlite.cancel_operation/1` takes one token and refuses a list, an
+  empty one and a list of live tokens included, as the one element it was
+  handed. The raw NIFs keep `{:expected_list, _}` for a term that is no list.
+- **`XqliteNIF.stmt_bind/2` reads `nil` as no parameters, like its siblings.**
+  `query`, `execute`, `query_with_changes`, `explain_analyze` and
+  `stream_open` all took a parameter term of `nil` as "no parameters" while
+  `stmt_bind` answered `{:expected_list, _}` for it. One rule now, in one
+  place: `stmt_bind(stmt, nil)` answers `:ok` and binds nothing, which leaves
+  a statement's parameter NULL instead of refusing the call.
+  `Xqlite.bind/2,3` still guards `is_list/1`, so `nil` raises at the typed
+  door as before.
+- **`Xqlite.Pragma` judges its options.** The options position — the last
+  argument of `get/4` and `put/4`, and the third argument of `get/4` when it
+  is a keyword list, the two being merged — used to reach `Keyword.get/3`
+  unjudged: a term that is no list raised `FunctionClauseError` several calls
+  deep, and `[1]`, `[:db_name]` and `[foo: 1]` were silently ignored. Options
+  are now a keyword list whose only key is `:db_name`, whose value is a
+  string, an atom or `nil`; anything else answers
+  `{:error, {:invalid_pragma_argument, %{pragma: name, value: value, reason:
+  :invalid_options}}}` before a statement is built, `value` being the whole
+  term when it is no keyword list and the `{key, value}` pair that could not
+  be read when it is one. The named accessors (`table_info/3` and its
+  siblings) reach `get/4` and inherit it.
+- **`nil` is not a PRAGMA name.** `Xqlite.get_pragma/2` and
+  `Xqlite.set_pragma/3` turned it into the empty string on their way to
+  SQLite and answered `{:error, {:invalid_pragma_name, ""}}`, replacing the
+  caller's key with a string it never wrote. They now answer
+  `{:error, {:invalid_pragma_name, nil}}`. `true` and `false` stay names of
+  PRAGMAs SQLite parses and ignores.
+- **`Xqlite.Pragma.get_result/0` names `:no_value`.** The atom is what every
+  read door answers for a PRAGMA the connection has no row for — `mmap_size`
+  on a database that is not a file, and `legacy_file_format` and
+  `incremental_vacuum` on any database — and it was hidden inside `atom()`
+  with nothing saying when it comes. The type names it, the `get/3,4` doc says
+  when it comes, and no write door takes it back.
+- **`mix verify`'s panic step checks the library the VM loads, by path.**
+  `scripts/panic_strategy.exs` used to glob for libraries and read the newest
+  file it found, which could be the crate's own build under
+  `native/xqlitenif/target` — a file nothing loads. It now takes the
+  libraries to read as arguments and checks each one, and `mix verify` hands
+  it `priv/native/xqlitenif.{so,dll}`. It also fails, instead of passing with
+  a notice, when no tool that lists symbols is on the machine; name one in
+  `XQLITE_SYMBOL_TOOL` to override the search for `nm` and `llvm-nm`.
+- **The release workflow reports each built library's panic strategy.** Every
+  build job unpacks the library it produced, reads its symbols and writes what
+  it found into its own job summary. The step reports and never fails the job:
+  the marker that proves unwinding differs per target family, and one that is
+  wrong for a family would block that target's asset.
+
 ## [0.15.0] - 2026-09-18
 
 ### Fixed

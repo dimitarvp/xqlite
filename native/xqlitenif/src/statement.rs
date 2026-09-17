@@ -7,8 +7,8 @@ use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::raw::{c_char, c_int};
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Compiles exactly one SQL statement and hands the raw statement to the
 /// caller, who owns it and must finalize it.
@@ -201,6 +201,14 @@ unsafe fn tail_holds_statement(
 /// `finalize` finds a null cell and answers `:ok`.
 pub(crate) struct XqliteStatement {
     pub(crate) atomic_raw_stmt: Arc<AtomicPtr<ffi::sqlite3_stmt>>,
+
+    /// A value read that failed after the batch had already read rows. Those
+    /// rows go back to the caller and the error waits here for the next call,
+    /// exactly as a stream holds one back. Written and taken with the
+    /// connection Mutex held; `take_and_finalize` empties it before it takes
+    /// that Mutex, so the two never nest the other way round.
+    pending_error: Mutex<Option<XqliteError>>,
+
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
     /// Prepare-time snapshot, served by `stmt_column_names` only after
     /// finalization; live statements read column metadata directly so
@@ -212,8 +220,41 @@ pub(crate) struct XqliteStatement {
 impl Resource for XqliteStatement {}
 
 impl XqliteStatement {
+    pub(crate) fn new(
+        atomic_raw_stmt: Arc<AtomicPtr<ffi::sqlite3_stmt>>,
+        conn_resource_arc: ResourceArc<XqliteConn>,
+        column_names: Vec<String>,
+    ) -> Self {
+        XqliteStatement {
+            atomic_raw_stmt,
+            pending_error: Mutex::new(None),
+            conn_resource_arc,
+            column_names,
+        }
+    }
+
     pub(crate) fn take_and_finalize(&self) -> Result<(), XqliteError> {
+        // A finalized statement answers its lifecycle error, never a
+        // leftover value error.
+        let _ = self.take_pending_error();
         take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc)
+    }
+
+    pub(crate) fn take_pending_error(&self) -> Option<XqliteError> {
+        self.pending_slot().take()
+    }
+
+    pub(crate) fn store_pending_error(&self, error: XqliteError) {
+        *self.pending_slot() = Some(error);
+    }
+
+    // The slot holds one Option and nothing that can panic runs while it is
+    // held, so a poisoned Mutex is recovered rather than reported.
+    fn pending_slot(&self) -> MutexGuard<'_, Option<XqliteError>> {
+        match self.pending_error.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     /// Runs `f` with the connection Mutex held, the connection proven open,

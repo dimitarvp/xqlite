@@ -5,7 +5,6 @@ use crate::util::{
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, Statement, ToSql};
-use rustler::types::atom::nil;
 use rustler::{Env, Term};
 
 /// Reject SQL text containing an interior NUL byte before it reaches SQLite.
@@ -62,25 +61,21 @@ pub(crate) fn core_query<'a>(
         stmt.column_names().iter().map(|s| s.to_string()).collect();
     let column_count = column_names.len();
 
-    let rows_result = if params_term == nil().to_term(env) {
-        stmt.query([])
-    } else {
-        match walk_params(params_term)? {
-            Params::Empty => stmt.query([]),
-            Params::Named(items) => {
-                let named_params_vec = decode_exec_keyword_params(env, &items)?;
-                let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                    .collect();
-                stmt.query(params_for_rusqlite.as_slice())
-            }
-            Params::Positional(items) => {
-                let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
-                let params_slice: Vec<&dyn ToSql> =
-                    positional_values.iter().map(|v| v as &dyn ToSql).collect();
-                stmt.query(params_slice.as_slice())
-            }
+    let rows_result = match walk_params(params_term)? {
+        Params::Empty => stmt.query([]),
+        Params::Named(items) => {
+            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                .iter()
+                .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                .collect();
+            stmt.query(params_for_rusqlite.as_slice())
+        }
+        Params::Positional(items) => {
+            let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
+            let params_slice: Vec<&dyn ToSql> =
+                positional_values.iter().map(|v| v as &dyn ToSql).collect();
+            stmt.query(params_slice.as_slice())
         }
     };
     let rows = rows_result?;
@@ -132,25 +127,21 @@ pub(crate) fn core_execute<'a>(
     let mut stmt = conn.prepare(sql)?;
     reject_no_statement(&stmt)?;
 
-    let affected_rows = if params_term == nil().to_term(env) {
-        stmt.execute([])
-    } else {
-        match walk_params(params_term)? {
-            Params::Empty => stmt.execute([]),
-            Params::Named(items) => {
-                let named_params_vec = decode_exec_keyword_params(env, &items)?;
-                let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                    .collect();
-                stmt.execute(params_for_rusqlite.as_slice())
-            }
-            Params::Positional(items) => {
-                let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
-                let params_slice: Vec<&dyn ToSql> =
-                    positional_values.iter().map(|v| v as &dyn ToSql).collect();
-                stmt.execute(params_slice.as_slice())
-            }
+    let affected_rows = match walk_params(params_term)? {
+        Params::Empty => stmt.execute([]),
+        Params::Named(items) => {
+            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
+                .iter()
+                .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
+                .collect();
+            stmt.execute(params_for_rusqlite.as_slice())
+        }
+        Params::Positional(items) => {
+            let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
+            let params_slice: Vec<&dyn ToSql> =
+                positional_values.iter().map(|v| v as &dyn ToSql).collect();
+            stmt.execute(params_slice.as_slice())
         }
     }?;
 

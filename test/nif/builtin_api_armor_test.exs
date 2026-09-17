@@ -22,7 +22,7 @@ defmodule Xqlite.NIF.BuiltinApiArmorTest do
         {:ok, 1} = NIF.execute(conn, "INSERT INTO aa_mid VALUES (?1)", [i])
       end
 
-      {:ok, stream} = NIF.stream_open(conn, "SELECT * FROM aa_mid", [], [])
+      {:ok, stream} = NIF.stream_open(conn, "SELECT * FROM aa_mid", [])
 
       assert {:ok, %{rows: rows}} = NIF.stream_fetch(stream, 5)
       assert length(rows) == 5
@@ -37,7 +37,7 @@ defmodule Xqlite.NIF.BuiltinApiArmorTest do
       {:ok, 1} = NIF.execute(conn, "INSERT INTO aa_cycle VALUES (1)", [])
 
       for _ <- 1..50 do
-        {:ok, stream} = NIF.stream_open(conn, "SELECT * FROM aa_cycle", [], [])
+        {:ok, stream} = NIF.stream_open(conn, "SELECT * FROM aa_cycle", [])
         assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream, 10)
         assert :done = NIF.stream_fetch(stream, 10)
         assert :ok = NIF.stream_close(stream)

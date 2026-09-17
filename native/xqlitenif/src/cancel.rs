@@ -36,6 +36,7 @@ pub(crate) fn decode_tokens(term: Term<'_>) -> Result<Vec<Arc<AtomicBool>>, Xqli
             Err(_not_a_token) => {
                 return Err(XqliteError::InvalidCancelTokens {
                     position: index + 1,
+                    value_type: item.get_type(),
                 });
             }
         }

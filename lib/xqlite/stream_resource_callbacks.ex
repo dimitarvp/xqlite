@@ -48,7 +48,7 @@ defmodule Xqlite.StreamResourceCallbacks do
   end
 
   defp open_stream(conn, sql, params, opts, on_error) do
-    case NIF.stream_open(conn, sql, params, []) do
+    case NIF.stream_open(conn, sql, params) do
       {:ok, handle} ->
         case NIF.stream_get_columns(handle) do
           {:ok, columns} ->

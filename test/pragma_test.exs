@@ -272,6 +272,28 @@ defmodule XqlitePragmaTest do
       assert {:error, {:invalid_pragma_name, 7}} = P.get(db, 7)
     end
 
+    # `to_string(nil)` is `""`, so a raw door that converted first would hand
+    # SQLite an empty name and report the caller's key as that empty string.
+    # The two door families answer with different tags, but neither invents a
+    # key, and neither builds a statement.
+    test "the anchor: nil is no name on any door", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+
+      assert {:error, {:invalid_pragma_name, nil}} = Xqlite.get_pragma(db, nil)
+      assert {:error, {:invalid_pragma_name, nil}} = Xqlite.set_pragma(db, nil, 1)
+      assert {:error, {:unknown_pragma, nil}} = P.get(db, nil)
+      assert {:error, {:unknown_pragma, nil}} = P.put(db, nil, 1)
+
+      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
+    end
+
+    # `true` and `false` stay names of PRAGMAs SQLite parses and ignores, by
+    # the raw doors' own rule for a name outside the typed schema.
+    test "the anchor: true and false are still names on the raw doors", %{db: db} do
+      assert {:ok, :no_value} = Xqlite.get_pragma(db, true)
+      assert {:ok, :no_value} = Xqlite.get_pragma(db, false)
+    end
+
     # Denying the `:pragma` action turns any PRAGMA that really reaches SQLite
     # into an authorization error, so a structured refusal here proves no
     # statement was built at all.
@@ -412,6 +434,183 @@ defmodule XqlitePragmaTest do
       end
     end
   end
+
+  # SQLite answers no row at all for some PRAGMAs: memory mapped I/O has no
+  # size on a database that is not a file, and two more report nothing
+  # anywhere. Every read door answers `:no_value` there, and no write door
+  # takes the atom back.
+  describe "a PRAGMA the connection has no row for" do
+    setup do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+      {:ok, db: db}
+    end
+
+    test "memory mapped I/O has no size in memory", %{db: db} do
+      assert {:ok, :no_value} = P.get(db, :mmap_size)
+      assert {:ok, :no_value} = Xqlite.get_pragma(db, :mmap_size)
+    end
+
+    test "the same PRAGMA answers a number off a file database" do
+      path = tmp_db_path("mmap_size")
+      assert {:ok, file_db} = Xqlite.open(path)
+      on_exit(fn -> :ok = Xqlite.close(file_db) end)
+
+      assert {:ok, size} = P.get(file_db, :mmap_size)
+      assert is_integer(size)
+    end
+
+    test "two more answer it on every database", %{db: db} do
+      assert {:ok, :no_value} = P.get(db, :legacy_file_format)
+      assert {:ok, :no_value} = P.get(db, :incremental_vacuum)
+    end
+
+    test "no write door takes the atom back", %{db: db} do
+      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: :no_value}}} =
+               P.put(db, :mmap_size, :no_value)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: :no_value}}} =
+               Xqlite.set_pragma(db, "mmap_size", :no_value)
+    end
+  end
+
+  # The options are the last argument of every read and write door — and the
+  # third argument too, when it is a keyword list, because the two are merged
+  # before a statement is built. `:db_name` is the only key they carry.
+  describe "the options position" do
+    setup do
+      assert {:ok, db} = NIF.open_in_memory(":memory:")
+      on_exit(fn -> NIF.close(db) end)
+
+      :ok =
+        NIF.execute_batch(db, "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);")
+
+      {:ok, db: db}
+    end
+
+    test "the anchor: a term that is no keyword list is no options", %{db: db} do
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: :nope, reason: :invalid_options}}} =
+               P.get(db, :user_version, [], :nope)
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: :nope, reason: :invalid_options}}} =
+               P.put(db, :user_version, 1, :nope)
+    end
+
+    test "the anchor: an unknown key and a db_name that is no name", %{db: db} do
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: {:foo, 1}, reason: :invalid_options}}} =
+               P.get(db, :user_version, foo: 1)
+
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: {:db_name, 42}, reason: :invalid_options}}} =
+               P.get(db, :user_version, db_name: 42)
+    end
+
+    test "the anchor: the options that read keep reading", %{db: db} do
+      assert {:ok, _written} = P.put(db, :user_version, 3)
+
+      assert {:ok, 3} = P.get(db, :user_version, [], [])
+      assert {:ok, 3} = P.get(db, :user_version, db_name: "main")
+      assert {:ok, 3} = P.get(db, :user_version, db_name: :main)
+      assert {:ok, 3} = P.get(db, :user_version, db_name: nil)
+      assert {:ok, [[0, "id" | _rest] | _more]} = P.table_info(db, "people", db_name: "main")
+    end
+
+    property "every door refuses options it cannot read, and builds nothing", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+
+      check all(options <- bad_options(), max_runs: 2000) do
+        value = refused_option(options)
+
+        assert {:error,
+                {:invalid_pragma_argument,
+                 %{pragma: :user_version, value: ^value, reason: :invalid_options}}} =
+                 P.get(db, :user_version, [], options)
+
+        assert {:error,
+                {:invalid_pragma_argument,
+                 %{pragma: :user_version, value: ^value, reason: :invalid_options}}} =
+                 P.put(db, :user_version, 1, options)
+
+        assert {:error,
+                {:invalid_pragma_argument,
+                 %{pragma: :table_info, value: ^value, reason: :invalid_options}}} =
+                 apply(P, :table_info, [db, "people", options])
+      end
+
+      # The denying authorizer turns any PRAGMA that really reaches SQLite
+      # into an authorization error, so the refusals above built nothing.
+      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
+    end
+
+    property "the third argument is options too, and is judged the same way", %{db: db} do
+      check all(options <- bad_keyword_options(), max_runs: 2000) do
+        value = refused_option(options)
+
+        assert {:error,
+                {:invalid_pragma_argument,
+                 %{pragma: :user_version, value: ^value, reason: :invalid_options}}} =
+                 P.get(db, :user_version, options)
+      end
+    end
+  end
+
+  # Every term a caller can put in the options position that is not a keyword
+  # list of the one key these doors read.
+  defp bad_options do
+    StreamData.one_of([
+      StreamData.atom(:alphanumeric),
+      StreamData.integer(),
+      StreamData.scale(StreamData.binary(), fn size -> min(size, 8) end),
+      StreamData.tuple({StreamData.atom(:alphanumeric), StreamData.integer()}),
+      StreamData.map_of(StreamData.atom(:alphanumeric), StreamData.integer(), max_length: 2),
+      StreamData.list_of(StreamData.integer(), min_length: 1, max_length: 3),
+      StreamData.constant([:db_name]),
+      improper_options(),
+      bad_keyword_options()
+    ])
+  end
+
+  # A keyword list that ends in something other than `[]` is no keyword list,
+  # so the whole term is what the refusal carries.
+  defp improper_options do
+    StreamData.map(StreamData.atom(:alphanumeric), fn tail -> [{:db_name, "main"} | tail] end)
+  end
+
+  # A proper keyword list the doors still cannot read: a key they do not know,
+  # or a `:db_name` that is no name.
+  defp bad_keyword_options do
+    StreamData.one_of([
+      StreamData.map(StreamData.integer(), fn number -> [db_name: number] end),
+      StreamData.map(capped_float(), fn number -> [db_name: number] end),
+      StreamData.map(StreamData.member_of([:foo, :schema, :bar]), fn key -> [{key, 1}] end),
+      StreamData.map(StreamData.integer(), fn number -> [db_name: "main", other: number] end)
+    ])
+  end
+
+  # `float/0` costs time quadratic in the size parameter, which grows by one
+  # per run, so an uncapped one spends the property's budget generating.
+  defp capped_float do
+    StreamData.scale(StreamData.float(), fn size -> min(size, 5) end)
+  end
+
+  # What the refusal names: the whole term when it is no keyword list, and the
+  # first pair the doors cannot read when it is one.
+  defp refused_option(options) do
+    case Keyword.keyword?(options) do
+      true -> Enum.find(options, &bad_option_pair?/1)
+      false -> options
+    end
+  end
+
+  defp bad_option_pair?({:db_name, value}), do: not (is_binary(value) or is_atom(value))
+  defp bad_option_pair?(_pair), do: true
 
   # SQLite reads the argument of four of these PRAGMAs as a number and of the
   # rest as a name, so the statement has to carry each as what it is.

@@ -53,6 +53,69 @@ jobs:
           cross-version: "from-source"
           project-dir: "native/xqlitenif"
 
+      # Report-only on purpose. The symbol that proves unwinding differs per
+      # target family — glibc imports the unwinder, musl links it in and may
+      # hide it, MSVC unwinds through Windows exceptions — so a marker that is
+      # wrong for one family would block that target's asset and force a patch
+      # release. The job summaries of the first tag that runs this step say
+      # what each family really shows; the check turns blocking after that.
+      - name: Panic strategy of the built library
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -u
+          rustup component add llvm-tools
+
+          SYSROOT="$(rustc --print sysroot)"
+          if command -v cygpath > /dev/null 2>&1; then
+            SYSROOT="$(cygpath -u "${SYSROOT}")"
+          fi
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          BIN="${SYSROOT}/lib/rustlib/${HOST}/bin"
+
+          NM="${BIN}/llvm-nm"
+          [ -x "${NM}" ] || NM="${NM}.exe"
+          # A Windows DLL's imports are not in the symbol table llvm-nm reads,
+          # so the import directory is read with llvm-objdump instead.
+          OBJDUMP="${BIN}/llvm-objdump"
+          [ -x "${OBJDUMP}" ] || OBJDUMP="${OBJDUMP}.exe"
+
+          UNPACKED="$(mktemp -d)"
+          tar -xzf "${{ steps.build-crate.outputs.file-path }}" -C "${UNPACKED}"
+          LIBRARY="$(find "${UNPACKED}" -type f \( -name '*.so' -o -name '*.dll' -o -name '*.dylib' \) | head -n 1)"
+
+          READOUT="$({
+            "${NM}" "${LIBRARY}"
+            "${NM}" --dynamic "${LIBRARY}"
+            "${OBJDUMP}" -p "${LIBRARY}"
+          } 2>&1 || true)"
+          MARKERS="$(printf '%s\n' "${READOUT}" | grep -E 'Unwind|CxxThrow|CxxFrameHandler|rust_panic|panic_unwind' || true)"
+
+          if printf '%s\n' "${READOUT}" | grep -q '_Unwind_RaiseException'; then
+            UNWIND="yes — _Unwind_RaiseException is there (ELF and Mach-O)"
+          else
+            UNWIND="no _Unwind_RaiseException"
+          fi
+
+          if printf '%s\n' "${READOUT}" | grep -q '_CxxThrowException'; then
+            THROW="yes — _CxxThrowException is imported (MSVC)"
+          else
+            THROW="no _CxxThrowException"
+          fi
+
+          {
+            echo "### Panic strategy — ${{ matrix.job.target }}"
+            echo
+            echo "Library: $(basename "${LIBRARY}")"
+            echo
+            echo "- unwinding runtime: ${UNWIND}"
+            echo "- Windows exceptions: ${THROW}"
+            echo
+            echo '```'
+            printf '%s\n' "${MARKERS}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Artifact upload
         uses: actions/upload-artifact@v4
         with:

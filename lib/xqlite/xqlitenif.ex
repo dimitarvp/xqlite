@@ -1163,7 +1163,7 @@ defmodule XqliteNIF do
   A term that is not a cancellation token raises `ArgumentError`, as a
   wrong-typed argument does on every raw NIF; `Xqlite.cancel_operation/1`
   asks `is_cancel_token/1` first and answers
-  `{:error, {:invalid_cancel_tokens, value}}` instead.
+  `{:error, {:invalid_cancel_tokens, refusal}}` instead.
   """
   @spec cancel_operation(token_resource :: reference()) :: :ok | Xqlite.error()
   def cancel_operation(_token_resource), do: err()
@@ -1179,7 +1179,6 @@ defmodule XqliteNIF do
   `conn` is the database connection resource.
   `sql` is the SQL query string.
   `params` is a list of positional parameters or a keyword list of named parameters.
-  `opts` is a keyword list for future stream-specific options (currently unused).
 
   Returns `{:ok, stream_handle_resource}` or `{:error, reason}`.
   The `stream_handle_resource` is an opaque reference.
@@ -1193,16 +1192,15 @@ defmodule XqliteNIF do
   @spec stream_open(
           conn :: Xqlite.conn(),
           sql :: String.t(),
-          params :: list() | keyword(),
-          opts :: keyword()
+          params :: list() | keyword()
         ) ::
           {:ok, reference()} | Xqlite.error()
-  def stream_open(_conn, _sql, _params, _opts \\ []), do: err()
+  def stream_open(_conn, _sql, _params), do: err()
 
   @doc """
   Retrieves the column names for an opened stream.
 
-  `stream_handle` is the opaque resource returned by `stream_open/4`.
+  `stream_handle` is the opaque resource returned by `stream_open/3`.
 
   Returns `{:ok, list_of_column_names}` where `list_of_column_names` is a list of strings,
   or `{:error, reason}` if the handle is invalid or another error occurs.
@@ -1215,7 +1213,7 @@ defmodule XqliteNIF do
   @doc """
   Fetches a batch of rows from an active stream handle.
 
-  `stream_handle` is the opaque resource obtained from `stream_open/4`.
+  `stream_handle` is the opaque resource obtained from `stream_open/3`.
   `batch_size` is the largest number of rows this call may read; it must be
   at least 1. Anything else, including 0, is rejected with
   `{:error, {:invalid_batch_size, %{provided: tagged_value, minimum: 1}}}`
@@ -1285,7 +1283,7 @@ defmodule XqliteNIF do
   prematurely. It is safe to call this function multiple times on the same handle;
   subsequent calls after the first will be no-ops.
 
-  `stream_handle` is the opaque resource returned by `stream_open/4`.
+  `stream_handle` is the opaque resource returned by `stream_open/3`.
 
   Returns `:ok` if successful, or `{:error, reason}` if the handle is invalid
   or an error occurs during finalization (rare).
@@ -1303,7 +1301,7 @@ defmodule XqliteNIF do
   _}}` carrying the byte offset SQLite reports — no silent partial
   compilation. Text after the first statement counts as a second statement
   only when it compiles to one, so a trailing comment, extra semicolons and
-  whitespace are accepted; `query/3`, `execute/3`, `stream_open/4` and
+  whitespace are accepted; `query/3`, `execute/3`, `stream_open/3` and
   `explain_analyze/3` apply the same rule. The returned handle must
   eventually be finalized via `stmt_finalize/1` (garbage collection also
   finalizes abandoned handles).

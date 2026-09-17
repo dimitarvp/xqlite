@@ -327,7 +327,13 @@ pub(crate) enum Params<'a> {
     Positional(Vec<Term<'a>>),
 }
 
+/// A parameter term of `nil` means no parameters, on every door that takes
+/// them: the one producer answers for it, so the doors cannot disagree.
 pub(crate) fn walk_params<'a>(term: Term<'a>) -> Result<Params<'a>, XqliteError> {
+    if term == nil().to_term(term.get_env()) {
+        return Ok(Params::Empty);
+    }
+
     let keyword = is_keyword(term);
 
     match walk_list(term) {
@@ -349,7 +355,8 @@ pub(crate) fn decode_exec_keyword_params<'a>(
             term_item
                 .decode()
                 .map_err(|_| XqliteError::ExpectedKeywordTuple {
-                    value_str: format!("{term_item:?}"),
+                    position: index + 1,
+                    value_type: term_item.get_type(),
                 })?;
         let mut key_string: String = key_atom
             .to_term(env)

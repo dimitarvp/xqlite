@@ -10,7 +10,7 @@ defmodule Xqlite.NIF.BlobParamTest do
 
   The empty payload is pinned twice on purpose. `query/3` and `execute/3` go
   through rusqlite, which turns an empty slice into `sqlite3_bind_zeroblob`,
-  while `stream_open/4`, `stmt_bind/2` and `explain_analyze/3` use this
+  while `stream_open/3`, `stmt_bind/2` and `explain_analyze/3` use this
   crate's own binder, which calls `sqlite3_bind_blob` with a zero length —
   two different C calls with one expected result.
   """

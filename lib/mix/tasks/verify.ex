@@ -16,9 +16,11 @@ defmodule Mix.Tasks.Verify do
   5. Sobelow static security analysis (`mix sobelow`)
   6. Rust clippy with denied warnings
   7. Rust unit tests (`cargo test`)
-  8. Panic strategy (`scripts/panic_strategy.exs` reads the built
-     library's undefined symbols: a panic has to unwind, or rustler's
-     guard cannot turn it into `:nif_panicked`)
+  8. Panic strategy (`scripts/panic_strategy.exs` reads the undefined
+     symbols of `priv/native/xqlitenif.so`, the library both mix
+     environments load: a panic has to unwind, or rustler's guard cannot
+     turn it into `:nif_panicked`. Without a tool that lists symbols the
+     step fails rather than passing unread)
   9. Dialyzer type checks
   10. Full Elixir test suite (`mix test.seq`)
   11. Verify stamp (`scripts/tree_fingerprint.exs --stamp` records the
@@ -104,8 +106,19 @@ defmodule Mix.Tasks.Verify do
     run_cargo(["test"])
   end
 
+  # The library the VM loads, by path: both mix environments link their
+  # priv directory to this one, and a `cargo build` from the crate directory
+  # leaves a second copy under its target directory that nothing loads.
   def check_panic_strategy do
-    run_cmd("elixir", ["scripts/panic_strategy.exs"])
+    case Path.wildcard("priv/native/xqlitenif.{so,dll}") do
+      [] -> no_built_library()
+      libraries -> run_cmd("elixir", ["scripts/panic_strategy.exs" | libraries])
+    end
+  end
+
+  defp no_built_library do
+    IO.puts("  no built library under priv/native — build the crate first")
+    {:error, 1}
   end
 
   def check_dialyzer do

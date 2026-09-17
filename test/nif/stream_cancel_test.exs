@@ -50,8 +50,8 @@ defmodule Xqlite.NIF.StreamCancelTest do
     test "an empty token list returns the same rows and :done as stream_fetch/2", %{conn: conn} do
       sql = cte_sql(5)
 
-      assert {:ok, plain} = NIF.stream_open(conn, sql, [], [])
-      assert {:ok, twin} = NIF.stream_open(conn, sql, [], [])
+      assert {:ok, plain} = NIF.stream_open(conn, sql, [])
+      assert {:ok, twin} = NIF.stream_open(conn, sql, [])
 
       assert NIF.stream_fetch(plain, 4) == NIF.stream_fetch_cancellable(twin, 4, [])
       assert NIF.stream_fetch(plain, 4) == NIF.stream_fetch_cancellable(twin, 4, [])
@@ -65,8 +65,8 @@ defmodule Xqlite.NIF.StreamCancelTest do
     test "an empty token list rejects a bad batch size like stream_fetch/2", %{conn: conn} do
       sql = cte_sql(5)
 
-      assert {:ok, plain} = NIF.stream_open(conn, sql, [], [])
-      assert {:ok, twin} = NIF.stream_open(conn, sql, [], [])
+      assert {:ok, plain} = NIF.stream_open(conn, sql, [])
+      assert {:ok, twin} = NIF.stream_open(conn, sql, [])
 
       for bad <- [0, -1, :nope, "3"] do
         assert NIF.stream_fetch(plain, bad) == NIF.stream_fetch_cancellable(twin, bad, [])
@@ -80,7 +80,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
     end
 
     test "a bad batch size is refused even with a signalled token", %{conn: conn} do
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(5), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(5), [])
       assert {:ok, token} = NIF.create_cancel_token()
       assert :ok = NIF.cancel_operation(token)
 
@@ -96,8 +96,8 @@ defmodule Xqlite.NIF.StreamCancelTest do
       seed_bad_utf8_table(conn)
       sql = "SELECT v FROM stream_cancel_bad_utf8"
 
-      assert {:ok, plain} = NIF.stream_open(conn, sql, [], [])
-      assert {:ok, twin} = NIF.stream_open(conn, sql, [], [])
+      assert {:ok, plain} = NIF.stream_open(conn, sql, [])
+      assert {:ok, twin} = NIF.stream_open(conn, sql, [])
 
       plain_result = NIF.stream_fetch(plain, 10)
 
@@ -111,7 +111,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
     end
 
     test "a token signalled before the first fetch cancels that fetch", %{conn: conn} do
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [])
       assert {:ok, token} = NIF.create_cancel_token()
       assert :ok = NIF.cancel_operation(token)
 
@@ -121,7 +121,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
 
     test "any one signalled token in the list cancels the fetch", %{conn: conn} do
       for count <- [2, 3], position <- 0..(count - 1) do
-        assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [], [])
+        assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [])
         tokens = create_tokens(count)
         signal(tokens, position)
 
@@ -133,7 +133,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
     end
 
     test "live tokens that are never signalled do not disturb a stream", %{conn: conn} do
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(3), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(3), [])
       tokens = create_tokens(3)
 
       assert {:ok, %{rows: [[0], [1], [2], [3]]}} =
@@ -144,7 +144,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
     end
 
     test "after a cancel the connection is clean and the token stays spent", %{conn: conn} do
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [])
       assert {:ok, token} = NIF.create_cancel_token()
       assert :ok = NIF.cancel_operation(token)
 
@@ -154,18 +154,18 @@ defmodule Xqlite.NIF.StreamCancelTest do
 
       assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT 1", [])
 
-      assert {:ok, fresh} = NIF.stream_open(conn, cte_sql(2), [], [])
+      assert {:ok, fresh} = NIF.stream_open(conn, cte_sql(2), [])
       assert {:ok, %{rows: [[0], [1], [2]]}} = NIF.stream_fetch_cancellable(fresh, 10, [])
       assert :done = NIF.stream_fetch_cancellable(fresh, 10, [])
       assert :ok = NIF.stream_close(fresh)
 
-      assert {:ok, spent} = NIF.stream_open(conn, cte_sql(200), [], [])
+      assert {:ok, spent} = NIF.stream_open(conn, cte_sql(200), [])
       assert {:error, :operation_cancelled} = NIF.stream_fetch_cancellable(spent, 10, [token])
       assert :ok = NIF.stream_close(spent)
     end
 
     test "a closed stream answers :done whatever the tokens say", %{conn: conn} do
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [])
       assert :ok = NIF.stream_close(stream)
 
       assert {:ok, token} = NIF.create_cancel_token()
@@ -178,7 +178,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
     test "a fetch after the connection closed keeps reporting :connection_closed", %{
       conn: conn
     } do
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [])
       assert {:ok, token} = NIF.create_cancel_token()
       assert :ok = NIF.cancel_operation(token)
       assert :ok = NIF.close(conn)
@@ -205,7 +205,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
       # connection is outstanding.
       assert {:ok, %{stmt_used: before_open}} = NIF.connection_stats(conn)
 
-      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [], [])
+      assert {:ok, stream} = NIF.stream_open(conn, cte_sql(200), [])
       assert {:ok, %{stmt_used: while_open}} = NIF.connection_stats(conn)
       assert while_open > before_open
 
@@ -220,7 +220,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
       seed_scan_table(conn)
 
       assert {:ok, stream} =
-               NIF.stream_open(conn, "SELECT id FROM stream_cancel_scan ORDER BY id", [], [])
+               NIF.stream_open(conn, "SELECT id FROM stream_cancel_scan ORDER BY id", [])
 
       assert {:ok, token} = NIF.create_cancel_token()
       assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch_cancellable(stream, 1, [token])
@@ -253,7 +253,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
       "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) " <>
         "SELECT count(*) FROM n"
 
-    {:ok, stream} = NIF.stream_open(conn, sql, [], [])
+    {:ok, stream} = NIF.stream_open(conn, sql, [])
     {:ok, token} = NIF.create_cancel_token()
 
     spawn(fn ->
@@ -273,7 +273,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
   defp run_scenario(conn, scenario) do
     sql = cte_sql(scenario.depth)
     tokens = create_tokens(scenario.token_count)
-    assert {:ok, stream} = NIF.stream_open(conn, sql, [], [])
+    assert {:ok, stream} = NIF.stream_open(conn, sql, [])
 
     case scenario.cancel_point do
       :never -> assert_drains_like_a_query(conn, stream, sql, tokens, scenario)

@@ -79,6 +79,11 @@ and attaches the result to the release with `softprops/action-gh-release`
 target does not cancel the rest; jobs cap at 30 minutes, and the `cross`
 ones are slow because `cross-version: "from-source"` builds `cross` too.
 
+Each job also reads the symbols of the library it built and writes what
+it found about the panic strategy into its own job summary — a Rust
+panic has to unwind for rustler to catch it. The step reports and never
+fails the job, so the summaries are where that readout lives.
+
 ```bash
 gh run list --workflow=release.yml --limit 1   # then gh run watch <id>
 gh release view vX.Y.Z

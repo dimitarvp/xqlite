@@ -162,8 +162,9 @@ defmodule Xqlite do
   `:invalid_blob_bytes` names the term found in a wrapper's `bytes`, one of
   the atoms `Xqlite.Blob` lists. `:unknown_pragma` carries the caller's own
   atom or string for a PRAGMA the typed schema does not know.
-  `:invalid_pragma_name` carries one of two things: the caller's key when it
-  is neither an atom nor a string, or the name itself when it holds a byte
+  `:invalid_pragma_name` carries one of three things: the caller's key when
+  it is neither an atom nor a string, `nil`, which is no name on the raw
+  doors even though it is an atom, or the name itself when it holds a byte
   outside `A-Z`, `a-z`, `0-9` and `_`, which the native side refuses because
   it writes the name into the statement.
 
@@ -211,7 +212,7 @@ defmodule Xqlite do
           | {:constraint_violation, constraint_kind(), constraint_details()}
           | {:database_busy_or_locked, integer(), String.t()}
           | {:expected_keyword_list, list_refusal()}
-          | {:expected_keyword_tuple, String.t()}
+          | {:expected_keyword_tuple, list_refusal()}
           | {:expected_list, list_refusal()}
           | {:from_sql_conversion_failure, non_neg_integer(), atom(), String.t()}
           | {:index_exists, String.t()}
@@ -220,7 +221,7 @@ defmodule Xqlite do
           | {:invalid_authorizer_action, atom()}
           | {:invalid_batch_size, %{provided: term(), minimum: 1}}
           | {:invalid_blob_bytes, %{position: pos_integer(), type: atom()}}
-          | {:invalid_cancel_tokens, term()}
+          | {:invalid_cancel_tokens, list_refusal()}
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
@@ -239,7 +240,7 @@ defmodule Xqlite do
              %{
                pragma: atom(),
                value: term(),
-               reason: :missing | :not_a_scalar | :takes_no_argument
+               reason: :invalid_options | :missing | :not_a_scalar | :takes_no_argument
              }}
           | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
@@ -272,6 +273,9 @@ defmodule Xqlite do
   tail stops being one part-way through (`[1 | 2]`), and `:bad_element` an
   element that does not belong in that list, at its one-based `:position`.
   `:value_type` names the kind of term that stopped the walk.
+
+  Four reasons carry this map: `:expected_list`, `:expected_keyword_list`,
+  `:expected_keyword_tuple` and `:invalid_cancel_tokens`.
   """
   @type list_refusal :: %{
           :reason => :not_a_list | :improper_tail | :bad_element,
@@ -1513,10 +1517,10 @@ defmodule Xqlite do
       single-use, so a token you have already signalled kills the next
       stream you hand it to on its first fetch — create a fresh one per
       stream. Any value that is not a live token, or a list holding one,
-      returns `{:error, {:invalid_cancel_tokens, value}}` at stream open,
-      carrying the value you passed unchanged — a plain `make_ref/0`
-      included, which the NIF tells apart from a token where Elixir
-      cannot.
+      returns `{:error, {:invalid_cancel_tokens, refusal}}` at stream open,
+      the refusal naming the one-based position of the element that is no
+      token and the kind of term it is — a plain `make_ref/0` included,
+      which the NIF tells apart from a token where Elixir cannot.
 
   ## Examples
 
@@ -1688,6 +1692,19 @@ defmodule Xqlite do
   Stepping past `:done` without a `reset/1` returns whatever SQLite reports
   for the re-step (a fresh automatic rerun on modern SQLite).
 
+  A value SQLite hands back that cannot be read — a TEXT column holding
+  bytes that are not valid UTF-8 — is reported as
+  `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
+  stepped past, so that row is never delivered. `step/1` reports it at once;
+  `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
+  before it in the same batch first, with `done: false`, and report the
+  error on the next call. After the error every door carries on at the row
+  that follows the bad one — `:done`, or `done: true` with no rows, when the
+  bad row was the last. `reset/1` starts the statement over, dropping an
+  error that was held back, and the same row errors again. A stream
+  (`stream/4`) delivers the rows before the bad one, reports the error on
+  the next fetch, and is finished after that.
+
   The values come back exactly as SQLite stored them: no type extension
   runs on them, whatever `bind/3` was given. Pass them through
   `Xqlite.TypeExtension.decode_rows/2` for the decoded form.
@@ -1706,6 +1723,19 @@ defmodule Xqlite do
   from the top (v2-prepared statements auto-reset when stepped past done —
   SQLite semantics, same as `step/1`).
 
+  A value SQLite hands back that cannot be read — a TEXT column holding
+  bytes that are not valid UTF-8 — is reported as
+  `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
+  stepped past, so that row is never delivered. `step/1` reports it at once;
+  `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
+  before it in the same batch first, with `done: false`, and report the
+  error on the next call. After the error every door carries on at the row
+  that follows the bad one — `:done`, or `done: true` with no rows, when the
+  bad row was the last. `reset/1` starts the statement over, dropping an
+  error that was held back, and the same row errors again. A stream
+  (`stream/4`) delivers the rows before the bad one, reports the error on
+  the next fetch, and is finished after that.
+
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
   decoded form.
@@ -1722,7 +1752,22 @@ defmodule Xqlite do
   Accepts a single cancel token or a list (OR-semantics — any signalled
   token aborts with `{:error, :operation_cancelled}`). Cancellation rides
   the connection's progress handler, exactly like `query_cancellable/4`.
-  After a cancellation, `reset/1` the statement before stepping it again.
+  After a cancellation, `reset/1` the statement before stepping it again; a
+  cancellation discards the rows its batch had already read, which is the
+  one failure that throws rows away.
+
+  A value SQLite hands back that cannot be read — a TEXT column holding
+  bytes that are not valid UTF-8 — is reported as
+  `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
+  stepped past, so that row is never delivered. `step/1` reports it at once;
+  `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
+  before it in the same batch first, with `done: false`, and report the
+  error on the next call. After the error every door carries on at the row
+  that follows the bad one — `:done`, or `done: true` with no rows, when the
+  bad row was the last. `reset/1` starts the statement over, dropping an
+  error that was held back, and the same row errors again. A stream
+  (`stream/4`) delivers the rows before the bad one, reports the error on
+  the next fetch, and is finished after that.
 
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
@@ -2010,11 +2055,15 @@ defmodule Xqlite do
   written and reads back whatever SQLite answers, which is `{:ok, :no_value}`
   for a word SQLite parses and ignores. A key that is neither an atom nor a
   string is refused with
-  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged.
+  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged, and so
+  is `nil`: it is an atom, but `to_string(nil)` is the empty string, which is
+  no PRAGMA name. `true` and `false` stay names SQLite parses and ignores.
 
   Wraps `XqliteNIF.get_pragma/2` and emits `[:xqlite, :pragma, :get]`.
   """
   @spec get_pragma(conn(), String.t() | atom()) :: {:ok, term()} | error()
+  def get_pragma(_conn, nil), do: {:error, {:invalid_pragma_name, nil}}
+
   def get_pragma(conn, name) when is_atom(name) or is_binary(name) do
     name_str = pragma_name_string(name)
 
@@ -2051,12 +2100,15 @@ defmodule Xqlite do
   A PRAGMA `Xqlite.Pragma` does not model keeps the raw path: its value
   reaches SQLite as written, and SQLite decides. A key that is neither an
   atom nor a string never reaches that path: it is refused with
-  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged.
+  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged. `nil`
+  is refused the same way, being no name however it is written.
 
   Wraps `XqliteNIF.set_pragma/3` and emits `[:xqlite, :pragma, :set]` after
   a successful write, with the caller's own value in the metadata.
   """
   @spec set_pragma(conn(), String.t() | atom(), term()) :: {:ok, term()} | error()
+  def set_pragma(_conn, nil, _value), do: {:error, {:invalid_pragma_name, nil}}
+
   def set_pragma(conn, name, value) when is_atom(name) or is_binary(name) do
     name_str = pragma_name_string(name)
 
@@ -2458,12 +2510,18 @@ defmodule Xqlite do
   operation cancels that operation immediately. Create a fresh token per
   operation; see the "Cancel tokens are single-use" section of the Gotchas
   guide.
+
+  Takes one token, not a list: the cancellable operations take a list, this
+  signals a single token. Anything else, a list of live tokens included, is
+  refused as the one element it was handed,
+  `{:error, {:invalid_cancel_tokens, %{reason: :bad_element, position: 1,
+  value_type: type}}}`.
   """
   @spec cancel_operation(term()) :: :ok | error()
   def cancel_operation(token) do
     case XqliteNIF.is_cancel_token(token) do
       true -> signal_cancellation(token)
-      false -> {:error, {:invalid_cancel_tokens, token}}
+      false -> {:error, {:invalid_cancel_tokens, bad_token_element(1, token)}}
     end
   end
 
@@ -3093,31 +3151,46 @@ defmodule Xqlite do
   @doc false
   # Public so the stream callbacks module validates through the same helper.
   @spec validate_cancel_tokens(term()) :: :ok | error()
-  def validate_cancel_tokens(tokens) when is_list(tokens) do
-    case all_cancel_tokens?(tokens) do
-      true -> :ok
-      false -> {:error, {:invalid_cancel_tokens, tokens}}
-    end
-  end
+  def validate_cancel_tokens(tokens) when is_list(tokens), do: walk_cancel_tokens(tokens, 1)
 
   def validate_cancel_tokens(token) do
     case XqliteNIF.is_cancel_token(token) do
       true -> :ok
-      false -> {:error, {:invalid_cancel_tokens, token}}
+      false -> {:error, {:invalid_cancel_tokens, bad_token_element(1, token)}}
     end
   end
 
-  defp all_cancel_tokens?([]), do: true
+  defp walk_cancel_tokens([], _position), do: :ok
 
-  defp all_cancel_tokens?([token | rest]) do
+  defp walk_cancel_tokens([token | rest], position) do
     case XqliteNIF.is_cancel_token(token) do
-      true -> all_cancel_tokens?(rest)
-      false -> false
+      true -> walk_cancel_tokens(rest, position + 1)
+      false -> {:error, {:invalid_cancel_tokens, bad_token_element(position, token)}}
     end
   end
 
   # A list the caller built by hand can end in something other than `[]`.
-  defp all_cancel_tokens?(_tail), do: false
+  defp walk_cancel_tokens(tail, _position) do
+    {:error, {:invalid_cancel_tokens, %{reason: :improper_tail, value_type: term_type(tail)}}}
+  end
+
+  defp bad_token_element(position, term) do
+    %{reason: :bad_element, position: position, value_type: term_type(term)}
+  end
+
+  # The names the NIF gives a term's kind, so a refusal reads the same
+  # whichever side of the door produced it.
+  defp term_type(term) when is_atom(term), do: :atom
+  defp term_type(term) when is_bitstring(term), do: :binary
+  defp term_type(term) when is_float(term), do: :float
+  defp term_type(term) when is_function(term), do: :function
+  defp term_type(term) when is_integer(term), do: :integer
+  defp term_type(term) when is_list(term), do: :list
+  defp term_type(term) when is_map(term), do: :map
+  defp term_type(term) when is_pid(term), do: :pid
+  defp term_type(term) when is_port(term), do: :port
+  defp term_type(term) when is_reference(term), do: :reference
+  defp term_type(term) when is_tuple(term), do: :tuple
 
   @doc false
   # Public so the stream callbacks module emits this event through the same

@@ -5,7 +5,6 @@ use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params, 
 use rusqlite::Connection;
 use rusqlite::ffi;
 use rusqlite::types::Value;
-use rustler::types::atom::nil;
 use rustler::{Encoder, Env, Term, types::map::map_new};
 use std::ffi::CStr;
 use std::os::raw::c_int;
@@ -130,10 +129,6 @@ fn bind_params<'a>(
     db_handle: *mut ffi::sqlite3,
     params_term: Term<'a>,
 ) -> Result<(), XqliteError> {
-    if params_term == nil().to_term(env) {
-        return Ok(());
-    }
-
     match walk_params(params_term)? {
         Params::Empty => Ok(()),
         Params::Named(items) => {

@@ -190,7 +190,8 @@ pub(crate) enum XqliteError {
         value_type: TermType,
     },
     ExpectedKeywordTuple {
-        value_str: String,
+        position: usize,
+        value_type: TermType,
     },
     ExpectedList {
         refusal: ListRefusal,
@@ -198,6 +199,7 @@ pub(crate) enum XqliteError {
     },
     InvalidCancelTokens {
         position: usize,
+        value_type: TermType,
     },
     UnsupportedAtom {
         atom_value: String,
@@ -401,9 +403,12 @@ impl Display for XqliteError {
                 "Expected a keyword list for named parameters: {} ({value_type:?})",
                 refusal_text(refusal)
             ),
-            XqliteError::ExpectedKeywordTuple { value_str } => write!(
+            XqliteError::ExpectedKeywordTuple {
+                position,
+                value_type,
+            } => write!(
                 f,
-                "Expected a {{atom, value}} tuple inside keyword list, got: {value_str}"
+                "element {position} of the keyword list is not an {{atom, value}} pair (a {value_type:?})"
             ),
             XqliteError::ExpectedList {
                 refusal,
@@ -413,9 +418,12 @@ impl Display for XqliteError {
                 "Expected a list: {} ({value_type:?})",
                 refusal_text(refusal)
             ),
-            XqliteError::InvalidCancelTokens { position } => write!(
+            XqliteError::InvalidCancelTokens {
+                position,
+                value_type,
+            } => write!(
                 f,
-                "Expected a cancel token at position {position} of the list"
+                "element {position} of the cancel token list is no live token (a {value_type:?})"
             ),
             XqliteError::UnsupportedAtom { atom_value } => write!(
                 f,
@@ -636,26 +644,32 @@ impl Encoder for XqliteError {
             } => {
                 encode_list_refusal(env, atoms::expected_keyword_list(), refusal, *value_type)
             }
-            XqliteError::ExpectedKeywordTuple { value_str } => {
-                (atoms::expected_keyword_tuple(), value_str).encode(env)
-            }
+            XqliteError::ExpectedKeywordTuple {
+                position,
+                value_type,
+            } => encode_list_refusal(
+                env,
+                atoms::expected_keyword_tuple(),
+                &ListRefusal::BadElement {
+                    position: *position,
+                },
+                *value_type,
+            ),
             XqliteError::ExpectedList {
                 refusal,
                 value_type,
             } => encode_list_refusal(env, atoms::expected_list(), refusal, *value_type),
-            XqliteError::InvalidCancelTokens { position } => {
-                let map_result = map_new(env).map_put(atoms::position(), position);
-
-                match map_result {
-                    Ok(map) => (atoms::invalid_cancel_tokens(), map).encode(env),
-                    Err(_) => {
-                        let err = XqliteError::InternalEncodingError {
-                            context: "Failed map create for InvalidCancelTokens".to_string(),
-                        };
-                        err.encode(env)
-                    }
-                }
-            }
+            XqliteError::InvalidCancelTokens {
+                position,
+                value_type,
+            } => encode_list_refusal(
+                env,
+                atoms::invalid_cancel_tokens(),
+                &ListRefusal::BadElement {
+                    position: *position,
+                },
+                *value_type,
+            ),
             XqliteError::UnsupportedAtom { atom_value } => {
                 (atoms::unsupported_atom(), atom_value).encode(env)
             }

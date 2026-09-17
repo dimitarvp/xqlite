@@ -270,10 +270,14 @@ Elixir alone cannot tell one from the other — the NIF is asked instead
 (`XqliteNIF.is_cancel_token/1`). Every entry point that takes tokens checks
 before it does any work: anything that is not a live token, a plain
 `make_ref()` and `:bogus` alike, and any list holding one, answers
-`{:error, {:invalid_cancel_tokens, value}}` with the value you passed
-unchanged. `Xqlite.stream/4` answers it at stream open, the others at the
-call. The raw `XqliteNIF` functions do no such checking: like every raw NIF,
-a wrong-typed argument raises `ArgumentError` there.
+`{:error, {:invalid_cancel_tokens, refusal}}`, where `refusal` is
+`%{reason: :bad_element, position: n, value_type: type}` naming the
+one-based position of the element that is no token and the kind of term it
+is, or `%{reason: :improper_tail, value_type: type}` for a list whose tail
+stops being one part-way through. `Xqlite.stream/4` answers it at stream
+open, the others at the call, and the raw `XqliteNIF` functions answer the
+same map — except for a term that is no list at all, which they refuse as
+`{:expected_list, _}`, taking a list and nothing else.
 
 ### Delete sessions before the connection
 

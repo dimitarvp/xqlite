@@ -30,9 +30,18 @@ defmodule Xqlite.Pragma do
   @type pragma_key :: String.t() | atom()
   @type pragma_value :: String.t() | integer() | boolean() | atom()
 
+  @typedoc """
+  What a read door answers.
+
+  `:no_value` is the answer whenever the connection has no row for the
+  PRAGMA: `mmap_size` on a database that is not a file, and
+  `legacy_file_format` and `incremental_vacuum`, which answer it on every
+  database. It is a reading, not a value — no write door takes it back.
+  """
   @type get_result ::
           {:ok,
-           integer()
+           :no_value
+           | integer()
            | float()
            | boolean()
            | atom()
@@ -668,11 +677,26 @@ defmodule Xqlite.Pragma do
   - `get(db, :auto_vacuum)` is a PRAGMA that does _not_ require an extra argument.
   - `get(db, :table_info, :users)` is a PRAGMA that does require an extra argument.
 
-  The last argument is a list of options:
-  - `:db_name` - must be a string. The values `"main"` and `"temp"` are treated specially,
-    as in  instruct sqlite to use the main (originally opened) database or a temporary DB
+  The last argument is a list of options, and so is the third when it is a
+  keyword list — the two are merged and judged together:
+  - `:db_name` - a string, an atom, or `nil` for the database the connection
+    opened with. The values `"main"` and `"temp"` are treated specially, as in
+    instruct sqlite to use the main (originally opened) database or a temporary DB
     respectively. Any other value refers to a name of an ATTACH-ed database. This function
     will fail if there is no ATTACH-ed database with the specified name.
+
+  `:db_name` is the only key these doors read. Options that are no keyword
+  list, a key other than `:db_name`, and a `:db_name` that is neither a
+  string nor an atom are all refused with
+  `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
+  reason: :invalid_options}}}` before a statement is built — `value` being
+  the whole term when it is no keyword list and the `{key, value}` pair that
+  could not be read when it is one.
+
+  A PRAGMA the connection has no row for answers `{:ok, :no_value}`:
+  `get(db, :mmap_size)` on an in-memory database is the plain case, memory
+  mapped I/O not applying to one. `put/4` and `Xqlite.set_pragma/3` refuse
+  the atom as a value like any other the PRAGMA cannot hold.
 
   A known name is matched with its case folded, so `:foreign_keys`,
   `:FOREIGN_KEYS`, `"foreign_keys"` and `"FOREIGN_KEYS"` all reach the same
@@ -713,14 +737,45 @@ defmodule Xqlite.Pragma do
 
   def get(db, key, arg_or_opts, opts) do
     with {:ok, name} <- resolve_name(key),
-         {:ok, spec} <- known_spec(name) do
-      read_pragma(db, name, spec, arg_or_opts, opts)
+         {:ok, spec} <- known_spec(name),
+         {:ok, options} <- merged_options(name, arg_or_opts, opts) do
+      read_pragma(db, name, spec, arg_or_opts, options)
     end
   end
 
+  # The third argument is options too when it is a keyword list, so both are
+  # judged and merged before the argument position is sorted out.
+  defp merged_options(name, arg_or_opts, opts) when is_list(arg_or_opts) do
+    case Keyword.keyword?(arg_or_opts) do
+      true -> check_options(name, arg_or_opts, opts)
+      false -> check_options(name, [], opts)
+    end
+  end
+
+  defp merged_options(name, _arg, opts), do: check_options(name, [], opts)
+
+  defp check_options(name, head, opts) do
+    case Keyword.keyword?(opts) do
+      true -> judge_options(name, head ++ opts)
+      false -> {:error, invalid_argument(name, opts, :invalid_options)}
+    end
+  end
+
+  defp judge_options(name, options) do
+    case Enum.find(options, &unreadable_option?/1) do
+      nil -> {:ok, options}
+      pair -> {:error, invalid_argument(name, pair, :invalid_options)}
+    end
+  end
+
+  # `:db_name` is the one key, and it names a database: a string, or an atom
+  # quoted the same way, `nil` meaning the one the connection opened with.
+  defp unreadable_option?({:db_name, value}), do: not (is_binary(value) or is_atom(value))
+  defp unreadable_option?(_pair), do: true
+
   defp read_pragma(db, name, spec, arg_or_opts, opts) when is_list(arg_or_opts) do
     case Keyword.keyword?(arg_or_opts) do
-      true -> read_without_arg(db, name, spec, arg_or_opts ++ opts)
+      true -> read_without_arg(db, name, spec, opts)
       false -> {:error, invalid_argument(name, arg_or_opts, :not_a_scalar)}
     end
   end
@@ -861,8 +916,13 @@ defmodule Xqlite.Pragma do
 
   ## Options
 
-    * `:db_name` (string) - Target a specific attached database schema.
-      `"main"` and `"temp"` are built-in; other values refer to ATTACH-ed databases.
+    * `:db_name` (a string, an atom, or `nil`) - Target a specific attached
+      database schema. `"main"` and `"temp"` are built-in; other values refer
+      to ATTACH-ed databases. It is the only key this door reads: options
+      that are no keyword list, another key, and a `:db_name` that is neither
+      a string nor an atom are refused with
+      `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
+      reason: :invalid_options}}}`, as in `get/4`.
   """
   @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) ::
           {:ok, term()} | Xqlite.error()
@@ -875,9 +935,9 @@ defmodule Xqlite.Pragma do
   end
 
   defp do_put(db, key_atom, val, opts) do
-    case check_value(key_atom, val) do
-      {:ok, checked} -> put_checked(db, key_atom, checked, opts)
-      {:error, _reason} = err -> err
+    with {:ok, checked} <- check_value(key_atom, val),
+         {:ok, options} <- check_options(key_atom, [], opts) do
+      put_checked(db, key_atom, checked, options)
     end
   end
 

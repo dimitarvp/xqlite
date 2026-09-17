@@ -36,28 +36,28 @@ defmodule Xqlite.NIF.StreamTest do
         {:ok, conn: conn}
       end
 
-      # --- stream_open/4 Tests ---
-      test "stream_open/4 with valid SQL returns a handle and correct columns", %{conn: conn} do
+      # --- stream_open/3 Tests ---
+      test "stream_open/3 with valid SQL returns a handle and correct columns", %{conn: conn} do
         sql = "SELECT id, name, price FROM stream_items;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
         assert is_reference(stream_handle)
         assert {:ok, ["id", "name", "price"]} == NIF.stream_get_columns(stream_handle)
         assert :ok == NIF.stream_close(stream_handle)
       end
 
-      test "stream_open/4 with positional parameters returns a handle and correct columns", %{
+      test "stream_open/3 with positional parameters returns a handle and correct columns", %{
         conn: conn
       } do
         sql = "SELECT name, price FROM stream_items WHERE id = ?1;"
         params = [1]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, params, [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, params)
         assert is_reference(stream_handle)
         assert {:ok, ["name", "price"]} == NIF.stream_get_columns(stream_handle)
         assert :ok == NIF.stream_close(stream_handle)
       end
 
-      test "stream_open/4 with nil params works (no parameters)", %{conn: conn} do
-        {:ok, stream_handle} = NIF.stream_open(conn, "SELECT 1 AS val;", nil, [])
+      test "stream_open/3 with nil params works (no parameters)", %{conn: conn} do
+        {:ok, stream_handle} = NIF.stream_open(conn, "SELECT 1 AS val;", nil)
         assert {:ok, ["val"]} == NIF.stream_get_columns(stream_handle)
 
         assert {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream_handle, 10)
@@ -65,22 +65,22 @@ defmodule Xqlite.NIF.StreamTest do
         assert :ok == NIF.stream_close(stream_handle)
       end
 
-      test "stream_open/4 with named parameters returns a handle and correct columns", %{
+      test "stream_open/3 with named parameters returns a handle and correct columns", %{
         conn: conn
       } do
         sql = "SELECT id FROM stream_items WHERE name = :item_name;"
         params = [item_name: "Item 2"]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, params, [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, params)
         assert is_reference(stream_handle)
         assert {:ok, ["id"]} == NIF.stream_get_columns(stream_handle)
         assert :ok == NIF.stream_close(stream_handle)
       end
 
-      test "stream_open/4 with invalid SQL (syntax error) returns an error", %{conn: conn} do
+      test "stream_open/3 with invalid SQL (syntax error) returns an error", %{conn: conn} do
         sql = "SELEKT id FROM stream_items;"
 
         assert {:error, {:sql_input_error, %{code: 1, sql: ^sql, offset: 0}}} =
-                 NIF.stream_open(conn, sql, [], [])
+                 NIF.stream_open(conn, sql, [])
       end
 
       test "Xqlite.stream/4 reports a syntax error at open, with the byte offset", %{
@@ -90,87 +90,87 @@ defmodule Xqlite.NIF.StreamTest do
                  Xqlite.stream(conn, "SELCT 1")
       end
 
-      test "stream_open/4 and query/3 classify rejected SQL identically", %{conn: conn} do
+      test "stream_open/3 and query/3 classify rejected SQL identically", %{conn: conn} do
         for sql <- [
               "SELCT 1",
               "SELECT * FROM no_such_table_xyz",
               "SELECT nope FROM sqlite_master"
             ] do
           assert {:error, query_reason} = NIF.query(conn, sql, [])
-          assert {:error, ^query_reason} = NIF.stream_open(conn, sql, [], [])
+          assert {:error, ^query_reason} = NIF.stream_open(conn, sql, [])
         end
       end
 
-      test "stream_open/4 with SQL for non-existent table returns an error", %{conn: conn} do
+      test "stream_open/3 with SQL for non-existent table returns an error", %{conn: conn} do
         sql = "SELECT id FROM non_existent_table_for_stream;"
-        assert {:error, error_details} = NIF.stream_open(conn, sql, [], [])
+        assert {:error, error_details} = NIF.stream_open(conn, sql, [])
 
         assert {:no_such_table, "non_existent_table_for_stream"} = error_details
       end
 
-      test "stream_open/4 with empty SQL string reports that there is no statement", %{
+      test "stream_open/3 with empty SQL string reports that there is no statement", %{
         conn: conn
       } do
-        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, "", [], [])
+        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, "", [])
         assert is_binary(reason)
       end
 
-      test "stream_open/4 with comments-only SQL reports that there is no statement",
+      test "stream_open/3 with comments-only SQL reports that there is no statement",
            %{conn: conn} do
         sql = "-- This is just a comment;"
 
-        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, sql, [], [])
+        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, sql, [])
         assert is_binary(reason)
       end
 
-      test "stream_open/4 refuses a second statement instead of streaming the first",
+      test "stream_open/3 refuses a second statement instead of streaming the first",
            %{conn: conn} do
         assert {:error, :multiple_statements} =
-                 NIF.stream_open(conn, "SELECT 1; DROP TABLE stream_items", [], [])
+                 NIF.stream_open(conn, "SELECT 1; DROP TABLE stream_items", [])
 
         assert {:ok, %{rows: [[12]]}} =
                  NIF.query(conn, "SELECT count(*) FROM stream_items", [])
       end
 
-      test "stream_open/4 with invalid parameter name (named params) returns an error", %{
+      test "stream_open/3 with invalid parameter name (named params) returns an error", %{
         conn: conn
       } do
         sql = "SELECT id FROM stream_items WHERE name = :name;"
         params = [name: "Item 1", unexpected_param_name: "foo"]
 
         assert {:error, {:invalid_parameter_name, ":unexpected_param_name"}} ==
-                 NIF.stream_open(conn, sql, params, [])
+                 NIF.stream_open(conn, sql, params)
       end
 
-      test "stream_open/4 with too few positional params returns handle and correct columns",
+      test "stream_open/3 with too few positional params returns handle and correct columns",
            %{conn: conn} do
         sql = "SELECT id, name FROM stream_items WHERE id = ?1 AND name = ?2;"
         params = [1]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, params, [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, params)
         assert is_reference(stream_handle)
         assert {:ok, ["id", "name"]} == NIF.stream_get_columns(stream_handle)
         assert :ok == NIF.stream_close(stream_handle)
       end
 
-      test "stream_open/4 with too many positional params returns an error", %{conn: conn} do
+      test "stream_open/3 with too many positional params returns an error", %{conn: conn} do
         sql = "SELECT id FROM stream_items WHERE id = ?1;"
         params = [1, "extra_param"]
 
         assert {:error, {:sqlite_failure, _, 25, _msg}} =
-                 NIF.stream_open(conn, sql, params, [])
+                 NIF.stream_open(conn, sql, params)
 
         # The bind failed after the statement was prepared; SQLite refuses the
         # close of a connection that still owns one.
         assert :ok = NIF.close(conn)
       end
 
-      test "stream_open/4 refuses a params term that is no list, and nothing is prepared", %{
+      test "stream_open/3 refuses a params term that is no list, and nothing is prepared", %{
         conn: conn
       } do
         sql = "SELECT id FROM stream_items WHERE id = ?1;"
 
         for term <- [{:a, 1}, 7, %{a: 1}] do
-          assert {:error, {:expected_list, _payload}} = NIF.stream_open(conn, sql, term, [])
+          assert {:error, {:expected_list, _payload}} = NIF.stream_open(conn, sql, term)
         end
 
         assert :ok = NIF.close(conn)
@@ -179,7 +179,7 @@ defmodule Xqlite.NIF.StreamTest do
       # --- stream_fetch/2 Tests ---
       test "stream_fetch/2 retrieves all rows in a single large batch", %{conn: conn} do
         sql = "SELECT id, name, price FROM stream_items ORDER BY id;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         expected_rows = for i <- 1..12, do: [i, "Item #{i}", i + 0.50]
         assert {:ok, %{rows: actual_rows}} = NIF.stream_fetch(stream_handle, 20)
@@ -191,7 +191,7 @@ defmodule Xqlite.NIF.StreamTest do
 
       test "stream_fetch/2 retrieves all rows in multiple smaller batches", %{conn: conn} do
         sql = "SELECT id FROM stream_items ORDER BY id;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         assert {:ok, %{rows: [[1], [2], [3], [4], [5]]}} == NIF.stream_fetch(stream_handle, 5)
         assert {:ok, %{rows: [[6], [7], [8], [9], [10]]}} == NIF.stream_fetch(stream_handle, 5)
@@ -202,7 +202,7 @@ defmodule Xqlite.NIF.StreamTest do
 
       test "stream_fetch/2 with invalid batch_size (0) returns an error", %{conn: conn} do
         sql = "SELECT id FROM stream_items LIMIT 2;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         assert {:error, {:invalid_batch_size, %{provided: {:integer, 0}, minimum: 1}}} ==
                  NIF.stream_fetch(stream_handle, 0)
@@ -217,7 +217,7 @@ defmodule Xqlite.NIF.StreamTest do
         conn: conn
       } do
         sql = "SELECT id FROM stream_items LIMIT 1;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         assert {:error, {:invalid_batch_size, %{provided: {:integer, -5}, minimum: 1}}} ==
                  NIF.stream_fetch(stream_handle, -5)
@@ -229,7 +229,7 @@ defmodule Xqlite.NIF.StreamTest do
         conn: conn
       } do
         sql = "SELECT id FROM stream_items LIMIT 1;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         assert {:error,
                 {:invalid_batch_size, %{provided: {:atom, :not_an_integer}, minimum: 1}}} ==
@@ -242,7 +242,7 @@ defmodule Xqlite.NIF.StreamTest do
         conn: conn
       } do
         sql = "SELECT id FROM stream_items LIMIT 1;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         assert {:error, {:invalid_batch_size, %{provided: {:string, "invalid"}, minimum: 1}}} ==
                  NIF.stream_fetch(stream_handle, "invalid")
@@ -255,7 +255,7 @@ defmodule Xqlite.NIF.StreamTest do
         # the BEAM via an eager pre-allocation — it fetches the actual rows and
         # stops. Pre-fix this aborted the OS process (handle_alloc_error).
         sql = "SELECT id FROM stream_items ORDER BY id;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
         huge = 10_000_000_000_000
         assert {:ok, %{rows: rows}} = NIF.stream_fetch(stream_handle, huge)
@@ -266,14 +266,14 @@ defmodule Xqlite.NIF.StreamTest do
 
       test "stream_fetch/2 on an empty result set immediately returns :done", %{conn: conn} do
         sql = "SELECT id FROM stream_items WHERE id = 999;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
         assert :done == NIF.stream_fetch(stream_handle, 5)
         assert :ok == NIF.stream_close(stream_handle)
       end
 
       test "stream_fetch/2 after :done signal consistently returns :done", %{conn: conn} do
         sql = "SELECT id FROM stream_items LIMIT 1;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
         assert {:ok, %{rows: [[1]]}} == NIF.stream_fetch(stream_handle, 1)
         assert :done == NIF.stream_fetch(stream_handle, 1)
         assert :done == NIF.stream_fetch(stream_handle, 1)
@@ -282,7 +282,7 @@ defmodule Xqlite.NIF.StreamTest do
 
       test "stream_fetch/2 after stream_close returns :done", %{conn: conn} do
         sql = "SELECT id FROM stream_items;"
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
         assert :ok == NIF.stream_close(stream_handle)
         assert :done == NIF.stream_fetch(stream_handle, 1)
       end
@@ -291,13 +291,13 @@ defmodule Xqlite.NIF.StreamTest do
            %{conn: conn} do
         sql = "SELECT id, name FROM stream_items WHERE id = ?1 AND name = ?2;"
         params = [1]
-        {:ok, stream_handle} = NIF.stream_open(conn, sql, params, [])
+        {:ok, stream_handle} = NIF.stream_open(conn, sql, params)
         assert :done == NIF.stream_fetch(stream_handle, 1)
         assert :ok == NIF.stream_close(stream_handle)
       end
 
       test "stream_fetch/2 reads non-finite floats as sentinel atoms", %{conn: conn} do
-        {:ok, handle} = NIF.stream_open(conn, "SELECT 1e308 * 10.0, -1e308 * 10.0;", [], [])
+        {:ok, handle} = NIF.stream_open(conn, "SELECT 1e308 * 10.0, -1e308 * 10.0;", [])
 
         assert {:ok, %{rows: [[:positive_infinity, :negative_infinity]]}} =
                  NIF.stream_fetch(handle, 10)
@@ -315,7 +315,7 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (2, 'b')", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO cs_t VALUES (3, 'c')", [])
 
-    {:ok, stream} = NIF.stream_open(conn, "SELECT id, val FROM cs_t ORDER BY id", [], [])
+    {:ok, stream} = NIF.stream_open(conn, "SELECT id, val FROM cs_t ORDER BY id", [])
     assert {:ok, %{rows: [[1, "a"]]}} = NIF.stream_fetch(stream, 1)
 
     assert {:ok, %{rows: [[3]], num_rows: 1}} =
@@ -337,7 +337,7 @@ defmodule Xqlite.NIF.StreamTest do
     assert {:ok, 1} = NIF.execute(conn, "INSERT INTO iso_items (id) VALUES (2);", [])
 
     sql = "SELECT id FROM iso_items ORDER BY id LIMIT 2;"
-    {:ok, stream_handle} = NIF.stream_open(conn, sql, [], [])
+    {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
 
     assert {:error, {:invalid_batch_size, %{provided: {:integer, 0}, minimum: 1}}} ==
              NIF.stream_fetch(stream_handle, 0),
@@ -362,7 +362,7 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE sc_t (id INTEGER)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO sc_t VALUES (1)", [])
 
-    {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM sc_t", [], [])
+    {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM sc_t", [])
     :ok = NIF.close(conn)
 
     # close/1 drops the connection — stream_fetch returns connection_closed.
@@ -376,8 +376,8 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 1} = NIF.execute(conn, "INSERT INTO ms_t VALUES (1, 'a')", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO ms_t VALUES (2, 'b')", [])
 
-    {:ok, stream1} = NIF.stream_open(conn, "SELECT id FROM ms_t ORDER BY id", [], [])
-    {:ok, stream2} = NIF.stream_open(conn, "SELECT val FROM ms_t ORDER BY id", [], [])
+    {:ok, stream1} = NIF.stream_open(conn, "SELECT id FROM ms_t ORDER BY id", [])
+    {:ok, stream2} = NIF.stream_open(conn, "SELECT val FROM ms_t ORDER BY id", [])
 
     assert {:ok, %{rows: [[1], [2]]}} = NIF.stream_fetch(stream1, 10)
     assert {:ok, %{rows: [["a"], ["b"]]}} = NIF.stream_fetch(stream2, 10)
@@ -407,7 +407,7 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 1} =
       NIF.execute(conn, "INSERT INTO pb_t VALUES (?1, CAST(X'FF41' AS TEXT))", [good_rows + 1])
 
-    {:ok, stream} = NIF.stream_open(conn, "SELECT id, v FROM pb_t ORDER BY id", [], [])
+    {:ok, stream} = NIF.stream_open(conn, "SELECT id, v FROM pb_t ORDER BY id", [])
     {conn, stream, batch_size}
   end
 
@@ -418,6 +418,28 @@ defmodule Xqlite.NIF.StreamTest do
     assert length(rows) == 14
     assert {:error, {:utf8_error, _, _}} = NIF.stream_fetch(stream, batch_size)
     assert :done = NIF.stream_fetch(stream, batch_size)
+
+    NIF.stream_close(stream)
+    NIF.close(conn)
+  end
+
+  # A stream ends at its first error: the rows before the bad one come back,
+  # the error follows, and the rows after it are never read. An Elixir stream
+  # that has yielded an error is finished, so carrying on past a bad row
+  # silently would be the surprise.
+  test "isolated: a stream that errored delivers no row after the bad one" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+    {:ok, 0} = NIF.execute(conn, "CREATE TABLE after_bad (id INTEGER PRIMARY KEY, v)", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO after_bad VALUES (1, 'first')", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO after_bad VALUES (2, CAST(X'FF41' AS TEXT))", [])
+    {:ok, 1} = NIF.execute(conn, "INSERT INTO after_bad VALUES (3, 'third')", [])
+
+    {:ok, stream} = NIF.stream_open(conn, "SELECT v FROM after_bad ORDER BY id", [])
+
+    assert {:ok, %{rows: [["first"]]}} = NIF.stream_fetch(stream, 10)
+    assert {:error, {:utf8_error, _, _}} = NIF.stream_fetch(stream, 10)
+    assert :done = NIF.stream_fetch(stream, 10)
+    assert :done = NIF.stream_fetch(stream, 10)
 
     NIF.stream_close(stream)
     NIF.close(conn)
@@ -465,7 +487,7 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE utf8_t (val TEXT)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO utf8_t VALUES (CAST(X'FFFE8041' AS TEXT))", [])
 
-    {:ok, stream} = NIF.stream_open(conn, "SELECT val FROM utf8_t", [], [])
+    {:ok, stream} = NIF.stream_open(conn, "SELECT val FROM utf8_t", [])
     assert {:error, {:utf8_error, column, reason}} = NIF.stream_fetch(stream, 10)
     assert column == 0
     assert is_binary(reason)
@@ -480,7 +502,7 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE blob_s (data BLOB)", [])
     {:ok, 1} = NIF.execute(conn, "INSERT INTO blob_s VALUES (x'')", [])
 
-    {:ok, stream} = NIF.stream_open(conn, "SELECT data FROM blob_s", [], [])
+    {:ok, stream} = NIF.stream_open(conn, "SELECT data FROM blob_s", [])
     assert {:ok, %{rows: [[val]]}} = NIF.stream_fetch(stream, 10)
     assert val == <<>>
     NIF.stream_close(stream)

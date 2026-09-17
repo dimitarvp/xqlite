@@ -53,6 +53,15 @@ defmodule Xqlite.ArgumentValidationLawTest do
     StreamData.filter(any_term(), fn term -> not (is_integer(term) and term >= 0) end)
   end
 
+  # The raw stream door takes the connection, the SQL and the parameters, and
+  # nothing else: an argument no code reads cannot be judged, so it is not
+  # there to be passed.
+  test "the raw stream door takes three arguments and no more" do
+    assert {:module, XqliteNIF} = Code.ensure_loaded(XqliteNIF)
+    assert function_exported?(XqliteNIF, :stream_open, 3)
+    refute function_exported?(XqliteNIF, :stream_open, 4)
+  end
+
   for_each_opener do
     property "begin/2 refuses every term that is not a transaction mode", %{conn: conn} do
       check all(mode <- term_other_than(@begin_modes), max_runs: 2000) do
@@ -73,7 +82,7 @@ defmodule Xqlite.ArgumentValidationLawTest do
         {:nif_execute, NIF.execute(conn, sql, params)},
         {:nif_query_with_changes, NIF.query_with_changes(conn, sql, params)},
         {:nif_explain_analyze, NIF.explain_analyze(conn, sql, params)},
-        {:nif_stream_open, NIF.stream_open(conn, sql, params, [])},
+        {:nif_stream_open, NIF.stream_open(conn, sql, params)},
         {:query, Xqlite.query(conn, sql, params)},
         {:stream, Xqlite.stream(conn, sql, params)}
       ]

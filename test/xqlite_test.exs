@@ -250,10 +250,14 @@ defmodule XqliteTest do
       test "stream/4 rejects a cancel_tokens value that is not references", %{conn: conn} do
         sql = "SELECT id FROM stream_test_users;"
 
-        assert {:error, {:invalid_cancel_tokens, :bogus}} =
+        assert {:error,
+                {:invalid_cancel_tokens,
+                 %{reason: :bad_element, position: 1, value_type: :atom}}} =
                  Xqlite.stream(conn, sql, [], cancel_tokens: :bogus)
 
-        assert {:error, {:invalid_cancel_tokens, [:bogus]}} =
+        assert {:error,
+                {:invalid_cancel_tokens,
+                 %{reason: :bad_element, position: 1, value_type: :atom}}} =
                  Xqlite.stream(conn, sql, [], cancel_tokens: [:bogus])
       end
     end

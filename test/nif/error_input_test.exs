@@ -50,7 +50,7 @@ defmodule Xqlite.NIF.ErrorInputTest do
 
         # The prepared-statement and stream entry points reject it too.
         assert {:error, :null_byte_in_string} = NIF.stmt_prepare(conn, "SELECT\0 1")
-        assert {:error, :null_byte_in_string} = NIF.stream_open(conn, "SELECT\0 1", [], [])
+        assert {:error, :null_byte_in_string} = NIF.stream_open(conn, "SELECT\0 1", [])
 
         # A NUL inside a bound value still round-trips byte-exact.
         assert {:ok, _} =
@@ -88,7 +88,9 @@ defmodule Xqlite.NIF.ErrorInputTest do
         # List starts like a keyword list but contains an invalid element
         invalid_element_list = [{:valid, 1}, :not_a_tuple]
 
-        assert {:error, {:expected_keyword_tuple, _}} =
+        assert {:error,
+                {:expected_keyword_tuple,
+                 %{reason: :bad_element, position: 2, value_type: :atom}}} =
                  NIF.query(conn, sql, invalid_element_list)
       end
 

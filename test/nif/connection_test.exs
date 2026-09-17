@@ -385,7 +385,7 @@ defmodule Xqlite.NIF.ConnectionTest do
   defp apply_statement_state(stmt, :finalized), do: assert(:ok = NIF.stmt_finalize(stmt))
 
   defp open_stream(conn, state) do
-    assert {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM kids", [], [])
+    assert {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM kids", [])
     apply_stream_state(stream, state)
     {:stream, stream}
   end

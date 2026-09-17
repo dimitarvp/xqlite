@@ -1,6 +1,6 @@
 defmodule Xqlite.NIF.PrepareTailLawTest do
   @moduledoc """
-  Every entry point that compiles SQL — `stmt_prepare/2`, `stream_open/4`,
+  Every entry point that compiles SQL — `stmt_prepare/2`, `stream_open/3`,
   `query/3` and `explain_analyze/3` — accepts and refuses the same strings.
 
   The rule they share is rusqlite's: input holding no statement at all is
@@ -113,7 +113,7 @@ defmodule Xqlite.NIF.PrepareTailLawTest do
   end
 
   defp stream_class(conn, sql) do
-    case NIF.stream_open(conn, sql, [], []) do
+    case NIF.stream_open(conn, sql, []) do
       {:ok, handle} ->
         assert :ok = NIF.stream_close(handle)
         :ok
