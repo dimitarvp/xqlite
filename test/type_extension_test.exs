@@ -598,6 +598,62 @@ defmodule Xqlite.TypeExtensionTest do
   end
 
   # ---------------------------------------------------------------------------
+
+  describe "a parameter term the encode chain cannot walk" do
+    setup do
+      assert {:ok, conn} = TestUtil.open_in_memory()
+      on_exit(fn -> assert :ok = NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "a positional list whose tail is not one is refused either way", %{conn: conn} do
+      expected = {:error, {:expected_list, %{reason: :improper_tail, value_type: :atom}}}
+
+      assert_same_on_every_door(conn, "SELECT ?1", [1 | :tail], expected)
+      assert TypeExtension.encode_params([1 | :tail], [IntDoubler]) == expected
+    end
+
+    test "the tail's own kind is what the refusal names", %{conn: conn} do
+      expected = {:error, {:expected_list, %{reason: :improper_tail, value_type: :integer}}}
+
+      assert_same_on_every_door(conn, "SELECT ?1", [1 | 2], expected)
+      assert TypeExtension.encode_params([1 | 2], [IntDoubler]) == expected
+    end
+
+    test "a keyword list whose tail is not one is refused either way", %{conn: conn} do
+      expected =
+        {:error, {:expected_keyword_list, %{reason: :improper_tail, value_type: :atom}}}
+
+      assert_same_on_every_door(conn, "SELECT :a", [{:a, 1} | :tail], expected)
+      assert TypeExtension.encode_params([{:a, 1} | :tail], [IntDoubler]) == expected
+
+      assert TypeExtension.encode_params([{:a, 1} | 2], [IntDoubler]) ==
+               {:error,
+                {:expected_keyword_list, %{reason: :improper_tail, value_type: :integer}}}
+    end
+
+    # The chain copies such an element through untouched and the native walk
+    # refuses it, which is how it was before the tail clauses arrived.
+    test "a keyword element that is no pair is refused where it always was", %{conn: conn} do
+      expected =
+        {:error,
+         {:expected_keyword_tuple, %{reason: :bad_element, position: 2, value_type: :integer}}}
+
+      assert_same_on_every_door(conn, "SELECT :a", [{:a, 1}, 2], expected)
+      assert TypeExtension.encode_params([{:a, 1}, 2], [IntDoubler]) == {:ok, [{:a, 2}, 2]}
+    end
+
+    test "a term that is no list at all is refused either way", %{conn: conn} do
+      for {term, type} <- [{:foo, :atom}, {%{}, :map}, {42, :integer}] do
+        expected = {:error, {:expected_list, %{reason: :not_a_list, value_type: type}}}
+
+        assert_same_on_every_door(conn, "SELECT ?1", term, expected)
+        assert TypeExtension.encode_params(term, [IntDoubler]) == expected
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Unit tests: extension ordering
   # ---------------------------------------------------------------------------
 
@@ -1332,6 +1388,34 @@ defmodule Xqlite.TypeExtensionTest do
 
   defp stream_answer(conn, opts) do
     case Xqlite.stream(conn, "SELECT ?1", [1], opts) do
+      {:error, _reason} = error -> error
+      stream -> Enum.to_list(stream)
+    end
+  end
+
+  # The same call with a working extension and with none: a parameter term
+  # the chain cannot walk has to answer the same thing on both settings,
+  # because without one the term travels untouched to the native walk.
+  defp assert_same_on_every_door(conn, sql, params, expected) do
+    for extensions <- [[], [IntDoubler]],
+        {door, answer} <- chain_doors(conn, sql, params, extensions) do
+      assert {door, extensions, expected} == {door, extensions, answer}
+    end
+  end
+
+  defp chain_doors(conn, sql, params, extensions) do
+    opts = [type_extensions: extensions]
+    assert {:ok, stmt} = Xqlite.prepare(conn, sql)
+
+    [
+      {:query, Xqlite.query(conn, sql, params, opts)},
+      {:bind, Xqlite.bind(stmt, params, opts)},
+      {:stream, stream_answer(conn, sql, params, opts)}
+    ]
+  end
+
+  defp stream_answer(conn, sql, params, opts) do
+    case Xqlite.stream(conn, sql, params, opts) do
       {:error, _reason} = error -> error
       stream -> Enum.to_list(stream)
     end

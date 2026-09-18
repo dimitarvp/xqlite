@@ -199,6 +199,23 @@ defmodule XqliteTest do
                  Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], on_error: :bogus)
       end
 
+      test "stream/4 rejects a statement whose column names repeat at open", %{conn: conn} do
+        assert {:error, {:duplicate_column_name, "id"}} =
+                 Xqlite.stream(conn, "SELECT id, id FROM stream_test_users;")
+
+        assert {:error, {:duplicate_column_name, "?"}} =
+                 Xqlite.stream(conn, "SELECT ?, ?, ?", [1, 2, 3])
+      end
+
+      test "stream/4 takes the same columns once they are aliased", %{conn: conn} do
+        sql = "SELECT id AS a, id AS b FROM stream_test_users ORDER BY id;"
+
+        assert [%{"a" => 1, "b" => 1} | _] =
+                 conn
+                 |> Xqlite.stream(sql)
+                 |> Enum.to_list()
+      end
+
       test "stream/4 rejects a batch size that is not a positive integer at open",
            %{conn: conn} do
         sql = "SELECT id FROM stream_test_users;"

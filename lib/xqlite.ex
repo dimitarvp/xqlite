@@ -235,7 +235,9 @@ defmodule Xqlite do
   `Xqlite.limit/3` reads and sets; every door judges every value against it
   before it binds anything, so the refusal binds nothing. `:too_big` is the
   other side of the same limit: SQLite met it while it ran — a row it was
-  building, a concatenation, a column read — and the code is always 18.
+  building, a concatenation, a column read — and it carries the code SQLite
+  gave, the way `:read_only_database` does. SQLite defines no extended code
+  for this result today, so that code is the plain one.
 
   `:invalid_limit_category` is an atom naming none of the thirteen limits
   `Xqlite.limit/3` takes, and `:invalid_limit_value` a limit value outside
@@ -252,6 +254,13 @@ defmodule Xqlite do
   on every door that takes the option, and the extension list of
   `Xqlite.TypeExtension.encode_params/2` and `decode_rows/2`, which judge
   it the same way.
+
+  `:duplicate_column_name` is a statement `Xqlite.stream/4` cannot stream: a
+  stream row is a map keyed by column name, and a map cannot hold two entries
+  under one key, so two columns of one name would lose the first value. It
+  carries the first name that repeats, in SQLite's own order, and is answered
+  at open, before a row is read. Give each column an alias, or use `query/4`,
+  whose rows are lists.
   """
   @type error_reason ::
           :connection_closed
@@ -273,6 +282,7 @@ defmodule Xqlite do
           | {:cannot_open_database, String.t(), integer(), String.t()}
           | {:constraint_violation, constraint_kind(), constraint_details()}
           | {:database_busy_or_locked, integer(), String.t()}
+          | {:duplicate_column_name, String.t()}
           | {:duplicate_parameter_name, String.t()}
           | {:expected_keyword_list, list_refusal()}
           | {:expected_keyword_tuple, list_refusal()}
@@ -289,10 +299,10 @@ defmodule Xqlite do
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
-          | {:invalid_limit_category, atom()}
-          | {:invalid_limit_value, %{category: atom(), value: integer()}}
           | {:invalid_hook_option,
              %{key: :every_n | :tag, value: term(), reason: :invalid_value}}
+          | {:invalid_limit_category, atom()}
+          | {:invalid_limit_value, %{category: atom(), value: integer()}}
           | {:invalid_on_error, term()}
           | {:invalid_open_option,
              %{key: atom(), reason: :unknown_key, allowed: [atom()], value: nil}
@@ -1338,7 +1348,7 @@ defmodule Xqlite do
       `{:error, {:type_extension_refused, %{position: n, extension: module,
       reason: reason}}}` before any SQL runs; `n` is the parameter's 1-based
       place in the list.
-      The option itself must be a proper list of module names, or `nil`
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
@@ -1426,7 +1436,7 @@ defmodule Xqlite do
       no result rows to decode). Default: `[]`. A parameter an extension
       refuses fails the call with `{:error, {:type_extension_refused, _}}`,
       as described in `query/4`.
-      The option itself must be a proper list of module names, or `nil`
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
@@ -1561,7 +1571,7 @@ defmodule Xqlite do
       `query/4`, so the statement profiled here is the one the application
       runs. A parameter an extension refuses returns
       `{:error, {:type_extension_refused, _}}`. Default: `[]`.
-      The option itself must be a proper list of module names, or `nil`
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
@@ -1706,6 +1716,17 @@ defmodule Xqlite do
       :ok
       iex> Xqlite.stream(conn, "SELECT id, name FROM users;") |> Enum.to_list()
       [%{"id" => 1, "name" => "Alice"}, %{"id" => 2, "name" => "Bob"}]
+
+  Because each row is a map keyed by column name, the statement's column
+  names must all be different: a map cannot hold two entries under one key,
+  so a statement naming two columns the same is
+  `{:error, {:duplicate_column_name, name}}` at stream open, `name` being the
+  first name that repeats in SQLite's own order. A join of two tables that
+  share a column is the usual case — `SELECT a.v, b.v` names both columns
+  `"v"` — and giving each column an alias (`SELECT a.v AS x, b.v AS y`) makes
+  it streamable. SQLite names a column that has no name of its own after the
+  text that produced it, so `SELECT 1, 1` and `SELECT ?, ?` repeat too.
+  `query/4` and the raw stream doors answer lists and take any names.
 
   Returns an `Enumerable.t()` on success or `{:error, reason}` on setup failure.
   Callers must pattern-match the result before piping — this is intentional,
@@ -1860,6 +1881,12 @@ defmodule Xqlite do
   in a row no longer add up. Once stepping has started, call `reset/1` before
   rebinding — SQLite rejects mid-run rebinds.
 
+  A term that is no list at all answers
+  `{:error, {:expected_list, %{reason: :not_a_list, value_type: kind}}}`, and
+  a list whose tail is not `[]` the same tag with `:improper_tail`. `nil`
+  means no parameters here as it does at every other parameter door, so a
+  statement that takes one refuses it as a count mismatch.
+
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise. Pass `%Xqlite.Blob{bytes: bytes}` in either form — a
   positional element or a keyword pair's value — to store a `BLOB` whatever
@@ -1872,16 +1899,16 @@ defmodule Xqlite do
       `query/4`, and a parameter an extension refuses returns
       `{:error, {:type_extension_refused, _}}`. Default: `[]`. The rows
       `step/1` and `multi_step/2` return are never decoded — run them
-      through `Xqlite.TypeExtension.decode_rows/2` yourself if you want the
-      decoded form.
-      The option itself must be a proper list of module names, or `nil`
+      through `Xqlite.TypeExtension.decode_rows/2` yourself, which answers
+      `{:ok, rows}`, if you want the decoded form.
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
   """
   @spec bind(stmt(), list() | keyword()) :: :ok | error()
   @spec bind(stmt(), list() | keyword(), keyword()) :: :ok | error()
-  def bind(stmt, params, opts \\ []) when is_list(params) do
+  def bind(stmt, params, opts \\ []) do
     case type_extensions(opts) do
       {:ok, extensions} -> encode_and_bind(stmt, params, extensions)
       {:error, _reason} = error -> error
@@ -1948,7 +1975,8 @@ defmodule Xqlite do
 
   The values come back exactly as SQLite stored them: no type extension
   runs on them, whatever `bind/3` was given. Pass them through
-  `Xqlite.TypeExtension.decode_rows/2` for the decoded form.
+  `Xqlite.TypeExtension.decode_rows/2`, which answers `{:ok, rows}`, for the
+  decoded form.
   """
   @spec step(stmt()) :: {:row, [sqlite_value()]} | :done | error()
   def step(stmt), do: XqliteNIF.stmt_step(stmt)
@@ -2016,8 +2044,8 @@ defmodule Xqlite do
   statement stays runnable across one.
 
   The rows come back exactly as SQLite stored them: no type extension runs
-  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
-  decoded form.
+  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2`, which
+  answers `{:ok, rows}`, for the decoded form.
   """
   @spec multi_step(stmt(), pos_integer()) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
@@ -2087,8 +2115,8 @@ defmodule Xqlite do
   statement stays runnable across one.
 
   The rows come back exactly as SQLite stored them: no type extension runs
-  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
-  decoded form.
+  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2`, which
+  answers `{:ok, rows}`, for the decoded form.
   """
   @spec multi_step_cancellable(stmt(), pos_integer(), term()) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
@@ -2902,7 +2930,7 @@ defmodule Xqlite do
       stays a plain map — only its `:rows` are rewritten. A parameter an
       extension refuses returns `{:error, {:type_extension_refused, _}}`.
       Default: `[]`.
-      The option itself must be a proper list of module names, or `nil`
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
@@ -2992,7 +3020,7 @@ defmodule Xqlite do
       `query/4` (there are no result rows to decode). A parameter an
       extension refuses returns `{:error, {:type_extension_refused, _}}`.
       Default: `[]`.
-      The option itself must be a proper list of module names, or `nil`
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
@@ -3121,7 +3149,7 @@ defmodule Xqlite do
       stays a plain map — only its `:rows` are rewritten. A parameter an
       extension refuses returns `{:error, {:type_extension_refused, _}}`.
       Default: `[]`.
-      The option itself must be a proper list of module names, or `nil`
+      The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
@@ -3424,7 +3452,7 @@ defmodule Xqlite do
   before it binds — a longer one is
   `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` — and the one
   SQLite itself checks while it runs, so lowering it below values already
-  stored makes reading them answer `{:error, {:too_big, 18, message}}`.
+  stored makes reading them answer `{:error, {:too_big, code, message}}`.
 
   ## Examples
 

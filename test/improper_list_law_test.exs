@@ -9,6 +9,11 @@ defmodule Xqlite.ImproperListLawTest do
   walk, so a caller can tell "your list has a broken tail" from "that is not
   a list at all".
 
+  A parameter door is driven twice, once with a type extension on and once
+  without, because the two settings walk the list in different places: with
+  no extension the term travels untouched to the native walk, and with one
+  the encode chain walks it in Elixir first. The answer has to be the same.
+
   Every generated input gets its own connection: a door that fails this law
   does so from inside the connection's lock, which leaves the connection
   unusable for the rest of the process, and a shared one would make every
@@ -73,8 +78,26 @@ defmodule Xqlite.ImproperListLawTest do
     {:stream_type_extensions, :extension, :invalid_type_extensions},
     {:query_cancellable_type_extensions, :extension, :invalid_type_extensions},
     {:execute_cancellable_type_extensions, :extension, :invalid_type_extensions},
-    {:query_with_changes_cancellable_type_extensions, :extension, :invalid_type_extensions}
+    {:query_with_changes_cancellable_type_extensions, :extension, :invalid_type_extensions},
+    {:stream_params_extension, :value, :expected_list},
+    {:stream_keyword_extension, :pair, :expected_keyword_list},
+    {:bind_params_extension, :value, :expected_list},
+    {:bind_keyword_extension, :pair, :expected_keyword_list},
+    {:query_params_extension, :value, :expected_list},
+    {:query_keyword_extension, :pair, :expected_keyword_list},
+    {:execute_params_extension, :value, :expected_list},
+    {:execute_keyword_extension, :pair, :expected_keyword_list},
+    {:explain_analyze_params_extension, :value, :expected_list},
+    {:explain_analyze_keyword_extension, :pair, :expected_keyword_list},
+    {:query_cancellable_params_extension, :value, :expected_list},
+    {:query_cancellable_keyword_extension, :pair, :expected_keyword_list},
+    {:execute_cancellable_params_extension, :value, :expected_list},
+    {:execute_cancellable_keyword_extension, :pair, :expected_keyword_list},
+    {:query_with_changes_cancellable_params_extension, :value, :expected_list},
+    {:query_with_changes_cancellable_keyword_extension, :pair, :expected_keyword_list}
   ]
+
+  @extension_opts [type_extensions: [Xqlite.TypeExtension.JSON]]
 
   test "the anchor: a stream refuses an improper parameter list at open" do
     conn = fresh_conn()
@@ -151,9 +174,27 @@ defmodule Xqlite.ImproperListLawTest do
     check all(term <- tail(), max_runs: 2000) do
       type = type_of(term)
 
-      assert {:error, {:expected_list, %{reason: :not_a_list, value_type: ^type}}} =
-               NIF.query(fresh_conn(), "SELECT ?1", term)
+      for {door, answer} <- not_a_list_answers(term) do
+        assert {^door, {:error, {:expected_list, %{reason: :not_a_list, value_type: ^type}}}} =
+                 {door, answer}
+      end
     end
+  end
+
+  # The raw door, the typed statement door at both arities, and two doors with
+  # a type extension on, which walks the term in Elixir before the native side
+  # is reached.
+  defp not_a_list_answers(term) do
+    conn = fresh_conn()
+    assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+
+    [
+      {:nif_query, NIF.query(conn, "SELECT ?1", term)},
+      {:bind2, Xqlite.bind(stmt, term)},
+      {:bind3, Xqlite.bind(stmt, term, [])},
+      {:bind3_extension, Xqlite.bind(stmt, term, @extension_opts)},
+      {:query_extension, Xqlite.query(conn, "SELECT ?1", term, @extension_opts)}
+    ]
   end
 
   # `nil` is left out on purpose: it is not a list either, but it is the one
@@ -362,6 +403,86 @@ defmodule Xqlite.ImproperListLawTest do
   defp call(:query_with_changes_cancellable_type_extensions, conn, list) do
     Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], new_token(),
       type_extensions: list
+    )
+  end
+
+  defp call(:stream_params_extension, conn, list),
+    do: Xqlite.stream(conn, "SELECT ?1", list, @extension_opts)
+
+  defp call(:stream_keyword_extension, conn, list),
+    do: Xqlite.stream(conn, "SELECT :p1", list, @extension_opts)
+
+  defp call(:bind_params_extension, conn, list) do
+    assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+    Xqlite.bind(stmt, list, @extension_opts)
+  end
+
+  defp call(:bind_keyword_extension, conn, list) do
+    assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT :p1")
+    Xqlite.bind(stmt, list, @extension_opts)
+  end
+
+  defp call(:query_params_extension, conn, list),
+    do: Xqlite.query(conn, "SELECT ?1", list, @extension_opts)
+
+  defp call(:query_keyword_extension, conn, list),
+    do: Xqlite.query(conn, "SELECT :p1", list, @extension_opts)
+
+  defp call(:execute_params_extension, conn, list),
+    do: Xqlite.execute(conn, insert_sql(conn, "?1"), list, @extension_opts)
+
+  defp call(:execute_keyword_extension, conn, list),
+    do: Xqlite.execute(conn, insert_sql(conn, ":p1"), list, @extension_opts)
+
+  defp call(:explain_analyze_params_extension, conn, list),
+    do: Xqlite.explain_analyze(conn, "SELECT ?1", list, @extension_opts)
+
+  defp call(:explain_analyze_keyword_extension, conn, list),
+    do: Xqlite.explain_analyze(conn, "SELECT :p1", list, @extension_opts)
+
+  defp call(:query_cancellable_params_extension, conn, list),
+    do: Xqlite.query_cancellable(conn, "SELECT ?1", list, new_token(), @extension_opts)
+
+  defp call(:query_cancellable_keyword_extension, conn, list),
+    do: Xqlite.query_cancellable(conn, "SELECT :p1", list, new_token(), @extension_opts)
+
+  defp call(:execute_cancellable_params_extension, conn, list) do
+    Xqlite.execute_cancellable(
+      conn,
+      insert_sql(conn, "?1"),
+      list,
+      new_token(),
+      @extension_opts
+    )
+  end
+
+  defp call(:execute_cancellable_keyword_extension, conn, list) do
+    Xqlite.execute_cancellable(
+      conn,
+      insert_sql(conn, ":p1"),
+      list,
+      new_token(),
+      @extension_opts
+    )
+  end
+
+  defp call(:query_with_changes_cancellable_params_extension, conn, list) do
+    Xqlite.query_with_changes_cancellable(
+      conn,
+      "SELECT ?1",
+      list,
+      new_token(),
+      @extension_opts
+    )
+  end
+
+  defp call(:query_with_changes_cancellable_keyword_extension, conn, list) do
+    Xqlite.query_with_changes_cancellable(
+      conn,
+      "SELECT :p1",
+      list,
+      new_token(),
+      @extension_opts
     )
   end
 end

@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A bind SQLite refused before taking a value marked the statement
+  unrunnable.** A bind on a statement mid-run is refused by SQLite with
+  `SQLITE_MISUSE` before it touches the first parameter, but the bind path
+  tagged it as partly bound and cleared the flag that lets a statement step,
+  so `reset/1` then `step/1` answered `{:error, {:parameters_unbound, _}}`
+  with the earlier bind still in place. Only a failure after at least one
+  value was taken clears the flag now; a refusal that took nothing leaves
+  the statement as it was.
+- **`SAVEPOINT`, `RELEASE`, `ROLLBACK TO` and a read-only statement with a
+  long comment read as "SQL contains no statement" under a lowered
+  `:length`.** The check that tells an empty text from a statement reads
+  SQLite's expansion of the statement, which SQLite withholds above the
+  connection's length limit; the read now lifts the limit and puts it back,
+  so the check is exact at any limit.
+- **`XqliteNIF.get_create_sql/2` judges its name against the length limit**
+  like every door that binds a value, answering
+  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` where it used to
+  answer `{:too_big, code, message}`.
+- **A keyword list with one key the statement lacks paid for the whole name
+  map.** Resolving keys through the map costs one read per parameter of the
+  statement, so a refused list of a few keys on a 32 766-parameter statement
+  took 1.4 s and held the connection for it. A list holding fewer than half
+  the statement's parameters' worth of keys now resolves them one by one, so
+  a refused list costs what its keys cost (8 µs at the cap); a longer list
+  still pays the map, as a successful bind does.
 - **The telemetry guide names the one refusal answered without an event.**
   A `:type_extensions` option that is no proper list of extension modules is
   refused before the span opens, so the call emits neither a start nor a
@@ -37,22 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string comparison per name. Both binding paths now read the statement's own
   names once into a map and bind by index, and the doors going through
   rusqlite no longer let it resolve every name a second time. On one machine a
-  bind of 32 766 names went from 3.5 to 1.5 seconds, and the connection lock
+  bind of 32 766 names went from 3.48 to 1.46 seconds, and the connection lock
   is held for that much less. The cost still grows faster than the number of
   names: reading the name at one index is itself a walk of SQLite's parameter
   list, and its C interface offers no way to read them all in one pass.
-
-### Changed
-
-- **`{:value_too_large, _}` is now answered by every door that binds**, where
-  the doors going through rusqlite used to answer
-  `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw doors only
-  refused values above two gigabytes. The limit in the error is the
-  connection's own, which `Xqlite.limit/3` reads and sets.
-- **`SQLITE_TOOBIG` is classified as `{:too_big, code, message}`** wherever
-  SQLite answers it. It no longer comes from a bind, but it still comes from a
-  step: SQLite checks the same limit against the row it builds, a
-  concatenation and a column read.
 
 - **A bind the library refused left the statement runnable.** Every one of
   the six refusals binds nothing at all, and SQLite reads a parameter nothing
@@ -164,9 +177,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaching `done: true`. After such a failure the statement is left where
   SQLite left it: the next step is SQLite's own rerun from the top, which
   meets the same failure, and `reset/1` changes nothing.
+- **`Xqlite.stream/4` silently dropped every column whose name repeated.** A
+  stream row is a map keyed by column name, and a map cannot hold two entries
+  under one key, so a join of two tables sharing a column —
+  `SELECT ta.v, tb.v FROM ta, tb` — came back as `%{"v" => 2}`, the first
+  value gone with nothing said about it, where `Xqlite.query/4` over the same
+  SQL keeps both. SQLite also names a column that has no name of its own
+  after the text that produced it, so `SELECT 1, 1` and `SELECT ?, ?` lost
+  values the same way, in every `:on_error` mode. Such a statement is now
+  refused at stream open with
+  `{:error, {:duplicate_column_name, name}}`, `name` being the first name
+  that repeats in SQLite's order; alias the columns
+  (`SELECT ta.v AS x, tb.v AS y`) to stream it. `query/4` and the raw stream
+  doors answer lists and are unchanged.
+- **An improper parameter list raised once a type extension was on.** With no
+  extension the list travelled untouched to the native walk, which refuses a
+  tail that is not a list with
+  `{:error, {:expected_list, %{reason: :improper_tail, value_type: _}}}`;
+  with one, the encode chain walked the list itself and `[1 | :tail]` raised
+  `FunctionClauseError` on all eight parameter doors and on the public
+  `Xqlite.TypeExtension.encode_params/2`. The chain now answers what the
+  native walk answers for the same term: both improper-tail shapes, and
+  `{:error, {:expected_list, %{reason: :not_a_list, value_type: _}}}` for a
+  parameter term that is no list and not `nil`, which raised too.
+  `Xqlite.bind/2,3` lost its own `is_list` guard with it, so
+  `Xqlite.bind(stmt, :foo)` answers that refusal instead of raising and
+  `Xqlite.bind(stmt, nil)` means no parameters, as it does at every other
+  parameter door.
+- **Documentation.** The seven `:type_extensions` paragraphs say "extension
+  modules" rather than "module names"; the four places that recommend
+  `Xqlite.TypeExtension.decode_rows/2` say it answers `{:ok, rows}`; the
+  `:too_big` docs write its code as `code` rather than the literal 18, SQLite
+  defining no extended code for that result today; the telemetry guide names
+  `Xqlite.limit/3` beside `backup_with_progress/6` as the doors that emit
+  nothing; the gotchas guide, this file and the architecture map carry the
+  one measured figure for the named bind; the architecture map names the
+  functions the stream data flow really goes through and all of the checks
+  the open makes; and this file's Unreleased section has one `### Changed`
+  heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
 
+- **`{:value_too_large, _}` is now answered by every door that binds**, where
+  the doors going through rusqlite used to answer
+  `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw doors only
+  refused values above two gigabytes. The limit in the error is the
+  connection's own, which `Xqlite.limit/3` reads and sets.
+- **`SQLITE_TOOBIG` is classified as `{:too_big, code, message}`** wherever
+  SQLite answers it. It no longer comes from a bind, but it still comes from a
+  step: SQLite checks the same limit against the row it builds, a
+  concatenation and a column read.
 - **`Xqlite.TypeExtension.encode_params/2` and `decode_rows/2` judge their
   extension list.** Both are public and are what the raw-statement docs
   recommend for the rows `step/1` and `multi_step/2` return, and both took

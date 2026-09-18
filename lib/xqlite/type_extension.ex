@@ -187,6 +187,16 @@ defmodule Xqlite.TypeExtension do
   way the NIF numbers its bindings. `nil` in place of a list is accepted and
   answers `{:ok, nil}`.
 
+  The parameter list is walked by hand, so it answers for a broken list what
+  the native walk answers for the same one, and a call refuses the same way
+  with extensions as without: a list whose tail is not `[]` is
+  `{:error, {:expected_list, %{reason: :improper_tail, value_type: kind}}}`
+  (`:expected_keyword_list` for a keyword list), a term that is no list and
+  not `nil` is `{:error, {:expected_list, %{reason: :not_a_list, value_type:
+  kind}}}`, and a keyword element that is no `{key, value}` pair travels on
+  to the NIF, which answers `{:error, {:expected_keyword_tuple, %{reason:
+  :bad_element, position: n, value_type: kind}}}`.
+
   The extension list is judged first, the way every door that takes the
   `:type_extensions` option judges it: it must be a proper list, or `nil` for
   none, and every element an atom naming a module that declares
@@ -195,8 +205,8 @@ defmodule Xqlite.TypeExtension do
   parameter is touched, the refusal naming what stopped the walk and, for an
   element that is no extension module, its one-based position.
   """
-  @spec encode_params(params :: list() | keyword() | nil, extensions :: term()) ::
-          {:ok, list() | keyword() | nil} | {:error, Xqlite.error_reason()}
+  @spec encode_params(params :: term(), extensions :: term()) ::
+          {:ok, term()} | {:error, Xqlite.error_reason()}
   def encode_params(params, extensions) do
     case validate_extensions(extensions) do
       {:ok, walked} -> encode_params_checked(params, walked)
@@ -208,8 +218,8 @@ defmodule Xqlite.TypeExtension do
   # For a caller that walked the list already — every door does, before its
   # telemetry metadata — so the list is walked once per call, not once per
   # function that touches it.
-  @spec encode_params_checked(params :: list() | keyword() | nil, extensions :: [module()]) ::
-          {:ok, list() | keyword() | nil} | {:error, Xqlite.error_reason()}
+  @spec encode_params_checked(params :: term(), extensions :: [module()]) ::
+          {:ok, term()} | {:error, Xqlite.error_reason()}
   def encode_params_checked(params, []), do: {:ok, params}
 
   def encode_params_checked(nil, _extensions), do: {:ok, nil}
@@ -222,6 +232,9 @@ defmodule Xqlite.TypeExtension do
     encode_positional(params, extensions, 1, [])
   end
 
+  def encode_params_checked(params, _extensions),
+    do: {:error, {:expected_list, not_a_list(params)}}
+
   defp encode_positional([], _extensions, _position, acc), do: {:ok, Enum.reverse(acc)}
 
   defp encode_positional([value | rest], extensions, position, acc) do
@@ -230,6 +243,9 @@ defmodule Xqlite.TypeExtension do
       {:error, details} -> refusal(details, position)
     end
   end
+
+  defp encode_positional(tail, _extensions, _position, _acc),
+    do: {:error, {:expected_list, improper_tail(tail)}}
 
   defp encode_keyword([], _extensions, _position, acc), do: {:ok, Enum.reverse(acc)}
 
@@ -243,6 +259,9 @@ defmodule Xqlite.TypeExtension do
   defp encode_keyword([other | rest], extensions, position, acc) do
     encode_keyword(rest, extensions, position + 1, [other | acc])
   end
+
+  defp encode_keyword(tail, _extensions, _position, _acc),
+    do: {:error, {:expected_keyword_list, improper_tail(tail)}}
 
   defp refusal(%{extension: extension, reason: reason}, position) do
     {:error,

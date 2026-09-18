@@ -73,7 +73,7 @@ defmodule Xqlite.StreamResourceCallbacks do
       {:ok, handle} ->
         case NIF.stream_get_columns(handle) do
           {:ok, columns} ->
-            {:ok, build_acc(conn, handle, columns, opts, on_error)}
+            judge_columns(conn, handle, columns, opts, on_error)
 
           {:error, _reason} = error ->
             # Nothing else owns the handle yet — close it or it leaks.
@@ -83,6 +83,37 @@ defmodule Xqlite.StreamResourceCallbacks do
 
       {:error, _reason} = error ->
         error
+    end
+  end
+
+  defp judge_columns(conn, handle, columns, opts, on_error) do
+    case repeated_column(columns) do
+      nil ->
+        {:ok, build_acc(conn, handle, columns, opts, on_error)}
+
+      name ->
+        NIF.stream_close(handle)
+        {:error, {:duplicate_column_name, name}}
+    end
+  end
+
+  # Naming the repeat costs about twice what counting the distinct names
+  # does, so that walk runs only once the two counts disagree.
+  defp repeated_column(columns) do
+    distinct = columns |> Map.from_keys(nil) |> map_size()
+
+    case distinct == length(columns) do
+      true -> nil
+      false -> first_repeat(columns, %{})
+    end
+  end
+
+  defp first_repeat([], _seen), do: nil
+
+  defp first_repeat([name | rest], seen) do
+    case Map.has_key?(seen, name) do
+      true -> name
+      false -> first_repeat(rest, Map.put(seen, name, nil))
     end
   end
 

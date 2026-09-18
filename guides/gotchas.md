@@ -162,15 +162,42 @@ If you need `ORDER BY` to be chronological, store a sort-stable form:
 SQLite resolves a parameter name by walking the statement's own list of
 names, one string comparison per name (`sqlite3_bind_parameter_index`). xqlite
 does not call that for each key: it reads the statement's names into a map
-first and binds by index, which is about twice as fast at SQLite's cap of
+first and binds by index, which is about 2.4 times as fast at SQLite's cap of
 32 766 parameters. It is not free either — reading the name at one index is
 itself a walk of the same list — so the cost still grows faster than the
 number of names. A positional list does none of this, binding each value
 straight at its index, and the gap grows with the number of parameters. For a
 statement with a handful of them the difference is nothing; for one with
-thousands, bind a positional list.
+thousands, bind a positional list. A keyword list the library refuses costs
+what resolving its keys costs: one lookup per key while the list holds fewer
+than half the statement's parameters' worth, and one read per parameter of
+the statement once it holds half or more — so a refused list that long is
+as expensive as a bind that succeeded.
 
 ## Streaming
+
+### A stream row is a map: alias columns that share a name
+
+`Xqlite.stream/4` hands each row back as a map keyed by column name, and a
+map cannot hold two entries under one key. A statement whose column names
+repeat is therefore refused when the stream opens, before any row is read:
+
+```elixir
+Xqlite.stream(conn, "SELECT a.id, o.id FROM accounts a, orders o")
+#=> {:error, {:duplicate_column_name, "id"}}
+
+Xqlite.stream(conn, "SELECT a.id AS account_id, o.id AS order_id FROM accounts a, orders o")
+#=> a stream over %{"account_id" => _, "order_id" => _}
+```
+
+The name in the error is the first one that repeats, in SQLite's own order.
+A join of two tables that share a column is the usual way to hit this, but
+SQLite also names a column that has no name of its own after the text that
+produced it, so `SELECT 1, 1` and `SELECT ?, ?` repeat as well. Give each
+column an alias and the statement streams.
+
+`Xqlite.query/4` and the raw stream doors (`XqliteNIF.stream_open/3` and
+friends) answer rows as lists, so they keep both values and take any names.
 
 ### Mid-stream errors surface via `:on_error`
 

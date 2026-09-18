@@ -1056,7 +1056,7 @@ defmodule XqliteNIF do
 
   A lowered `:length` also applies to reads: SQLite refuses a row or a column
   longer than the current limit while it runs, as
-  `{:error, {:too_big, 18, message}}`, so lowering it below values already
+  `{:error, {:too_big, code, message}}`, so lowering it below values already
   stored makes reading them fail.
   """
   @spec limit(conn :: Xqlite.conn(), category :: atom(), new_value :: integer()) ::
