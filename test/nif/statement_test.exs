@@ -159,6 +159,50 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
+    test "a clear mid-run is refused and the rest of the run keeps its value",
+         %{conn: conn} do
+      seed(conn, 3)
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT id, ?1 FROM items ORDER BY id")
+      :ok = Xqlite.bind(stmt, ["P"])
+
+      assert {:row, [1, "P"]} = Xqlite.step(stmt)
+      assert {:error, :statement_mid_run} = Xqlite.clear_bindings(stmt)
+      assert {:row, [2, "P"]} = Xqlite.step(stmt)
+
+      assert :ok = Xqlite.reset(stmt)
+      assert :ok = Xqlite.clear_bindings(stmt)
+      assert {:row, [1, nil]} = Xqlite.step(stmt)
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a clear mid-run on a statement that takes no parameters changes nothing",
+         %{conn: conn} do
+      seed(conn, 3)
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT id FROM items ORDER BY id")
+
+      assert {:row, [1]} = Xqlite.step(stmt)
+      assert :ok = Xqlite.clear_bindings(stmt)
+      assert :ok = Xqlite.bind(stmt, [])
+      assert {:row, [2]} = Xqlite.step(stmt)
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "after :done a clear is allowed where a bind is refused", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+      :ok = Xqlite.bind(stmt, [1])
+
+      assert {:row, [1]} = Xqlite.step(stmt)
+      assert :done = Xqlite.step(stmt)
+
+      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, [2])
+      assert :ok = Xqlite.clear_bindings(stmt)
+      assert {:row, [nil]} = Xqlite.step(stmt)
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
     # -------------------------------------------------------------------
     # Named parameters
     # -------------------------------------------------------------------

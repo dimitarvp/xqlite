@@ -37,13 +37,17 @@ here is optional on a bump that changes the bundled SQLite version.
    Connection>` plus a raw pointer and never a live reference — a
    rusqlite that stores `&'conn Connection` turns that leak path into
    undefined behaviour. Re-measure how rusqlite maps a parameter name to
-   an index too. A keyword list holding at least half the statement's
-   parameters' worth of keys is resolved through
+   an index too. A keyword list's keys are resolved through
    `query.rs:parameter_indices_by_name`, which builds a map with
-   `Statement::parameter_name`; that call carries a UTF-8 `expect`, and
-   only a parameter name that is not UTF-8 could reach it, which SQLite
-   never produces. A shorter list is resolved key by key through
-   `Statement::parameter_index`, which carries no `expect`. A key neither
+   rusqlite's `Statement::parameter_name`. That function converts the
+   name with an `expect` on UTF-8 — the `expect` is rusqlite's own, not
+   this crate's — and it stays unreachable because every SQL text this
+   crate prepares was judged UTF-8 at the door, so the parameter names
+   SQLite hands back are UTF-8 too; a bump re-checks that
+   `parameter_name` still takes that path. A list holding fewer than half
+   the statement's parameters' worth of keys starts key by key through
+   `Statement::parameter_index`, which carries no `expect`, and reaches
+   the map part-way through when its keys have cost too much to walk. A key neither
    way resolves answers `{:invalid_parameter_name, name}`, and so does an
    index of 0 on the raw-FFI twin, which is how SQLite says "no such
    parameter". A rusqlite that starts answering a name differently —

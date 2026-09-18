@@ -67,9 +67,15 @@ defmodule Xqlite.StreamColumnNameLawTest do
     assert {:error, {:duplicate_column_name, "?1"}} = Xqlite.stream(conn, "SELECT ?1, ?1", [1])
   end
 
-  test "the refusal names the first repeat, not a later one", %{conn: conn} do
+  test "the refusal names the column at the first repeating position", %{conn: conn} do
     assert {:error, {:duplicate_column_name, "b"}} =
              Xqlite.stream(conn, "SELECT 1 AS a, 2 AS b, 3 AS c, 4 AS b, 5 AS c")
+
+    # The two readings of "the first repeat" part company here: the column at
+    # the first repeating position is `b`, while the first name that repeats
+    # anywhere in the statement is `a`.
+    assert {:error, {:duplicate_column_name, "b"}} =
+             Xqlite.stream(conn, "SELECT 1 AS a, 2 AS b, 3 AS b, 4 AS a")
   end
 
   test "the doors that answer lists keep both values", %{conn: conn} do
@@ -104,7 +110,7 @@ defmodule Xqlite.StreamColumnNameLawTest do
           ) do
       sql = select_naming(names)
 
-      case first_repeat(names, MapSet.new()) do
+      case first_repeat(names) do
         nil ->
           assert [row] = conn |> Xqlite.stream(sql) |> Enum.to_list()
           assert map_size(row) == length(names)
@@ -131,12 +137,15 @@ defmodule Xqlite.StreamColumnNameLawTest do
     |> Map.new(fn {name, index} -> {name, index} end)
   end
 
-  defp first_repeat([], _seen), do: nil
+  # Reads the statement the long way round, with nothing in common with the
+  # library's walk: every position asks whether any earlier one already
+  # carries its name, and the first that answers yes is the name to expect.
+  defp first_repeat(names) do
+    repeats =
+      for {name, position} <- Enum.with_index(names),
+          names |> Enum.take(position) |> Enum.member?(name),
+          do: name
 
-  defp first_repeat([name | rest], seen) do
-    case MapSet.member?(seen, name) do
-      true -> name
-      false -> first_repeat(rest, MapSet.put(seen, name))
-    end
+    List.first(repeats)
   end
 end

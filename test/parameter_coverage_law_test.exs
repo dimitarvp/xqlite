@@ -276,6 +276,40 @@ defmodule Xqlite.ParameterCoverageLawTest do
       assert "seed" == stored(conn)
     end
 
+    # A list short enough to have its keys resolved one at a time still gives
+    # that up part-way through when the names it has walked have cost as much
+    # as reading every name would: 99 keys naming the far end of a
+    # 200-parameter statement pass that point after a dozen keys. The three
+    # refusals, and the keys resolved before the switch, must come out the
+    # same as they do for a list that never reaches it.
+    test "a keyword list resolved partly one key at a time and partly not answers the same",
+         %{conn: conn} do
+      names = Enum.map(1..200, fn index -> ":p#{index}" end)
+      sql = named_sql(names)
+      far_end = Enum.map(102..200, fn index -> {:"p#{index}", index} end)
+      unknown = Enum.map(102..199, fn index -> {:"p#{index}", index} end) ++ [{:nope, 0}]
+      duplicate = Enum.map(102..199, fn index -> {:"p#{index}", index} end) ++ [{:p102, 102}]
+
+      assert {:ok, stmt} = Xqlite.prepare(conn, sql)
+
+      assert {:error, {:missing_parameter, %{index: 1, name: ":p1"}}} =
+               Xqlite.query(conn, sql, far_end)
+
+      assert {:error, {:missing_parameter, %{index: 1, name: ":p1"}}} =
+               Xqlite.bind(stmt, far_end)
+
+      assert {:error, {:invalid_parameter_name, ":nope"}} = Xqlite.query(conn, sql, unknown)
+      assert {:error, {:invalid_parameter_name, ":nope"}} = Xqlite.bind(stmt, unknown)
+
+      assert {:error, {:duplicate_parameter_name, ":p102"}} =
+               Xqlite.query(conn, sql, duplicate)
+
+      assert {:error, {:duplicate_parameter_name, ":p102"}} = Xqlite.bind(stmt, duplicate)
+
+      assert :ok = Xqlite.finalize(stmt)
+      assert "seed" == stored(conn)
+    end
+
     property "a keyword list is refused unless it names every parameter once",
              %{conn: conn} do
       check all(

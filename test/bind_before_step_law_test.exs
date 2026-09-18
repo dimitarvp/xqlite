@@ -17,6 +17,9 @@ defmodule Xqlite.BindBeforeStepLawTest do
     * a successful bind makes it runnable, and so does `clear_bindings/1`;
     * a refused bind changes nothing — an earlier successful bind stays in
       force and a statement that never had one stays unrunnable;
+    * a refused clear changes nothing either: a statement that takes
+      parameters and has been stepped without a reset since refuses one and
+      goes on carrying the values it was bound;
     * `reset/1` changes nothing either, SQLite keeping the bindings across it.
 
   "A refused bind changes nothing" is a rule about refusals the library makes
@@ -139,13 +142,22 @@ defmodule Xqlite.BindBeforeStepLawTest do
   # Everything a caller can do to a prepared statement short of stepping it.
   # A statement with no parameters has no value that could fail to convert.
   defp actions(0) do
-    [:bind_ok, :refuse_count, :clear, :reset]
+    [:bind_ok, :refuse_count, :clear, :clear_mid_run, :reset]
     |> member_of()
     |> list_of(max_length: 4)
   end
 
   defp actions(_count) do
-    [:bind_ok, :refuse_count, :refuse_value, :refuse_length, :clear, :reset, :bind_mid_step]
+    [
+      :bind_ok,
+      :refuse_count,
+      :refuse_value,
+      :refuse_length,
+      :clear,
+      :clear_mid_run,
+      :reset,
+      :bind_mid_step
+    ]
     |> member_of()
     |> list_of(max_length: 4)
   end
@@ -192,7 +204,25 @@ defmodule Xqlite.BindBeforeStepLawTest do
   end
 
   # A statement nothing has bound yet cannot be stepped, so there is no
-  # mid-run bind to refuse and the action has nothing to do.
+  # mid-run bind or clear to refuse and both actions have nothing to do.
+  defp act(:clear_mid_run, _stmt, _count, %{set?: false} = state), do: state
+
+  # A statement that takes no parameters has none to release, so the clear is
+  # the no-op it always was, mid-run as anywhere else.
+  defp act(:clear_mid_run, stmt, 0, state) do
+    assert {:row, _row} = Xqlite.step(stmt)
+    assert :ok = Xqlite.clear_bindings(stmt)
+    assert :ok = Xqlite.reset(stmt)
+    state
+  end
+
+  defp act(:clear_mid_run, stmt, _count, state) do
+    assert {:row, _row} = Xqlite.step(stmt)
+    assert {:error, :statement_mid_run} = Xqlite.clear_bindings(stmt)
+    assert :ok = Xqlite.reset(stmt)
+    state
+  end
+
   defp act(:bind_mid_step, _stmt, _count, %{set?: false} = state), do: state
 
   defp act(:bind_mid_step, stmt, count, state) do

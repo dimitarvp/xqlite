@@ -262,6 +262,13 @@ impl XqliteStatement {
         self.parameters_set.store(false, Ordering::Release);
     }
 
+    /// Whether the statement takes any parameters at all. One that takes none
+    /// has nothing a clear could release, so a clear on it is the no-op it has
+    /// always been, whatever the statement is doing.
+    pub(crate) fn takes_parameters(&self) -> bool {
+        self.parameter_count > 0
+    }
+
     pub(crate) fn require_parameters_set(&self) -> Result<(), XqliteError> {
         match self.parameters_set.load(Ordering::Acquire) {
             true => Ok(()),

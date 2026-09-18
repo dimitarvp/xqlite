@@ -273,6 +273,7 @@ defmodule Xqlite do
           | :null_byte_in_string
           | :operation_cancelled
           | :statement_finalized
+          | :statement_mid_run
           | :transaction_in_progress
           | {:authorization_denied, integer(), String.t()}
           | {:busy_timeout_write_refused, %{policy: boolean(), observers: non_neg_integer()}}
@@ -1879,7 +1880,10 @@ defmodule Xqlite do
   exactly once — see `query/4` for the three refusals and for how a key names
   a parameter — so one call hands over one complete list; two partial binds
   in a row no longer add up. Once stepping has started, call `reset/1` before
-  rebinding — SQLite rejects mid-run rebinds.
+  rebinding — SQLite rejects mid-run rebinds, and `clear_bindings/1` is
+  refused there too. After `:done` the two part company: the bind is still
+  SQLite's misuse refusal, while a clear is allowed and the next step reruns
+  the statement with NULL in every parameter.
 
   A term that is no list at all answers
   `{:error, {:expected_list, %{reason: :not_a_list, value_type: kind}}}`, and
@@ -2145,6 +2149,20 @@ defmodule Xqlite do
 
   @doc """
   Clears all parameter bindings on a prepared statement back to NULL.
+
+  A statement that takes parameters and is mid-run — a step has answered a
+  row and neither `:done` nor a `reset/1` has followed — is refused with
+  `{:error, :statement_mid_run}`, and keeps the values it was bound. SQLite
+  itself allows the call there and would release the values in place, which
+  leaves every row still to come reading NULL. Call `reset/1` first.
+
+  A statement that takes no parameters has nothing to release and answers
+  `:ok` wherever it is, as `bind(stmt, [])` on it does.
+
+  After `:done` the two stop agreeing: a bind is SQLite's own misuse refusal
+  there, while a clear is allowed and the next step reruns the statement from
+  the top with NULL in every parameter. That is deliberate — a finished run
+  has no rows left to change.
   """
   @spec clear_bindings(stmt()) :: :ok | error()
   def clear_bindings(stmt), do: XqliteNIF.stmt_clear_bindings(stmt)

@@ -1007,11 +1007,28 @@ fn stmt_reset(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'
 #[rustler::nif(schedule = "DirtyIo")]
 fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'_> {
     let result = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
+        // `sqlite3_clear_bindings` has no mid-run check where every
+        // `sqlite3_bind_*` answers SQLITE_MISUSE, so a clear between two rows
+        // releases the values in place and every row left in the run reads
+        // NULL. The tell is read and answered under the same lock as the
+        // clear, so the statement is in one state for both.
+        //
         // SAFETY: with_live_stmt holds the connection mutex and proved
-        // stmt_ptr live. sqlite3_clear_bindings always returns SQLITE_OK.
-        unsafe { ffi::sqlite3_clear_bindings(stmt_ptr) };
-        stmt_handle.mark_parameters_set();
-        Ok(())
+        // stmt_ptr live. sqlite3_stmt_busy is non-zero exactly while a step
+        // has run and neither SQLITE_DONE nor a reset has followed.
+        let mid_run = unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } != 0;
+
+        match mid_run && stmt_handle.takes_parameters() {
+            true => Err(XqliteError::StatementMidRun),
+            false => {
+                // SAFETY: with_live_stmt holds the connection mutex and proved
+                // stmt_ptr live. sqlite3_clear_bindings always returns
+                // SQLITE_OK.
+                unsafe { ffi::sqlite3_clear_bindings(stmt_ptr) };
+                stmt_handle.mark_parameters_set();
+                Ok(())
+            }
+        }
     });
 
     singular_ok_or_error_tuple(env, result)

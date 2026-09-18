@@ -17,6 +17,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Xqlite.clear_bindings/1` mid-run nulled the rest of the read.**
+  `sqlite3_clear_bindings` has no mid-run check where every `sqlite3_bind_*`
+  answers `SQLITE_MISUSE`, so a clear between two rows released the values in
+  place and every row left in the run read NULL: `SELECT rowid, ? FROM t`
+  handed back `[1, "P"]`, then `[2, nil]`. A statement that takes parameters
+  and has been stepped without a `reset/1` since now answers
+  `{:error, :statement_mid_run}` and keeps its values. A statement that takes
+  none has nothing to release and still answers `:ok`, and so does a clear
+  after `:done`, where a bind is refused instead — a finished run has no rows
+  left to change.
+- **`Xqlite.TypeExtension.encode_params/2` skipped its own walk when there
+  were no extensions.** With `[]` or `nil` extensions the call handed the term
+  straight back, answering `{:ok, term}` for every list its own documentation
+  says it refuses: a term that is no list, and a list whose tail is not `[]`.
+  It walks the list's spine whatever the extension list now, and answers the
+  same `{:expected_list, _}` and `{:expected_keyword_list, _}` refusals it
+  answers with an extension on. A keyword element that is no `{key, value}`
+  pair still travels on to the NIF, which refuses it, and a key of any kind is
+  still a key.
+- **`Xqlite.TypeExtension.decode_rows/2` raised where its write-side twin
+  refused.** A rows term that is no list of lists — `:done`, `{:row, values}`,
+  `nil`, a list whose tail is not `[]`, a row that is no list — raised
+  `Protocol.UndefinedError` or `FunctionClauseError` from inside the chain,
+  and this is the function four `Xqlite` doc blocks recommend for the rows
+  `step/1` and `multi_step/2` hand back. It now answers the write side's
+  refusals: `{:error, {:expected_list, %{reason: :not_a_list, value_type:
+  kind}}}`, the same tag with `:improper_tail` for a tail that is not `[]`,
+  and with `:bad_element` and the row's one-based position for a row that is
+  no list. A row whose own tail is not `[]` is refused where a walk reads it,
+  which is when an extension is on. A map row, which used to be turned
+  silently into a list of its pairs, is refused as a row that is no list.
 - **A bind SQLite refused before taking a value marked the statement
   unrunnable.** A bind on a statement mid-run is refused by SQLite with
   `SQLITE_MISUSE` before it touches the first parameter, but the bind path
@@ -218,6 +249,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A keyword list is no longer resolved one key at a time to the end.**
+  Resolving a key by name walks the statement's own list of names up to the
+  one it answers, so a list costs the sum of the positions its keys name — a
+  number the caller chooses. A refused list of 16 382 keys naming the high
+  half of a 32 766-parameter statement held the connection for 2 304 ms,
+  where reading every name into a map costs 1 456 ms. Such a list now starts a
+  key at a time and builds the map for the keys that are left once that
+  walking has cost a fixed share of a map read, which caps the worst shape at
+  about 1 650 ms — 1.13 map reads. Two shapes pay for the ceiling: 16 382 keys
+  naming the low half go from 775 ms to about 1 650 ms and 8 191 keys naming
+  the high quarter from 1 344 ms to about 1 650 ms. A list holding half the
+  statement's parameters' worth of keys or more still takes the map at once,
+  and a full bind costs what it did. The refusals, their order and their
+  payloads are unchanged.
 - **`{:value_too_large, _}` is now answered by every door that binds**, where
   the doors going through rusqlite used to answer
   `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw doors only

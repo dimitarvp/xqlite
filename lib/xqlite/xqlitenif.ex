@@ -1605,6 +1605,13 @@ defmodule XqliteNIF do
   for a statement that runs with NULL in every parameter: a statement that
   takes parameters and has never had a successful bind refuses to step until
   this has run.
+
+  A statement that takes parameters and is mid-run — a step has answered a
+  row and neither `:done` nor `stmt_reset/1` has followed — answers
+  `{:error, :statement_mid_run}` and keeps its values, because SQLite would
+  release them in place and leave every row still to come reading NULL.
+  A statement that takes no parameters has nothing to release and answers
+  `:ok` wherever it is.
   """
   @spec stmt_clear_bindings(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
   def stmt_clear_bindings(_stmt), do: err()

@@ -168,11 +168,21 @@ itself a walk of the same list — so the cost still grows faster than the
 number of names. A positional list does none of this, binding each value
 straight at its index, and the gap grows with the number of parameters. For a
 statement with a handful of them the difference is nothing; for one with
-thousands, bind a positional list. A keyword list the library refuses costs
-what resolving its keys costs: one lookup per key while the list holds fewer
-than half the statement's parameters' worth, and one read per parameter of
-the statement once it holds half or more — so a refused list that long is
-as expensive as a bind that succeeded.
+thousands, bind a positional list. What a keyword list costs depends on which
+parameters its keys name. Resolving one key walks the statement's names up to
+the one it answers, so keys naming the last parameters cost far more than the
+same number of keys naming the first ones. A list holding half the
+statement's parameters' worth of keys or more reads every name into the map
+at once. A shorter one is resolved a key at a time until that walking has
+cost a fixed share of what the map costs, and the map is then built for the
+keys that are left, which caps what any list can cost. At SQLite's limit of
+32 766 parameters, on one machine: the map costs 1 456 ms, the walking before
+it 192 ms, so no list costs more than about 1 650 ms whatever its keys name.
+Two shapes pay for that ceiling: a refused list of 16 382 keys naming the low
+half of the statement went from 775 ms to about 1 650 ms, and one of 8 191
+keys naming the high quarter from 1 344 ms to about 1 650 ms. The shape that
+used to be worst, 16 382 keys naming the high half, went from 2 304 ms to
+about 1 650 ms.
 
 ## Streaming
 

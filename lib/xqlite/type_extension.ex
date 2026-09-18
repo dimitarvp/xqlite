@@ -209,10 +209,35 @@ defmodule Xqlite.TypeExtension do
           {:ok, term()} | {:error, Xqlite.error_reason()}
   def encode_params(params, extensions) do
     case validate_extensions(extensions) do
+      {:ok, []} -> judge_params(params)
       {:ok, walked} -> encode_params_checked(params, walked)
       {:error, reason} -> {:error, reason}
     end
   end
+
+  # With no extension to run, the list is walked for its shape alone and
+  # handed back as it came: the same refusals, and no list rebuilt for
+  # nothing. The unchecked twin below keeps its short circuit, so a door with
+  # no extensions still walks its list once, in the NIF.
+  defp judge_params(nil), do: {:ok, nil}
+
+  defp judge_params([{key, _value} | _rest] = params) when is_atom(key),
+    do: judge_keyword(params, params)
+
+  defp judge_params(params) when is_list(params), do: judge_positional(params, params)
+
+  defp judge_params(params), do: {:error, {:expected_list, not_a_list(params)}}
+
+  defp judge_positional([], params), do: {:ok, params}
+  defp judge_positional([_value | rest], params), do: judge_positional(rest, params)
+
+  defp judge_positional(tail, _params), do: {:error, {:expected_list, improper_tail(tail)}}
+
+  defp judge_keyword([], params), do: {:ok, params}
+  defp judge_keyword([_element | rest], params), do: judge_keyword(rest, params)
+
+  defp judge_keyword(tail, _params),
+    do: {:error, {:expected_keyword_list, improper_tail(tail)}}
 
   @doc false
   # For a caller that walked the list already — every door does, before its
@@ -279,15 +304,63 @@ defmodule Xqlite.TypeExtension do
   list of extension modules answers
   `{:error, {:invalid_type_extensions, refusal}}` before a single value is
   touched.
+
+  The rows are judged the way `encode_params/2` judges a parameter list: a
+  term that is no list is
+  `{:error, {:expected_list, %{reason: :not_a_list, value_type: kind}}}`, a
+  list whose tail is not `[]` the same tag with `:improper_tail`, and a row
+  that is no list the same tag with `:bad_element` and the row's one-based
+  `:position`. A row's own tail is read only by the walk that decodes its
+  values, so a row whose tail is not `[]` is refused when an extension is on
+  and handed back untouched when the extension list is empty.
   """
-  @spec decode_rows(rows :: [[term()]], extensions :: term()) ::
+  @spec decode_rows(rows :: term(), extensions :: term()) ::
           {:ok, [[term()]]} | {:error, Xqlite.error_reason()}
   def decode_rows(rows, extensions) do
     case validate_extensions(extensions) do
-      {:ok, walked} -> {:ok, decode_rows_checked(rows, walked)}
+      {:ok, walked} -> decode_judged_rows(rows, walked)
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp decode_judged_rows(rows, []) when is_list(rows), do: judge_rows(rows, rows, 1)
+
+  defp decode_judged_rows(rows, extensions) when is_list(rows),
+    do: decode_walked_rows(rows, extensions, 1, [])
+
+  defp decode_judged_rows(rows, _extensions), do: {:error, {:expected_list, not_a_list(rows)}}
+
+  defp judge_rows([], rows, _position), do: {:ok, rows}
+
+  defp judge_rows([row | rest], rows, position) when is_list(row),
+    do: judge_rows(rest, rows, position + 1)
+
+  defp judge_rows([row | _rest], _rows, position),
+    do: {:error, {:expected_list, bad_element(position, row)}}
+
+  defp judge_rows(tail, _rows, _position), do: {:error, {:expected_list, improper_tail(tail)}}
+
+  defp decode_walked_rows([], _extensions, _position, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp decode_walked_rows([row | rest], extensions, position, acc) when is_list(row) do
+    case decode_row(row, extensions, []) do
+      {:ok, decoded} -> decode_walked_rows(rest, extensions, position + 1, [decoded | acc])
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_walked_rows([row | _rest], _extensions, position, _acc),
+    do: {:error, {:expected_list, bad_element(position, row)}}
+
+  defp decode_walked_rows(tail, _extensions, _position, _acc),
+    do: {:error, {:expected_list, improper_tail(tail)}}
+
+  defp decode_row([], _extensions, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp decode_row([value | rest], extensions, acc),
+    do: decode_row(rest, extensions, [decode_value(value, extensions) | acc])
+
+  defp decode_row(tail, _extensions, _acc), do: {:error, {:expected_list, improper_tail(tail)}}
 
   @doc false
   # The twin of `encode_params_checked/2` for the read side: the rows come

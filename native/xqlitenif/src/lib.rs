@@ -219,6 +219,7 @@ pub(crate) mod atoms {
         sql_input_error,
         sqlite_failure,
         statement_finalized,
+        statement_mid_run,
         stmt_counters,
         stmt_used,
         stored_generated,

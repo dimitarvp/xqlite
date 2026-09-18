@@ -17,10 +17,10 @@ const MAX_LIMIT_VALUE: i64 = c_int::MAX as i64;
 /// Reads, and optionally sets, one of the connection's limits.
 ///
 /// `new_value` of -1 reads without setting, and 0 to 2^31-1 sets; every other
-/// negative, and anything above 2^31-1, is refused rather than read. SQLite answers the value in force before the call and silently
-/// clamps a new one to its own compile-time ceiling — and, for `:length`
-/// alone, up to a floor of 30 — so a caller who needs the value that took
-/// effect reads it back.
+/// negative, and anything above 2^31-1, is refused rather than read. SQLite
+/// answers the value in force before the call and silently clamps a new one
+/// to its own compile-time ceiling — and, for `:length` alone, up to a floor
+/// of 30 — so a caller who needs the value that took effect reads it back.
 ///
 /// Callers must hold the connection Mutex.
 pub(crate) fn read_or_set(
@@ -118,8 +118,13 @@ pub(crate) unsafe fn with_length_limit_lifted<T>(
     answer
 }
 
-/// Refuses a name a door hands SQLite outside a parameter list — an object
-/// name to look up — by the limit every bound value is judged against.
+/// Refuses a name a door binds as a parameter by the limit every bound value
+/// is judged against, before the bind, so the refusal leaves the statement
+/// untouched. Its one caller is `schema.rs:create_sql`, behind
+/// `XqliteNIF.get_create_sql/2`. The four PRAGMA-based schema doors build the
+/// name into the SQL text instead and never come here: they answer SQLite's
+/// `:too_big` only when the text they built passes `SQLITE_LIMIT_SQL_LENGTH`,
+/// which a 5 000-byte name does not at that limit's default.
 ///
 /// # Safety
 ///

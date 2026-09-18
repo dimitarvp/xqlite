@@ -86,10 +86,13 @@ measurement and metadata key. A `:*` below stands for the span's
 | `[:xqlite, :cancel, :signalled]` | `Xqlite.cancel_operation/1` | `:token` |
 | `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:conn`, `:operation`, `:tokens` |
 
-Two doors are not in the list and emit nothing at all:
-`Xqlite.backup_with_progress/6`, which reports its progress to a pid
-instead, and `Xqlite.limit/3`, which reads or sets one of SQLite's
-per-connection limits.
+The table lists the doors that emit. Every other `Xqlite` door hands its
+work straight to `XqliteNIF` without an event of its own — `prepare/2`,
+`bind/3`, `reset/1`, `changes/1` and the rest of the statement, blob and
+schema doors among them. Two are worth naming because a reader goes
+looking for them: `Xqlite.backup_with_progress/6` reports its progress to
+a pid instead of emitting, and `Xqlite.limit/3` is a pass-through that
+reads or sets one of SQLite's per-connection limits.
 
 One refusal is answered without any event at all: a `:type_extensions`
 option that is no proper list of extension modules is refused before the

@@ -124,7 +124,10 @@ fn require_named_parameters_covered(
     stmt: &Statement<'_>,
     params: &[(String, Value)],
 ) -> Result<Vec<usize>, XqliteError> {
-    let resolver = name_resolver(stmt, params.len());
+    let count = stmt.parameter_count();
+    let share = name_walk_share(count);
+    let mut resolver = name_resolver(stmt, params.len());
+    let mut walked: usize = 0;
 
     // Two structures, because they answer two questions. `indices` keeps the
     // caller's order, which is what the caller zips its values with to bind.
@@ -133,7 +136,7 @@ fn require_named_parameters_covered(
     // The vector is sized from the statement's own parameter count, which
     // SQLite caps at 32 766, so it is small whatever the SQL.
     let mut indices: Vec<usize> = Vec::with_capacity(params.len());
-    let mut claimed = vec![false; stmt.parameter_count() + 1];
+    let mut claimed = vec![false; count + 1];
 
     for (name, _value) in params {
         // Neither way of resolving a name answers one the statement does not
@@ -155,9 +158,15 @@ fn require_named_parameters_covered(
                 indices.push(index);
             }
         }
+
+        // A key the statement does not have, and a second key naming one
+        // parameter, both end the walk above, so only a key that resolved and
+        // was the first to claim its parameter is counted here.
+        walked = walked.saturating_add(index);
+        resolver = map_once_share_spent(resolver, stmt, walked, share);
     }
 
-    match (1..=stmt.parameter_count()).find(|index| claimed.get(*index) != Some(&true)) {
+    match (1..=count).find(|index| claimed.get(*index) != Some(&true)) {
         None => Ok(indices),
         Some(index) => Err(XqliteError::MissingParameter {
             index,
@@ -169,8 +178,9 @@ fn require_named_parameters_covered(
 /// How a walk turns a key into the parameter's one-based index.
 ///
 /// The twin for the raw-FFI doors is `stream.rs:NameResolver`, and the reason
-/// for the two ways is the same: the map costs what the statement is long, a
-/// direct lookup what the list is long.
+/// for the two ways is the same: the map costs what the statement is long,
+/// while a direct lookup costs the position of the key it answers, so a
+/// list's cost is the sum of the positions its keys name.
 enum NameResolver<'a> {
     OneByOne,
     Map(HashMap<&'a str, usize>),
@@ -188,13 +198,51 @@ impl NameResolver<'_> {
     }
 }
 
-/// The cheaper of the two ways to resolve this list's keys: the map reads one
-/// name per parameter, a direct lookup walks the names once per key, so the
-/// map only wins once the list holds half the statement's parameters' worth.
+/// Where a list's keys start being resolved: one holding half the statement's
+/// parameters' worth of keys or more reads every name into the map at once,
+/// being about to read most of them anyway; a shorter one starts a key at a
+/// time and gives that up part-way if the walking costs too much
+/// (`name_walk_share`).
 fn name_resolver<'a>(stmt: &'a Statement<'a>, keys: usize) -> NameResolver<'a> {
     match keys.saturating_mul(2) < stmt.parameter_count() {
         true => NameResolver::OneByOne,
         false => NameResolver::Map(parameter_indices_by_name(stmt)),
+    }
+}
+
+/// How many names resolving keys one at a time may walk before the map is
+/// built for the keys that are left: `count * count / 32`, never less than
+/// `count`. That share measures about a sixth of a map read at SQLite's limit
+/// of 32 766 parameters, so no key shape costs more than about 1.2 map reads
+/// however far into the statement the caller's keys reach. The floor keeps
+/// the share from rounding to nothing on a short statement, where it means
+/// the map is built after a key or two and nothing measurable is spent.
+///
+/// The twin for the raw-FFI doors is `stream.rs:name_walk_share`.
+const NAME_WALK_SHARE_DIVISOR: usize = 32;
+
+#[inline]
+fn name_walk_share(count: usize) -> usize {
+    let share = count.saturating_mul(count) / NAME_WALK_SHARE_DIVISOR;
+
+    share.max(count)
+}
+
+/// The map, built for the keys still to come once the one-by-one walk has
+/// spent its share. The keys resolved before it keep their answers, so no key
+/// is resolved twice, and the check runs after every key, so the walk
+/// overshoots the share by one key's worth at most.
+fn map_once_share_spent<'a>(
+    resolver: NameResolver<'a>,
+    stmt: &'a Statement<'a>,
+    walked: usize,
+    share: usize,
+) -> NameResolver<'a> {
+    match resolver {
+        NameResolver::OneByOne if walked > share => {
+            NameResolver::Map(parameter_indices_by_name(stmt))
+        }
+        kept => kept,
     }
 }
 

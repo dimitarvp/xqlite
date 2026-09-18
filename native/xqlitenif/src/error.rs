@@ -409,6 +409,7 @@ pub(crate) enum XqliteError {
 
     ConnectionClosed,
     StatementFinalized,
+    StatementMidRun,
 
     InternalEncodingError {
         context: String,
@@ -631,6 +632,12 @@ impl Display for XqliteError {
             }
             XqliteError::StatementFinalized => {
                 write!(f, "Statement is already finalized")
+            }
+            XqliteError::StatementMidRun => {
+                write!(
+                    f,
+                    "Statement is mid-run: reset it before clearing its bindings"
+                )
             }
             XqliteError::InternalEncodingError { context } => {
                 write!(f, "Internal error during result encoding: {context}")
@@ -878,6 +885,7 @@ impl Encoder for XqliteError {
             }
             XqliteError::ConnectionClosed => atoms::connection_closed().encode(env),
             XqliteError::StatementFinalized => atoms::statement_finalized().encode(env),
+            XqliteError::StatementMidRun => atoms::statement_mid_run().encode(env),
             XqliteError::InternalEncodingError { context } => {
                 (atoms::internal_encoding_error(), context).encode(env)
             }

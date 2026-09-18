@@ -324,8 +324,11 @@ pub(crate) unsafe fn require_named_parameters_covered(
 ) -> Result<Vec<c_int>, XqliteError> {
     // SAFETY: forwarded from this function's own contract.
     let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
+    let count = expected.max(0) as usize;
+    let share = name_walk_share(count);
     // SAFETY: forwarded from this function's own contract.
-    let resolver = unsafe { name_resolver(raw_stmt_ptr, params.len(), expected) };
+    let mut resolver = unsafe { name_resolver(raw_stmt_ptr, params.len(), expected) };
+    let mut walked: usize = 0;
 
     // Two structures, because they answer two questions. `indices` keeps the
     // caller's order, which is what the caller zips its values with to bind.
@@ -334,18 +337,22 @@ pub(crate) unsafe fn require_named_parameters_covered(
     // far. SQLite caps a statement's parameter count at 32 766, which is what
     // makes the flag vector small whatever the SQL.
     let mut indices: Vec<c_int> = Vec::with_capacity(params.len());
-    let mut claimed = vec![false; expected.max(0) as usize + 1];
+    let mut claimed = vec![false; count + 1];
 
     for (name, _value) in params {
         // SAFETY: forwarded from this function's own contract.
         let index = unsafe { resolver.index_of(raw_stmt_ptr, name) };
 
         // Zero is how SQLite says "no such parameter", and no name the map
-        // holds is zero either; an index the flag vector has no room for would
-        // be SQLite answering outside its own count.
-        let slot = usize::try_from(index).ok().filter(|slot| *slot > 0);
+        // holds is zero either.
+        let slot = match usize::try_from(index).ok().filter(|slot| *slot > 0) {
+            None => return Err(XqliteError::InvalidParameterName(name.clone())),
+            Some(slot) => slot,
+        };
 
-        match slot.and_then(|slot| claimed.get_mut(slot)) {
+        // An index the flag vector has no room for would be SQLite answering
+        // outside its own count.
+        match claimed.get_mut(slot) {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
             Some(flag) if *flag => {
                 return Err(XqliteError::DuplicateParameterName(name.clone()));
@@ -355,6 +362,14 @@ pub(crate) unsafe fn require_named_parameters_covered(
                 indices.push(index);
             }
         }
+
+        // A key the statement does not have, and a second key naming one
+        // parameter, both end the walk above, so only a key that resolved and
+        // was the first to claim its parameter is counted here.
+        walked = walked.saturating_add(slot);
+        // SAFETY: forwarded from this function's own contract.
+        resolver =
+            unsafe { map_once_share_spent(resolver, raw_stmt_ptr, expected, walked, share) };
     }
 
     match (1..=expected).find(|index| !claimed_parameter(&claimed, *index)) {
@@ -388,10 +403,12 @@ pub(crate) unsafe fn require_named_parameters_covered(
 ///
 /// The map reads one name per parameter of the statement, so it costs what the
 /// statement is long whatever the list holds; a direct lookup walks the same
-/// names once per key. A keyword list has to name every parameter, so a much
-/// shorter one is a list about to be refused, and resolving its keys one by
-/// one keeps that refusal proportional to the keys given — on a statement of
-/// 32 766 parameters the difference is seconds.
+/// names up to the one it answers, so it costs the position the caller's key
+/// named. A keyword list has to name every parameter, so a much shorter one is
+/// a list about to be refused, and resolving its keys one at a time keeps that
+/// refusal cheap — on a statement of 32 766 parameters the difference is
+/// seconds — until the positions add up, which is what `name_walk_share`
+/// bounds.
 enum NameResolver {
     OneByOne,
     Map(HashMap<String, c_int>),
@@ -425,9 +442,11 @@ impl NameResolver {
     }
 }
 
-/// The cheaper of the two ways to resolve this list's keys: the map pays one
-/// name read per parameter, a direct lookup one name walk per key, so the map
-/// only wins once the list holds half the statement's parameters' worth.
+/// Where a list's keys start being resolved: one holding half the statement's
+/// parameters' worth of keys or more reads every name into the map at once,
+/// being about to read most of them anyway; a shorter one starts a key at a
+/// time and gives that up part-way if the walking costs too much
+/// (`name_walk_share`).
 ///
 /// # Safety
 ///
@@ -446,6 +465,52 @@ unsafe fn name_resolver(
 
             NameResolver::Map(by_name)
         }
+    }
+}
+
+/// How many names resolving keys one at a time may walk before the map is
+/// built for the keys that are left: `count * count / 32`, never less than
+/// `count`. That share measures about a sixth of a map read at SQLite's limit
+/// of 32 766 parameters, so no key shape costs more than about 1.2 map reads
+/// however far into the statement the caller's keys reach. The floor keeps
+/// the share from rounding to nothing on a short statement, where it means
+/// the map is built after a key or two and nothing measurable is spent.
+///
+/// The twin for the doors that bind through rusqlite is
+/// `query.rs:name_walk_share`.
+const NAME_WALK_SHARE_DIVISOR: usize = 32;
+
+#[inline]
+fn name_walk_share(count: usize) -> usize {
+    let share = count.saturating_mul(count) / NAME_WALK_SHARE_DIVISOR;
+
+    share.max(count)
+}
+
+/// The map, built for the keys still to come once the one-by-one walk has
+/// spent its share. The keys resolved before it keep their answers, so no key
+/// is resolved twice, and the check runs after every key, so the walk
+/// overshoots the share by one key's worth at most.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and
+/// `raw_stmt_ptr` is a live prepared statement of that connection.
+unsafe fn map_once_share_spent(
+    resolver: NameResolver,
+    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
+    expected: c_int,
+    walked: usize,
+    share: usize,
+) -> NameResolver {
+    match resolver {
+        NameResolver::OneByOne if walked > share => {
+            // SAFETY: forwarded from this function's own contract.
+            let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
+
+            NameResolver::Map(by_name)
+        }
+        kept => kept,
     }
 }
 

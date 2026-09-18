@@ -94,7 +94,11 @@ defmodule Xqlite.ImproperListLawTest do
     {:execute_cancellable_params_extension, :value, :expected_list},
     {:execute_cancellable_keyword_extension, :pair, :expected_keyword_list},
     {:query_with_changes_cancellable_params_extension, :value, :expected_list},
-    {:query_with_changes_cancellable_keyword_extension, :pair, :expected_keyword_list}
+    {:query_with_changes_cancellable_keyword_extension, :pair, :expected_keyword_list},
+    {:encode_params_no_extensions, :value, :expected_list},
+    {:encode_params_no_extensions_keyword, :pair, :expected_keyword_list},
+    {:decode_rows_no_extensions, :row, :expected_list},
+    {:decode_rows_extension, :row, :expected_list}
   ]
 
   @extension_opts [type_extensions: [Xqlite.TypeExtension.JSON]]
@@ -193,7 +197,9 @@ defmodule Xqlite.ImproperListLawTest do
       {:bind2, Xqlite.bind(stmt, term)},
       {:bind3, Xqlite.bind(stmt, term, [])},
       {:bind3_extension, Xqlite.bind(stmt, term, @extension_opts)},
-      {:query_extension, Xqlite.query(conn, "SELECT ?1", term, @extension_opts)}
+      {:query_extension, Xqlite.query(conn, "SELECT ?1", term, @extension_opts)},
+      {:encode_params_no_extensions, Xqlite.TypeExtension.encode_params(term, [])},
+      {:decode_rows_no_extensions, Xqlite.TypeExtension.decode_rows(term, [])}
     ]
   end
 
@@ -224,6 +230,8 @@ defmodule Xqlite.ImproperListLawTest do
 
   defp elements(:extension, count),
     do: Enum.map(1..count, fn _i -> Xqlite.TypeExtension.JSON end)
+
+  defp elements(:row, count), do: Enum.map(1..count, fn i -> [i] end)
 
   defp elements(:token, count) do
     Enum.map(1..count, fn _i ->
@@ -485,4 +493,18 @@ defmodule Xqlite.ImproperListLawTest do
       @extension_opts
     )
   end
+
+  # The two chain functions judge the list they are handed before any door
+  # sees it, and with no extension on the list they judge it all the same.
+  defp call(:encode_params_no_extensions, _conn, list),
+    do: Xqlite.TypeExtension.encode_params(list, [])
+
+  defp call(:encode_params_no_extensions_keyword, _conn, list),
+    do: Xqlite.TypeExtension.encode_params(list, [])
+
+  defp call(:decode_rows_no_extensions, _conn, rows),
+    do: Xqlite.TypeExtension.decode_rows(rows, [])
+
+  defp call(:decode_rows_extension, _conn, rows),
+    do: Xqlite.TypeExtension.decode_rows(rows, [Xqlite.TypeExtension.JSON])
 end

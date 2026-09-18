@@ -651,6 +651,89 @@ defmodule Xqlite.TypeExtensionTest do
         assert TypeExtension.encode_params(term, [IntDoubler]) == expected
       end
     end
+
+    # The walk runs whatever the extension list holds, so a list too broken to
+    # walk gets the same answer from all three settings. `nil` is the one
+    # non-list term that means "no parameters" instead, everywhere.
+    test "a broken list is refused with no extensions exactly as with one" do
+      shapes = [
+        {42, {:expected_list, %{reason: :not_a_list, value_type: :integer}}},
+        {:foo, {:expected_list, %{reason: :not_a_list, value_type: :atom}}},
+        {"ab", {:expected_list, %{reason: :not_a_list, value_type: :binary}}},
+        {%{}, {:expected_list, %{reason: :not_a_list, value_type: :map}}},
+        {{:a, 1}, {:expected_list, %{reason: :not_a_list, value_type: :tuple}}},
+        {1.5, {:expected_list, %{reason: :not_a_list, value_type: :float}}},
+        {[1 | 2], {:expected_list, %{reason: :improper_tail, value_type: :integer}}},
+        {[1, 2 | :tail], {:expected_list, %{reason: :improper_tail, value_type: :atom}}},
+        {[{:a, 1} | 2],
+         {:expected_keyword_list, %{reason: :improper_tail, value_type: :integer}}},
+        {[{:a, 1}, {:b, 2} | :tail],
+         {:expected_keyword_list, %{reason: :improper_tail, value_type: :atom}}}
+      ]
+
+      for {params, refusal} <- shapes, extensions <- [[], nil, [IntDoubler]] do
+        assert {params, extensions, TypeExtension.encode_params(params, extensions)} ==
+                 {params, extensions, {:error, refusal}}
+      end
+
+      assert TypeExtension.encode_params(nil, []) == {:ok, nil}
+      assert TypeExtension.encode_params(nil, nil) == {:ok, nil}
+      assert TypeExtension.encode_params(nil, [IntDoubler]) == {:ok, nil}
+    end
+
+    # The walk reads a keyword element's shape only far enough to find the
+    # pair it encodes: an element that is no pair at all, and one carrying a
+    # third field, both travel on to the NIF, and a key of any kind is a key.
+    test "what the walk does not judge stays unjudged with no extensions too" do
+      assert TypeExtension.encode_params([{:a, 1}, 2], []) == {:ok, [{:a, 1}, 2]}
+      assert TypeExtension.encode_params([{:a, 1}, 2], nil) == {:ok, [{:a, 1}, 2]}
+      assert TypeExtension.encode_params([{:a, 1}, 2], [IntDoubler]) == {:ok, [{:a, 2}, 2]}
+
+      triple = [{:a, 1}, {:b, 2, 3}]
+
+      assert TypeExtension.encode_params(triple, []) == {:ok, triple}
+      assert TypeExtension.encode_params(triple, nil) == {:ok, triple}
+      assert TypeExtension.encode_params(triple, [IntDoubler]) == {:ok, [{:a, 2}, {:b, 2, 3}]}
+
+      keys = [{:a, 5}, {"b", 5}]
+
+      assert TypeExtension.encode_params(keys, []) == {:ok, keys}
+      assert TypeExtension.encode_params(keys, nil) == {:ok, keys}
+      assert TypeExtension.encode_params(keys, [IntDoubler]) == {:ok, [{:a, 10}, {"b", 10}]}
+    end
+  end
+
+  describe "a rows term the decode chain cannot walk" do
+    test "a rows term that is no list of lists is refused either way" do
+      shapes = [
+        {42, {:expected_list, %{reason: :not_a_list, value_type: :integer}}},
+        {nil, {:expected_list, %{reason: :not_a_list, value_type: :atom}}},
+        {:done, {:expected_list, %{reason: :not_a_list, value_type: :atom}}},
+        {{:row, [1]}, {:expected_list, %{reason: :not_a_list, value_type: :tuple}}},
+        {[[1, 2] | 3], {:expected_list, %{reason: :improper_tail, value_type: :integer}}},
+        {[1], {:expected_list, %{reason: :bad_element, position: 1, value_type: :integer}}},
+        {[[1], "ab"],
+         {:expected_list, %{reason: :bad_element, position: 2, value_type: :binary}}},
+        {[%{a: 1}], {:expected_list, %{reason: :bad_element, position: 1, value_type: :map}}}
+      ]
+
+      for {rows, refusal} <- shapes, extensions <- [[], nil, [IntDoubler]] do
+        assert {rows, extensions, TypeExtension.decode_rows(rows, extensions)} ==
+                 {rows, extensions, {:error, refusal}}
+      end
+    end
+
+    # A row's own tail is read only by the walk that decodes its values, so a
+    # call with no extensions hands the row back as it came.
+    test "a row whose tail is not one is refused where a walk reads it" do
+      rows = [[1 | 2]]
+
+      assert TypeExtension.decode_rows(rows, []) == {:ok, rows}
+      assert TypeExtension.decode_rows(rows, nil) == {:ok, rows}
+
+      assert TypeExtension.decode_rows(rows, [IntDoubler]) ==
+               {:error, {:expected_list, %{reason: :improper_tail, value_type: :integer}}}
+    end
   end
 
   # ---------------------------------------------------------------------------
