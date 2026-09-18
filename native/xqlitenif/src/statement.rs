@@ -221,8 +221,8 @@ pub(crate) struct XqliteStatement {
     /// Whether anything has set this statement's parameters. False from
     /// prepare for a statement that takes some, true for one that takes
     /// none; a successful bind and `clear_bindings` set it, a reset and a
-    /// refusal of the library's own leave it alone, and a bind SQLite refused
-    /// after it had taken values clears it. SQLite itself reads a parameter
+    /// bind that took no value leave it alone, and a bind that failed after at
+    /// least one value was taken clears it. SQLite itself reads a parameter
     /// nothing bound as NULL and runs the statement anyway, which is what the
     /// flag is here to refuse.
     parameters_set: AtomicBool,
@@ -255,7 +255,7 @@ impl XqliteStatement {
         self.parameters_set.store(true, Ordering::Release);
     }
 
-    /// A bind SQLite refused after it had already taken values leaves the
+    /// A bind that failed after at least one value was taken leaves the
     /// statement half-bound, which is no state to run: it stops running until
     /// a bind succeeds or `clear_bindings` puts NULL everywhere.
     pub(crate) fn clear_parameters_set(&self) {

@@ -56,24 +56,39 @@ fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
 ///
 /// `readonly()` is the tell: `sqlite3_stmt_readonly` answers true for a NULL
 /// statement, which is the one thing rusqlite's public API reports differently
-/// for one. It is true of plenty of real statements too — every SELECT, and
-/// the transaction-control ones — so the other three conditions narrow it, and
-/// `expanded_sql()` is what tells a NULL statement from `BEGIN`. That last one
-/// is also NULL for an expansion longer than the connection's length limit, so
-/// it may not judge alone: a caller who lowers `SQLITE_LIMIT_LENGTH` through
-/// `Xqlite.limit/3` would see an ordinary `CREATE TABLE` read as no statement.
+/// for one. It is true of plenty of real statements too — every SELECT, the
+/// transaction-control ones, `SAVEPOINT` and `RELEASE` — so the other three
+/// conditions narrow it, and `expanded_sql()` is what tells a NULL statement
+/// from `BEGIN`. That last one answers nothing for an expansion longer than
+/// the connection's length limit as well, so the read lifts the limit and puts
+/// it back: otherwise a caller who lowered it would see `SAVEPOINT` read as no
+/// statement.
 #[inline]
-fn reject_no_statement(stmt: &Statement<'_>) -> Result<(), XqliteError> {
+fn reject_no_statement(conn: &Connection, stmt: &Statement<'_>) -> Result<(), XqliteError> {
     if stmt.column_count() == 0
         && stmt.parameter_count() == 0
         && stmt.readonly()
-        && stmt.expanded_sql().is_none()
+        && expansion_absent(conn, stmt)
     {
         Err(XqliteError::CannotExecute(
             "SQL contains no statement".to_string(),
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Whether SQLite has no expansion for this statement, judged with the
+/// connection's length limit out of the way. The three cheap conditions come
+/// first, so a statement with columns or parameters pays no C call for this.
+fn expansion_absent(conn: &Connection, stmt: &Statement<'_>) -> bool {
+    // SAFETY: the caller holds the connection Mutex for the whole call, so no
+    // other thread is inside a `sqlite3_*` call on this connection, and
+    // `handle()` is the live `sqlite3*` that Mutex guards.
+    unsafe {
+        crate::limits::with_length_limit_lifted(conn.handle(), || {
+            stmt.expanded_sql().is_none()
+        })
     }
 }
 
@@ -109,7 +124,7 @@ fn require_named_parameters_covered(
     stmt: &Statement<'_>,
     params: &[(String, Value)],
 ) -> Result<Vec<usize>, XqliteError> {
-    let by_name = parameter_indices_by_name(stmt);
+    let resolver = name_resolver(stmt, params.len());
 
     // Two structures, because they answer two questions. `indices` keeps the
     // caller's order, which is what the caller zips its values with to bind.
@@ -121,14 +136,15 @@ fn require_named_parameters_covered(
     let mut claimed = vec![false; stmt.parameter_count() + 1];
 
     for (name, _value) in params {
-        // A name the map does not hold is one the statement does not have,
-        // and so is an index of 0 — which is how SQLite says "no such
-        // parameter" and is no slot of the flag vector either.
-        let index = match by_name.get(name.as_str()).copied().filter(|i| *i > 0) {
+        // Neither way of resolving a name answers one the statement does not
+        // have; rusqlite reports SQLite's index of 0 as absence itself.
+        let index = match resolver.index_of(stmt, name) {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
             Some(index) => index,
         };
 
+        // An index the flag vector has no room for would be SQLite answering
+        // outside its own parameter count.
         match claimed.get_mut(index) {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
             Some(flag) if *flag => {
@@ -147,6 +163,38 @@ fn require_named_parameters_covered(
             index,
             name: stmt.parameter_name(index).map(str::to_string),
         }),
+    }
+}
+
+/// How a walk turns a key into the parameter's one-based index.
+///
+/// The twin for the raw-FFI doors is `stream.rs:NameResolver`, and the reason
+/// for the two ways is the same: the map costs what the statement is long, a
+/// direct lookup what the list is long.
+enum NameResolver<'a> {
+    OneByOne,
+    Map(HashMap<&'a str, usize>),
+}
+
+impl NameResolver<'_> {
+    /// The parameter's one-based index, or `None` for a name the statement
+    /// does not have. rusqlite answers absence for a name it cannot hand to
+    /// SQLite at all — one holding a NUL byte — which is absence all the same.
+    fn index_of(&self, stmt: &Statement<'_>, name: &str) -> Option<usize> {
+        match self {
+            NameResolver::Map(by_name) => by_name.get(name).copied(),
+            NameResolver::OneByOne => stmt.parameter_index(name).ok().flatten(),
+        }
+    }
+}
+
+/// The cheaper of the two ways to resolve this list's keys: the map reads one
+/// name per parameter, a direct lookup walks the names once per key, so the
+/// map only wins once the list holds half the statement's parameters' worth.
+fn name_resolver<'a>(stmt: &'a Statement<'a>, keys: usize) -> NameResolver<'a> {
+    match keys.saturating_mul(2) < stmt.parameter_count() {
+        true => NameResolver::OneByOne,
+        false => NameResolver::Map(parameter_indices_by_name(stmt)),
     }
 }
 
@@ -189,7 +237,7 @@ pub(crate) fn core_query<'a>(
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
     reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
-    reject_no_statement(&stmt)?;
+    reject_no_statement(conn, &stmt)?;
     let column_names: Vec<String> =
         stmt.column_names().iter().map(|s| s.to_string()).collect();
     let column_count = column_names.len();
@@ -261,7 +309,7 @@ pub(crate) fn core_execute<'a>(
 ) -> Result<usize, XqliteError> {
     reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
-    reject_no_statement(&stmt)?;
+    reject_no_statement(conn, &stmt)?;
 
     let affected_rows = match walk_params(params_term)? {
         Params::Empty => {

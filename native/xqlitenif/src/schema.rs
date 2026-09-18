@@ -889,6 +889,11 @@ pub(crate) fn create_sql(
     conn: &Connection,
     object_name: &str,
 ) -> Result<Option<String>, XqliteError> {
+    // SAFETY: the caller holds the connection Mutex for the whole call, so no
+    // other thread is inside a `sqlite3_*` call on this connection, and
+    // `handle()` is the live `sqlite3*` that Mutex guards.
+    unsafe { crate::limits::require_text_within_length(conn.handle(), object_name) }?;
+
     let sql = "SELECT sql FROM sqlite_schema WHERE name = ?1 LIMIT 1;";
     let mut stmt = conn.prepare(sql)?;
     let result = stmt.query_row([object_name], |row| row.get::<usize, Option<String>>(0));

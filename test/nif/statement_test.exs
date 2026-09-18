@@ -130,6 +130,35 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
+    test "a bind SQLite refuses mid-run takes no value and retires nothing", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+      :ok = Xqlite.bind(stmt, [1])
+
+      assert {:row, [1]} = Xqlite.step(stmt)
+      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, [2])
+      assert :ok = Xqlite.reset(stmt)
+      assert {:row, [1]} = Xqlite.step(stmt)
+
+      assert :done = Xqlite.step(stmt)
+      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, [3])
+      assert :ok = Xqlite.reset(stmt)
+      assert {:ok, %{rows: [[1]], done: false}} = Xqlite.multi_step(stmt, 1)
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a keyword bind SQLite refuses mid-run takes no value either", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT :a, :b")
+      :ok = Xqlite.bind(stmt, a: 1, b: 2)
+
+      assert {:ok, %{rows: [[1, 2]], done: false}} = Xqlite.multi_step(stmt, 1)
+      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, a: 3, b: 4)
+      assert :ok = Xqlite.reset(stmt)
+      assert {:row, [1, 2]} = Xqlite.step(stmt)
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
     # -------------------------------------------------------------------
     # Named parameters
     # -------------------------------------------------------------------
@@ -355,6 +384,37 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:ok, %{num_rows: 0}} = Xqlite.query(conn, sql, [])
       assert {:error, {:cannot_execute, reason}} = Xqlite.query(conn, "-- just a comment", [])
       assert is_binary(reason)
+    end
+
+    test "a lowered length limit does not hide a read-only statement", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      name = String.duplicate("s", 40)
+      comment = " -- " <> String.duplicate("c", 60)
+
+      assert {:ok, _savepoint} = Xqlite.execute(conn, "SAVEPOINT #{name}", [])
+      assert {:ok, _rollback_to} = Xqlite.execute(conn, "ROLLBACK TO #{name}", [])
+      assert {:ok, _release} = Xqlite.execute(conn, "RELEASE #{name}", [])
+      assert {:ok, _begin} = Xqlite.execute(conn, "BEGIN" <> comment, [])
+      assert {:ok, _rollback} = Xqlite.execute(conn, "ROLLBACK", [])
+      assert {:ok, _pragma} = Xqlite.execute(conn, "PRAGMA foreign_keys=ON" <> comment, [])
+    end
+
+    test "a comment-only text holds no statement at any limit or door", %{conn: conn} do
+      long_comment = "-- " <> String.duplicate("c", 60)
+
+      assert {:error, {:cannot_execute, reason}} = Xqlite.query(conn, long_comment, [])
+      assert is_binary(reason)
+      assert {:error, {:cannot_execute, _execute}} = Xqlite.execute(conn, long_comment, [])
+      assert {:error, {:cannot_execute, _prepare}} = Xqlite.prepare(conn, long_comment)
+
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+
+      assert {:error, {:cannot_execute, _lowered_query}} = Xqlite.query(conn, long_comment, [])
+
+      assert {:error, {:cannot_execute, _lowered_execute}} =
+               Xqlite.execute(conn, long_comment, [])
+
+      assert {:error, {:cannot_execute, _lowered_prepare}} = Xqlite.prepare(conn, long_comment)
     end
 
     test "the batch doors judge the batch size before anything else", %{conn: conn} do

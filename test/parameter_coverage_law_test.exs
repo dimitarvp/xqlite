@@ -242,6 +242,40 @@ defmodule Xqlite.ParameterCoverageLawTest do
       assert ["keep_a", "keep_b"] == pair(conn)
     end
 
+    test "a keyword list is refused by the same rule however few keys it holds",
+         %{conn: conn} do
+      names = Enum.map(1..40, fn index -> ":p#{index}" end)
+      sql = named_sql(names)
+      short = Enum.map(1..5, fn index -> {:"p#{index}", index} end)
+      full = Enum.map(1..40, fn index -> {:"p#{index}", index} end)
+
+      short_unknown = short ++ [{:nope, 0}]
+      full_unknown = Enum.drop(full, -1) ++ [{:nope, 0}]
+      short_duplicate = short ++ [{:p1, 1}]
+      full_duplicate = full ++ [{:p1, 1}]
+
+      assert {:ok, stmt} = Xqlite.prepare(conn, sql)
+
+      for params <- [short_unknown, full_unknown] do
+        assert {:error, {:invalid_parameter_name, ":nope"}} = Xqlite.query(conn, sql, params)
+        assert {:error, {:invalid_parameter_name, ":nope"}} = Xqlite.bind(stmt, params)
+      end
+
+      for params <- [short_duplicate, full_duplicate] do
+        assert {:error, {:duplicate_parameter_name, ":p1"}} = Xqlite.query(conn, sql, params)
+        assert {:error, {:duplicate_parameter_name, ":p1"}} = Xqlite.bind(stmt, params)
+      end
+
+      assert {:error, {:missing_parameter, %{index: 6, name: ":p6"}}} =
+               Xqlite.query(conn, sql, short)
+
+      assert {:error, {:missing_parameter, %{index: 6, name: ":p6"}}} =
+               Xqlite.bind(stmt, short)
+
+      assert :ok = Xqlite.finalize(stmt)
+      assert "seed" == stored(conn)
+    end
+
     property "a keyword list is refused unless it names every parameter once",
              %{conn: conn} do
       check all(
@@ -298,7 +332,7 @@ defmodule Xqlite.ParameterCoverageLawTest do
     for element <- list, rest <- permutations(list -- [element]), do: [element | rest]
   end
 
-  # A statement of 1 to 4 named parameters, each in one of SQLite's three
+  # A statement of 1 to 64 named parameters, each in one of SQLite's three
   # name spellings, and a keyword list for it: one that keeps some of the
   # names (`keeps`), or one that covers them all and names one twice.
   defp named_case do

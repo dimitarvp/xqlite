@@ -325,7 +325,7 @@ pub(crate) unsafe fn require_named_parameters_covered(
     // SAFETY: forwarded from this function's own contract.
     let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
     // SAFETY: forwarded from this function's own contract.
-    let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
+    let resolver = unsafe { name_resolver(raw_stmt_ptr, params.len(), expected) };
 
     // Two structures, because they answer two questions. `indices` keeps the
     // caller's order, which is what the caller zips its values with to bind.
@@ -337,14 +337,12 @@ pub(crate) unsafe fn require_named_parameters_covered(
     let mut claimed = vec![false; expected.max(0) as usize + 1];
 
     for (name, _value) in params {
-        // A name the map does not hold is one the statement does not have.
-        let index = match by_name.get(name.as_str()) {
-            None => return Err(XqliteError::InvalidParameterName(name.clone())),
-            Some(index) => *index,
-        };
+        // SAFETY: forwarded from this function's own contract.
+        let index = unsafe { resolver.index_of(raw_stmt_ptr, name) };
 
-        // An index of 0, or one the flag vector has no room for, would mean
-        // the same, SQLite having answered outside its own count.
+        // Zero is how SQLite says "no such parameter", and no name the map
+        // holds is zero either; an index the flag vector has no room for would
+        // be SQLite answering outside its own count.
         let slot = usize::try_from(index).ok().filter(|slot| *slot > 0);
 
         match slot.and_then(|slot| claimed.get_mut(slot)) {
@@ -386,14 +384,79 @@ pub(crate) unsafe fn require_named_parameters_covered(
     }
 }
 
+/// How a walk turns a key into the parameter's one-based index.
+///
+/// The map reads one name per parameter of the statement, so it costs what the
+/// statement is long whatever the list holds; a direct lookup walks the same
+/// names once per key. A keyword list has to name every parameter, so a much
+/// shorter one is a list about to be refused, and resolving its keys one by
+/// one keeps that refusal proportional to the keys given — on a statement of
+/// 32 766 parameters the difference is seconds.
+enum NameResolver {
+    OneByOne,
+    Map(HashMap<String, c_int>),
+}
+
+impl NameResolver {
+    /// The parameter's one-based index, or 0 for a name the statement does not
+    /// have — SQLite's own answer for one.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the connection Mutex for the whole call and
+    /// `raw_stmt_ptr` is a live prepared statement of that connection.
+    unsafe fn index_of(&self, raw_stmt_ptr: *mut ffi::sqlite3_stmt, name: &str) -> c_int {
+        match self {
+            NameResolver::Map(by_name) => match by_name.get(name) {
+                None => 0,
+                Some(index) => *index,
+            },
+            // A name holding a NUL byte is no parameter name SQLite can be
+            // asked about, and is answered like any other it does not have.
+            NameResolver::OneByOne => match std::ffi::CString::new(name) {
+                Err(_interior_nul) => 0,
+                // SAFETY: forwarded from this function's own contract. The
+                // CString owns the buffer for the length of the call.
+                Ok(c_name) => unsafe {
+                    ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr())
+                },
+            },
+        }
+    }
+}
+
+/// The cheaper of the two ways to resolve this list's keys: the map pays one
+/// name read per parameter, a direct lookup one name walk per key, so the map
+/// only wins once the list holds half the statement's parameters' worth.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and
+/// `raw_stmt_ptr` is a live prepared statement of that connection.
+unsafe fn name_resolver(
+    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
+    keys: usize,
+    expected: c_int,
+) -> NameResolver {
+    match keys.saturating_mul(2) < expected.max(0) as usize {
+        true => NameResolver::OneByOne,
+        false => {
+            // SAFETY: forwarded from this function's own contract.
+            let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
+
+            NameResolver::Map(by_name)
+        }
+    }
+}
+
 /// SQLite's own spelling of every named parameter, against its one-based
 /// index, so that each key costs one hash lookup instead of a call to
 /// `sqlite3_bind_parameter_index`, which walks the statement's whole name list
 /// with one string comparison per name. Reading one name is a walk of the same
 /// list (`sqlite3VListNumToName`), so building the map is not free either — it
-/// is about twice as fast, measured at SQLite's cap of 32 766 parameters, and
-/// it is the most the C interface allows. A bare `?` has no name and is left
-/// out.
+/// is about 2.4 times cheaper per name, measured at SQLite's cap of 32 766
+/// parameters, and it is the most the C interface allows. A bare `?` has no
+/// name and is left out.
 ///
 /// # Safety
 ///
@@ -441,16 +504,30 @@ fn claimed_parameter(claimed: &[bool], index: c_int) -> bool {
     }
 }
 
-/// Why a bind did not happen, and how much of it SQLite had already taken.
+/// Why a bind did not happen, and whether SQLite had taken a value by then.
 ///
 /// The library's own refusals — the count, the names, a value it cannot
 /// convert, a value over the connection's length limit — all come before the
-/// first `sqlite3_bind_*` call, so the statement is untouched. An error from
-/// SQLite itself comes part-way through the list, with the values before it
-/// bound and the failing parameter left NULL.
+/// first `sqlite3_bind_*` call, so the statement is untouched. So does one
+/// refusal of SQLite's own: a bind on a statement that is mid-run, answered
+/// with a misuse before the first parameter is released. Every other failure
+/// has taken at least one value, leaving the ones before it bound and the
+/// failing parameter NULL.
 pub(crate) enum BindFailure {
     NothingBound(XqliteError),
     PartlyBound(XqliteError),
+}
+
+/// Which tag a failed bind carries. `vdbeUnbind` answers a misuse for a
+/// statement that is mid-run and returns before it releases the parameter, so
+/// a misuse on the first value of the list took nothing; every other failure
+/// has already replaced that parameter with NULL.
+#[inline]
+fn bind_failure(position: usize, error: XqliteError) -> BindFailure {
+    match position == 0 && crate::error::is_misuse(&error) {
+        true => BindFailure::NothingBound(error),
+        false => BindFailure::PartlyBound(error),
+    }
 }
 
 impl BindFailure {
@@ -483,7 +560,7 @@ pub(crate) unsafe fn bind_positional_params_ffi(
         // SQLite bind indices are 1-based
         // SAFETY: forwarded from this function's own contract.
         unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, (i + 1) as c_int, value, db_handle) }
-            .map_err(BindFailure::PartlyBound)?;
+            .map_err(|error| bind_failure(i, error))?;
     }
     Ok(())
 }
@@ -505,10 +582,10 @@ pub(crate) unsafe fn bind_named_params_ffi(
     unsafe { crate::limits::require_named_within_length(db_handle, params) }
         .map_err(BindFailure::NothingBound)?;
 
-    for ((_name, value), bind_idx) in params.iter().zip(indices) {
+    for (position, ((_name, value), bind_idx)) in params.iter().zip(indices).enumerate() {
         // SAFETY: forwarded from this function's own contract.
         unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, bind_idx, value, db_handle) }
-            .map_err(BindFailure::PartlyBound)?;
+            .map_err(|error| bind_failure(position, error))?;
     }
     Ok(())
 }

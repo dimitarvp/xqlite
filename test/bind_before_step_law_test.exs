@@ -28,6 +28,11 @@ defmodule Xqlite.BindBeforeStepLawTest do
   keeps bindings across a reset) and `clear_bindings/1` would replace every
   parameter with NULL rather than put back what was bound before.
 
+  One refusal of SQLite's own falls under the rule all the same: a bind on a
+  statement that has been stepped and not yet reset. SQLite answers that one
+  before it takes the first value, so nothing is bound, nothing is lost, and
+  the statement runs on with what it already held.
+
   The row the step reads back is the oracle: it holds the values of the last
   successful bind, or NULL in every column after `clear_bindings/1`.
   """
@@ -140,7 +145,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
   end
 
   defp actions(_count) do
-    [:bind_ok, :refuse_count, :refuse_value, :refuse_length, :clear, :reset]
+    [:bind_ok, :refuse_count, :refuse_value, :refuse_length, :clear, :reset, :bind_mid_step]
     |> member_of()
     |> list_of(max_length: 4)
   end
@@ -182,6 +187,20 @@ defmodule Xqlite.BindBeforeStepLawTest do
   end
 
   defp act(:reset, stmt, _count, state) do
+    assert :ok = Xqlite.reset(stmt)
+    state
+  end
+
+  # A statement nothing has bound yet cannot be stepped, so there is no
+  # mid-run bind to refuse and the action has nothing to do.
+  defp act(:bind_mid_step, _stmt, _count, %{set?: false} = state), do: state
+
+  defp act(:bind_mid_step, stmt, count, state) do
+    assert {:row, _row} = Xqlite.step(stmt)
+
+    assert {:error, {:sqlite_failure, 21, 21, _misuse}} =
+             Xqlite.bind(stmt, values_for(count, 0))
+
     assert :ok = Xqlite.reset(stmt)
     state
   end

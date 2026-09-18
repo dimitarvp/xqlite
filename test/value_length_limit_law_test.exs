@@ -4,8 +4,9 @@ defmodule Xqlite.ValueLengthLimitLawTest do
   (`Xqlite.limit/3` with `:length`, SQLite's `SQLITE_LIMIT_LENGTH`), and the
   library judges every value against it before it binds anything.
 
-  The law: every door that takes parameters refuses a value longer than the
-  connection's limit with
+  The law: every door that hands SQLite a value of the caller's — a parameter
+  list, or the object name `XqliteNIF.get_create_sql/2` looks up — refuses a
+  value longer than the connection's limit with
   `{:error, {:value_too_large, %{byte_size: bytes, limit: limit}}}`, wherever
   in the list that value sits, and nothing is bound and nothing runs — the
   stored row is the oracle. A value shorter than the limit binds like any
@@ -40,7 +41,8 @@ defmodule Xqlite.ValueLengthLimitLawTest do
     :nif_query_with_changes,
     :nif_stmt_bind,
     :nif_stream_open,
-    :nif_explain_analyze
+    :nif_explain_analyze,
+    :nif_get_create_sql
   ]
 
   @writing_doors [:query, :execute, :nif_query_with_changes]
@@ -89,6 +91,16 @@ defmodule Xqlite.ValueLengthLimitLawTest do
       assert is_binary(message)
       assert :ok = Xqlite.finalize(stmt)
       assert "seed" == stored(conn)
+    end
+
+    test "the name an introspection door looks up is judged like a bound value",
+         %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+
+      assert {:ok, nil} = NIF.get_create_sql(conn, String.duplicate("n", 30))
+
+      assert {:error, {:value_too_large, %{byte_size: 31, limit: 30}}} =
+               NIF.get_create_sql(conn, String.duplicate("n", 31))
     end
 
     test "a BLOB is judged by its bytes like a TEXT value", %{conn: conn} do
@@ -212,4 +224,21 @@ defmodule Xqlite.ValueLengthLimitLawTest do
     assert :ok = NIF.stmt_finalize(stmt)
     answer
   end
+
+  # This door takes a name rather than a parameter list, and binds it the same
+  # way, so it is given the one over-long value the other doors bind.
+  defp call(:nif_get_create_sql, conn, _sql, params),
+    do: NIF.get_create_sql(conn, longest(params))
+
+  defp longest(params) do
+    assert [value] =
+             params
+             |> Enum.map(&value_of/1)
+             |> Enum.filter(&is_binary/1)
+
+    value
+  end
+
+  defp value_of({_key, value}), do: value
+  defp value_of(value), do: value
 end

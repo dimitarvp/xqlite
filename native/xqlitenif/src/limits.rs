@@ -10,19 +10,14 @@ use rusqlite::types::Value;
 use rustler::Atom;
 use std::os::raw::c_int;
 
-// libsqlite3-sys generates constants up to SQLITE_LIMIT_WORKER_THREADS (11)
-// and stops, so the thirteenth category is spelled out here from SQLite's own
-// header.
-const SQLITE_LIMIT_PARSER_DEPTH: c_int = 12;
-
 // The largest value sqlite3_limit accepts; a bigger one is a caller error
 // rather than something SQLite clamps.
 const MAX_LIMIT_VALUE: i64 = c_int::MAX as i64;
 
 /// Reads, and optionally sets, one of the connection's limits.
 ///
-/// `new_value` of -1 (or any negative) reads without setting; 0 to 2^31-1
-/// sets. SQLite answers the value in force before the call and silently
+/// `new_value` of -1 reads without setting, and 0 to 2^31-1 sets; every other
+/// negative, and anything above 2^31-1, is refused rather than read. SQLite answers the value in force before the call and silently
 /// clamps a new one to its own compile-time ceiling — and, for `:length`
 /// alone, up to a floor of 30 — so a caller who needs the value that took
 /// effect reads it back.
@@ -62,7 +57,7 @@ fn category_id(category: Atom) -> Result<c_int, XqliteError> {
         (atoms::variable_number(), ffi::SQLITE_LIMIT_VARIABLE_NUMBER),
         (atoms::trigger_depth(), ffi::SQLITE_LIMIT_TRIGGER_DEPTH),
         (atoms::worker_threads(), ffi::SQLITE_LIMIT_WORKER_THREADS),
-        (atoms::parser_depth(), SQLITE_LIMIT_PARSER_DEPTH),
+        (atoms::parser_depth(), ffi::SQLITE_LIMIT_PARSER_DEPTH),
     ];
 
     table
@@ -95,6 +90,49 @@ pub(crate) unsafe fn length_limit(db_handle: *mut ffi::sqlite3) -> usize {
     let limit = unsafe { ffi::sqlite3_limit(db_handle, ffi::SQLITE_LIMIT_LENGTH, -1) };
 
     limit.max(0) as usize
+}
+
+/// Runs `read` with the connection's length limit lifted to SQLite's own
+/// ceiling, and puts the caller's limit back before it answers.
+///
+/// `sqlite3_expanded_sql` builds its answer under that limit and hands back
+/// nothing when the expansion does not fit — the same answer it gives for a
+/// statement that is not there at all. Lifting the limit for the read tells
+/// the two apart whatever the caller set.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and `db_handle`
+/// is the live `sqlite3*` that Mutex guards.
+pub(crate) unsafe fn with_length_limit_lifted<T>(
+    db_handle: *mut ffi::sqlite3,
+    read: impl FnOnce() -> T,
+) -> T {
+    // SAFETY: forwarded from this function's own contract.
+    let previous =
+        unsafe { ffi::sqlite3_limit(db_handle, ffi::SQLITE_LIMIT_LENGTH, c_int::MAX) };
+    let answer = read();
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { ffi::sqlite3_limit(db_handle, ffi::SQLITE_LIMIT_LENGTH, previous) };
+
+    answer
+}
+
+/// Refuses a name a door hands SQLite outside a parameter list — an object
+/// name to look up — by the limit every bound value is judged against.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and `db_handle`
+/// is the live `sqlite3*` that Mutex guards.
+pub(crate) unsafe fn require_text_within_length(
+    db_handle: *mut ffi::sqlite3,
+    text: &str,
+) -> Result<(), XqliteError> {
+    // SAFETY: forwarded from this function's own contract.
+    let limit = unsafe { length_limit(db_handle) };
+
+    require_byte_size(limit, text.len())
 }
 
 /// Refuses a positional list holding a value over the connection's length
@@ -146,6 +184,11 @@ fn require_within_length(limit: usize, value: &Value) -> Result<(), XqliteError>
         Value::Null | Value::Integer(_) | Value::Real(_) => 0,
     };
 
+    require_byte_size(limit, byte_size)
+}
+
+#[inline]
+fn require_byte_size(limit: usize, byte_size: usize) -> Result<(), XqliteError> {
     match byte_size > limit {
         true => Err(XqliteError::ValueTooLarge { byte_size, limit }),
         false => Ok(()),

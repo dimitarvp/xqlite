@@ -813,12 +813,13 @@ fn stmt_bind<'a>(
 
         // The flag moves under the same lock as the bind, so a step that took
         // the lock straight after a bind answered `:ok` never reads it unset.
-        // A refusal of the library's own bound nothing and leaves an earlier
-        // successful bind in force; one SQLite gave after binding began left
-        // values half-applied, so the statement stops running until a bind
-        // succeeds or `clear_bindings` runs. The length check before the bind
-        // loop leaves an allocation failure as the only way into that arm,
-        // which no test can force — it still states the rule.
+        // A bind that took no value leaves an earlier successful one in force:
+        // every refusal of the library's own, and SQLite's own refusal of a
+        // bind on a statement mid-run. A failure after at least one value was
+        // taken left values half-applied, so the statement stops running until
+        // a bind succeeds or `clear_bindings` runs — with the length check
+        // ahead of the loop, an allocation failure is the one way into that
+        // arm, which no test can force.
         match bound {
             Ok(()) => {
                 stmt_handle.mark_parameters_set();

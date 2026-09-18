@@ -1102,6 +1102,17 @@ pub(crate) fn is_sqlite_auth(err: &RusqliteError) -> bool {
     (extended_code & 0xFF) == ffi::SQLITE_AUTH
 }
 
+/// True when SQLite answered a misuse of the C API. The bind path asks,
+/// because that is the one refusal SQLite makes before it touches a parameter.
+pub(crate) fn is_misuse(error: &XqliteError) -> bool {
+    match error {
+        XqliteError::SqliteFailure { extended_code, .. } => {
+            (extended_code & 0xFF) == ffi::SQLITE_MISUSE
+        }
+        _other => false,
+    }
+}
+
 /// Classify a failed `sqlite3_prepare_v2` the way rusqlite's own `prepare`
 /// does, so the raw-FFI prepare sites and `query`/`execute` agree on one SQL
 /// string.
