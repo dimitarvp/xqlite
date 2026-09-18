@@ -730,6 +730,8 @@ fn stmt_prepare(
 
             let column_count =
                 ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
+            let parameter_count = ffi::sqlite3_bind_parameter_count(non_null_raw_stmt.as_ptr())
+                .max(0) as usize;
             let mut column_names = Vec::with_capacity(column_count);
             for i in 0..column_count {
                 let name_ptr = ffi::sqlite3_column_name(
@@ -760,6 +762,7 @@ fn stmt_prepare(
                 cell,
                 conn_resource_arc_clone,
                 column_names,
+                parameter_count,
             ))
         }
     })
@@ -795,6 +798,11 @@ fn stmt_bind<'a>(
             }
         }
     });
+
+    if result.is_ok() {
+        stmt_handle.mark_parameters_set();
+    }
+
     singular_ok_or_error_tuple(env, result)
 }
 
@@ -803,6 +811,11 @@ fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
     use crate::stream::process_single_step;
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        // Behind the liveness check the lock did: a finalized statement, and
+        // one whose connection is closed, are answered as such whether or
+        // not anything ever bound their parameters.
+        stmt_handle.require_parameters_set()?;
+
         // An earlier batch read a row it could not decode after it had handed
         // back the rows it already had. Every door that reads a row answers
         // that error first and empties the slot; the statement itself carries
@@ -874,6 +887,9 @@ fn stmt_multi_step_impl<'a>(
     let mut done = false;
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        // Behind the liveness check the lock did, exactly as in `stmt_step`.
+        stmt_handle.require_parameters_set()?;
+
         // An earlier batch ended on a row it could not decode after it had
         // handed back the rows it already had. Answer that error now and
         // empty the slot: the statement itself carries on at the row after
@@ -966,6 +982,11 @@ fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) 
         unsafe { ffi::sqlite3_clear_bindings(stmt_ptr) };
         Ok(())
     });
+
+    if result.is_ok() {
+        stmt_handle.mark_parameters_set();
+    }
+
     singular_ok_or_error_tuple(env, result)
 }
 

@@ -102,6 +102,12 @@ defmodule Xqlite do
   while `%Xqlite.Blob{}` forces `BLOB` storage whatever the bytes are —
   nothing reads back wrapped. A value a type extension encodes arrives here
   as one of these forms.
+
+  An integer is a 64-bit signed one, SQLite having no room for more:
+  `-9223372036854775808` up to `9223372036854775807`. Elixir's integers have
+  no size, so one outside that range is refused with
+  `{:error, {:integer_out_of_range, %{position: n}}}` rather than wrapped or
+  rounded.
   """
   @type param_value :: integer() | float() | binary() | boolean() | nil | Xqlite.Blob.t()
 
@@ -202,14 +208,35 @@ defmodule Xqlite do
   Four shapes are about the parameter list itself, all answered before a value
   is bound. `:invalid_parameter_count` is a positional list whose length is
   not the statement's own parameter count. The other three are a keyword
-  list's: `:invalid_parameter_name` carries a key the statement does not have,
-  `:duplicate_parameter_name` the second of two keys naming one parameter, and
-  `:missing_parameter` the lowest-numbered parameter no key named, with
-  SQLite's own spelling of it in `:name` and `nil` there for a bare `?`.
+  list's: `:invalid_parameter_name` carries a name the statement does not
+  have, `:duplicate_parameter_name` the second of two keys naming one
+  parameter, and `:missing_parameter` the lowest-numbered parameter no key
+  named. All three carry the name the key resolved to, never the key itself:
+  a key already starting `:`, `@` or `$` is used as written and every other
+  key gets the `:` prefix, so `[c: 1]` answers `":c"` and `[{:"@b", 1}]`
+  answers `"@b"`. `:name` is `nil` only for a bare `?`, which no key can name.
+
+  `:parameters_unbound` is a statement stepped before anything set its
+  parameters, `:expected` being how many it takes. A bind the library refused
+  bound nothing, so it leaves the statement in that state too;
+  `clear_bindings/1` is how a caller asks for a run with NULL in every
+  parameter.
+
+  `:integer_out_of_range` is an integer with no room in SQLite's signed 64
+  bits, with the value's one-based place in the parameter list in `:position`
+  — and no `:position` at all where one value was judged on its own, as
+  `XqliteNIF.set_pragma/3` does. `:value_too_large` is a TEXT or BLOB
+  parameter longer than the bytes SQLite's C interface can be told about.
 
   `:invalid_batch_size` carries the caller's own term in `:provided`, whatever
   kind of term it was: the stream fetch doors take it and judge it, where the
-  statement doors take an integer and raise for anything else.
+  statement doors take an integer and raise for anything else. A stream's
+  batch size must also fit in 64 signed bits, which is all the fetch door
+  reads.
+
+  `:invalid_type_extensions` is the `:type_extensions` option when it is not
+  a proper list of module names, refused before anything else happens on
+  every door that takes the option.
   """
   @type error_reason ::
           :connection_closed
@@ -226,7 +253,6 @@ defmodule Xqlite do
           | {:authorization_denied, integer(), String.t()}
           | {:busy_timeout_write_refused, %{policy: boolean(), observers: non_neg_integer()}}
           | {:cannot_convert_atom_to_string, String.t()}
-          | {:cannot_convert_to_sqlite_value, String.t(), String.t()}
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
           | {:cannot_open_database, String.t(), integer(), String.t()}
@@ -238,6 +264,7 @@ defmodule Xqlite do
           | {:expected_list, list_refusal()}
           | {:from_sql_conversion_failure, non_neg_integer(), atom(), String.t()}
           | {:index_exists, String.t()}
+          | {:integer_out_of_range, %{optional(:position) => pos_integer()}}
           | {:integral_value_out_of_range, non_neg_integer(), integer()}
           | {:internal_encoding_error, String.t()}
           | {:invalid_authorizer_action, atom()}
@@ -272,11 +299,13 @@ defmodule Xqlite do
           | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
           | {:invalid_stream_handle, String.t()}
+          | {:invalid_type_extensions, list_refusal()}
           | {:lock_error, String.t()}
           | {:missing_parameter, %{index: pos_integer(), name: String.t() | nil}}
           | {:no_such_index, String.t()}
           | {:no_such_table, String.t()}
           | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
+          | {:parameters_unbound, %{expected: non_neg_integer()}}
           | {:read_only_database, integer(), String.t()}
           | {:read_only_pragma, atom()}
           | {:rowid_shadowed, String.t()}
@@ -292,6 +321,7 @@ defmodule Xqlite do
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
           | {:utf8_error, non_neg_integer(), String.t()}
+          | {:value_too_large, %{byte_size: non_neg_integer(), limit: non_neg_integer()}}
           | {:without_rowid_unsupported, String.t()}
 
   @typedoc """
@@ -302,8 +332,9 @@ defmodule Xqlite do
   element that does not belong in that list, at its one-based `:position`.
   `:value_type` names the kind of term that stopped the walk.
 
-  Four reasons carry this map: `:expected_list`, `:expected_keyword_list`,
-  `:expected_keyword_tuple` and `:invalid_cancel_tokens`.
+  Five reasons carry this map: `:expected_list`, `:expected_keyword_list`,
+  `:expected_keyword_tuple`, `:invalid_cancel_tokens` and
+  `:invalid_type_extensions`.
 
   A cancellable call takes two lists, so the tag says which one it refused:
   `:invalid_cancel_tokens` is always about the tokens, `:expected_list` always
@@ -1261,13 +1292,14 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
 
   ## Options
 
@@ -1280,12 +1312,21 @@ defmodule Xqlite do
       `{:error, {:type_extension_refused, %{position: n, extension: module,
       reason: reason}}}` before any SQL runs; `n` is the parameter's 1-based
       place in the list.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
   """
   @spec query(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def query(conn, sql, params \\ [], opts \\ []) do
-    extensions = Keyword.get(opts, :type_extensions, [])
+    case type_extensions(opts) do
+      {:ok, extensions} -> query_span(conn, sql, params, extensions)
+      {:error, _reason} = error -> error
+    end
+  end
 
+  defp query_span(conn, sql, params, extensions) do
     start_md = %{
       conn: conn,
       sql: sql,
@@ -1341,13 +1382,14 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
 
   ## Options
 
@@ -1356,12 +1398,21 @@ defmodule Xqlite do
       no result rows to decode). Default: `[]`. A parameter an extension
       refuses fails the call with `{:error, {:type_extension_refused, _}}`,
       as described in `query/4`.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
   """
   @spec execute(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def execute(conn, sql, params \\ [], opts \\ []) do
-    extensions = Keyword.get(opts, :type_extensions, [])
+    case type_extensions(opts) do
+      {:ok, extensions} -> execute_span(conn, sql, params, extensions)
+      {:error, _reason} = error -> error
+    end
+  end
 
+  defp execute_span(conn, sql, params, extensions) do
     start_md = %{
       conn: conn,
       sql: sql,
@@ -1482,6 +1533,10 @@ defmodule Xqlite do
       `query/4`, so the statement profiled here is the one the application
       runs. A parameter an extension refuses returns
       `{:error, {:type_extension_refused, _}}`. Default: `[]`.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
 
   ## Examples
 
@@ -1497,7 +1552,13 @@ defmodule Xqlite do
   @spec explain_analyze(conn(), String.t(), list() | keyword() | nil, keyword()) ::
           {:ok, Xqlite.ExplainAnalyze.t()} | error()
   def explain_analyze(conn, sql, params \\ [], opts \\ []) do
-    extensions = Keyword.get(opts, :type_extensions, [])
+    case type_extensions(opts) do
+      {:ok, extensions} -> explain_analyze_span(conn, sql, params, extensions)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp explain_analyze_span(conn, sql, params, extensions) do
     start_md = %{conn: conn, sql: sql, params_count: params_count(params)}
 
     span_with_stop_metadata [:xqlite, :explain_analyze], start_md do
@@ -1549,15 +1610,22 @@ defmodule Xqlite do
 
   ## Options
 
-    * `:batch_size` (integer, default: `500`) - The maximum number of rows
-      to fetch from the database in a single batch.
+    * `:batch_size` (integer, default: `#{Xqlite.StreamResourceCallbacks.default_batch_size()}`) - The maximum number of rows
+      to fetch from the database in a single batch. It has to be an integer
+      from 1 up to 9223372036854775807, which is all the fetch door reads;
+      anything else returns `{:error, {:invalid_batch_size, %{provided: _,
+      minimum: 1}}}` at stream open rather than failing on the first batch.
     * `:type_extensions` (list of modules, default: `[]`) - A list of modules
       implementing the `Xqlite.TypeExtension` behaviour. Parameters are encoded
       before binding, and result values are decoded as rows are fetched.
       Extensions are applied in list order; the first match wins. A parameter
       an extension refuses returns `{:error, {:type_extension_refused, _}}` at
       stream open, before any statement is prepared, as described in
-      `query/4`.
+      `query/4`. The option itself must be a proper list of module names, or
+      `nil` for none: anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before the stream is
+      opened, the refusal naming what stopped the walk and, for an element
+      that is no module name, its one-based position.
     * `:on_error` (`:raise` | `:halt` | `:emit_error`, default: `:raise`) -
       How a mid-fetch error (e.g. an invalid-UTF-8 TEXT value) is surfaced.
       Every row read before the failing one is delivered first, whatever
@@ -1627,8 +1695,15 @@ defmodule Xqlite do
   @spec stream(conn(), String.t(), list() | keyword(), keyword()) ::
           Enumerable.t() | error()
   def stream(conn, sql, params \\ [], opts \\ []) do
-    type_extensions = Keyword.get(opts, :type_extensions, [])
-    batch_size = Keyword.get(opts, :batch_size, 500)
+    case type_extensions(opts) do
+      {:ok, extensions} -> stream_span(conn, sql, params, extensions, opts)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp stream_span(conn, sql, params, extensions, opts) do
+    batch_size =
+      Keyword.get(opts, :batch_size, Xqlite.StreamResourceCallbacks.default_batch_size())
 
     cancel_tokens =
       opts
@@ -1639,13 +1714,17 @@ defmodule Xqlite do
       conn: conn,
       sql: sql,
       batch_size: batch_size,
-      type_extensions_count: length(type_extensions),
+      type_extensions_count: length(extensions),
       cancellable?: cancel_tokens != []
     }
 
+    # The walked list goes back into the options, so the fetch path decodes
+    # rows through the same one — `nil` included, which means none.
+    walked_opts = Keyword.put(opts, :type_extensions, extensions)
+
     span_with_stop_metadata [:xqlite, :stream, :open], start_md do
-      case Xqlite.TypeExtension.encode_params(params, type_extensions) do
-        {:ok, encoded_params} -> open_stream(conn, sql, encoded_params, opts, start_md)
+      case Xqlite.TypeExtension.encode_params(params, extensions) do
+        {:ok, encoded_params} -> open_stream(conn, sql, encoded_params, walked_opts, start_md)
         {:error, reason} -> {{:error, reason}, stream_error_metadata(start_md, reason)}
       end
     end
@@ -1755,12 +1834,21 @@ defmodule Xqlite do
       `step/1` and `multi_step/2` return are never decoded — run them
       through `Xqlite.TypeExtension.decode_rows/2` yourself if you want the
       decoded form.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
   """
   @spec bind(stmt(), list() | keyword()) :: :ok | error()
   @spec bind(stmt(), list() | keyword(), keyword()) :: :ok | error()
   def bind(stmt, params, opts \\ []) when is_list(params) do
-    extensions = Keyword.get(opts, :type_extensions, [])
+    case type_extensions(opts) do
+      {:ok, extensions} -> encode_and_bind(stmt, params, extensions)
+      {:error, _reason} = error -> error
+    end
+  end
 
+  defp encode_and_bind(stmt, params, extensions) do
     case Xqlite.TypeExtension.encode_params(params, extensions) do
       {:ok, bound_params} -> XqliteNIF.stmt_bind(stmt, bound_params)
       {:error, _reason} = err -> err
@@ -1806,9 +1894,14 @@ defmodule Xqlite do
   again, a trigger's `RAISE` answers the error and never a row — so a caller
   stops on such an error rather than stepping on.
 
-  A statement stepped with nothing bound runs with every parameter NULL.
-  That is SQLite's own rule and no bind door was involved, so the parameter
-  count `bind/3` checks cannot catch it.
+  A statement that takes parameters is refused until something sets them:
+  before a successful `bind/3`, and after one the library refused (which
+  binds nothing at all), the answer is
+  `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
+  parameters the statement takes. SQLite's own rule is the opposite — it
+  reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
+  a caller asks for that on purpose. `reset/1` keeps the bindings, so a
+  statement stays runnable across one.
 
   The values come back exactly as SQLite stored them: no type extension
   runs on them, whatever `bind/3` was given. Pass them through
@@ -1827,6 +1920,13 @@ defmodule Xqlite do
   Calling again after `done: true` without a `reset/1` RERUNS the query
   from the top (v2-prepared statements auto-reset when stepped past done —
   SQLite semantics, same as `step/1`).
+
+  `batch_size` is a guarded argument here, so a term that is no integer
+  raises `FunctionClauseError` and one outside SQLite's signed 64-bit range
+  raises `ArgumentError` from the NIF — the documented kinds for a wrong
+  argument at a guarded `Xqlite` function. `stream/4` answers a structured
+  `{:error, {:invalid_batch_size, _}}` for the same values, because there
+  the number is an option rather than an argument.
 
   A value SQLite hands back that cannot be read — a TEXT column holding
   bytes that are not valid UTF-8 — is reported as
@@ -1860,9 +1960,14 @@ defmodule Xqlite do
   again, a trigger's `RAISE` answers the error and never a row — so a caller
   stops on such an error rather than stepping on.
 
-  A statement stepped with nothing bound runs with every parameter NULL.
-  That is SQLite's own rule and no bind door was involved, so the parameter
-  count `bind/3` checks cannot catch it.
+  A statement that takes parameters is refused until something sets them:
+  before a successful `bind/3`, and after one the library refused (which
+  binds nothing at all), the answer is
+  `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
+  parameters the statement takes. SQLite's own rule is the opposite — it
+  reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
+  a caller asks for that on purpose. `reset/1` keeps the bindings, so a
+  statement stays runnable across one.
 
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
@@ -1916,9 +2021,14 @@ defmodule Xqlite do
   again, a trigger's `RAISE` answers the error and never a row — so a caller
   stops on such an error rather than stepping on.
 
-  A statement stepped with nothing bound runs with every parameter NULL.
-  That is SQLite's own rule and no bind door was involved, so the parameter
-  count `bind/3` checks cannot catch it.
+  A statement that takes parameters is refused until something sets them:
+  before a successful `bind/3`, and after one the library refused (which
+  binds nothing at all), the answer is
+  `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
+  parameters the statement takes. SQLite's own rule is the opposite — it
+  reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
+  a caller asks for that on purpose. `reset/1` keeps the bindings, so a
+  statement stays runnable across one.
 
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2` for the
@@ -2686,7 +2796,7 @@ defmodule Xqlite do
   def cancel_operation(token) do
     case XqliteNIF.is_cancel_token(token) do
       true -> signal_cancellation(token)
-      false -> {:error, {:invalid_cancel_tokens, bad_token_element(1, token)}}
+      false -> {:error, {:invalid_cancel_tokens, bad_element(1, token)}}
     end
   end
 
@@ -2717,13 +2827,14 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
 
   ## Options
 
@@ -2733,6 +2844,10 @@ defmodule Xqlite do
       stays a plain map — only its `:rows` are rewritten. A parameter an
       extension refuses returns `{:error, {:type_extension_refused, _}}`.
       Default: `[]`.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
   """
   @spec query_cancellable(
           conn(),
@@ -2748,8 +2863,17 @@ defmodule Xqlite do
           keyword()
         ) :: {:ok, query_result()} | error()
   def query_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
+    case type_extensions(opts) do
+      {:ok, extensions} ->
+        query_cancellable_span(conn, sql, params, token_or_tokens, extensions)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp query_cancellable_span(conn, sql, params, token_or_tokens, extensions) do
     tokens = List.wrap(token_or_tokens)
-    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :query], start_md do
@@ -2792,13 +2916,14 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
 
   ## Options
 
@@ -2807,6 +2932,10 @@ defmodule Xqlite do
       `query/4` (there are no result rows to decode). A parameter an
       extension refuses returns `{:error, {:type_extension_refused, _}}`.
       Default: `[]`.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
   """
   @spec execute_cancellable(
           conn(),
@@ -2822,8 +2951,17 @@ defmodule Xqlite do
           keyword()
         ) :: {:ok, non_neg_integer()} | error()
   def execute_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
+    case type_extensions(opts) do
+      {:ok, extensions} ->
+        execute_cancellable_span(conn, sql, params, token_or_tokens, extensions)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp execute_cancellable_span(conn, sql, params, token_or_tokens, extensions) do
     tokens = List.wrap(token_or_tokens)
-    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
@@ -2904,13 +3042,14 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
 
   ## Options
 
@@ -2920,6 +3059,10 @@ defmodule Xqlite do
       stays a plain map — only its `:rows` are rewritten. A parameter an
       extension refuses returns `{:error, {:type_extension_refused, _}}`.
       Default: `[]`.
+      The option itself must be a proper list of module names, or `nil`
+      for none; anything else returns
+      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      runs, as in `stream/4`.
   """
   @spec query_with_changes_cancellable(
           conn(),
@@ -2935,8 +3078,17 @@ defmodule Xqlite do
           keyword()
         ) :: {:ok, map()} | error()
   def query_with_changes_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
+    case type_extensions(opts) do
+      {:ok, extensions} ->
+        changes_cancellable_span(conn, sql, params, token_or_tokens, extensions)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp changes_cancellable_span(conn, sql, params, token_or_tokens, extensions) do
     tokens = List.wrap(token_or_tokens)
-    extensions = Keyword.get(opts, :type_extensions, [])
     start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
 
     span_with_stop_metadata [:xqlite, :query_with_changes], start_md do
@@ -3358,6 +3510,37 @@ defmodule Xqlite do
   defp params_count([_element | rest], counted), do: params_count(rest, counted + 1)
   defp params_count(_tail, counted), do: counted
 
+  # Every door that takes `:type_extensions` reads the option through here,
+  # before its telemetry metadata and before the NIF: counting an improper
+  # list with `length/1` raised, and a term that is no list at all reached the
+  # encode chain and raised there. `nil` and an absent option both mean no
+  # extensions. Whether an atom that passed here names a module implementing
+  # the behaviour is the chain's own later answer.
+  defp type_extensions(opts) do
+    case Keyword.get(opts, :type_extensions, []) do
+      nil -> {:ok, []}
+      given when is_list(given) -> walk_type_extensions(given, 1, [])
+      other -> {:error, {:invalid_type_extensions, not_a_list(other)}}
+    end
+  end
+
+  defp walk_type_extensions([], _position, walked), do: {:ok, Enum.reverse(walked)}
+
+  defp walk_type_extensions([extension | rest], position, walked) when is_atom(extension),
+    do: walk_type_extensions(rest, position + 1, [extension | walked])
+
+  defp walk_type_extensions([element | _rest], position, _walked),
+    do: {:error, {:invalid_type_extensions, bad_element(position, element)}}
+
+  defp walk_type_extensions(tail, _position, _walked),
+    do: {:error, {:invalid_type_extensions, improper_tail(tail)}}
+
+  defp not_a_list(term), do: %{reason: :not_a_list, value_type: term_type(term)}
+  defp improper_tail(tail), do: %{reason: :improper_tail, value_type: term_type(tail)}
+
+  defp bad_element(position, term),
+    do: %{reason: :bad_element, position: position, value_type: term_type(term)}
+
   @doc false
   # Public so the stream callbacks module validates through the same helper.
   @spec validate_cancel_tokens(term()) :: :ok | error()
@@ -3366,7 +3549,7 @@ defmodule Xqlite do
   def validate_cancel_tokens(token) do
     case XqliteNIF.is_cancel_token(token) do
       true -> :ok
-      false -> {:error, {:invalid_cancel_tokens, bad_token_element(1, token)}}
+      false -> {:error, {:invalid_cancel_tokens, bad_element(1, token)}}
     end
   end
 
@@ -3375,17 +3558,13 @@ defmodule Xqlite do
   defp walk_cancel_tokens([token | rest], position) do
     case XqliteNIF.is_cancel_token(token) do
       true -> walk_cancel_tokens(rest, position + 1)
-      false -> {:error, {:invalid_cancel_tokens, bad_token_element(position, token)}}
+      false -> {:error, {:invalid_cancel_tokens, bad_element(position, token)}}
     end
   end
 
   # A list the caller built by hand can end in something other than `[]`.
   defp walk_cancel_tokens(tail, _position) do
     {:error, {:invalid_cancel_tokens, %{reason: :improper_tail, value_type: term_type(tail)}}}
-  end
-
-  defp bad_token_element(position, term) do
-    %{reason: :bad_element, position: position, value_type: term_type(term)}
   end
 
   # The names the NIF gives a term's kind, so a refusal reads the same

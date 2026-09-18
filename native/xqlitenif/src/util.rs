@@ -267,12 +267,6 @@ fn elixir_term_to_rusqlite_value<'a>(
     term: Term<'a>,
     position: usize,
 ) -> Result<Value, XqliteError> {
-    let make_convert_error = |term: Term<'a>, err: RustlerError| -> XqliteError {
-        XqliteError::CannotConvertToSqliteValue {
-            value_str: format!("{term:?}"),
-            reason: format!("{err:?}"),
-        }
-    };
     let term_type = term.get_type();
     match term_type {
         TermType::Atom => {
@@ -290,14 +284,18 @@ fn elixir_term_to_rusqlite_value<'a>(
                 })
             }
         }
+        // SQLite stores an integer in 64 signed bits and Elixir's have no
+        // size, so the decode is the range test.
         TermType::Integer => term
             .decode::<i64>()
             .map(Value::Integer)
-            .map_err(|e| make_convert_error(term, e)),
+            .map_err(|_too_big| XqliteError::IntegerOutOfRange {
+                position: Some(position),
+            }),
         TermType::Float => term
             .decode::<f64>()
             .map(Value::Real)
-            .map_err(|e| make_convert_error(term, e)),
+            .map_err(|_not_a_float| XqliteError::UnsupportedDataType { term_type }),
         TermType::Binary => match term.decode::<String>() {
             Ok(s) => Ok(Value::Text(s)),
             Err(_string_decode_err) => match term.decode::<Binary>() {
@@ -418,8 +416,10 @@ pub(crate) fn decode_exec_keyword_params<'a>(
 /// The parameter a keyword key names. SQLite spells a name with one of three
 /// prefixes (`:a`, `@a`, `$a`), so a key that already carries one is used as
 /// written and every other key gets the `:` one — `[a: 1]` names `:a` and
-/// `[{:"@a", 1}]` names `@a`. A `?NNN` parameter and a bare `?` have no name
-/// at all, so no key reaches them.
+/// `[{:"@a", 1}]` names `@a`. SQLite does name a `?NNN` parameter, as `?NNN`,
+/// and only a bare `?` has no name at all; no key reaches either, because a
+/// key always comes out with one of the three prefixes — `[{:"?1", 1}]` asks
+/// for `:?1`.
 #[inline]
 fn parameter_name_of(key: String) -> String {
     match key.as_bytes().first() {
@@ -457,18 +457,15 @@ pub(crate) fn format_term_for_pragma<'a>(
                     .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{e:?}")))
             }
         }
-        TermType::Integer => term.decode::<i64>().map(|i| i.to_string()).map_err(|e| {
-            XqliteError::CannotConvertToSqliteValue {
-                value_str: format!("{term:?}"),
-                reason: format!("{e:?}"),
-            }
-        }),
-        TermType::Float => term.decode::<f64>().map(|f| f.to_string()).map_err(|e| {
-            XqliteError::CannotConvertToSqliteValue {
-                value_str: format!("{term:?}"),
-                reason: format!("{e:?}"),
-            }
-        }),
+        // One value, no list around it, so there is no position to report.
+        TermType::Integer => term
+            .decode::<i64>()
+            .map(|i| i.to_string())
+            .map_err(|_too_big| XqliteError::IntegerOutOfRange { position: None }),
+        TermType::Float => term
+            .decode::<f64>()
+            .map(|f| f.to_string())
+            .map_err(|_not_a_float| XqliteError::UnsupportedDataType { term_type }),
         TermType::Binary => pragma_text(term),
         _ => Err(XqliteError::UnsupportedDataType { term_type }),
     }

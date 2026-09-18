@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A bind the library refused left the statement runnable.** Every one of
+  the six refusals binds nothing at all, and SQLite reads a parameter nothing
+  was bound to as NULL, so `Xqlite.bind(stmt, [1, 2, {:no}])` followed by
+  `Xqlite.step(stmt)` ran the statement with NULL in every parameter and
+  answered success — an `UPDATE` written that way wrote NULL over its
+  columns. A statement that takes parameters now refuses `step/1`,
+  `multi_step/2` and `multi_step_cancellable/3` with
+  `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds,
+  and the same refusal covers a statement stepped straight after `prepare/2`.
+  An earlier successful bind stays in force, `reset/1` keeps it, and
+  `clear_bindings/1` is how a caller asks for a run with NULL in every
+  parameter. The refusal sits behind the lifecycle checks, so a finalized
+  statement still answers `:statement_finalized` and one on a closed
+  connection `:connection_closed`.
+- **`Xqlite.stream/4` took a batch size the fetch door cannot read.** The gate
+  accepted any integer at or above 1, while the fetch door reads the number as
+  a signed 64-bit integer, so `batch_size: 2 ** 63` opened a stream that died
+  on its first batch — and under `on_error: :halt` that was an empty stream
+  with no error at all. The gate now bounds the number to
+  `1..9223372036854775807` and answers
+  `{:error, {:invalid_batch_size, %{provided: _, minimum: 1}}}` at the call,
+  as it already did for `0` and for a term that is no integer.
+
 - **A keyword list that left a name out wrote NULL over that column.** A
   named parameter nothing was bound to reads as NULL, so
   `Xqlite.query(conn, "UPDATE t SET a = :a, b = :b WHERE id = 1", a: "new_a")`
@@ -99,6 +122,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`:type_extensions` is judged before anything else runs.** A term that is
+  no proper list of module names reached `length/1` or the encode chain and
+  raised: `Xqlite.stream(conn, sql, params, type_extensions: [JSON | :x])`
+  raised `ArgumentError`, and `query/4`, `execute/4`, `bind/3` and the
+  cancellable doors raised `FunctionClauseError`. Every door that takes the
+  option now answers `{:error, {:invalid_type_extensions, refusal}}` before
+  its telemetry and before the NIF, the refusal naming what stopped the walk
+  (`:not_a_list`, `:improper_tail`, or `:bad_element` with the element's
+  one-based position) and the kind of term it was. `nil` and an absent option
+  both mean no extensions.
+- **An integer SQLite has no room for answers a structured error.** A number
+  past the signed 64-bit range used to answer
+  `{:cannot_convert_to_sqlite_value, "9223372036854775808", "{error, badarg}"}`
+  — a tag carrying two debug strings, which four different causes shared. The
+  tag is gone. A parameter outside the range is now
+  `{:error, {:integer_out_of_range, %{position: n}}}`, `n` being the value's
+  one-based place in the list; `XqliteNIF.set_pragma/3` judges one value with
+  no list around it and answers `{:error, {:integer_out_of_range, %{}}}`. A
+  TEXT or BLOB parameter longer than SQLite's C interface can be told about
+  answers `{:error, {:value_too_large, %{byte_size: _, limit: _}}}`.
 - **A key named twice in a parameter list is refused.** `[a: 1, a: 2]` used to
   bind the second value, where every `Keyword` function reads the first. Two
   keys that name the same parameter — `[{:a, 1}, {:":a", 2}]` included, since

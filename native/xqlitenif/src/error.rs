@@ -156,6 +156,25 @@ fn encode_list_refusal<'a>(
     }
 }
 
+/// The map carries `position` only where the value came out of a list; a
+/// PRAGMA value is judged on its own and answers an empty map.
+fn encode_integer_out_of_range(env: Env<'_>, position: Option<usize>) -> Term<'_> {
+    let map_result = match position {
+        Some(position) => map_new(env).map_put(atoms::position(), position),
+        None => Ok(map_new(env)),
+    };
+
+    match map_result {
+        Ok(map) => (atoms::integer_out_of_range(), map).encode(env),
+        Err(_) => {
+            let err = XqliteError::InternalEncodingError {
+                context: "Failed map create for IntegerOutOfRange".to_string(),
+            };
+            err.encode(env)
+        }
+    }
+}
+
 /// A pragma name is handed back exactly as the caller wrote it, bytes and all,
 /// so a name holding something that is no UTF-8 is still the name they used.
 fn encode_pragma_name<'a>(env: Env<'a>, name: &[u8]) -> Term<'a> {
@@ -187,9 +206,17 @@ pub(crate) enum ListRefusal {
 
 #[derive(Debug, Clone)]
 pub(crate) enum XqliteError {
-    CannotConvertToSqliteValue {
-        value_str: String,
-        reason: String,
+    // An Elixir integer with no room in SQLite's signed 64 bits. `position`
+    // is the value's one-based place in the parameter list, and None where
+    // one value was judged on its own, as a PRAGMA value is.
+    IntegerOutOfRange {
+        position: Option<usize>,
+    },
+    // A TEXT or BLOB parameter longer than the bytes SQLite's C API can be
+    // told about.
+    ValueTooLarge {
+        byte_size: usize,
+        limit: usize,
     },
     ToSqlConversionFailure {
         reason: String,
@@ -226,6 +253,11 @@ pub(crate) enum XqliteError {
     CannotConvertAtomToString(String),
     InvalidParameterCount {
         provided: usize,
+        expected: usize,
+    },
+    // A statement that takes parameters, stepped before anything set them.
+    // SQLite would read every one of them as NULL and run.
+    ParametersUnbound {
         expected: usize,
     },
     InvalidParameterName(String),
@@ -421,9 +453,16 @@ impl XqliteError {
 impl Display for XqliteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            XqliteError::CannotConvertToSqliteValue { value_str, reason } => write!(
+            XqliteError::IntegerOutOfRange { position } => match position {
+                Some(position) => write!(
+                    f,
+                    "parameter {position} is an integer outside SQLite's 64-bit range"
+                ),
+                None => write!(f, "the value is an integer outside SQLite's 64-bit range"),
+            },
+            XqliteError::ValueTooLarge { byte_size, limit } => write!(
                 f,
-                "Cannot convert Elixir value '{value_str}' to SQLite type: {reason}"
+                "a value of {byte_size} bytes is longer than the {limit} SQLite can be given"
             ),
             XqliteError::ToSqlConversionFailure { reason } => {
                 write!(f, "Cannot convert Rust value to SQLite type: {reason}")
@@ -576,6 +615,10 @@ impl Display for XqliteError {
                 f,
                 "Invalid parameter count: provided {provided}, expected {expected}"
             ),
+            XqliteError::ParametersUnbound { expected } => write!(
+                f,
+                "the statement takes {expected} parameter(s) and nothing has bound them"
+            ),
             XqliteError::InvalidParameterName(name) => {
                 write!(f, "Invalid parameter name: '{name}'")
             }
@@ -680,8 +723,22 @@ impl Display for XqliteError {
 impl Encoder for XqliteError {
     fn encode<'a>(&self, env: Env<'a>) -> Term<'a> {
         match self {
-            XqliteError::CannotConvertToSqliteValue { value_str, reason } => {
-                (atoms::cannot_convert_to_sqlite_value(), value_str, reason).encode(env)
+            XqliteError::IntegerOutOfRange { position } => {
+                encode_integer_out_of_range(env, *position)
+            }
+            XqliteError::ValueTooLarge { byte_size, limit } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::byte_size(), byte_size)
+                    .and_then(|map| map.map_put(atoms::limit(), limit));
+                match map_result {
+                    Ok(map) => (atoms::value_too_large(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for ValueTooLarge".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
             XqliteError::ToSqlConversionFailure { reason } => {
                 (atoms::to_sql_conversion_failure(), reason).encode(env)
@@ -797,6 +854,17 @@ impl Encoder for XqliteError {
                     Err(_) => {
                         let err = XqliteError::InternalEncodingError {
                             context: "Failed map create for InvalidParameterCount".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
+            XqliteError::ParametersUnbound { expected } => {
+                match map_new(env).map_put(atoms::expected(), expected) {
+                    Ok(map) => (atoms::parameters_unbound(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for ParametersUnbound".to_string(),
                         };
                         err.encode(env)
                     }

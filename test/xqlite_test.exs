@@ -209,6 +209,44 @@ defmodule XqliteTest do
         end
       end
 
+      # The fetch door reads the batch size as a signed 64-bit integer, so a
+      # bigger number never reaches it. Left to the fetch, it failed on the
+      # first batch — and under `on_error: :halt` that was an empty stream
+      # with no error at all.
+      test "stream/4 rejects a batch size past the fetch door's range at open",
+           %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users;"
+
+        for provided <- [
+              9_223_372_036_854_775_808,
+              18_446_744_073_709_551_616,
+              -18_446_744_073_709_551_616
+            ] do
+          assert {:error, {:invalid_batch_size, %{provided: ^provided, minimum: 1}}} =
+                   Xqlite.stream(conn, sql, [], batch_size: provided)
+        end
+      end
+
+      test "stream/4 takes the largest batch size the fetch door reads", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users;"
+        opts = [batch_size: 9_223_372_036_854_775_807]
+
+        assert @record_count ==
+                 conn
+                 |> Xqlite.stream(sql, [], opts)
+                 |> Enum.count()
+      end
+
+      property "a batch size outside the fetch door's range is refused at open",
+               %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users;"
+
+        check all(outside <- outside_batch_range(), max_runs: 2000) do
+          assert {:error, {:invalid_batch_size, %{provided: ^outside, minimum: 1}}} =
+                   Xqlite.stream(conn, sql, [], batch_size: outside)
+        end
+      end
+
       test "query/4 refuses a keyword list that leaves a parameter out", %{conn: conn} do
         sql = "UPDATE stream_test_users SET name = :name, email = :email WHERE id = 1"
         params = [name: "new_name"]
@@ -448,6 +486,21 @@ defmodule XqliteTest do
       assert {:ok, %{rows: [["hello"]]}} =
                NIF.query(conn, "SELECT n FROM coerce", [])
     end
+  end
+
+  # Batch sizes the fetch door cannot read: below one, and past either end of
+  # the signed 64-bit range it decodes the caller's number into.
+  defp outside_batch_range do
+    StreamData.one_of([
+      StreamData.map(StreamData.integer(0..1_000_000), fn step ->
+        9_223_372_036_854_775_808 + step
+      end),
+      StreamData.map(StreamData.integer(0..1_000_000), fn step ->
+        -9_223_372_036_854_775_809 - step
+      end),
+      StreamData.map(StreamData.integer(64..512), fn bits -> Bitwise.bsl(1, bits) end),
+      StreamData.integer(-1_000_000..0)
+    ])
   end
 
   # Seeds a table whose 3rd row (by id) holds an invalid-UTF-8 TEXT value, so a

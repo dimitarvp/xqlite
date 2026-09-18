@@ -272,10 +272,39 @@ defmodule Xqlite.NIF.StatementTest do
     # step before bind
     # -------------------------------------------------------------------
 
-    test "stepping before any bind runs with NULL parameters", %{conn: conn} do
+    test "stepping before any bind is refused", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
-      assert {:row, [nil]} = Xqlite.step(stmt)
+      assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.step(stmt)
+      assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.multi_step(stmt, 2)
+
+      assert {:error, {:parameters_unbound, %{expected: 1}}} =
+               Xqlite.multi_step_cancellable(stmt, 2, [])
+
       assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a refused bind leaves nothing to run", %{conn: conn} do
+      seed(conn, 2)
+      {:ok, stmt} = Xqlite.prepare(conn, "UPDATE items SET label = ?1")
+
+      assert {:error, {:unsupported_data_type, :tuple}} = Xqlite.bind(stmt, [{:no}])
+      assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.step(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+
+      assert {:ok, %{rows: [["v1"], ["v2"]]}} =
+               Xqlite.query(conn, "SELECT label FROM items ORDER BY id", [])
+    end
+
+    test "a closed connection is reported before an unbound statement", %{conn: conn} do
+      {:ok, other} = Xqlite.open_in_memory()
+      {:ok, stmt} = Xqlite.prepare(other, "SELECT ?1")
+
+      assert :ok = Xqlite.close(other)
+      assert {:error, :connection_closed} = Xqlite.step(stmt)
+      assert {:error, :connection_closed} = Xqlite.multi_step(stmt, 2)
+      assert :ok = Xqlite.finalize(stmt)
+
+      assert {:ok, %{rows: [[1]]}} = Xqlite.query(conn, "SELECT 1", [])
     end
 
     # -------------------------------------------------------------------

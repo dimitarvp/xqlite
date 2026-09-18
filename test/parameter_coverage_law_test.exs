@@ -197,6 +197,39 @@ defmodule Xqlite.ParameterCoverageLawTest do
                Xqlite.query(conn, "SELECT :a, @b, $c", short)
     end
 
+    # The walk resolves each key to its parameter index and the binder uses
+    # that index, so the keyword list's own order is free.
+    test "a keyword list in any order binds each value to its own parameter",
+         %{conn: conn} do
+      sql = "SELECT :a, :b, :c, :d"
+      values = [a: "va", b: "vb", c: "vc", d: "vd"]
+
+      for order <- permutations(values) do
+        assert {:ok, %{rows: [["va", "vb", "vc", "vd"]]}} = Xqlite.query(conn, sql, order)
+
+        assert {:ok, stmt} = Xqlite.prepare(conn, sql)
+        assert :ok = Xqlite.bind(stmt, order)
+        assert {:row, ["va", "vb", "vc", "vd"]} = Xqlite.step(stmt)
+        assert :ok = Xqlite.finalize(stmt)
+      end
+    end
+
+    # The name walk reads a parameter's name back from SQLite as UTF-8. It
+    # never sees one that is not, because every door refuses the SQL text
+    # first.
+    test "SQL holding a parameter name that is no UTF-8 is refused at the door",
+         %{conn: conn} do
+      sql = "SELECT :" <> <<255>>
+
+      assert {:error, :invalid_utf8_in_string} = Xqlite.query(conn, sql, [1])
+      assert {:error, :invalid_utf8_in_string} = Xqlite.query(conn, sql, a: 1)
+      assert {:error, :invalid_utf8_in_string} = Xqlite.stream(conn, sql, [1])
+      assert {:error, :invalid_utf8_in_string} = Xqlite.prepare(conn, sql)
+      assert {:error, :invalid_utf8_in_string} = NIF.stmt_prepare(conn, sql)
+      assert {:error, :invalid_utf8_in_string} = NIF.stream_open(conn, sql, [1])
+      assert {:error, :invalid_utf8_in_string} = NIF.explain_analyze(conn, sql, [1])
+    end
+
     test "a key the statement lacks is refused before a name that is missing",
          %{conn: conn} do
       sql = "UPDATE pair_rows SET a = :a, b = :b WHERE id = 1"
@@ -257,6 +290,12 @@ defmodule Xqlite.ParameterCoverageLawTest do
              Xqlite.query(conn, "SELECT a, b FROM pair_rows WHERE id = 1", [])
 
     [a, b]
+  end
+
+  defp permutations([]), do: [[]]
+
+  defp permutations(list) do
+    for element <- list, rest <- permutations(list -- [element]), do: [element | rest]
   end
 
   # A statement of 1 to 4 named parameters, each in one of SQLite's three

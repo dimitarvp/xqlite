@@ -28,8 +28,11 @@ defmodule Xqlite.ImproperListLawTest do
   # cancellable call is always about its parameters.
   @doors [
     {:stream_params, :value, :expected_list},
+    {:stream_keyword, :pair, :expected_keyword_list},
     {:bind2_params, :value, :expected_list},
+    {:bind2_keyword, :pair, :expected_keyword_list},
     {:bind3_params, :value, :expected_list},
+    {:bind3_keyword, :pair, :expected_keyword_list},
     {:set_authorizer, :action, :expected_list},
     {:query_params, :value, :expected_list},
     {:query_keyword, :pair, :expected_keyword_list},
@@ -46,10 +49,15 @@ defmodule Xqlite.ImproperListLawTest do
     {:nif_query_params, :value, :expected_list},
     {:nif_query_keyword, :pair, :expected_keyword_list},
     {:nif_execute_params, :value, :expected_list},
+    {:nif_execute_keyword, :pair, :expected_keyword_list},
     {:nif_query_with_changes_params, :value, :expected_list},
+    {:nif_query_with_changes_keyword, :pair, :expected_keyword_list},
     {:nif_stmt_bind_params, :value, :expected_list},
+    {:nif_stmt_bind_keyword, :pair, :expected_keyword_list},
     {:nif_stream_open_params, :value, :expected_list},
+    {:nif_stream_open_keyword, :pair, :expected_keyword_list},
     {:nif_explain_analyze_params, :value, :expected_list},
+    {:nif_explain_analyze_keyword, :pair, :expected_keyword_list},
     {:nif_query_cancellable_tokens, :token, :invalid_cancel_tokens},
     {:nif_execute_cancellable_tokens, :token, :invalid_cancel_tokens},
     {:nif_execute_batch_cancellable_tokens, :token, :invalid_cancel_tokens},
@@ -57,7 +65,15 @@ defmodule Xqlite.ImproperListLawTest do
     {:nif_stmt_multi_step_cancellable_tokens, :token, :invalid_cancel_tokens},
     {:nif_stream_fetch_cancellable_tokens, :token, :invalid_cancel_tokens},
     {:nif_set_authorizer, :action, :expected_list},
-    {:nif_backup_with_progress_tokens, :token, :invalid_cancel_tokens}
+    {:nif_backup_with_progress_tokens, :token, :invalid_cancel_tokens},
+    {:query_type_extensions, :extension, :invalid_type_extensions},
+    {:execute_type_extensions, :extension, :invalid_type_extensions},
+    {:explain_analyze_type_extensions, :extension, :invalid_type_extensions},
+    {:bind_type_extensions, :extension, :invalid_type_extensions},
+    {:stream_type_extensions, :extension, :invalid_type_extensions},
+    {:query_cancellable_type_extensions, :extension, :invalid_type_extensions},
+    {:execute_cancellable_type_extensions, :extension, :invalid_type_extensions},
+    {:query_with_changes_cancellable_type_extensions, :extension, :invalid_type_extensions}
   ]
 
   test "the anchor: a stream refuses an improper parameter list at open" do
@@ -165,6 +181,9 @@ defmodule Xqlite.ImproperListLawTest do
   defp elements(:pair, count), do: Enum.map(1..count, fn i -> {:"p#{i}", i} end)
   defp elements(:action, count), do: Enum.map(1..count, fn _i -> :pragma end)
 
+  defp elements(:extension, count),
+    do: Enum.map(1..count, fn _i -> Xqlite.TypeExtension.JSON end)
+
   defp elements(:token, count) do
     Enum.map(1..count, fn _i ->
       {:ok, token} = NIF.create_cancel_token()
@@ -192,13 +211,25 @@ defmodule Xqlite.ImproperListLawTest do
 
   defp call(:stream_params, conn, list), do: Xqlite.stream(conn, "SELECT ?1", list)
 
+  defp call(:stream_keyword, conn, list), do: Xqlite.stream(conn, "SELECT :p1", list)
+
   defp call(:bind2_params, conn, list) do
     assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
     Xqlite.bind(stmt, list)
   end
 
+  defp call(:bind2_keyword, conn, list) do
+    assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT :p1")
+    Xqlite.bind(stmt, list)
+  end
+
   defp call(:bind3_params, conn, list) do
     assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+    Xqlite.bind(stmt, list, [])
+  end
+
+  defp call(:bind3_keyword, conn, list) do
+    assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT :p1")
     Xqlite.bind(stmt, list, [])
   end
 
@@ -244,18 +275,34 @@ defmodule Xqlite.ImproperListLawTest do
 
   defp call(:nif_execute_params, conn, list), do: NIF.execute(conn, "SELECT ?1", list)
 
+  defp call(:nif_execute_keyword, conn, list), do: NIF.execute(conn, "SELECT :p1", list)
+
   defp call(:nif_query_with_changes_params, conn, list),
     do: NIF.query_with_changes(conn, "SELECT ?1", list)
+
+  defp call(:nif_query_with_changes_keyword, conn, list),
+    do: NIF.query_with_changes(conn, "SELECT :p1", list)
 
   defp call(:nif_stmt_bind_params, conn, list) do
     assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT ?1")
     NIF.stmt_bind(stmt, list)
   end
 
+  defp call(:nif_stmt_bind_keyword, conn, list) do
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT :p1")
+    NIF.stmt_bind(stmt, list)
+  end
+
   defp call(:nif_stream_open_params, conn, list), do: NIF.stream_open(conn, "SELECT ?1", list)
+
+  defp call(:nif_stream_open_keyword, conn, list),
+    do: NIF.stream_open(conn, "SELECT :p1", list)
 
   defp call(:nif_explain_analyze_params, conn, list),
     do: NIF.explain_analyze(conn, "SELECT ?1", list)
+
+  defp call(:nif_explain_analyze_keyword, conn, list),
+    do: NIF.explain_analyze(conn, "SELECT :p1", list)
 
   defp call(:nif_query_cancellable_tokens, conn, list),
     do: NIF.query_cancellable(conn, "SELECT 1", [], list)
@@ -284,5 +331,37 @@ defmodule Xqlite.ImproperListLawTest do
   defp call(:nif_backup_with_progress_tokens, conn, list) do
     dest = Path.join(System.tmp_dir!(), "xqlite_improper_list_backup_never_written.db")
     NIF.backup_with_progress(conn, "main", dest, self(), 1, list)
+  end
+
+  defp call(:query_type_extensions, conn, list),
+    do: Xqlite.query(conn, "SELECT ?1", [1], type_extensions: list)
+
+  defp call(:execute_type_extensions, conn, list),
+    do: Xqlite.execute(conn, insert_sql(conn, "?1"), [1], type_extensions: list)
+
+  defp call(:explain_analyze_type_extensions, conn, list),
+    do: Xqlite.explain_analyze(conn, "SELECT ?1", [1], type_extensions: list)
+
+  defp call(:bind_type_extensions, conn, list) do
+    assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+    Xqlite.bind(stmt, [1], type_extensions: list)
+  end
+
+  defp call(:stream_type_extensions, conn, list),
+    do: Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: list)
+
+  defp call(:query_cancellable_type_extensions, conn, list),
+    do: Xqlite.query_cancellable(conn, "SELECT ?1", [1], new_token(), type_extensions: list)
+
+  defp call(:execute_cancellable_type_extensions, conn, list) do
+    Xqlite.execute_cancellable(conn, insert_sql(conn, "?1"), [1], new_token(),
+      type_extensions: list
+    )
+  end
+
+  defp call(:query_with_changes_cancellable_type_extensions, conn, list) do
+    Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], new_token(),
+      type_extensions: list
+    )
   end
 end

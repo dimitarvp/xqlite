@@ -184,13 +184,14 @@ defmodule XqliteNIF do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   """
   @spec query(
           conn :: Xqlite.conn(),
@@ -226,13 +227,14 @@ defmodule XqliteNIF do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   """
   @spec query_cancellable(
           conn :: Xqlite.conn(),
@@ -262,13 +264,14 @@ defmodule XqliteNIF do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   """
   @spec query_with_changes(
           conn :: Xqlite.conn(),
@@ -287,13 +290,14 @@ defmodule XqliteNIF do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   """
   @spec query_with_changes_cancellable(
           conn :: Xqlite.conn(),
@@ -355,6 +359,11 @@ defmodule XqliteNIF do
           detail: String.t()
         }]
       }
+
+  Parameters follow `query/3`'s rule: a plain list is positional and its
+  length must be the statement's own parameter count, a keyword list is named
+  and must name every parameter of the statement exactly once. See `query/3`
+  for the three refusals and for how a key names a parameter.
   """
   @spec explain_analyze(
           conn :: Xqlite.conn(),
@@ -393,13 +402,14 @@ defmodule XqliteNIF do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   """
   @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list() | keyword()) ::
           {:ok, non_neg_integer()} | Xqlite.error()
@@ -424,13 +434,14 @@ defmodule XqliteNIF do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
   must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
-  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
-  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
-  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
-  names `:a`.
+  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
+  a bare `?`, and a statement holding `?` or `?3` takes a positional list
+  only. A key starting with `:`, `@` or `$` names that parameter as written;
+  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
+  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
+  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   """
   @spec execute_cancellable(
           conn :: Xqlite.conn(),
@@ -1443,6 +1454,9 @@ defmodule XqliteNIF do
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise; wrap it as `%Xqlite.Blob{bytes: bytes}` to store a `BLOB`
   whatever the bytes are.
+
+  A refused bind binds nothing at all, and the statement it was called on
+  cannot be stepped until a bind succeeds or `stmt_clear_bindings/1` runs.
   """
   @spec stmt_bind(stmt :: Xqlite.stmt(), params :: list() | keyword()) ::
           :ok | Xqlite.error()
@@ -1463,6 +1477,14 @@ defmodule XqliteNIF do
   valid UTF-8 — is different: SQLite has already stepped past it, so the
   error is held back and answered by the next call that reads a row, and the
   statement carries on at the row after it.
+
+  A statement that takes parameters is refused with
+  `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds or
+  `stmt_clear_bindings/1` runs; a bind the library refused binds nothing, so
+  it leaves the statement unrunnable too. The check sits behind the
+  lifecycle ones, so a finalized statement still answers
+  `{:error, :statement_finalized}` and one on a closed connection
+  `{:error, :connection_closed}`.
   """
   @spec stmt_step(stmt :: Xqlite.stmt()) ::
           {:row, [Xqlite.sqlite_value()]} | :done | Xqlite.error()
@@ -1484,6 +1506,14 @@ defmodule XqliteNIF do
   bytes that are not valid UTF-8 — is different: the rows read before it come
   back now with `done: false`, the error waits, and the next call that reads
   a row answers it; the statement carries on at the row after the bad one.
+
+  A statement that takes parameters is refused with
+  `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds or
+  `stmt_clear_bindings/1` runs; a bind the library refused binds nothing, so
+  it leaves the statement unrunnable too. The check sits behind the
+  lifecycle ones, so a finalized statement still answers
+  `{:error, :statement_finalized}` and one on a closed connection
+  `{:error, :connection_closed}`.
   """
   @spec stmt_multi_step(stmt :: Xqlite.stmt(), batch_size :: pos_integer()) ::
           {:ok, %{rows: [[Xqlite.sqlite_value()]], done: boolean()}} | Xqlite.error()
@@ -1495,7 +1525,8 @@ defmodule XqliteNIF do
   Most users want `Xqlite.multi_step_cancellable/3`. Same return shape as
   `stmt_multi_step/2`; any signalled token in the list aborts the loop with
   `{:error, :operation_cancelled}` (OR-semantics; an empty list means plain
-  stepping).
+  stepping). The unbound-parameter refusal of `stmt_multi_step/2` applies
+  here too.
   """
   @spec stmt_multi_step_cancellable(
           stmt :: Xqlite.stmt(),
@@ -1508,7 +1539,8 @@ defmodule XqliteNIF do
   Resets a prepared statement so it can be stepped again (raw NIF).
 
   Most users want `Xqlite.reset/1`. Bindings are preserved (SQLite
-  semantics) — use `stmt_clear_bindings/1` to drop them. The return code of
+  semantics) — use `stmt_clear_bindings/1` to drop them — so a statement
+  that was bound stays runnable across a reset. The return code of
   `sqlite3_reset` echoes the most recent step error rather than reporting
   the reset itself, so this returns `:ok` for any live statement.
   """
@@ -1518,7 +1550,10 @@ defmodule XqliteNIF do
   @doc """
   Clears all parameter bindings on a prepared statement back to NULL (raw NIF).
 
-  Most users want `Xqlite.clear_bindings/1`.
+  Most users want `Xqlite.clear_bindings/1`. This is also the one way to ask
+  for a statement that runs with NULL in every parameter: a statement that
+  takes parameters and has never had a successful bind refuses to step until
+  this has run.
   """
   @spec stmt_clear_bindings(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
   def stmt_clear_bindings(_stmt), do: err()

@@ -7,7 +7,7 @@ use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::raw::{c_char, c_int};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Compiles exactly one SQL statement and hands the raw statement to the
@@ -214,6 +214,17 @@ pub(crate) struct XqliteStatement {
     /// finalization; live statements read column metadata directly so
     /// v2 auto-reprepare (schema changes) is reflected.
     pub(crate) column_names: Vec<String>,
+
+    /// How many parameters the statement takes, read once at prepare.
+    parameter_count: usize,
+
+    /// Whether anything has set this statement's parameters. False from
+    /// prepare for a statement that takes some, true for one that takes
+    /// none; a successful bind and `clear_bindings` set it, a refused bind
+    /// and a reset leave it alone. SQLite itself reads a parameter nothing
+    /// bound as NULL and runs the statement anyway, which is what the flag
+    /// is here to refuse.
+    parameters_set: AtomicBool,
 }
 
 #[rustler::resource_impl]
@@ -224,12 +235,31 @@ impl XqliteStatement {
         atomic_raw_stmt: Arc<AtomicPtr<ffi::sqlite3_stmt>>,
         conn_resource_arc: ResourceArc<XqliteConn>,
         column_names: Vec<String>,
+        parameter_count: usize,
     ) -> Self {
         XqliteStatement {
             atomic_raw_stmt,
             pending_error: Mutex::new(None),
             conn_resource_arc,
             column_names,
+            parameter_count,
+            parameters_set: AtomicBool::new(parameter_count == 0),
+        }
+    }
+
+    /// A bind that got as far as SQLite, and `clear_bindings`, both leave the
+    /// statement's parameters set — the second to NULL, which is the one way
+    /// a caller asks for that on purpose.
+    pub(crate) fn mark_parameters_set(&self) {
+        self.parameters_set.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn require_parameters_set(&self) -> Result<(), XqliteError> {
+        match self.parameters_set.load(Ordering::Acquire) {
+            true => Ok(()),
+            false => Err(XqliteError::ParametersUnbound {
+                expected: self.parameter_count,
+            }),
         }
     }
 

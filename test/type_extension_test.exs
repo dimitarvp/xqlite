@@ -963,6 +963,91 @@ defmodule Xqlite.TypeExtensionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # The :type_extensions option itself
+  # ---------------------------------------------------------------------------
+
+  describe "the :type_extensions option" do
+    setup do
+      assert {:ok, conn} = TestUtil.open_in_memory()
+      on_exit(fn -> assert :ok = NIF.close(conn) end)
+      {:ok, conn: conn}
+    end
+
+    test "a term that is no list at all is refused", %{conn: conn} do
+      assert {:error, {:invalid_type_extensions, %{reason: :not_a_list, value_type: :atom}}} =
+               Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: :nope)
+    end
+
+    test "a list whose tail is not one is refused", %{conn: conn} do
+      extensions = [Xqlite.TypeExtension.JSON | :x]
+
+      assert {:error, {:invalid_type_extensions, %{reason: :improper_tail, value_type: :atom}}} =
+               Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: extensions)
+    end
+
+    test "an element that is no module name is refused by its position", %{conn: conn} do
+      extensions = [Xqlite.TypeExtension.JSON, "x"]
+
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 2, value_type: :binary}}}
+
+      assert expected == Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: extensions)
+
+      assert expected == Xqlite.stream(conn, "SELECT 1", [], type_extensions: extensions)
+    end
+
+    test "nil and an absent option both mean no extensions", %{conn: conn} do
+      assert [%{"?1" => 1}] =
+               conn
+               |> Xqlite.stream("SELECT ?1", [1], type_extensions: nil)
+               |> Enum.to_list()
+
+      assert {:ok, %{rows: [[1]]}} = Xqlite.query(conn, "SELECT ?1", [1], type_extensions: nil)
+      assert {:ok, %{rows: [[1]]}} = Xqlite.query(conn, "SELECT ?1", [1])
+    end
+
+    test "every door that takes the option judges it the same way", %{conn: conn} do
+      assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE ext_rows (v)")
+      assert {:ok, token} = Xqlite.create_cancel_token()
+      assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+      bad = [Xqlite.TypeExtension.JSON | :x]
+
+      refusal =
+        {:error, {:invalid_type_extensions, %{reason: :improper_tail, value_type: :atom}}}
+
+      assert refusal == Xqlite.query(conn, "SELECT ?1", [1], type_extensions: bad)
+
+      assert refusal ==
+               Xqlite.execute(conn, "INSERT INTO ext_rows (v) VALUES (?1)", [1],
+                 type_extensions: bad
+               )
+
+      assert refusal == Xqlite.explain_analyze(conn, "SELECT ?1", [1], type_extensions: bad)
+      assert refusal == Xqlite.bind(stmt, [1], type_extensions: bad)
+
+      assert refusal ==
+               Xqlite.query_cancellable(conn, "SELECT ?1", [1], token, type_extensions: bad)
+
+      assert refusal ==
+               Xqlite.execute_cancellable(
+                 conn,
+                 "INSERT INTO ext_rows (v) VALUES (?1)",
+                 [1],
+                 token,
+                 type_extensions: bad
+               )
+
+      assert refusal ==
+               Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], token,
+                 type_extensions: bad
+               )
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 

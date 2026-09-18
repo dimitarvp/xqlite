@@ -25,6 +25,16 @@ defmodule Xqlite.StreamResourceCallbacks do
 
   @valid_on_error [:raise, :halt, :emit_error]
 
+  @default_batch_size 500
+
+  # The fetch door decodes the caller's number as a signed 64-bit integer, so
+  # a bigger one never reaches it at all.
+  @max_batch_size 9_223_372_036_854_775_807
+
+  @doc false
+  @spec default_batch_size() :: pos_integer()
+  def default_batch_size, do: @default_batch_size
+
   @spec start_fun({Xqlite.conn(), String.t(), list() | keyword(), keyword()}) ::
           {:ok, acc()} | {:error, Xqlite.error_reason()}
   def start_fun({conn, sql, params, opts}) do
@@ -46,8 +56,8 @@ defmodule Xqlite.StreamResourceCallbacks do
   # stream that cannot fetch is refused where the caller asked for it, rather
   # than on the first element it takes out of the stream.
   defp validate_batch_size(opts) do
-    case Keyword.get(opts, :batch_size, 500) do
-      size when is_integer(size) and size >= 1 -> :ok
+    case Keyword.get(opts, :batch_size, @default_batch_size) do
+      size when is_integer(size) and size >= 1 and size <= @max_batch_size -> :ok
       other -> {:error, {:invalid_batch_size, %{provided: other, minimum: 1}}}
     end
   end
@@ -86,7 +96,7 @@ defmodule Xqlite.StreamResourceCallbacks do
       handle: handle,
       conn: conn,
       columns: columns,
-      batch_size: Keyword.get(opts, :batch_size, 500),
+      batch_size: Keyword.get(opts, :batch_size, @default_batch_size),
       cancel_tokens: cancel_tokens,
       type_extensions: Keyword.get(opts, :type_extensions, []),
       original_opts: opts,

@@ -157,6 +157,18 @@ If you need `ORDER BY` to be chronological, store a sort-stable form:
   decode, because a stored integer is indistinguishable from any other integer,
   so read-side conversion back to a `DateTime` is yours to do.)
 
+### A keyword list with hundreds of names binds slowly
+
+SQLite resolves a parameter name by walking the statement's own list of
+names, one string comparison per name (`sqlite3_bind_parameter_index`), so
+binding a keyword list of N names costs on the order of N² comparisons
+inside SQLite, where a positional list binds each value by its index in
+constant time. On one machine a thousand names bound about a hundred times
+slower than the same thousand values bound positionally, and at SQLite's
+cap of 32 766 parameters the gap was seconds against a millisecond. For a
+statement with a handful of parameters the difference is nothing; for one
+with hundreds, bind a positional list.
+
 ## Streaming
 
 ### Mid-stream errors surface via `:on_error`

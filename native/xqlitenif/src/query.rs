@@ -80,18 +80,28 @@ fn require_named_parameters_covered(
     stmt: &Statement<'_>,
     params: &[(String, Value)],
 ) -> Result<(), XqliteError> {
-    let mut claimed: Vec<usize> = Vec::with_capacity(params.len());
+    // One flag per parameter index, rather than a scan of the keys read so
+    // far: a list of n keys costs n steps here instead of n². The vector is
+    // sized from the statement's own parameter count, which SQLite caps at
+    // 32 766, so it is small whatever the SQL. This is not where a long
+    // keyword list spends its time: resolving each key still walks SQLite's
+    // own list of parameter names (sqlite3VListNameToNum, one strncmp per
+    // name), which costs far more.
+    let mut claimed = vec![false; stmt.parameter_count() + 1];
 
     for (name, _value) in params {
         let index = named_parameter_index(stmt, name)?;
 
-        match claimed.contains(&index) {
-            true => return Err(XqliteError::DuplicateParameterName(name.clone())),
-            false => claimed.push(index),
+        match claimed.get_mut(index) {
+            None => return Err(XqliteError::InvalidParameterName(name.clone())),
+            Some(flag) if *flag => {
+                return Err(XqliteError::DuplicateParameterName(name.clone()));
+            }
+            Some(flag) => *flag = true,
         }
     }
 
-    match (1..=stmt.parameter_count()).find(|index| !claimed.contains(index)) {
+    match (1..=stmt.parameter_count()).find(|index| claimed.get(*index) != Some(&true)) {
         None => Ok(()),
         Some(index) => Err(XqliteError::MissingParameter {
             index,
@@ -102,13 +112,16 @@ fn require_named_parameters_covered(
 
 /// The one-based place of the parameter a key names. A name the statement
 /// does not have, and one rusqlite cannot even look up (a NUL byte inside
-/// it), are the same refusal a raw-FFI door gives.
+/// it), are the same refusal a raw-FFI door gives — rusqlite answers the
+/// first as `None` today and the NUL byte as `None` too, so the third arm is
+/// the same answer for whichever of them a later rusqlite reports as an
+/// error.
 #[inline]
 fn named_parameter_index(stmt: &Statement<'_>, name: &str) -> Result<usize, XqliteError> {
     match stmt.parameter_index(name) {
         Ok(Some(index)) => Ok(index),
         Ok(None) => Err(XqliteError::InvalidParameterName(name.to_string())),
-        Err(e) => Err(XqliteError::from(e)),
+        Err(_no_such_name) => Err(XqliteError::InvalidParameterName(name.to_string())),
     }
 }
 

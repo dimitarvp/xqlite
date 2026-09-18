@@ -235,10 +235,10 @@ unsafe fn bind_value_to_raw_stmt(
                 // legitimately contain interior NUL bytes (SQLite stores them
                 // fine), and sqlite3_bind_text never needs NUL termination
                 // when a length is supplied. SQLITE_TRANSIENT copies at once.
-                let len = c_int::try_from(s_val.len()).map_err(|_| {
-                    XqliteError::CannotConvertToSqliteValue {
-                        value_str: format!("<text len {}>", s_val.len()),
-                        reason: "text length exceeds c_int range".to_string(),
+                let len = c_int::try_from(s_val.len()).map_err(|_too_long| {
+                    XqliteError::ValueTooLarge {
+                        byte_size: s_val.len(),
+                        limit: c_int::MAX as usize,
                     }
                 })?;
                 ffi::sqlite3_bind_text(
@@ -250,10 +250,10 @@ unsafe fn bind_value_to_raw_stmt(
                 )
             }
             Value::Blob(b_val) => {
-                let len = c_int::try_from(b_val.len()).map_err(|_| {
-                    XqliteError::CannotConvertToSqliteValue {
-                        value_str: format!("<blob len {}>", b_val.len()),
-                        reason: "blob length exceeds c_int range".to_string(),
+                let len = c_int::try_from(b_val.len()).map_err(|_too_long| {
+                    XqliteError::ValueTooLarge {
+                        byte_size: b_val.len(),
+                        limit: c_int::MAX as usize,
                     }
                 })?;
                 ffi::sqlite3_bind_blob(
@@ -337,7 +337,20 @@ pub(crate) unsafe fn require_named_parameters_covered(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     params: &[(String, Value)],
 ) -> Result<Vec<c_int>, XqliteError> {
-    let mut claimed: Vec<c_int> = Vec::with_capacity(params.len());
+    // SAFETY: forwarded from this function's own contract.
+    let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
+
+    // Two structures, because they answer two questions. `indices` keeps the
+    // caller's order, which is what the caller zips its values with to bind.
+    // `claimed` is one flag per parameter index, so a second key naming the
+    // same parameter costs one step instead of a scan of the keys read so
+    // far. SQLite caps a statement's parameter count at 32 766, which is what
+    // makes the flag vector small whatever the SQL. The loop below still
+    // costs time squared in the number of keys, and that is SQLite's own
+    // doing: sqlite3_bind_parameter_index walks the statement's name list
+    // with one strncmp per name.
+    let mut indices: Vec<c_int> = Vec::with_capacity(params.len());
+    let mut claimed = vec![false; expected.max(0) as usize + 1];
 
     for (name, _value) in params {
         let c_name = std::ffi::CString::new(name.as_str())
@@ -348,20 +361,25 @@ pub(crate) unsafe fn require_named_parameters_covered(
         let index =
             unsafe { ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr()) };
 
-        match index {
-            0 => return Err(XqliteError::InvalidParameterName(name.clone())),
-            _found if claimed.contains(&index) => {
+        // Index 0 means the statement has no such parameter; an index the
+        // flag vector has no room for would mean the same, SQLite having
+        // answered outside its own count.
+        let slot = usize::try_from(index).ok().filter(|slot| *slot > 0);
+
+        match slot.and_then(|slot| claimed.get_mut(slot)) {
+            None => return Err(XqliteError::InvalidParameterName(name.clone())),
+            Some(flag) if *flag => {
                 return Err(XqliteError::DuplicateParameterName(name.clone()));
             }
-            found => claimed.push(found),
+            Some(flag) => {
+                *flag = true;
+                indices.push(index);
+            }
         }
     }
 
-    // SAFETY: forwarded from this function's own contract.
-    let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
-
-    match (1..=expected).find(|index| !claimed.contains(index)) {
-        None => Ok(claimed),
+    match (1..=expected).find(|index| !claimed_parameter(&claimed, *index)) {
+        None => Ok(indices),
         Some(index) => {
             // SAFETY: forwarded from this function's own contract. SQLite owns
             // the name for the statement's lifetime and it is copied here; a
@@ -384,6 +402,17 @@ pub(crate) unsafe fn require_named_parameters_covered(
                 name,
             })
         }
+    }
+}
+
+/// Whether a key has claimed the parameter at `index`. An index the flag
+/// vector has no room for cannot happen, the vector being sized from the
+/// statement's own parameter count, and reads as unclaimed.
+#[inline]
+fn claimed_parameter(claimed: &[bool], index: c_int) -> bool {
+    match usize::try_from(index) {
+        Ok(slot) => claimed.get(slot) == Some(&true),
+        Err(_negative) => false,
     }
 }
 
