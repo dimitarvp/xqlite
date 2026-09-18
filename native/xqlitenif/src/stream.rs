@@ -4,6 +4,7 @@ use crate::util::sqlite_row_to_elixir_terms;
 use rusqlite::ffi;
 use rusqlite::types::Value;
 use rustler::{Env, Resource, ResourceArc, Term};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -223,47 +224,31 @@ unsafe fn bind_value_to_raw_stmt(
     db_handle: *mut ffi::sqlite3,
 ) -> Result<(), XqliteError> {
     // SAFETY: forwarded from this function's own contract. SQLITE_TRANSIENT
-    // tells SQLite to copy the data immediately, so our local CString/slice
-    // can be dropped safely.
+    // tells SQLite to copy the data immediately, so our local slice can be
+    // dropped safely.
     let rc = unsafe {
         match value {
             Value::Null => ffi::sqlite3_bind_null(raw_stmt_ptr, bind_idx),
             Value::Integer(val) => ffi::sqlite3_bind_int64(raw_stmt_ptr, bind_idx, *val),
             Value::Real(val) => ffi::sqlite3_bind_double(raw_stmt_ptr, bind_idx, *val),
-            Value::Text(s_val) => {
-                // Bind with an explicit length instead of a CString: TEXT may
-                // legitimately contain interior NUL bytes (SQLite stores them
-                // fine), and sqlite3_bind_text never needs NUL termination
-                // when a length is supplied. SQLITE_TRANSIENT copies at once.
-                let len = c_int::try_from(s_val.len()).map_err(|_too_long| {
-                    XqliteError::ValueTooLarge {
-                        byte_size: s_val.len(),
-                        limit: c_int::MAX as usize,
-                    }
-                })?;
-                ffi::sqlite3_bind_text(
-                    raw_stmt_ptr,
-                    bind_idx,
-                    s_val.as_ptr() as *const std::os::raw::c_char,
-                    len,
-                    ffi::SQLITE_TRANSIENT(),
-                )
-            }
-            Value::Blob(b_val) => {
-                let len = c_int::try_from(b_val.len()).map_err(|_too_long| {
-                    XqliteError::ValueTooLarge {
-                        byte_size: b_val.len(),
-                        limit: c_int::MAX as usize,
-                    }
-                })?;
-                ffi::sqlite3_bind_blob(
-                    raw_stmt_ptr,
-                    bind_idx,
-                    b_val.as_ptr() as *const std::ffi::c_void,
-                    len,
-                    ffi::SQLITE_TRANSIENT(),
-                )
-            }
+            // The 64-bit forms take the byte count as it is. Binding with an
+            // explicit length rather than a CString is what lets TEXT hold
+            // interior NUL bytes, which SQLite stores fine.
+            Value::Text(s_val) => ffi::sqlite3_bind_text64(
+                raw_stmt_ptr,
+                bind_idx,
+                s_val.as_ptr() as *const std::os::raw::c_char,
+                s_val.len() as u64,
+                ffi::SQLITE_TRANSIENT(),
+                ffi::SQLITE_UTF8 as u8,
+            ),
+            Value::Blob(b_val) => ffi::sqlite3_bind_blob64(
+                raw_stmt_ptr,
+                bind_idx,
+                b_val.as_ptr() as *const std::ffi::c_void,
+                b_val.len() as u64,
+                ffi::SQLITE_TRANSIENT(),
+            ),
         }
     };
 
@@ -339,31 +324,27 @@ pub(crate) unsafe fn require_named_parameters_covered(
 ) -> Result<Vec<c_int>, XqliteError> {
     // SAFETY: forwarded from this function's own contract.
     let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
+    // SAFETY: forwarded from this function's own contract.
+    let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
 
     // Two structures, because they answer two questions. `indices` keeps the
     // caller's order, which is what the caller zips its values with to bind.
     // `claimed` is one flag per parameter index, so a second key naming the
     // same parameter costs one step instead of a scan of the keys read so
     // far. SQLite caps a statement's parameter count at 32 766, which is what
-    // makes the flag vector small whatever the SQL. The loop below still
-    // costs time squared in the number of keys, and that is SQLite's own
-    // doing: sqlite3_bind_parameter_index walks the statement's name list
-    // with one strncmp per name.
+    // makes the flag vector small whatever the SQL.
     let mut indices: Vec<c_int> = Vec::with_capacity(params.len());
     let mut claimed = vec![false; expected.max(0) as usize + 1];
 
     for (name, _value) in params {
-        let c_name = std::ffi::CString::new(name.as_str())
-            .map_err(|_| XqliteError::InvalidParameterName(name.clone()))?;
+        // A name the map does not hold is one the statement does not have.
+        let index = match by_name.get(name.as_str()) {
+            None => return Err(XqliteError::InvalidParameterName(name.clone())),
+            Some(index) => *index,
+        };
 
-        // SAFETY: forwarded from this function's own contract. c_name is a
-        // valid null-terminated CString; an unknown name answers 0, not UB.
-        let index =
-            unsafe { ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr()) };
-
-        // Index 0 means the statement has no such parameter; an index the
-        // flag vector has no room for would mean the same, SQLite having
-        // answered outside its own count.
+        // An index of 0, or one the flag vector has no room for, would mean
+        // the same, SQLite having answered outside its own count.
         let slot = usize::try_from(index).ok().filter(|slot| *slot > 0);
 
         match slot.and_then(|slot| claimed.get_mut(slot)) {
@@ -405,6 +386,50 @@ pub(crate) unsafe fn require_named_parameters_covered(
     }
 }
 
+/// SQLite's own spelling of every named parameter, against its one-based
+/// index, so that each key costs one hash lookup instead of a call to
+/// `sqlite3_bind_parameter_index`, which walks the statement's whole name list
+/// with one string comparison per name. Reading one name is a walk of the same
+/// list (`sqlite3VListNumToName`), so building the map is not free either — it
+/// is about twice as fast, measured at SQLite's cap of 32 766 parameters, and
+/// it is the most the C interface allows. A bare `?` has no name and is left
+/// out.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and
+/// `raw_stmt_ptr` is a live prepared statement of that connection.
+unsafe fn parameter_indices_by_name(
+    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
+    expected: c_int,
+) -> HashMap<String, c_int> {
+    let mut by_name = HashMap::with_capacity(expected.max(0) as usize);
+
+    for index in 1..=expected {
+        // SAFETY: forwarded from this function's own contract. SQLite owns
+        // the name for the statement's lifetime and it is copied here; a
+        // bare `?` has no name and answers a null pointer.
+        let name = unsafe {
+            let name_ptr = ffi::sqlite3_bind_parameter_name(raw_stmt_ptr, index);
+
+            match name_ptr.is_null() {
+                true => None,
+                false => Some(
+                    std::ffi::CStr::from_ptr(name_ptr)
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            }
+        };
+
+        if let Some(name) = name {
+            by_name.insert(name, index);
+        }
+    }
+
+    by_name
+}
+
 /// Whether a key has claimed the parameter at `index`. An index the flag
 /// vector has no room for cannot happen, the vector being sized from the
 /// statement's own parameter count, and reads as unclaimed.
@@ -413,6 +438,27 @@ fn claimed_parameter(claimed: &[bool], index: c_int) -> bool {
     match usize::try_from(index) {
         Ok(slot) => claimed.get(slot) == Some(&true),
         Err(_negative) => false,
+    }
+}
+
+/// Why a bind did not happen, and how much of it SQLite had already taken.
+///
+/// The library's own refusals — the count, the names, a value it cannot
+/// convert, a value over the connection's length limit — all come before the
+/// first `sqlite3_bind_*` call, so the statement is untouched. An error from
+/// SQLite itself comes part-way through the list, with the values before it
+/// bound and the failing parameter left NULL.
+pub(crate) enum BindFailure {
+    NothingBound(XqliteError),
+    PartlyBound(XqliteError),
+}
+
+impl BindFailure {
+    pub(crate) fn into_error(self) -> XqliteError {
+        match self {
+            BindFailure::NothingBound(error) => error,
+            BindFailure::PartlyBound(error) => error,
+        }
     }
 }
 
@@ -425,14 +471,19 @@ pub(crate) unsafe fn bind_positional_params_ffi(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     params: &[Value],
     db_handle: *mut ffi::sqlite3,
-) -> Result<(), XqliteError> {
+) -> Result<(), BindFailure> {
     // SAFETY: forwarded from this function's own contract.
-    unsafe { require_parameter_count(raw_stmt_ptr, params.len()) }?;
+    unsafe { require_parameter_count(raw_stmt_ptr, params.len()) }
+        .map_err(BindFailure::NothingBound)?;
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { crate::limits::require_positional_within_length(db_handle, params) }
+        .map_err(BindFailure::NothingBound)?;
 
     for (i, value) in params.iter().enumerate() {
         // SQLite bind indices are 1-based
         // SAFETY: forwarded from this function's own contract.
-        unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, (i + 1) as c_int, value, db_handle) }?;
+        unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, (i + 1) as c_int, value, db_handle) }
+            .map_err(BindFailure::PartlyBound)?;
     }
     Ok(())
 }
@@ -446,13 +497,18 @@ pub(crate) unsafe fn bind_named_params_ffi(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     params: &[(String, Value)],
     db_handle: *mut ffi::sqlite3,
-) -> Result<(), XqliteError> {
+) -> Result<(), BindFailure> {
     // SAFETY: forwarded from this function's own contract.
-    let indices = unsafe { require_named_parameters_covered(raw_stmt_ptr, params) }?;
+    let indices = unsafe { require_named_parameters_covered(raw_stmt_ptr, params) }
+        .map_err(BindFailure::NothingBound)?;
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { crate::limits::require_named_within_length(db_handle, params) }
+        .map_err(BindFailure::NothingBound)?;
 
     for ((_name, value), bind_idx) in params.iter().zip(indices) {
         // SAFETY: forwarded from this function's own contract.
-        unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, bind_idx, value, db_handle) }?;
+        unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, bind_idx, value, db_handle) }
+            .map_err(BindFailure::PartlyBound)?;
     }
     Ok(())
 }

@@ -144,11 +144,13 @@ unsafe fn bind_params<'a>(
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
             // SAFETY: forwarded from this function's own contract.
             unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
+                .map_err(crate::stream::BindFailure::into_error)
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
             // SAFETY: forwarded from this function's own contract.
             unsafe { bind_positional_params_ffi(stmt_ptr, &positional_values, db_handle) }
+                .map_err(crate::stream::BindFailure::into_error)
         }
     }
 }

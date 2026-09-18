@@ -302,7 +302,7 @@ defmodule Xqlite.ParameterCoverageLawTest do
   # name spellings, and a keyword list for it: one that keeps some of the
   # names (`keeps`), or one that covers them all and names one twice.
   defp named_case do
-    bind(list_of(member_of([":", "@", "$"]), length: 1..4), fn prefixes ->
+    bind(list_of(member_of([":", "@", "$"]), length: 1..64), fn prefixes ->
       count = length(prefixes)
 
       one_of([

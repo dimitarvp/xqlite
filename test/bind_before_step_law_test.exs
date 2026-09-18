@@ -19,6 +19,15 @@ defmodule Xqlite.BindBeforeStepLawTest do
       force and a statement that never had one stays unrunnable;
     * `reset/1` changes nothing either, SQLite keeping the bindings across it.
 
+  "A refused bind changes nothing" is a rule about refusals the library makes
+  itself, and it holds because every one of them judges the whole list before
+  a single value reaches SQLite — the count, the names, a value no SQLite type
+  can hold, and a value longer than the connection's own length limit. It is
+  not a rule about SQLite: were a value to reach SQLite and be refused there,
+  the values before it would stay bound, `reset/1` would not undo them (SQLite
+  keeps bindings across a reset) and `clear_bindings/1` would replace every
+  parameter with NULL rather than put back what was bound before.
+
   The row the step reads back is the oracle: it holds the values of the last
   successful bind, or NULL in every column after `clear_bindings/1`.
   """
@@ -31,6 +40,10 @@ defmodule Xqlite.BindBeforeStepLawTest do
   @moduletag timeout: 300_000
 
   @doors [:step, :multi_step, :multi_step_cancellable]
+
+  # Low enough that a value one byte over it is cheap to build, and well above
+  # the 30 SQLite silently raises a smaller `:length` to.
+  @length_limit 64
 
   for_each_opener "a step before a bind" do
     test "the anchor: a statement that takes a parameter is refused", %{conn: conn} do
@@ -70,7 +83,21 @@ defmodule Xqlite.BindBeforeStepLawTest do
       assert ["seed"] == stored(conn)
     end
 
+    test "a bind refused for its length leaves an earlier one in force", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, @length_limit)
+      assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
+      assert :ok = Xqlite.bind(stmt, [7, 8])
+
+      assert {:error, {:value_too_large, %{limit: @length_limit}}} =
+               Xqlite.bind(stmt, [9, String.duplicate("x", @length_limit + 1)])
+
+      assert {:row, [7, 8]} = Xqlite.step(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
     property "a step answers the rule whatever came before it", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, @length_limit)
+
       check all(
               count <- integer(0..4),
               actions <- actions(count),
@@ -113,7 +140,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
   end
 
   defp actions(_count) do
-    [:bind_ok, :refuse_count, :refuse_value, :clear, :reset]
+    [:bind_ok, :refuse_count, :refuse_value, :refuse_length, :clear, :reset]
     |> member_of()
     |> list_of(max_length: 4)
   end
@@ -137,6 +164,15 @@ defmodule Xqlite.BindBeforeStepLawTest do
   defp act(:refuse_value, stmt, count, state) do
     values = List.replace_at(values_for(count, 0), count - 1, {:no})
     assert {:error, {:unsupported_data_type, :tuple}} = Xqlite.bind(stmt, values)
+    state
+  end
+
+  defp act(:refuse_length, stmt, count, state) do
+    over_the_limit = String.duplicate("x", @length_limit + 1)
+    values = List.replace_at(values_for(count, 0), count - 1, over_the_limit)
+
+    assert {:error, {:value_too_large, %{limit: @length_limit}}} = Xqlite.bind(stmt, values)
+
     state
   end
 

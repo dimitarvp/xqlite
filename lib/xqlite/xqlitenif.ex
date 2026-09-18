@@ -190,8 +190,10 @@ defmodule XqliteNIF do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
   """
   @spec query(
           conn :: Xqlite.conn(),
@@ -233,8 +235,10 @@ defmodule XqliteNIF do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
   """
   @spec query_cancellable(
           conn :: Xqlite.conn(),
@@ -270,8 +274,10 @@ defmodule XqliteNIF do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
   """
   @spec query_with_changes(
           conn :: Xqlite.conn(),
@@ -296,8 +302,10 @@ defmodule XqliteNIF do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
   """
   @spec query_with_changes_cancellable(
           conn :: Xqlite.conn(),
@@ -408,8 +416,10 @@ defmodule XqliteNIF do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
   """
   @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list() | keyword()) ::
           {:ok, non_neg_integer()} | Xqlite.error()
@@ -440,8 +450,10 @@ defmodule XqliteNIF do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
   """
   @spec execute_cancellable(
           conn :: Xqlite.conn(),
@@ -1020,6 +1032,38 @@ defmodule XqliteNIF do
   def autocommit(_conn), do: err()
 
   @doc """
+  Reads, and optionally sets, one of the connection's limits (raw NIF).
+
+  Most users want `Xqlite.limit/3`. Equivalent to `sqlite3_limit`: it answers
+  `{:ok, previous}`, the value in force before the call, so a read and a set
+  look the same from the outside.
+
+  `category` is one of `:length`, `:sql_length`, `:column`, `:expr_depth`,
+  `:compound_select`, `:vdbe_op`, `:function_arg`, `:attached`,
+  `:like_pattern_length`, `:variable_number`, `:trigger_depth`,
+  `:worker_threads` and `:parser_depth`; any other atom answers
+  `{:error, {:invalid_limit_category, category}}` and a term that is no atom
+  raises `ArgumentError`.
+
+  `new_value` of `-1` reads without setting. A value from `0` to
+  `2_147_483_647` sets; anything else answers
+  `{:error, {:invalid_limit_value, %{category: category, value: value}}}`, and
+  a number outside signed 64 bits, or a term that is no integer, raises
+  `ArgumentError`. SQLite clamps a new value silently — down to its own
+  compile-time ceiling for the category, and up to 30 for `:length`, which is
+  the only category with a floor — so read the value back to see what took
+  effect.
+
+  A lowered `:length` also applies to reads: SQLite refuses a row or a column
+  longer than the current limit while it runs, as
+  `{:error, {:too_big, 18, message}}`, so lowering it below values already
+  stored makes reading them fail.
+  """
+  @spec limit(conn :: Xqlite.conn(), category :: atom(), new_value :: integer()) ::
+          {:ok, integer()} | Xqlite.error()
+  def limit(_conn, _category, _new_value), do: err()
+
+  @doc """
   Returns the transaction state for the given schema (defaults to `"main"`).
 
   Equivalent to `sqlite3_txn_state`. Zero-cost; always available.
@@ -1455,8 +1499,13 @@ defmodule XqliteNIF do
   `BLOB` otherwise; wrap it as `%Xqlite.Blob{bytes: bytes}` to store a `BLOB`
   whatever the bytes are.
 
-  A refused bind binds nothing at all, and the statement it was called on
-  cannot be stepped until a bind succeeds or `stmt_clear_bindings/1` runs.
+  A bind the library refused — the count, the names, a value it cannot
+  convert, a value longer than the connection's length limit — binds nothing
+  at all, so it leaves the statement as it found it and an earlier successful
+  bind stays in force. A bind SQLite itself refused after it had taken values
+  leaves the values before the failing one bound and that one NULL, so the
+  statement cannot be stepped until a bind succeeds or
+  `stmt_clear_bindings/1` runs.
   """
   @spec stmt_bind(stmt :: Xqlite.stmt(), params :: list() | keyword()) ::
           :ok | Xqlite.error()
@@ -1480,8 +1529,9 @@ defmodule XqliteNIF do
 
   A statement that takes parameters is refused with
   `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds or
-  `stmt_clear_bindings/1` runs; a bind the library refused binds nothing, so
-  it leaves the statement unrunnable too. The check sits behind the
+  `stmt_clear_bindings/1` runs. A bind the library refused binds nothing, so
+  it leaves that state as it found it; a bind SQLite itself refused after it
+  had taken values puts the statement back into it. The check sits behind the
   lifecycle ones, so a finalized statement still answers
   `{:error, :statement_finalized}` and one on a closed connection
   `{:error, :connection_closed}`.
@@ -1509,8 +1559,9 @@ defmodule XqliteNIF do
 
   A statement that takes parameters is refused with
   `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds or
-  `stmt_clear_bindings/1` runs; a bind the library refused binds nothing, so
-  it leaves the statement unrunnable too. The check sits behind the
+  `stmt_clear_bindings/1` runs. A bind the library refused binds nothing, so
+  it leaves that state as it found it; a bind SQLite itself refused after it
+  had taken values puts the statement back into it. The check sits behind the
   lifecycle ones, so a finalized statement still answers
   `{:error, :statement_finalized}` and one on a closed connection
   `{:error, :connection_closed}`.

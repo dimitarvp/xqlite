@@ -295,6 +295,91 @@ defmodule Xqlite.NIF.StatementTest do
                Xqlite.query(conn, "SELECT label FROM items ORDER BY id", [])
     end
 
+    test "a value over the connection's length limit binds nothing", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
+
+      assert :ok = Xqlite.bind(stmt, [1, "first"])
+
+      assert {:error, {:value_too_large, %{byte_size: 65, limit: 64}}} =
+               Xqlite.bind(stmt, [2, String.duplicate("x", 65)])
+
+      assert {:row, [1, "first"]} = Xqlite.step(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a keyword list over the length limit binds nothing either", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT :a, :b")
+
+      assert :ok = Xqlite.bind(stmt, a: 1, b: "first")
+
+      assert {:error, {:value_too_large, %{byte_size: 65, limit: 64}}} =
+               Xqlite.bind(stmt, a: 2, b: String.duplicate("x", 65))
+
+      assert {:row, [1, "first"]} = Xqlite.step(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a value of exactly the length limit binds", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      at_the_limit = String.duplicate("x", 64)
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
+
+      assert :ok = Xqlite.bind(stmt, [1, at_the_limit])
+      assert {:row, [1, ^at_the_limit]} = Xqlite.step(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a row longer than the limit is SQLite's own refusal at the step", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      {:ok, stmt} = Xqlite.prepare(conn, "INSERT INTO items (label) VALUES (?1)")
+
+      assert :ok = Xqlite.bind(stmt, [String.duplicate("x", 20)])
+      assert :done = Xqlite.step(stmt)
+      assert :ok = Xqlite.reset(stmt)
+
+      assert :ok = Xqlite.bind(stmt, [String.duplicate("x", 28)])
+      assert {:error, {:too_big, 18, message}} = Xqlite.step(stmt)
+      assert is_binary(message)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
+    test "a lowered length limit does not hide a statement", %{conn: conn} do
+      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      # Longer than the limit, so the expansion SQLite can hand back for it is
+      # capped away — which must not read as "this text holds no statement".
+      sql = "DELETE FROM items WHERE label = 'no such label'"
+      assert byte_size(sql) > 30
+
+      assert {:ok, %{num_rows: 0}} = Xqlite.query(conn, sql, [])
+      assert {:error, {:cannot_execute, reason}} = Xqlite.query(conn, "-- just a comment", [])
+      assert is_binary(reason)
+    end
+
+    test "the batch doors judge the batch size before anything else", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+      {:ok, token} = Xqlite.create_cancel_token()
+
+      assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} =
+               Xqlite.multi_step(stmt, 0)
+
+      assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} =
+               Xqlite.multi_step_cancellable(stmt, 0, [token])
+
+      assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.multi_step(stmt, 1)
+
+      assert {:error, {:parameters_unbound, %{expected: 1}}} =
+               Xqlite.multi_step_cancellable(stmt, 1, [token])
+
+      assert :ok = Xqlite.finalize(stmt)
+
+      assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} =
+               Xqlite.multi_step(stmt, 0)
+
+      assert {:error, :statement_finalized} = Xqlite.multi_step(stmt, 1)
+    end
+
     test "a closed connection is reported before an unbound statement", %{conn: conn} do
       {:ok, other} = Xqlite.open_in_memory()
       {:ok, stmt} = Xqlite.prepare(other, "SELECT ?1")

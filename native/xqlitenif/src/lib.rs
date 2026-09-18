@@ -30,6 +30,7 @@ pub(crate) mod atoms {
         cannot_execute_pragma,
         cannot_open_database,
         cascade,
+        category,
         code,
         columns,
         connection_closed,
@@ -112,6 +113,8 @@ pub(crate) mod atoms {
         invalid_column_index,
         invalid_column_name,
         invalid_column_type,
+        invalid_limit_category,
+        invalid_limit_value,
         invalid_pages_per_step,
         invalid_parameter_count,
         invalid_parameter_name,
@@ -122,6 +125,21 @@ pub(crate) mod atoms {
         invalid_stream_handle,
         list,
         limit,
+        // The thirteen categories `sqlite3_limit` takes, in SQLite's own
+        // order.
+        length,
+        sql_length,
+        column,
+        expr_depth,
+        compound_select,
+        vdbe_op,
+        function_arg,
+        attached,
+        like_pattern_length,
+        variable_number,
+        trigger_depth,
+        worker_threads,
+        parser_depth,
         literal,
         lock_error,
         log_pages,
@@ -211,11 +229,13 @@ pub(crate) mod atoms {
         text,
         time,
         timestamp,
+        too_big,
         to_sql_conversion_failure,
         transaction,
         truncate,
         r#type = "type",
         tuple,
+        value,
         value_too_large,
         value_type,
         vm_step,
@@ -253,6 +273,7 @@ mod constraint_parse;
 mod error;
 mod explain_analyze;
 mod hook_util;
+mod limits;
 mod log_hook;
 mod nif;
 mod pragma;

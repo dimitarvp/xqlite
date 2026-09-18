@@ -6,6 +6,32 @@ use crate::util::{
 use rusqlite::types::Value;
 use rusqlite::{Connection, Statement, ToSql};
 use rustler::{Env, Term};
+use std::collections::HashMap;
+
+/// Refuses a positional list holding a value over the connection's length
+/// limit, before rusqlite binds anything.
+///
+/// rusqlite reads that limit only behind its `limits` feature, which this
+/// crate does not enable, so the read goes straight to the C function on the
+/// connection's own handle.
+fn require_positional_within_length(
+    conn: &Connection,
+    params: &[Value],
+) -> Result<(), XqliteError> {
+    // SAFETY: the caller holds the connection Mutex for the whole call, so no
+    // other thread is inside a `sqlite3_*` call on this connection, and
+    // `handle()` is the live `sqlite3*` that Mutex guards.
+    unsafe { crate::limits::require_positional_within_length(conn.handle(), params) }
+}
+
+/// The keyword twin of `require_positional_within_length`.
+fn require_named_within_length(
+    conn: &Connection,
+    params: &[(String, Value)],
+) -> Result<(), XqliteError> {
+    // SAFETY: as in `require_positional_within_length`.
+    unsafe { crate::limits::require_named_within_length(conn.handle(), params) }
+}
 
 /// Reject SQL text containing an interior NUL byte before it reaches SQLite.
 ///
@@ -28,17 +54,20 @@ fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
 /// statement — no columns, no parameters, no SQL text — which rusqlite hands
 /// back as a `Statement` that steps straight into SQLITE_MISUSE.
 ///
-/// `expanded_sql()` is NULL for that case and for two others: an expansion
-/// longer than SQLITE_LIMIT_LENGTH, and an allocation failure. The first
-/// cannot happen here. A statement with zero parameters expands to its own
-/// text, whose length `sqlite3_prepare` already checked against
-/// SQLITE_LIMIT_SQL_LENGTH; both limits sit at the same compiled default
-/// (one billion bytes) because nothing in this crate calls `sqlite3_limit`
-/// to lower either. That leaves an allocation failure, which fails the call
-/// whichever way it is reported.
+/// `readonly()` is the tell: `sqlite3_stmt_readonly` answers true for a NULL
+/// statement, which is the one thing rusqlite's public API reports differently
+/// for one. It is true of plenty of real statements too — every SELECT, and
+/// the transaction-control ones — so the other three conditions narrow it, and
+/// `expanded_sql()` is what tells a NULL statement from `BEGIN`. That last one
+/// is also NULL for an expansion longer than the connection's length limit, so
+/// it may not judge alone: a caller who lowers `SQLITE_LIMIT_LENGTH` through
+/// `Xqlite.limit/3` would see an ordinary `CREATE TABLE` read as no statement.
 #[inline]
 fn reject_no_statement(stmt: &Statement<'_>) -> Result<(), XqliteError> {
-    if stmt.column_count() == 0 && stmt.parameter_count() == 0 && stmt.expanded_sql().is_none()
+    if stmt.column_count() == 0
+        && stmt.parameter_count() == 0
+        && stmt.readonly()
+        && stmt.expanded_sql().is_none()
     {
         Err(XqliteError::CannotExecute(
             "SQL contains no statement".to_string(),
@@ -79,30 +108,41 @@ fn require_parameter_count(stmt: &Statement<'_>, provided: usize) -> Result<(), 
 fn require_named_parameters_covered(
     stmt: &Statement<'_>,
     params: &[(String, Value)],
-) -> Result<(), XqliteError> {
-    // One flag per parameter index, rather than a scan of the keys read so
-    // far: a list of n keys costs n steps here instead of n². The vector is
-    // sized from the statement's own parameter count, which SQLite caps at
-    // 32 766, so it is small whatever the SQL. This is not where a long
-    // keyword list spends its time: resolving each key still walks SQLite's
-    // own list of parameter names (sqlite3VListNameToNum, one strncmp per
-    // name), which costs far more.
+) -> Result<Vec<usize>, XqliteError> {
+    let by_name = parameter_indices_by_name(stmt);
+
+    // Two structures, because they answer two questions. `indices` keeps the
+    // caller's order, which is what the caller zips its values with to bind.
+    // `claimed` is one flag per parameter index, rather than a scan of the
+    // keys read so far: a list of n keys costs n steps here instead of n².
+    // The vector is sized from the statement's own parameter count, which
+    // SQLite caps at 32 766, so it is small whatever the SQL.
+    let mut indices: Vec<usize> = Vec::with_capacity(params.len());
     let mut claimed = vec![false; stmt.parameter_count() + 1];
 
     for (name, _value) in params {
-        let index = named_parameter_index(stmt, name)?;
+        // A name the map does not hold is one the statement does not have,
+        // and so is an index of 0 — which is how SQLite says "no such
+        // parameter" and is no slot of the flag vector either.
+        let index = match by_name.get(name.as_str()).copied().filter(|i| *i > 0) {
+            None => return Err(XqliteError::InvalidParameterName(name.clone())),
+            Some(index) => index,
+        };
 
         match claimed.get_mut(index) {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
             Some(flag) if *flag => {
                 return Err(XqliteError::DuplicateParameterName(name.clone()));
             }
-            Some(flag) => *flag = true,
+            Some(flag) => {
+                *flag = true;
+                indices.push(index);
+            }
         }
     }
 
     match (1..=stmt.parameter_count()).find(|index| claimed.get(*index) != Some(&true)) {
-        None => Ok(()),
+        None => Ok(indices),
         Some(index) => Err(XqliteError::MissingParameter {
             index,
             name: stmt.parameter_name(index).map(str::to_string),
@@ -110,19 +150,35 @@ fn require_named_parameters_covered(
     }
 }
 
-/// The one-based place of the parameter a key names. A name the statement
-/// does not have, and one rusqlite cannot even look up (a NUL byte inside
-/// it), are the same refusal a raw-FFI door gives — rusqlite answers the
-/// first as `None` today and the NUL byte as `None` too, so the third arm is
-/// the same answer for whichever of them a later rusqlite reports as an
-/// error.
-#[inline]
-fn named_parameter_index(stmt: &Statement<'_>, name: &str) -> Result<usize, XqliteError> {
-    match stmt.parameter_index(name) {
-        Ok(Some(index)) => Ok(index),
-        Ok(None) => Err(XqliteError::InvalidParameterName(name.to_string())),
-        Err(_no_such_name) => Err(XqliteError::InvalidParameterName(name.to_string())),
-    }
+/// SQLite's own spelling of every named parameter, against its one-based
+/// index, so that each key costs one hash lookup instead of a call to
+/// `Statement::parameter_index`, which walks the statement's whole name list
+/// with one string comparison per name. A bare `?` has no name and is left
+/// out.
+///
+/// The twin for the raw-FFI doors is `stream.rs:parameter_indices_by_name`.
+fn parameter_indices_by_name<'a>(stmt: &'a Statement<'a>) -> HashMap<&'a str, usize> {
+    (1..=stmt.parameter_count())
+        .filter_map(|index| stmt.parameter_name(index).map(|name| (name, index)))
+        .collect()
+}
+
+/// Binds each value at the index the coverage walk resolved its key to, so
+/// no name is looked up twice. rusqlite's own named binding would resolve
+/// every name again through its parameter cache, which this walk no longer
+/// fills.
+fn bind_named_by_index(
+    stmt: &mut Statement<'_>,
+    params: &[(String, Value)],
+    indices: &[usize],
+) -> Result<(), XqliteError> {
+    params
+        .iter()
+        .zip(indices)
+        .try_for_each(|((_name, value), index)| {
+            stmt.raw_bind_parameter(*index, value)
+                .map_err(XqliteError::from)
+        })
 }
 
 pub(crate) fn core_query<'a>(
@@ -138,29 +194,27 @@ pub(crate) fn core_query<'a>(
         stmt.column_names().iter().map(|s| s.to_string()).collect();
     let column_count = column_names.len();
 
-    let rows_result = match walk_params(params_term)? {
+    let rows = match walk_params(params_term)? {
         Params::Empty => {
             require_parameter_count(&stmt, 0)?;
-            stmt.query([])
+            stmt.query([])?
         }
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
-            require_named_parameters_covered(&stmt, &named_params_vec)?;
-            let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                .iter()
-                .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                .collect();
-            stmt.query(params_for_rusqlite.as_slice())
+            let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
+            require_named_within_length(conn, &named_params_vec)?;
+            bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;
+            stmt.raw_query()
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
             require_parameter_count(&stmt, positional_values.len())?;
+            require_positional_within_length(conn, &positional_values)?;
             let params_slice: Vec<&dyn ToSql> =
                 positional_values.iter().map(|v| v as &dyn ToSql).collect();
-            stmt.query(params_slice.as_slice())
+            stmt.query(params_slice.as_slice())?
         }
     };
-    let rows = rows_result?;
 
     let results_vec = process_rows(env, rows, column_count)?;
     let num_rows = results_vec.len();
@@ -212,25 +266,24 @@ pub(crate) fn core_execute<'a>(
     let affected_rows = match walk_params(params_term)? {
         Params::Empty => {
             require_parameter_count(&stmt, 0)?;
-            stmt.execute([])
+            stmt.execute([])?
         }
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
-            require_named_parameters_covered(&stmt, &named_params_vec)?;
-            let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
-                .iter()
-                .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
-                .collect();
-            stmt.execute(params_for_rusqlite.as_slice())
+            let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
+            require_named_within_length(conn, &named_params_vec)?;
+            bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;
+            stmt.raw_execute()?
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
             require_parameter_count(&stmt, positional_values.len())?;
+            require_positional_within_length(conn, &positional_values)?;
             let params_slice: Vec<&dyn ToSql> =
                 positional_values.iter().map(|v| v as &dyn ToSql).collect();
-            stmt.execute(params_slice.as_slice())
+            stmt.execute(params_slice.as_slice())?
         }
-    }?;
+    };
 
     Ok(affected_rows)
 }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Xqlite.limit/3` and `XqliteNIF.limit/3`** — SQLite's per-connection
+  limits (`sqlite3_limit`). Thirteen categories, `-1` reads without setting,
+  and the call always answers the value that was in force before it. SQLite
+  clamps a new value silently, down to its own ceiling for the category and up
+  to 30 for `:length`, so read the value back to see what took effect.
+
 ### Fixed
 
 - **The telemetry guide names the one refusal answered without an event.**
@@ -15,6 +23,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stop; the guide said every operation emits events. Its event table also
   named `query_cancellable/4`, `query_with_changes_cancellable/4` and
   `explain_analyze/3` where the doors are `/5`, `/5` and `/4`.
+- **A bind SQLite refused part-way through the list left a half-written row.**
+  A value longer than the connection's length limit was refused only once
+  SQLite met it, with the values before it already bound and the failing
+  parameter left NULL — and the statement still runnable, so a step after the
+  error wrote a half-updated row. Every door now judges every TEXT and BLOB
+  parameter against that limit before it binds anything, and answers
+  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` with nothing
+  bound; a bind SQLite refuses for any other reason leaves the statement
+  unrunnable until a bind succeeds or `clear_bindings/1` runs.
+- **A keyword list of many names bound more slowly than it had to.** Each key
+  was resolved by walking the statement's whole list of parameter names, one
+  string comparison per name. Both binding paths now read the statement's own
+  names once into a map and bind by index, and the doors going through
+  rusqlite no longer let it resolve every name a second time. On one machine a
+  bind of 32 766 names went from 3.5 to 1.5 seconds, and the connection lock
+  is held for that much less. The cost still grows faster than the number of
+  names: reading the name at one index is itself a walk of SQLite's parameter
+  list, and its C interface offers no way to read them all in one pass.
+
+### Changed
+
+- **`{:value_too_large, _}` is now answered by every door that binds**, where
+  the doors going through rusqlite used to answer
+  `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw doors only
+  refused values above two gigabytes. The limit in the error is the
+  connection's own, which `Xqlite.limit/3` reads and sets.
+- **`SQLITE_TOOBIG` is classified as `{:too_big, code, message}`** wherever
+  SQLite answers it. It no longer comes from a bind, but it still comes from a
+  step: SQLite checks the same limit against the row it builds, a
+  concatenation and a column read.
+
 - **A bind the library refused left the statement runnable.** Every one of
   the six refusals binds nothing at all, and SQLite reads a parameter nothing
   was bound to as NULL, so `Xqlite.bind(stmt, [1, 2, {:no}])` followed by
@@ -171,7 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declaring the behaviour: `Jason` and OTP's `:json` both do, and
   `type_extensions: [Jason]` silently stored the integer `1` as the text
   `"1"`. And a module that exports `encode/1` but not `decode/1`, on the four
-  doors that never decode — `execute/4`, `explain_analyze/3`, `bind/3` and
+  doors that never decode — `execute/4`, `explain_analyze/4`, `bind/3` and
   `execute_cancellable/5` — which ran it to completion. A module written to
   the shape the `Xqlite.TypeExtension` moduledoc shows is unaffected. The
   check runs once per module for the life of the node: a module that passed

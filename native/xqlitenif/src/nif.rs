@@ -227,6 +227,17 @@ fn autocommit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn limit(
+    handle: ResourceArc<XqliteConn>,
+    category: rustler::Atom,
+    new_value: i64,
+) -> Result<i64, XqliteError> {
+    connection::with_conn(&handle, |conn| {
+        crate::limits::read_or_set(conn, category, new_value)
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn txn_state<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
@@ -776,16 +787,18 @@ fn stmt_bind<'a>(
     params_term: Term<'a>,
 ) -> Term<'a> {
     use crate::stream::{
-        bind_named_params_ffi, bind_positional_params_ffi, require_parameter_count,
+        BindFailure, bind_named_params_ffi, bind_positional_params_ffi,
+        require_parameter_count,
     };
     use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
         // Each call below: with_live_stmt holds the connection Mutex for the
         // whole closure and proved stmt_ptr a live statement of it.
-        match crate::util::walk_params(params_term)? {
+        let bound = match crate::util::walk_params(params_term)? {
             // SAFETY: the lock and the statement, as stated above.
-            Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
+            Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) }
+                .map_err(BindFailure::NothingBound),
             Params::Named(items) => {
                 let named = decode_exec_keyword_params(env, &items)?;
                 // SAFETY: the lock and the statement, as stated above.
@@ -796,12 +809,28 @@ fn stmt_bind<'a>(
                 // SAFETY: the lock and the statement, as stated above.
                 unsafe { bind_positional_params_ffi(stmt_ptr, &positional, db_handle) }
             }
+        };
+
+        // The flag moves under the same lock as the bind, so a step that took
+        // the lock straight after a bind answered `:ok` never reads it unset.
+        // A refusal of the library's own bound nothing and leaves an earlier
+        // successful bind in force; one SQLite gave after binding began left
+        // values half-applied, so the statement stops running until a bind
+        // succeeds or `clear_bindings` runs. The length check before the bind
+        // loop leaves an allocation failure as the only way into that arm,
+        // which no test can force — it still states the rule.
+        match bound {
+            Ok(()) => {
+                stmt_handle.mark_parameters_set();
+                Ok(())
+            }
+            Err(BindFailure::NothingBound(e)) => Err(e),
+            Err(BindFailure::PartlyBound(e)) => {
+                stmt_handle.clear_parameters_set();
+                Err(e)
+            }
         }
     });
-
-    if result.is_ok() {
-        stmt_handle.mark_parameters_set();
-    }
 
     singular_ok_or_error_tuple(env, result)
 }
@@ -980,12 +1009,9 @@ fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) 
         // SAFETY: with_live_stmt holds the connection mutex and proved
         // stmt_ptr live. sqlite3_clear_bindings always returns SQLITE_OK.
         unsafe { ffi::sqlite3_clear_bindings(stmt_ptr) };
+        stmt_handle.mark_parameters_set();
         Ok(())
     });
-
-    if result.is_ok() {
-        stmt_handle.mark_parameters_set();
-    }
 
     singular_ok_or_error_tuple(env, result)
 }
@@ -1061,11 +1087,13 @@ unsafe fn bind_stream_params<'a>(
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
             // SAFETY: forwarded from this function's own contract.
             unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
+                .map_err(crate::stream::BindFailure::into_error)
         }
         Params::Positional(items) => {
             let positional_params_vec = decode_plain_list_params(env, &items)?;
             // SAFETY: forwarded from this function's own contract.
             unsafe { bind_positional_params_ffi(stmt_ptr, &positional_params_vec, db_handle) }
+                .map_err(crate::stream::BindFailure::into_error)
         }
     }
 }

@@ -157,17 +157,18 @@ If you need `ORDER BY` to be chronological, store a sort-stable form:
   decode, because a stored integer is indistinguishable from any other integer,
   so read-side conversion back to a `DateTime` is yours to do.)
 
-### A keyword list with hundreds of names binds slowly
+### A positional list is still the cheaper way to bind many values
 
 SQLite resolves a parameter name by walking the statement's own list of
-names, one string comparison per name (`sqlite3_bind_parameter_index`), so
-binding a keyword list of N names costs on the order of N² comparisons
-inside SQLite, where a positional list binds each value by its index in
-constant time. On one machine a thousand names bound about a hundred times
-slower than the same thousand values bound positionally, and at SQLite's
-cap of 32 766 parameters the gap was seconds against a millisecond. For a
-statement with a handful of parameters the difference is nothing; for one
-with hundreds, bind a positional list.
+names, one string comparison per name (`sqlite3_bind_parameter_index`). xqlite
+does not call that for each key: it reads the statement's names into a map
+first and binds by index, which is about twice as fast at SQLite's cap of
+32 766 parameters. It is not free either — reading the name at one index is
+itself a walk of the same list — so the cost still grows faster than the
+number of names. A positional list does none of this, binding each value
+straight at its index, and the gap grows with the number of parameters. For a
+statement with a handful of them the difference is nothing; for one with
+thousands, bind a positional list.
 
 ## Streaming
 

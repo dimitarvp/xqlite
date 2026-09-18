@@ -212,8 +212,8 @@ pub(crate) enum XqliteError {
     IntegerOutOfRange {
         position: Option<usize>,
     },
-    // A TEXT or BLOB parameter longer than the bytes SQLite's C API can be
-    // told about.
+    // A TEXT or BLOB parameter longer than the connection's own length limit
+    // (SQLITE_LIMIT_LENGTH), judged before anything is bound.
     ValueTooLarge {
         byte_size: usize,
         limit: usize,
@@ -274,6 +274,16 @@ pub(crate) enum XqliteError {
     InvalidAuthorizerAction {
         action: Atom,
     },
+    // A limit category naming none of SQLite's thirteen.
+    InvalidLimitCategory {
+        category: Atom,
+    },
+    // A limit value outside what sqlite3_limit takes: -1 reads without
+    // setting, 0 to 2^31-1 sets.
+    InvalidLimitValue {
+        category: Atom,
+        value: i64,
+    },
     NulErrorInString,
     InvalidUtf8InString,
     MultipleStatements,
@@ -332,6 +342,14 @@ pub(crate) enum XqliteError {
     ReadOnlyDatabase {
         // SQLITE_READONLY — the extended code names the sub-reason
         // (READONLY_RECOVERY, READONLY_ROLLBACK, READONLY_DBMOVED, …).
+        extended_code: i32,
+        message: String,
+    },
+    TooBig {
+        // SQLITE_TOOBIG — SQLite met the connection's length limit while it
+        // ran: a row, a record it was building, a concatenation or a column
+        // read. A parameter over the same limit is refused before the bind,
+        // as ValueTooLarge.
         extended_code: i32,
         message: String,
     },
@@ -462,7 +480,7 @@ impl Display for XqliteError {
             },
             XqliteError::ValueTooLarge { byte_size, limit } => write!(
                 f,
-                "a value of {byte_size} bytes is longer than the {limit} SQLite can be given"
+                "a value of {byte_size} bytes is longer than this connection's limit of {limit}"
             ),
             XqliteError::ToSqlConversionFailure { reason } => {
                 write!(f, "Cannot convert Rust value to SQLite type: {reason}")
@@ -574,6 +592,12 @@ impl Display for XqliteError {
             } => {
                 write!(f, "Database is read-only: {message}")
             }
+            XqliteError::TooBig {
+                extended_code: _,
+                message,
+            } => {
+                write!(f, "Past the connection's length limit: {message}")
+            }
             XqliteError::AuthorizationDenied {
                 extended_code: _,
                 message,
@@ -645,6 +669,14 @@ impl Display for XqliteError {
             XqliteError::InvalidAuthorizerAction { action: _ } => {
                 write!(f, "Invalid authorizer action atom")
             }
+            XqliteError::InvalidLimitCategory { category: _ } => {
+                write!(f, "Invalid connection limit category")
+            }
+            XqliteError::InvalidLimitValue { category: _, value } => write!(
+                f,
+                "a limit of {value} is outside -1 (read) and 0 to {}",
+                i32::MAX
+            ),
             XqliteError::NulErrorInString => {
                 write!(f, "Input string contains embedded null byte")
             }
@@ -809,6 +841,10 @@ impl Encoder for XqliteError {
                 extended_code,
                 message,
             } => (atoms::read_only_database(), extended_code, message).encode(env),
+            XqliteError::TooBig {
+                extended_code,
+                message,
+            } => (atoms::too_big(), extended_code, message).encode(env),
             XqliteError::AuthorizationDenied {
                 extended_code,
                 message,
@@ -916,6 +952,23 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidAuthorizerAction { action } => {
                 (atoms::invalid_authorizer_action(), *action).encode(env)
+            }
+            XqliteError::InvalidLimitCategory { category } => {
+                (atoms::invalid_limit_category(), *category).encode(env)
+            }
+            XqliteError::InvalidLimitValue { category, value } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::category(), *category)
+                    .and_then(|map| map.map_put(atoms::value(), value));
+                match map_result {
+                    Ok(map) => (atoms::invalid_limit_value(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidLimitValue".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
             XqliteError::NulErrorInString => atoms::null_byte_in_string().encode(env),
             XqliteError::InvalidUtf8InString => atoms::invalid_utf8_in_string().encode(env),
@@ -1098,6 +1151,10 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
 
     match primary_code {
         ffi::SQLITE_READONLY => XqliteError::ReadOnlyDatabase {
+            extended_code: ffi_err.extended_code,
+            message: message_string,
+        },
+        ffi::SQLITE_TOOBIG => XqliteError::TooBig {
             extended_code: ffi_err.extended_code,
             message: message_string,
         },

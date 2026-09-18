@@ -211,22 +211,35 @@ defmodule Xqlite do
   list's: `:invalid_parameter_name` carries a name the statement does not
   have, `:duplicate_parameter_name` the second of two keys naming one
   parameter, and `:missing_parameter` the lowest-numbered parameter no key
-  named. All three carry the name the key resolved to, never the key itself:
-  a key already starting `:`, `@` or `$` is used as written and every other
-  key gets the `:` prefix, so `[c: 1]` answers `":c"` and `[{:"@b", 1}]`
-  answers `"@b"`. `:name` is `nil` only for a bare `?`, which no key can name.
+  named. The first two carry the name the key resolved to, never the key
+  itself: a key already starting `:`, `@` or `$` is used as written and every
+  other key gets the `:` prefix, so `[c: 1]` answers `":c"` and
+  `[{:"@b", 1}]` answers `"@b"`. `:missing_parameter` is about a parameter no
+  key named, so it carries SQLite's own spelling of it, read from the
+  statement; `:name` is `nil` only for a bare `?`, which no key can name.
 
   `:parameters_unbound` is a statement stepped before anything set its
   parameters, `:expected` being how many it takes. A bind the library refused
-  bound nothing, so it leaves the statement in that state too;
-  `clear_bindings/1` is how a caller asks for a run with NULL in every
-  parameter.
+  bound nothing, so it leaves the statement in whatever state it was already
+  in — an earlier successful bind stays in force. A bind SQLite itself refused
+  after it had taken values is the other way round: the values before the
+  failing one stayed bound, so the statement answers this error until a bind
+  succeeds or `clear_bindings/1` runs, which is also how a caller asks for a
+  run with NULL in every parameter.
 
   `:integer_out_of_range` is an integer with no room in SQLite's signed 64
   bits, with the value's one-based place in the parameter list in `:position`
   — and no `:position` at all where one value was judged on its own, as
   `XqliteNIF.set_pragma/3` does. `:value_too_large` is a TEXT or BLOB
-  parameter longer than the bytes SQLite's C interface can be told about.
+  parameter longer than the connection's own length limit, which
+  `Xqlite.limit/3` reads and sets; every door judges every value against it
+  before it binds anything, so the refusal binds nothing. `:too_big` is the
+  other side of the same limit: SQLite met it while it ran — a row it was
+  building, a concatenation, a column read — and the code is always 18.
+
+  `:invalid_limit_category` is an atom naming none of the thirteen limits
+  `Xqlite.limit/3` takes, and `:invalid_limit_value` a limit value outside
+  `-1` (which reads) and `0..2_147_483_647` (which sets).
 
   `:invalid_batch_size` carries the caller's own term in `:provided`, whatever
   kind of term it was: the stream fetch doors take it and judge it, where the
@@ -276,6 +289,8 @@ defmodule Xqlite do
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
+          | {:invalid_limit_category, atom()}
+          | {:invalid_limit_value, %{category: atom(), value: integer()}}
           | {:invalid_hook_option,
              %{key: :every_n | :tag, value: term(), reason: :invalid_value}}
           | {:invalid_on_error, term()}
@@ -317,6 +332,7 @@ defmodule Xqlite do
           | {:sqlite_failure, integer(), integer(), String.t() | nil}
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
+          | {:too_big, integer(), String.t()}
           | {:type_extension_refused,
              %{position: pos_integer(), extension: module(), reason: term()}}
           | {:unknown_pragma, atom() | String.t()}
@@ -1306,8 +1322,10 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
 
   ## Options
 
@@ -1396,8 +1414,10 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
 
   ## Options
 
@@ -1915,10 +1935,13 @@ defmodule Xqlite do
   stops on such an error rather than stepping on.
 
   A statement that takes parameters is refused until something sets them:
-  before a successful `bind/3`, and after one the library refused (which
-  binds nothing at all), the answer is
+  before a successful `bind/3` the answer is
   `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
-  parameters the statement takes. SQLite's own rule is the opposite — it
+  parameters the statement takes. A bind the library refused binds nothing at
+  all, so it leaves that answer as it found it and an earlier successful bind
+  stays in force; a bind SQLite itself refused after it had taken values is
+  the other way round, and leaves the statement unrunnable until a bind
+  succeeds or `clear_bindings/1` runs. SQLite's own rule is the opposite — it
   reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
   a caller asks for that on purpose. `reset/1` keeps the bindings, so a
   statement stays runnable across one.
@@ -1981,10 +2004,13 @@ defmodule Xqlite do
   stops on such an error rather than stepping on.
 
   A statement that takes parameters is refused until something sets them:
-  before a successful `bind/3`, and after one the library refused (which
-  binds nothing at all), the answer is
+  before a successful `bind/3` the answer is
   `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
-  parameters the statement takes. SQLite's own rule is the opposite — it
+  parameters the statement takes. A bind the library refused binds nothing at
+  all, so it leaves that answer as it found it and an earlier successful bind
+  stays in force; a bind SQLite itself refused after it had taken values is
+  the other way round, and leaves the statement unrunnable until a bind
+  succeeds or `clear_bindings/1` runs. SQLite's own rule is the opposite — it
   reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
   a caller asks for that on purpose. `reset/1` keeps the bindings, so a
   statement stays runnable across one.
@@ -2008,6 +2034,13 @@ defmodule Xqlite do
   After a cancellation, `reset/1` the statement before stepping it again; a
   cancellation discards the rows its batch had already read, as any failed
   step does.
+
+  `batch_size` is a guarded argument here, so a term that is no integer
+  raises `FunctionClauseError` and one outside SQLite's signed 64-bit range
+  raises `ArgumentError` from the NIF — the documented kinds for a wrong
+  argument at a guarded `Xqlite` function. `stream/4` answers a structured
+  `{:error, {:invalid_batch_size, _}}` for the same values, because there
+  the number is an option rather than an argument.
 
   A value SQLite hands back that cannot be read — a TEXT column holding
   bytes that are not valid UTF-8 — is reported as
@@ -2042,10 +2075,13 @@ defmodule Xqlite do
   stops on such an error rather than stepping on.
 
   A statement that takes parameters is refused until something sets them:
-  before a successful `bind/3`, and after one the library refused (which
-  binds nothing at all), the answer is
+  before a successful `bind/3` the answer is
   `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
-  parameters the statement takes. SQLite's own rule is the opposite — it
+  parameters the statement takes. A bind the library refused binds nothing at
+  all, so it leaves that answer as it found it and an earlier successful bind
+  stays in force; a bind SQLite itself refused after it had taken values is
+  the other way round, and leaves the statement unrunnable until a bind
+  succeeds or `clear_bindings/1` runs. SQLite's own rule is the opposite — it
   reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
   a caller asks for that on purpose. `reset/1` keeps the bindings, so a
   statement stays runnable across one.
@@ -2853,8 +2889,10 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
 
   ## Options
 
@@ -2942,8 +2980,10 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
 
   ## Options
 
@@ -3068,8 +3108,10 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. All three refusals carry the name the key
-  resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
+  `:missing_parameter` carries SQLite's own spelling of the parameter no key
+  named, read from the statement.
 
   ## Options
 
@@ -3353,6 +3395,46 @@ defmodule Xqlite do
   """
   @spec autocommit(conn()) :: {:ok, boolean()} | error()
   def autocommit(conn), do: XqliteNIF.autocommit(conn)
+
+  @doc """
+  Reads, and optionally sets, one of the connection's limits.
+
+  Wraps `XqliteNIF.limit/3`, which is SQLite's `sqlite3_limit`. The answer is
+  `{:ok, previous}` — the value in force before the call — whether the call
+  read or set, so reading back after a set is how a caller sees what took
+  effect. No telemetry is emitted.
+
+  `category` is one of `:length`, `:sql_length`, `:column`, `:expr_depth`,
+  `:compound_select`, `:vdbe_op`, `:function_arg`, `:attached`,
+  `:like_pattern_length`, `:variable_number`, `:trigger_depth`,
+  `:worker_threads` and `:parser_depth`. Any other atom answers
+  `{:error, {:invalid_limit_category, category}}`; a term that is no atom
+  raises `FunctionClauseError`.
+
+  `new_value` of `-1` reads without setting. A value from `0` to
+  `2_147_483_647` sets it; any other integer answers
+  `{:error, {:invalid_limit_value, %{category: category, value: value}}}`, a
+  number outside signed 64 bits raises `ArgumentError` from the NIF, and a
+  term that is no integer raises `FunctionClauseError`.
+
+  SQLite clamps a new value silently: down to its own compile-time ceiling for
+  the category, and up to 30 for `:length`, the only category with a floor.
+
+  `:length` is the limit every door checks a TEXT or BLOB parameter against
+  before it binds — a longer one is
+  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` — and the one
+  SQLite itself checks while it runs, so lowering it below values already
+  stored makes reading them answer `{:error, {:too_big, 18, message}}`.
+
+  ## Examples
+
+      {:ok, previous} = Xqlite.limit(conn, :length, 64)
+      {:ok, 64} = Xqlite.limit(conn, :length, -1)
+
+  """
+  @spec limit(conn(), atom(), integer()) :: {:ok, integer()} | error()
+  def limit(conn, category, new_value) when is_atom(category) and is_integer(new_value),
+    do: XqliteNIF.limit(conn, category, new_value)
 
   @doc """
   Returns the transaction state of a schema: `:none`, `:read`,

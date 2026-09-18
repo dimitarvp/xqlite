@@ -36,13 +36,14 @@ here is optional on a bump that changes the bundled SQLite version.
    sound only while `Session<'conn>` holds `PhantomData<&'conn
    Connection>` plus a raw pointer and never a live reference — a
    rusqlite that stores `&'conn Connection` turns that leak path into
-   undefined behaviour. Re-measure `Statement::parameter_index` too:
-   `query.rs:named_parameter_index` answers
-   `{:invalid_parameter_name, name}` for both its `Ok(None)` and its
-   `Err(_)` arm, on the reading that rusqlite reports "this statement
-   has no such parameter" through one or the other. A rusqlite that
-   starts reporting something else through `Err(_)` — an I/O failure,
-   say — needs that arm split again.
+   undefined behaviour. Re-measure how rusqlite maps a parameter name to
+   an index too. `query.rs:parameter_indices_by_name` builds the map from
+   `Statement::parameter_name`, and a key the map does not hold answers
+   `{:invalid_parameter_name, name}`; the raw-FFI twin filters an index
+   of 0 for the same reason, which is how SQLite says "no such
+   parameter". A rusqlite that starts answering a name differently —
+   reporting an I/O failure rather than absence, or numbering the names
+   from something other than one — changes which keys are refused.
 4. **Re-check the compile-option contract.** Tests and docs depend on
    exact build flags; run a connection and read
    `PRAGMA compile_options`, then confirm:
