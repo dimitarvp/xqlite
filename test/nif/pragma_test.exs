@@ -38,6 +38,21 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:ok, :no_value} = NIF.get_pragma(conn, "invalid_pragma_name")
       end
 
+      test "get_pragma/2 answers the first row's first column, not the whole list",
+           %{conn: conn} do
+        assert {:ok, %{columns: ["compile_options"], rows: rows}} =
+                 Xqlite.query(conn, "PRAGMA compile_options", [])
+
+        assert [[first_option] | _rest] = rows
+        assert length(rows) > 1
+
+        assert {:ok, first_option} == NIF.get_pragma(conn, "compile_options")
+        assert {:ok, first_option} == Xqlite.get_pragma(conn, :compile_options)
+
+        assert {:ok, options} = Xqlite.Pragma.get(conn, :compile_options)
+        assert Enum.map(options, fn option -> [option] end) == rows
+      end
+
       # --- set_pragma/3 Tests ---
       test "set_pragma/3 sets and get_pragma/2 reads integer value", %{conn: conn} do
         assert {:ok, _} = NIF.set_pragma(conn, "cache_size", 5000)

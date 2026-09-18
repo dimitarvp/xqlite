@@ -176,6 +176,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is now `0..0x7FFF0000`, so a negative size and one past the ceiling answer
   `{:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: value}}}`;
   `0`, which turns memory mapping off, stays legal.
+- **A refused parameter list reports its own length on every door.** The
+  `provided` number of `{:invalid_parameter_count, %{expected: _, provided:
+  _}}` used to differ by door for a list two or more elements too long:
+  `query/4`, `execute/4`, `query_with_changes/4` and their cancellable twins
+  bind through rusqlite, which stops at the first index the statement does
+  not have and reports that index, so a one-parameter statement handed three
+  values answered `provided: 2` while `stream/4`, `bind/3` and
+  `explain_analyze/4` answered `provided: 3`. Those doors now count the list
+  before binding anything, so `provided` is the list's own length everywhere.
+  The refusal itself, and the `expected` number, are unchanged.
 
 ## [0.15.0] - 2026-09-18
 

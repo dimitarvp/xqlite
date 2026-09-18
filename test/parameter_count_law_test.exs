@@ -11,11 +11,9 @@ defmodule Xqlite.ParameterCountLawTest do
   an UPDATE and the stored row is the oracle: it moved exactly when the call
   ran, and it is untouched after every refusal.
 
-  The `expected` number is the same on every door. The `provided` number is
-  not, for a list two or more elements too long: a door binding through
-  rusqlite stops at the first index the statement does not have and reports
-  that index, while a door binding through the raw C API measures the list
-  and reports its length.
+  Both numbers are the same on every door. Every door measures the list
+  before it binds anything, so `provided` is the list's own length even when
+  the list is longer than the statement can take.
   """
 
   use ExUnit.Case, async: true
@@ -27,21 +25,13 @@ defmodule Xqlite.ParameterCountLawTest do
 
   @moduletag timeout: 300_000
 
-  # The doors split by who counts the list. A door that binds through
-  # rusqlite stops at the first parameter index the statement does not have,
-  # so a list two or more elements too long is reported as one element too
-  # long; a door that binds through the raw C API counts the list itself and
-  # reports its real length. Both refuse, and both name the same `expected`.
-  @counted_whole [
+  @doors [
     :stream,
     :bind_step,
     :explain_analyze,
     :nif_stream_open,
     :nif_explain_analyze,
-    :nif_stmt_bind
-  ]
-
-  @counted_until_first_extra [
+    :nif_stmt_bind,
     :query,
     :execute,
     :query_cancellable,
@@ -54,8 +44,6 @@ defmodule Xqlite.ParameterCountLawTest do
     :nif_execute_cancellable,
     :nif_query_with_changes_cancellable
   ]
-
-  @doors @counted_whole ++ @counted_until_first_extra
 
   for_each_opener "the positional parameter count" do
     setup %{conn: conn} do
@@ -98,15 +86,18 @@ defmodule Xqlite.ParameterCountLawTest do
       end
     end
 
-    test "a list two elements too long is refused, counted the door's own way",
+    test "a list two elements too long is refused, counted the same on every door",
          %{conn: conn} do
       sql = "UPDATE count_rows SET v = ?1"
 
       assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 3}}} =
                Xqlite.stream(conn, sql, ["a", "b", "c"])
 
-      assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 2}}} =
+      assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 3}}} =
                Xqlite.query(conn, sql, ["a", "b", "c"])
+
+      assert {:error, {:invalid_parameter_count, %{expected: 1, provided: 3}}} =
+               Xqlite.execute(conn, sql, ["a", "b", "c"])
 
       assert "seed" == stored(conn)
     end
@@ -129,7 +120,7 @@ defmodule Xqlite.ParameterCountLawTest do
             assert ran_value(expected, values) == stored(conn)
 
           false ->
-            assert {:refused, expected, reported(door, expected, provided)} == answer
+            assert {:refused, expected, provided} == answer
             assert "seed" == stored(conn)
         end
       end
@@ -149,14 +140,6 @@ defmodule Xqlite.ParameterCountLawTest do
 
   defp ran_value(0, _values), do: "ran"
   defp ran_value(_count, values), do: Enum.join(values)
-
-  # How many values the refusal says it was given.
-  defp reported(door, expected, provided) do
-    case door in @counted_whole do
-      true -> provided
-      false -> min(provided, expected + 1)
-    end
-  end
 
   defp reseed(conn) do
     assert {:ok, _changes} = Xqlite.execute(conn, "UPDATE count_rows SET v = 'seed'", [])

@@ -48,6 +48,24 @@ fn reject_no_statement(stmt: &Statement<'_>) -> Result<(), XqliteError> {
     }
 }
 
+/// Refuse a positional parameter list whose length is not the statement's own
+/// parameter count, before a single value is bound.
+///
+/// rusqlite's checked binding refuses the same lists a step later, but it stops
+/// at the first index the statement does not have and reports THAT index: a
+/// statement taking one parameter given three values would answer `provided:
+/// 2`. Counting the list here makes `provided` the list's own length, the same
+/// number the raw-FFI doors report (`stream.rs:require_parameter_count`).
+#[inline]
+fn require_parameter_count(stmt: &Statement<'_>, provided: usize) -> Result<(), XqliteError> {
+    let expected = stmt.parameter_count();
+
+    match provided == expected {
+        true => Ok(()),
+        false => Err(XqliteError::InvalidParameterCount { provided, expected }),
+    }
+}
+
 pub(crate) fn core_query<'a>(
     env: Env<'a>,
     conn: &Connection,
@@ -62,7 +80,10 @@ pub(crate) fn core_query<'a>(
     let column_count = column_names.len();
 
     let rows_result = match walk_params(params_term)? {
-        Params::Empty => stmt.query([]),
+        Params::Empty => {
+            require_parameter_count(&stmt, 0)?;
+            stmt.query([])
+        }
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
             let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
@@ -73,6 +94,7 @@ pub(crate) fn core_query<'a>(
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
+            require_parameter_count(&stmt, positional_values.len())?;
             let params_slice: Vec<&dyn ToSql> =
                 positional_values.iter().map(|v| v as &dyn ToSql).collect();
             stmt.query(params_slice.as_slice())
@@ -128,7 +150,10 @@ pub(crate) fn core_execute<'a>(
     reject_no_statement(&stmt)?;
 
     let affected_rows = match walk_params(params_term)? {
-        Params::Empty => stmt.execute([]),
+        Params::Empty => {
+            require_parameter_count(&stmt, 0)?;
+            stmt.execute([])
+        }
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
             let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
@@ -139,6 +164,7 @@ pub(crate) fn core_execute<'a>(
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
+            require_parameter_count(&stmt, positional_values.len())?;
             let params_slice: Vec<&dyn ToSql> =
                 positional_values.iter().map(|v| v as &dyn ToSql).collect();
             stmt.execute(params_slice.as_slice())

@@ -458,11 +458,18 @@ defmodule XqliteNIF do
   or if the PRAGMA name is invalid/unknown to SQLite.
   Returns `{:error, reason}` for other failures.
 
+  The value is the first row's first column, so a PRAGMA that answers several
+  rows is cut down to its first one: `compile_options` read here gives the
+  first compile option, not the whole list. A PRAGMA that answers a list is
+  read through `Xqlite.Pragma.get/2,3`, which knows which ones do, or through
+  `XqliteNIF.query/3` with the PRAGMA as its SQL, which gives the rows
+  unchanged.
+
   Note: Some PRAGMAs require an argument to read (e.g., `PRAGMA table_info(table_name)`).
-  This function is for PRAGMAs that are read without an argument or whose argument is
-  part of the `name` string itself if SQLite supports that syntax. For more complex
-  PRAGMA queries, use `XqliteNIF.query/3`. The `Xqlite.Pragma` module provides
-  higher-level helpers for many common PRAGMAs.
+  This function cannot read those: a name may hold only letters, digits and
+  underscores, so there is nowhere to write the argument. Use
+  `Xqlite.Pragma.get/3` or `XqliteNIF.query/3` for them. The `Xqlite.Pragma`
+  module provides higher-level helpers for many common PRAGMAs.
 
   Reading `wal_autocheckpoint` reports xqlite's emulated threshold rather
   than issuing the PRAGMA: SQLite only reports a threshold while its own

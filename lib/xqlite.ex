@@ -2168,6 +2168,13 @@ defmodule Xqlite do
   @doc """
   Reads a PRAGMA value from the connection.
 
+  The answer is the first row's first column. A PRAGMA that answers several
+  rows is therefore cut down to its first one: `compile_options` read here
+  gives the first compile option, not the whole list. `Xqlite.Pragma.get/2,3`
+  knows which PRAGMAs answer a list and returns all of it, and it is also the
+  door that takes a PRAGMA argument, as `table_info` and `index_list` need;
+  `query/3` with the PRAGMA as its SQL gives the rows unchanged.
+
   A name outside the typed schema of `Xqlite.Pragma` is handed to SQLite as
   written and reads back whatever SQLite answers, which is `{:ok, :no_value}`
   for a word SQLite parses and ignores. A key that is neither an atom nor a
