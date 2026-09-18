@@ -568,14 +568,32 @@ defmodule Xqlite.Pragma do
 
   defp mapped_word(mapping, value) do
     word = word_of(value)
+    words = Map.values(mapping)
 
-    mapping
-    |> Map.values()
-    |> Enum.find(fn mapped -> word_of(mapped) == word end)
-    |> canonical_word()
+    case Enum.find(words, fn mapped -> word_of(mapped) == word end) do
+      nil -> mapped_boolean(words, word)
+      mapped -> canonical_word(mapped)
+    end
   end
 
-  defp canonical_word(nil), do: :error
+  # A mapping that gives both booleans a word of their own is a truth SQLite
+  # spells in six ways, so the whole boolean vocabulary reaches it and lands
+  # on the mapping's own word: `:on` writes the word that stores 1. A mapping
+  # of three modes gives a boolean no meaning and keeps refusing it.
+  defp mapped_boolean(words, word) do
+    case boolean_word(word) do
+      {:ok, 1} -> boolean_of(words, true)
+      {:ok, 0} -> boolean_of(words, false)
+      :error -> :error
+    end
+  end
+
+  defp boolean_of(words, mapped) do
+    case mapped in words do
+      true -> canonical_word(mapped)
+      false -> :error
+    end
+  end
 
   defp canonical_word(mapped) do
     word =

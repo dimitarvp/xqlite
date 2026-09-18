@@ -220,11 +220,12 @@ defmodule Xqlite.NIF.QueryTest do
                  NIF.query(conn, sql, [30, "Alice", "Extra"])
       end
 
-      test "query/3 with missing named parameter treats it as NULL", %{conn: conn} do
+      test "query/3 refuses a named parameter the list leaves out", %{conn: conn} do
         sql = "SELECT id FROM query_test WHERE age = :age AND name = :name;"
+        params = [age: 30]
 
-        assert {:ok, %{columns: ["id"], rows: [], num_rows: 0}} ==
-                 NIF.query(conn, sql, age: 30)
+        assert {:error, {:missing_parameter, %{index: 2, name: ":name"}}} =
+                 NIF.query(conn, sql, params)
       end
 
       test "query/3 returns error for invalid parameter name (named)", %{conn: conn} do

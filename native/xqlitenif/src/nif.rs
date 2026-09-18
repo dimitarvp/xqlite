@@ -778,15 +778,20 @@ fn stmt_bind<'a>(
     use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
+        // Each call below: with_live_stmt holds the connection Mutex for the
+        // whole closure and proved stmt_ptr a live statement of it.
         match crate::util::walk_params(params_term)? {
-            Params::Empty => require_parameter_count(stmt_ptr, 0),
+            // SAFETY: the lock and the statement, as stated above.
+            Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
             Params::Named(items) => {
                 let named = decode_exec_keyword_params(env, &items)?;
-                bind_named_params_ffi(stmt_ptr, &named, db_handle)
+                // SAFETY: the lock and the statement, as stated above.
+                unsafe { bind_named_params_ffi(stmt_ptr, &named, db_handle) }
             }
             Params::Positional(items) => {
                 let positional = decode_plain_list_params(env, &items)?;
-                bind_positional_params_ffi(stmt_ptr, &positional, db_handle)
+                // SAFETY: the lock and the statement, as stated above.
+                unsafe { bind_positional_params_ffi(stmt_ptr, &positional, db_handle) }
             }
         }
     });
@@ -1011,7 +1016,13 @@ fn stmt_finalize(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
 }
 
 /// Binds a stream's parameters onto a statement that is already prepared.
-fn bind_stream_params<'a>(
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call, `stmt_ptr` is a
+/// live prepared statement of that connection and `db_handle` is the
+/// `sqlite3*` that owns it.
+unsafe fn bind_stream_params<'a>(
     env: Env<'a>,
     stmt_ptr: *mut ffi::sqlite3_stmt,
     db_handle: *mut ffi::sqlite3,
@@ -1023,14 +1034,17 @@ fn bind_stream_params<'a>(
     use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
 
     match crate::util::walk_params(params_term)? {
-        Params::Empty => require_parameter_count(stmt_ptr, 0),
+        // SAFETY: forwarded from this function's own contract.
+        Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
-            bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle)
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
         }
         Params::Positional(items) => {
             let positional_params_vec = decode_plain_list_params(env, &items)?;
-            bind_positional_params_ffi(stmt_ptr, &positional_params_vec, db_handle)
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { bind_positional_params_ffi(stmt_ptr, &positional_params_vec, db_handle) }
         }
     }
 }
@@ -1141,7 +1155,6 @@ fn stream_fetch_impl<'a>(
     token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Term<'a> {
     use crate::stream::process_single_step;
-    use crate::util::term_to_tagged_elixir_value;
 
     let create_and_encode_error = |env_closure: Env<'a>,
                                    final_provided_term: Term<'a>|
@@ -1162,17 +1175,12 @@ fn stream_fetch_impl<'a>(
         }
     };
 
+    // `provided` is the caller's own term, whatever it was: this door takes it
+    // and judges it, where the statement door's `i64` argument makes rustler
+    // refuse a wrong type before the function runs.
     let batch_size_i64: i64 = match batch_size_term.decode::<i64>() {
         Ok(val) if val >= 1 => val,
-        Ok(val) => {
-            let original_term_as_term = val.encode(env);
-            let tagged_provided_term = term_to_tagged_elixir_value(env, original_term_as_term);
-            return create_and_encode_error(env, tagged_provided_term);
-        }
-        Err(_) => {
-            let tagged_provided_term = term_to_tagged_elixir_value(env, batch_size_term);
-            return create_and_encode_error(env, tagged_provided_term);
-        }
+        Ok(_) | Err(_) => return create_and_encode_error(env, batch_size_term),
     };
 
     let batch_size = match usize::try_from(batch_size_i64) {
@@ -1273,9 +1281,12 @@ fn stream_fetch_impl<'a>(
                         let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
                         break;
                     }
-                    // The stream finalizes its statement on every error and is
-                    // finished once it has reported, so both failure kinds are
-                    // held back the same way here.
+                    // The stream finalizes its statement on every error, so a
+                    // failed step and a row that cannot be read are both held
+                    // back the same way: there is nothing left to carry on
+                    // with, and the rows already read still belong to the
+                    // caller. A cancellation is the exception below — it is
+                    // answered at once and its batch's rows go with it.
                     Err(failure) => {
                         let e = XqliteError::from(failure);
                         stream_definitively_exhausted = true;

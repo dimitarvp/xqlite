@@ -199,6 +199,27 @@ defmodule XqliteTest do
                  Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], on_error: :bogus)
       end
 
+      test "stream/4 rejects a batch size that is not a positive integer at open",
+           %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users;"
+
+        for provided <- [0, -1, 1.0, :ten, "10", nil] do
+          assert {:error, {:invalid_batch_size, %{provided: ^provided, minimum: 1}}} =
+                   Xqlite.stream(conn, sql, [], batch_size: provided)
+        end
+      end
+
+      test "query/4 refuses a keyword list that leaves a parameter out", %{conn: conn} do
+        sql = "UPDATE stream_test_users SET name = :name, email = :email WHERE id = 1"
+        params = [name: "new_name"]
+
+        assert {:error, {:missing_parameter, %{index: 2, name: ":email"}}} =
+                 Xqlite.query(conn, sql, params)
+
+        assert {:ok, %{rows: [["User 1", "user1@example.com"]]}} =
+                 Xqlite.query(conn, "SELECT name, email FROM stream_test_users WHERE id = 1")
+      end
+
       # --- cancel_tokens option: a cancel is one more error routed by the mode ---
 
       test "cancel_tokens: on_error: :raise raises with :operation_cancelled", %{conn: conn} do

@@ -93,7 +93,8 @@ unsafe fn run_and_collect<'a>(
     params_term: Term<'a>,
     query_plan: Vec<QueryPlanRow>,
 ) -> Result<ExplainAnalyze, XqliteError> {
-    bind_params(env, stmt_ptr, db_handle, params_term)?;
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { bind_params(env, stmt_ptr, db_handle, params_term) }?;
 
     let start = Instant::now();
     let mut rows_produced: u64 = 0;
@@ -125,21 +126,29 @@ unsafe fn run_and_collect<'a>(
     })
 }
 
-fn bind_params<'a>(
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call, `stmt_ptr` is a
+/// live prepared statement of that connection and `db_handle` is the
+/// `sqlite3*` that owns it.
+unsafe fn bind_params<'a>(
     env: Env<'a>,
     stmt_ptr: *mut ffi::sqlite3_stmt,
     db_handle: *mut ffi::sqlite3,
     params_term: Term<'a>,
 ) -> Result<(), XqliteError> {
     match walk_params(params_term)? {
-        Params::Empty => require_parameter_count(stmt_ptr, 0),
+        // SAFETY: forwarded from this function's own contract.
+        Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
-            bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle)
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
-            bind_positional_params_ffi(stmt_ptr, &positional_values, db_handle)
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { bind_positional_params_ffi(stmt_ptr, &positional_values, db_handle) }
         }
     }
 }

@@ -79,10 +79,19 @@ and attaches the result to the release with `softprops/action-gh-release`
 target does not cancel the rest; jobs cap at 30 minutes, and the `cross`
 ones are slow because `cross-version: "from-source"` builds `cross` too.
 
-Each job also reads the symbols of the library it built and writes what
-it found about the panic strategy into its own job summary — a Rust
-panic has to unwind for rustler to catch it. The step reports and never
-fails the job, so the summaries are where that readout lives.
+Each job also reads the library it built two ways and writes what it
+found about the panic strategy into its own job summary — a Rust panic
+has to unwind for rustler to catch it. `llvm-nm` reads the symbol table,
+where an ELF or Mach-O library carries `_Unwind_RaiseException`, and
+`llvm-objdump -p` reads a DLL's import table, where an MSVC build names
+`_CxxThrowException` instead; both tools come from `rustup component add
+llvm-tools`, and the summary names the two it resolved and the library it
+found inside the built archive. An empty readout is reported as "could
+not read", never as a missing marker, because a library the job never
+found would otherwise read as an abort build. The step reports and never
+fails the job — the marker that proves unwinding differs per target
+family and only one family's is measured — so the summaries are where
+that readout lives.
 
 ```bash
 gh run list --workflow=release.yml --limit 1   # then gh run watch <id>

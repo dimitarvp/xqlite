@@ -192,29 +192,6 @@ fn encode_f64(env: Env<'_>, f: f64) -> Term<'_> {
 }
 
 #[inline]
-pub(crate) fn term_to_tagged_elixir_value<'a>(env: Env<'a>, term: Term<'a>) -> Term<'a> {
-    match term.get_type() {
-        TermType::Atom => (atoms::atom(), term).encode(env),
-        TermType::Binary => match term.decode::<String>() {
-            Ok(_s_val) => (atoms::string(), term).encode(env),
-            _ => (atoms::binary(), term).encode(env),
-        },
-        TermType::Integer => (atoms::integer(), term).encode(env),
-        TermType::Float => (atoms::float(), term).encode(env),
-        TermType::List => (atoms::list(), term).encode(env),
-        TermType::Map => (atoms::map(), term).encode(env),
-        TermType::Fun => (atoms::function(), term).encode(env),
-        TermType::Pid => (atoms::pid(), term).encode(env),
-        TermType::Port => (atoms::port(), term).encode(env),
-        TermType::Ref => (atoms::reference(), term).encode(env),
-        TermType::Tuple => (atoms::tuple(), term).encode(env),
-        TermType::Unknown => {
-            (atoms::unknown(), format!("Unknown TermType: {term:?}")).encode(env)
-        }
-    }
-}
-
-#[inline]
 pub(crate) fn singular_ok_or_error_tuple<'a>(
     env: Env<'a>,
     operation_result: Result<(), XqliteError>,
@@ -428,15 +405,27 @@ pub(crate) fn decode_exec_keyword_params<'a>(
                     position: index + 1,
                     value_type: term_item.get_type(),
                 })?;
-        let mut key_string: String = key_atom
+        let key_string: String = key_atom
             .to_term(env)
             .atom_to_string()
             .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{e:?}")))?;
-        key_string.insert(0, ':');
         let rusqlite_value = elixir_term_to_rusqlite_value(env, value_term, index + 1)?;
-        params.push((key_string, rusqlite_value));
+        params.push((parameter_name_of(key_string), rusqlite_value));
     }
     Ok(params)
+}
+
+/// The parameter a keyword key names. SQLite spells a name with one of three
+/// prefixes (`:a`, `@a`, `$a`), so a key that already carries one is used as
+/// written and every other key gets the `:` one — `[a: 1]` names `:a` and
+/// `[{:"@a", 1}]` names `@a`. A `?NNN` parameter and a bare `?` have no name
+/// at all, so no key reaches them.
+#[inline]
+fn parameter_name_of(key: String) -> String {
+    match key.as_bytes().first() {
+        Some(b':' | b'@' | b'$') => key,
+        _no_prefix => format!(":{key}"),
+    }
 }
 
 pub(crate) fn decode_plain_list_params<'a>(

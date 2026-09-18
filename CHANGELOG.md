@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A keyword list that left a name out wrote NULL over that column.** A
+  named parameter nothing was bound to reads as NULL, so
+  `Xqlite.query(conn, "UPDATE t SET a = :a, b = :b WHERE id = 1", a: "new_a")`
+  wrote NULL over `b` and answered `changes: 1`; the raw doors
+  (`XqliteNIF.stmt_bind/2`, `stream_open/3`, `explain_analyze/3`) lost the
+  column the same way. A keyword list must now name every parameter of the
+  statement, each exactly once, on every door that takes parameters, and the
+  whole list is judged before a single value is bound: a parameter no key
+  named is `{:error, {:missing_parameter, %{index: i, name: name}}}` for the
+  lowest such index, `name` being SQLite's own spelling of it (`":b"`, `"@b"`,
+  `"$c"`, `"?3"`) and `nil` for a bare `?`, which no keyword list can name —
+  use a positional list for such a statement. A key the statement does not
+  have is still `{:error, {:invalid_parameter_name, key}}`, and it is still
+  the answer when the list both names something unknown and leaves something
+  out: every key is resolved first. A name used twice in the SQL is one
+  parameter with one value and passes, as before.
+  **Two partial keyword binds in a row no longer add up.**
+  `Xqlite.bind(stmt, a: 1)` followed by `Xqlite.bind(stmt, b: 2)` worked
+  because SQLite keeps a binding until it is overwritten; each call now has
+  to hand over a complete list. Where that pattern was in use, call
+  `reset/1` and bind the whole list once.
+- **A keyword list can now name an `@` or `$` parameter.** Every key used to
+  get a `:` prefix, so `SELECT @b` was unreachable by name — `[b: 1]` and
+  `[{:"@b", 1}]` both answered `{:invalid_parameter_name, _}`. A key whose
+  own text starts with `:`, `@` or `$` is now used as written
+  (`[{:"@b", 1}]` binds `@b`, `[{:"$c", 1}]` binds `$c`) and every other key
+  still gets the `:` prefix, so `[a: 1]` binds `:a` as before.
+- **An improper parameter list raised at six doors.** `Xqlite.query/4`,
+  `execute/4`, `explain_analyze/4` and the three `*_cancellable` doors count
+  the list for their telemetry metadata before the NIF runs, with `length/1`,
+  which raises `ArgumentError` on a list whose tail is not a list. They now
+  count the list's proper prefix by hand and let the NIF answer, so
+  `[1 | :tail]` is `{:error, {:expected_list, %{reason: :improper_tail,
+  value_type: :atom}}}` there too, the same as at every other door. `nil` and
+  a term that is no list are unchanged.
+- **`secure_delete` refused the words SQLite takes.** Its spec maps `0`, `1`
+  and `2` to `false`, `true` and `:fast`, and the mapped path looked a word up
+  in those three alone, so `:on`, `"off"`, `:yes` and `"NO"` were
+  `{:error, {:invalid_pragma_value, _}}` while SQLite itself stores 1, 0, 1
+  and 0 for them. A PRAGMA whose mapping gives both booleans a word of their
+  own now takes the whole boolean vocabulary and writes the mapping's own word
+  (`:on` writes `TRUE`), in any case, as an atom or a string. A mapping of
+  three modes, such as `auto_vacuum`'s, gives a boolean no meaning and keeps
+  refusing the words; `secure_delete = 2` stays refused, because SQLite reads
+  the integer as the boolean true and would store 1.
 - **A parameter list one element short wrote NULL through `stream/4`.** The
   three doors that bind through SQLite's C API directly — `stream/4` and
   `XqliteNIF.stream_open/3`, `explain_analyze/4`, and `bind/3` — never
@@ -22,9 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQLite's own "column index out of range". `[]` and `nil` count as zero
   parameters, so they pass only on a statement that takes none:
   `XqliteNIF.stmt_bind(stmt, nil)` on a statement with a parameter is now
-  refused instead of leaving it NULL. Named parameters are unchanged and
-  keep SQLite's rule — a name the statement lacks is
-  `{:invalid_parameter_name, _}`, a name left out stays NULL.
+  refused instead of leaving it NULL. A keyword list is judged by the
+  coverage rule above.
 
 - **`multi_step/2` no longer throws away the rows it had already read.** A
   value SQLite hands back that cannot be read — a TEXT column holding bytes
@@ -55,6 +99,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A key named twice in a parameter list is refused.** `[a: 1, a: 2]` used to
+  bind the second value, where every `Keyword` function reads the first. Two
+  keys that name the same parameter — `[{:a, 1}, {:":a", 2}]` included, since
+  both name `:a` — are now
+  `{:error, {:duplicate_parameter_name, name}}`, with the second key's name as
+  it resolved, whatever the values.
+- **A refused batch size reports the caller's own term.** The stream fetch
+  doors used to tag it — `{:integer, 0}`, `{:float, 1.0}`, `{:atom, :ten}` —
+  while the statement doors put the bare number, so
+  `{:invalid_batch_size, %{provided: _, minimum: 1}}` had two shapes.
+  `provided` is now the term as the caller wrote it on both:
+  `XqliteNIF.stream_fetch(s, 1.0)` answers `provided: 1.0`. The stream fetch
+  doors are the ones that answer for a wrong type at all, because they take
+  the term and judge it; the statement doors take an integer argument, so
+  rustler refuses anything else with `ArgumentError` before the function runs
+  — that is their protection against a huge batch size.
+- **`Xqlite.stream/4` refuses a bad batch size at the call.** `batch_size: 0`
+  used to open the stream and raise `Xqlite.StreamError` on the first element
+  taken out of it. The option is now judged beside `:on_error` and
+  `:cancel_tokens`, so a value that is not a positive integer answers
+  `{:error, {:invalid_batch_size, %{provided: value, minimum: 1}}}` from
+  `stream/4` itself. `Xqlite.multi_step/2` keeps its integer guard.
+- **Six raw-statement helpers in the native crate are `unsafe fn`.** The
+  helpers that take a raw `sqlite3_stmt` pointer — the parameter-count check,
+  the coverage check, the two binders, the value binder and the stream's
+  parameter binding — were ordinary safe functions whose contract lived in a
+  comment. Each now carries a `# Safety` section naming it (the caller holds
+  the connection Mutex; the pointer is a live prepared statement of that
+  connection) and every caller says which lock it holds. No behaviour changes.
 - **The panic-strategy check reads a Windows DLL the right way.**
   `scripts/panic_strategy.exs` looked for `_Unwind_RaiseException` with `nm`
   whatever the library was. An MSVC-built `.dll` keeps no symbol table `nm`
@@ -179,13 +252,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A refused parameter list reports its own length on every door.** The
   `provided` number of `{:invalid_parameter_count, %{expected: _, provided:
   _}}` used to differ by door for a list two or more elements too long:
-  `query/4`, `execute/4`, `query_with_changes/4` and their cancellable twins
-  bind through rusqlite, which stops at the first index the statement does
-  not have and reports that index, so a one-parameter statement handed three
-  values answered `provided: 2` while `stream/4`, `bind/3` and
-  `explain_analyze/4` answered `provided: 3`. Those doors now count the list
-  before binding anything, so `provided` is the list's own length everywhere.
-  The refusal itself, and the `expected` number, are unchanged.
+  `Xqlite.query/4`, `Xqlite.execute/4`, `XqliteNIF.query/3`,
+  `XqliteNIF.execute/3`, `XqliteNIF.query_with_changes/3` and the cancellable
+  twins of all of them (`Xqlite.query_cancellable/5`,
+  `Xqlite.execute_cancellable/5`, `Xqlite.query_with_changes_cancellable/5`
+  and the `XqliteNIF` stubs behind them) bind through rusqlite, which stops
+  at the first index the statement does not have and reports that index, so a
+  one-parameter statement handed three values answered `provided: 2` while
+  `stream/4`, `bind/3` and `explain_analyze/4` answered `provided: 3`. Those
+  doors now count the list before binding anything, so `provided` is the
+  list's own length everywhere. The refusal itself, and the `expected`
+  number, are unchanged.
 
 ## [0.15.0] - 2026-09-18
 

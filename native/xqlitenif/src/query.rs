@@ -66,6 +66,52 @@ fn require_parameter_count(stmt: &Statement<'_>, provided: usize) -> Result<(), 
     }
 }
 
+/// Refuses a keyword list that does not name every parameter of the statement
+/// exactly once, before anything is bound.
+///
+/// Three refusals, in this order: a key the statement does not have, two keys
+/// that name the same parameter, and a parameter no key named. The last is
+/// why the walk exists — SQLite reads a parameter nothing was bound to as
+/// NULL, so a list that forgets one writes NULL over that column.
+///
+/// The twin for the raw-FFI doors is
+/// `stream.rs:require_named_parameters_covered`.
+fn require_named_parameters_covered(
+    stmt: &Statement<'_>,
+    params: &[(String, Value)],
+) -> Result<(), XqliteError> {
+    let mut claimed: Vec<usize> = Vec::with_capacity(params.len());
+
+    for (name, _value) in params {
+        let index = named_parameter_index(stmt, name)?;
+
+        match claimed.contains(&index) {
+            true => return Err(XqliteError::DuplicateParameterName(name.clone())),
+            false => claimed.push(index),
+        }
+    }
+
+    match (1..=stmt.parameter_count()).find(|index| !claimed.contains(index)) {
+        None => Ok(()),
+        Some(index) => Err(XqliteError::MissingParameter {
+            index,
+            name: stmt.parameter_name(index).map(str::to_string),
+        }),
+    }
+}
+
+/// The one-based place of the parameter a key names. A name the statement
+/// does not have, and one rusqlite cannot even look up (a NUL byte inside
+/// it), are the same refusal a raw-FFI door gives.
+#[inline]
+fn named_parameter_index(stmt: &Statement<'_>, name: &str) -> Result<usize, XqliteError> {
+    match stmt.parameter_index(name) {
+        Ok(Some(index)) => Ok(index),
+        Ok(None) => Err(XqliteError::InvalidParameterName(name.to_string())),
+        Err(e) => Err(XqliteError::from(e)),
+    }
+}
+
 pub(crate) fn core_query<'a>(
     env: Env<'a>,
     conn: &Connection,
@@ -86,6 +132,7 @@ pub(crate) fn core_query<'a>(
         }
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            require_named_parameters_covered(&stmt, &named_params_vec)?;
             let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                 .iter()
                 .map(|(k, v)| (k.as_str(), v as &dyn ToSql))
@@ -156,6 +203,7 @@ pub(crate) fn core_execute<'a>(
         }
         Params::Named(items) => {
             let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            require_named_parameters_covered(&stmt, &named_params_vec)?;
             let params_for_rusqlite: Vec<(&str, &dyn ToSql)> = named_params_vec
                 .iter()
                 .map(|(k, v)| (k.as_str(), v as &dyn ToSql))

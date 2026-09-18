@@ -15,7 +15,14 @@ defmodule Xqlite.PragmaDomainLawTest do
   The second: a PRAGMA whose spec maps its integers to words takes those
   words, as an atom or a string, in any case, and reads back the word.
 
-  Both run on fresh in-memory connections. Two of the value bands SQLite
+  The third: a PRAGMA whose value is a truth — one that reads back a boolean,
+  and one whose mapping gives both booleans a word — takes SQLite's whole
+  boolean vocabulary (`on`/`yes`/`true` and `off`/`no`/`false`) and stores
+  what SQLite itself stores for that word, raw SQL being the oracle again. A
+  mapping of three modes, such as `auto_vacuum`'s, gives a boolean no meaning
+  and keeps refusing the words.
+
+  All three run on fresh in-memory connections. Two of the value bands SQLite
   floors are out of reach that way rather than by exclusion: `max_page_count`
   below the database's own page count, and `auto_vacuum` on a file database,
   which cannot change without a VACUUM. The PRAGMAs listed in
@@ -62,6 +69,21 @@ defmodule Xqlite.PragmaDomainLawTest do
                   |> Enum.map(fn {name, spec} -> {name, Map.values(spec.int_mapping)} end)
                   |> Enum.sort()
 
+  # Every PRAGMA whose value is a truth: one whose reader answers a boolean,
+  # and one whose mapping gives both booleans a word of their own.
+  @boolean_word_pragmas P.schema()
+                        |> Enum.filter(fn {_name, spec} ->
+                          spec.writable and 0 in spec.read_arities and
+                            (spec.return_type == :bool or
+                               (is_map(spec.int_mapping) and
+                                  true in Map.values(spec.int_mapping) and
+                                  false in Map.values(spec.int_mapping)))
+                        end)
+                        |> Enum.map(fn {name, _spec} -> name end)
+                        |> Enum.sort()
+
+  @boolean_words ~w(on off yes no true false)
+
   test "the anchor: max_page_count's own default is accepted" do
     db = fresh()
     assert {:ok, 4_294_967_294} = P.get(db, :max_page_count)
@@ -96,15 +118,38 @@ defmodule Xqlite.PragmaDomainLawTest do
                P.put(db, :foreign_keys, value)
     end
 
-    # SQLite reads `on` and `yes` as true here, but the spec's mapping does
-    # not list them, and 2 is the integer SQLite would read as true as well.
-    for value <- [:on, "yes", :off, 2] do
-      assert {:error, {:invalid_pragma_value, %{pragma: :secure_delete}}} =
-               P.put(db, :secure_delete, value)
-    end
+    # 2 is the integer SQLite would read as the boolean true here, storing 1
+    # and losing the third mode, which only the word reaches.
+    assert {:error, {:invalid_pragma_value, %{pragma: :secure_delete}}} =
+             P.put(db, :secure_delete, 2)
 
     assert {:error, {:invalid_pragma_value, %{pragma: :auto_vacuum}}} =
              P.put(db, :auto_vacuum, :later)
+  end
+
+  # A mapping of three modes gives a boolean no meaning, so the words stay
+  # refused there even though SQLite takes `= TRUE` and stores the default.
+  test "a mapping without booleans keeps refusing the boolean words" do
+    db = fresh()
+
+    for value <- [:on, :off, "yes", "NO", true, false] do
+      assert {:error, {:invalid_pragma_value, %{pragma: :auto_vacuum}}} =
+               P.put(db, :auto_vacuum, value)
+
+      assert {:error, {:invalid_pragma_value, %{pragma: :temp_store}}} =
+               P.put(db, :temp_store, value)
+    end
+  end
+
+  test "the anchor: a mapped PRAGMA holding booleans takes the boolean words" do
+    db = fresh()
+
+    assert {:ok, _} = P.put(db, :secure_delete, :on)
+    assert {:ok, true} = P.get(db, :secure_delete)
+    assert {:ok, _} = P.put(db, :secure_delete, "OFF")
+    assert {:ok, false} = P.get(db, :secure_delete)
+    assert {:ok, _} = P.put(db, :secure_delete, :fast)
+    assert {:ok, :fast} = P.get(db, :secure_delete)
   end
 
   property "put accepts exactly the values SQLite keeps" do
@@ -123,6 +168,16 @@ defmodule Xqlite.PragmaDomainLawTest do
 
       assert {^name, {:ok, _}} = {name, P.put(db, name, spelling)}
       assert {^name, {:ok, ^word}} = {name, P.get(db, name)}
+    end
+  end
+
+  property "a boolean word stores what SQLite stores for that word" do
+    check all({name, spelling, word} <- boolean_word_case(), max_runs: 2000) do
+      db = fresh()
+      stored = meaning(name, raw_write(name, word))
+
+      assert {^name, {:ok, _}} = {name, P.put(db, name, spelling)}
+      assert {name, {:ok, stored}} == {name, P.get(db, name)}
     end
   end
 
@@ -166,6 +221,45 @@ defmodule Xqlite.PragmaDomainLawTest do
   defp spellings(word) do
     text = to_string(word)
     [word, text, String.upcase(text), String.downcase(text)]
+  end
+
+  defp boolean_word_case do
+    bind(member_of(@boolean_word_pragmas), fn name ->
+      bind(member_of(@boolean_words), fn word ->
+        map(member_of(boolean_spellings(word)), fn spelling -> {name, spelling, word} end)
+      end)
+    end)
+  end
+
+  defp boolean_spellings(word) do
+    upper = String.upcase(word)
+    [word, upper, String.to_atom(word), String.to_atom(upper)]
+  end
+
+  # SQLite's own answer for the word, read on a connection that saw nothing
+  # else. A PRAGMA with no row to give reads as `:no_value` on both sides.
+  defp raw_write(name, word) do
+    db = fresh()
+    :ok = NIF.execute_batch(db, "PRAGMA #{name} = #{word};")
+
+    case Xqlite.query(db, "PRAGMA #{name};", []) do
+      {:ok, %{rows: [[read_back]]}} -> read_back
+      {:ok, %{rows: []}} -> :no_value
+    end
+  end
+
+  defp meaning(_name, :no_value), do: :no_value
+
+  defp meaning(name, raw) do
+    assert {:ok, spec} = Map.fetch(P.schema(), name)
+    mapped_meaning(spec.int_mapping, raw)
+  end
+
+  defp mapped_meaning(nil, raw), do: raw == 1
+
+  defp mapped_meaning(mapping, raw) do
+    assert {:ok, word} = Map.fetch(mapping, raw)
+    word
   end
 
   defp sqlite_keeps?(name, value) do

@@ -146,6 +146,39 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(other)
     end
 
+    test "a keyword list that leaves a parameter out binds nothing", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE pairs (id INTEGER PRIMARY KEY, a TEXT, b TEXT);
+        INSERT INTO pairs (id, a, b) VALUES (1, 'keep_a', 'keep_b');
+        """)
+
+      sql = "UPDATE pairs SET a = :a, b = :b WHERE id = 1"
+      {:ok, stmt} = NIF.stmt_prepare(conn, sql)
+      params = [a: "x"]
+
+      assert {:error, {:missing_parameter, %{index: 2, name: ":b"}}} =
+               NIF.stmt_bind(stmt, params)
+
+      assert :ok = NIF.stmt_finalize(stmt)
+
+      assert {:ok, %{rows: [["keep_a", "keep_b"]]}} =
+               NIF.query(conn, "SELECT a, b FROM pairs WHERE id = 1", [])
+    end
+
+    test "two partial keyword binds do not add up", %{conn: conn} do
+      {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT :a + :b")
+      first = [a: 1]
+
+      assert {:error, {:missing_parameter, %{index: 2, name: ":b"}}} =
+               NIF.stmt_bind(stmt, first)
+
+      whole = [a: 1, b: 2]
+      assert :ok = NIF.stmt_bind(stmt, whole)
+      assert {:row, [3]} = NIF.stmt_step(stmt)
+      assert :ok = NIF.stmt_finalize(stmt)
+    end
+
     # -------------------------------------------------------------------
     # Positional count mismatch
     # -------------------------------------------------------------------

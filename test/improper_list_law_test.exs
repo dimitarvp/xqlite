@@ -23,14 +23,26 @@ defmodule Xqlite.ImproperListLawTest do
   @moduletag timeout: 300_000
 
   # Each door: the kind of element its list holds, and the tag it refuses
-  # with. Nineteen doors — every argument the library reads as a list. A
-  # token list is named by its own tag on both sides of the door, so
-  # `:expected_list` on a cancellable call is always about its parameters.
+  # with. Every argument the library reads as a list. A token list is named
+  # by its own tag on both sides of the door, so `:expected_list` on a
+  # cancellable call is always about its parameters.
   @doors [
     {:stream_params, :value, :expected_list},
     {:bind2_params, :value, :expected_list},
     {:bind3_params, :value, :expected_list},
     {:set_authorizer, :action, :expected_list},
+    {:query_params, :value, :expected_list},
+    {:query_keyword, :pair, :expected_keyword_list},
+    {:execute_params, :value, :expected_list},
+    {:execute_keyword, :pair, :expected_keyword_list},
+    {:explain_analyze_params, :value, :expected_list},
+    {:explain_analyze_keyword, :pair, :expected_keyword_list},
+    {:query_cancellable_params, :value, :expected_list},
+    {:query_cancellable_keyword, :pair, :expected_keyword_list},
+    {:execute_cancellable_params, :value, :expected_list},
+    {:execute_cancellable_keyword, :pair, :expected_keyword_list},
+    {:query_with_changes_cancellable_params, :value, :expected_list},
+    {:query_with_changes_cancellable_keyword, :pair, :expected_keyword_list},
     {:nif_query_params, :value, :expected_list},
     {:nif_query_keyword, :pair, :expected_keyword_list},
     {:nif_execute_params, :value, :expected_list},
@@ -165,6 +177,17 @@ defmodule Xqlite.ImproperListLawTest do
     conn
   end
 
+  defp new_token do
+    assert {:ok, token} = Xqlite.create_cancel_token()
+    token
+  end
+
+  # `execute/4` refuses a statement that returns rows, so its door writes one.
+  defp insert_sql(conn, placeholder) do
+    assert :ok = NIF.execute_batch(conn, "CREATE TABLE improper_rows (v)")
+    "INSERT INTO improper_rows (v) VALUES (#{placeholder})"
+  end
+
   defp answer(door, list), do: call(door, fresh_conn(), list)
 
   defp call(:stream_params, conn, list), do: Xqlite.stream(conn, "SELECT ?1", list)
@@ -180,6 +203,40 @@ defmodule Xqlite.ImproperListLawTest do
   end
 
   defp call(:set_authorizer, conn, list), do: Xqlite.set_authorizer(conn, list)
+
+  defp call(:query_params, conn, list), do: Xqlite.query(conn, "SELECT ?1", list)
+
+  defp call(:query_keyword, conn, list), do: Xqlite.query(conn, "SELECT :p1", list)
+
+  defp call(:execute_params, conn, list),
+    do: Xqlite.execute(conn, insert_sql(conn, "?1"), list)
+
+  defp call(:execute_keyword, conn, list),
+    do: Xqlite.execute(conn, insert_sql(conn, ":p1"), list)
+
+  defp call(:explain_analyze_params, conn, list),
+    do: Xqlite.explain_analyze(conn, "SELECT ?1", list)
+
+  defp call(:explain_analyze_keyword, conn, list),
+    do: Xqlite.explain_analyze(conn, "SELECT :p1", list)
+
+  defp call(:query_cancellable_params, conn, list),
+    do: Xqlite.query_cancellable(conn, "SELECT ?1", list, new_token())
+
+  defp call(:query_cancellable_keyword, conn, list),
+    do: Xqlite.query_cancellable(conn, "SELECT :p1", list, new_token())
+
+  defp call(:execute_cancellable_params, conn, list),
+    do: Xqlite.execute_cancellable(conn, insert_sql(conn, "?1"), list, new_token())
+
+  defp call(:execute_cancellable_keyword, conn, list),
+    do: Xqlite.execute_cancellable(conn, insert_sql(conn, ":p1"), list, new_token())
+
+  defp call(:query_with_changes_cancellable_params, conn, list),
+    do: Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", list, new_token())
+
+  defp call(:query_with_changes_cancellable_keyword, conn, list),
+    do: Xqlite.query_with_changes_cancellable(conn, "SELECT :p1", list, new_token())
 
   defp call(:nif_query_params, conn, list), do: NIF.query(conn, "SELECT ?1", list)
 

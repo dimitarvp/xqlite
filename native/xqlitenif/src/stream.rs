@@ -208,16 +208,23 @@ pub(crate) unsafe fn process_single_step<'a>(
     }
 }
 
+/// Binds one value at one index.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call, `raw_stmt_ptr` is
+/// a live prepared statement of that connection and `db_handle` is the
+/// `sqlite3*` that owns it.
 #[inline]
-fn bind_value_to_raw_stmt(
+unsafe fn bind_value_to_raw_stmt(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     bind_idx: c_int,
     value: &Value,
     db_handle: *mut ffi::sqlite3,
 ) -> Result<(), XqliteError> {
-    // SAFETY: raw_stmt_ptr and db_handle are guaranteed valid by the caller
-    // (stream_open holds the connection mutex). SQLITE_TRANSIENT tells SQLite
-    // to copy the data immediately, so our local CString/slice can be dropped safely.
+    // SAFETY: forwarded from this function's own contract. SQLITE_TRANSIENT
+    // tells SQLite to copy the data immediately, so our local CString/slice
+    // can be dropped safely.
     let rc = unsafe {
         match value {
             Value::Null => ffi::sqlite3_bind_null(raw_stmt_ptr, bind_idx),
@@ -262,8 +269,9 @@ fn bind_value_to_raw_stmt(
 
     if rc != ffi::SQLITE_OK {
         let ffi_err = ffi::Error::new(rc);
-        // SAFETY: db_handle is valid (caller holds mutex). sqlite3_errmsg returns
-        // a pointer to an internal buffer valid until the next API call; we copy immediately.
+        // SAFETY: forwarded from this function's own contract. sqlite3_errmsg
+        // returns a pointer to an internal buffer valid until the next API
+        // call; we copy immediately.
         let message = unsafe {
             let err_msg_ptr = ffi::sqlite3_errmsg(db_handle);
             if err_msg_ptr.is_null() {
@@ -286,17 +294,21 @@ fn bind_value_to_raw_stmt(
 /// SQLite itself refuses neither shape: a parameter nothing was bound to
 /// reads as NULL, so a short list silently writes NULLs, and a long one only
 /// fails at the first index past the last parameter. Every raw-FFI door goes
-/// through here so that all of them answer what rusqlite's checked binding
-/// already answers for `query`, `execute` and `query_with_changes`.
+/// through here. The three doors that bind through rusqlite count the list
+/// first as well, through `query.rs:require_parameter_count`, so `provided`
+/// is the list's own length everywhere and rusqlite's own check — which stops
+/// at the first index the statement lacks and reports THAT index — is only
+/// the second line behind them.
 ///
-/// The caller holds the connection Mutex and `raw_stmt_ptr` is a live
-/// prepared statement of that connection.
-pub(crate) fn require_parameter_count(
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and
+/// `raw_stmt_ptr` is a live prepared statement of that connection.
+pub(crate) unsafe fn require_parameter_count(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     provided: usize,
 ) -> Result<(), XqliteError> {
-    // SAFETY: raw_stmt_ptr is a live prepared statement and the connection
-    // Mutex is held, per this function's contract.
+    // SAFETY: forwarded from this function's own contract.
     let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) } as usize;
 
     match provided == expected {
@@ -305,38 +317,113 @@ pub(crate) fn require_parameter_count(
     }
 }
 
-pub(crate) fn bind_positional_params_ffi(
+/// Refuses a keyword list that does not name every parameter of the statement
+/// exactly once, before anything is bound, and answers the index each key
+/// names so the caller binds without resolving them again.
+///
+/// Three refusals, in this order: a key the statement does not have, two keys
+/// that name the same parameter, and a parameter no key named. The last is
+/// why the walk exists — SQLite reads a parameter nothing was bound to as
+/// NULL, so a list that forgets one writes NULL over that column.
+///
+/// The twin for the doors that bind through rusqlite is
+/// `query.rs:require_named_parameters_covered`.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call and
+/// `raw_stmt_ptr` is a live prepared statement of that connection.
+pub(crate) unsafe fn require_named_parameters_covered(
+    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
+    params: &[(String, Value)],
+) -> Result<Vec<c_int>, XqliteError> {
+    let mut claimed: Vec<c_int> = Vec::with_capacity(params.len());
+
+    for (name, _value) in params {
+        let c_name = std::ffi::CString::new(name.as_str())
+            .map_err(|_| XqliteError::InvalidParameterName(name.clone()))?;
+
+        // SAFETY: forwarded from this function's own contract. c_name is a
+        // valid null-terminated CString; an unknown name answers 0, not UB.
+        let index =
+            unsafe { ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr()) };
+
+        match index {
+            0 => return Err(XqliteError::InvalidParameterName(name.clone())),
+            _found if claimed.contains(&index) => {
+                return Err(XqliteError::DuplicateParameterName(name.clone()));
+            }
+            found => claimed.push(found),
+        }
+    }
+
+    // SAFETY: forwarded from this function's own contract.
+    let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
+
+    match (1..=expected).find(|index| !claimed.contains(index)) {
+        None => Ok(claimed),
+        Some(index) => {
+            // SAFETY: forwarded from this function's own contract. SQLite owns
+            // the name for the statement's lifetime and it is copied here; a
+            // bare `?` has no name and answers a null pointer.
+            let name = unsafe {
+                let name_ptr = ffi::sqlite3_bind_parameter_name(raw_stmt_ptr, index);
+
+                match name_ptr.is_null() {
+                    true => None,
+                    false => Some(
+                        std::ffi::CStr::from_ptr(name_ptr)
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                }
+            };
+
+            Err(XqliteError::MissingParameter {
+                index: index as usize,
+                name,
+            })
+        }
+    }
+}
+
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call, `raw_stmt_ptr` is
+/// a live prepared statement of that connection and `db_handle` is the
+/// `sqlite3*` that owns it.
+pub(crate) unsafe fn bind_positional_params_ffi(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     params: &[Value],
     db_handle: *mut ffi::sqlite3,
 ) -> Result<(), XqliteError> {
-    require_parameter_count(raw_stmt_ptr, params.len())?;
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { require_parameter_count(raw_stmt_ptr, params.len()) }?;
 
     for (i, value) in params.iter().enumerate() {
         // SQLite bind indices are 1-based
-        bind_value_to_raw_stmt(raw_stmt_ptr, (i + 1) as c_int, value, db_handle)?;
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, (i + 1) as c_int, value, db_handle) }?;
     }
     Ok(())
 }
 
-pub(crate) fn bind_named_params_ffi(
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call, `raw_stmt_ptr` is
+/// a live prepared statement of that connection and `db_handle` is the
+/// `sqlite3*` that owns it.
+pub(crate) unsafe fn bind_named_params_ffi(
     raw_stmt_ptr: *mut ffi::sqlite3_stmt,
     params: &[(String, Value)],
     db_handle: *mut ffi::sqlite3,
 ) -> Result<(), XqliteError> {
-    for (name, value) in params {
-        let c_name = std::ffi::CString::new(name.as_str())
-            .map_err(|_| XqliteError::InvalidParameterName(name.clone()))?;
+    // SAFETY: forwarded from this function's own contract.
+    let indices = unsafe { require_named_parameters_covered(raw_stmt_ptr, params) }?;
 
-        // SAFETY: raw_stmt_ptr is valid (caller holds mutex). c_name is a valid
-        // null-terminated CString. Returns 0 if parameter name not found (not UB).
-        let bind_idx =
-            unsafe { ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr()) };
-
-        if bind_idx == 0 {
-            return Err(XqliteError::InvalidParameterName(name.clone()));
-        }
-        bind_value_to_raw_stmt(raw_stmt_ptr, bind_idx, value, db_handle)?;
+    for ((_name, value), bind_idx) in params.iter().zip(indices) {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { bind_value_to_raw_stmt(raw_stmt_ptr, bind_idx, value, db_handle) }?;
     }
     Ok(())
 }

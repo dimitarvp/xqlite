@@ -72,7 +72,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
         assert NIF.stream_fetch(plain, bad) == NIF.stream_fetch_cancellable(twin, bad, [])
       end
 
-      assert {:error, {:invalid_batch_size, %{provided: {:integer, 0}, minimum: 1}}} =
+      assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} =
                NIF.stream_fetch_cancellable(twin, 0, [])
 
       assert :ok = NIF.stream_close(plain)
@@ -84,7 +84,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
       assert {:ok, token} = NIF.create_cancel_token()
       assert :ok = NIF.cancel_operation(token)
 
-      assert {:error, {:invalid_batch_size, %{provided: {:integer, 0}, minimum: 1}}} =
+      assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} =
                NIF.stream_fetch_cancellable(stream, 0, [token])
 
       # Refusing the batch size left the stream untouched, so it still runs.

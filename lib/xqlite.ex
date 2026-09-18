@@ -198,6 +198,18 @@ defmodule Xqlite do
   not a whole number of bytes — a binary is stored as TEXT or BLOB, so the atom
   is never `:binary` — and an atom other than `nil`, `true` and `false` has its
   own shape, `{:unsupported_atom, text}`.
+
+  Four shapes are about the parameter list itself, all answered before a value
+  is bound. `:invalid_parameter_count` is a positional list whose length is
+  not the statement's own parameter count. The other three are a keyword
+  list's: `:invalid_parameter_name` carries a key the statement does not have,
+  `:duplicate_parameter_name` the second of two keys naming one parameter, and
+  `:missing_parameter` the lowest-numbered parameter no key named, with
+  SQLite's own spelling of it in `:name` and `nil` there for a bare `?`.
+
+  `:invalid_batch_size` carries the caller's own term in `:provided`, whatever
+  kind of term it was: the stream fetch doors take it and judge it, where the
+  statement doors take an integer and raise for anything else.
   """
   @type error_reason ::
           :connection_closed
@@ -220,6 +232,7 @@ defmodule Xqlite do
           | {:cannot_open_database, String.t(), integer(), String.t()}
           | {:constraint_violation, constraint_kind(), constraint_details()}
           | {:database_busy_or_locked, integer(), String.t()}
+          | {:duplicate_parameter_name, String.t()}
           | {:expected_keyword_list, list_refusal()}
           | {:expected_keyword_tuple, list_refusal()}
           | {:expected_list, list_refusal()}
@@ -260,6 +273,7 @@ defmodule Xqlite do
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
           | {:invalid_stream_handle, String.t()}
           | {:lock_error, String.t()}
+          | {:missing_parameter, %{index: pos_integer(), name: String.t() | nil}}
           | {:no_such_index, String.t()}
           | {:no_such_table, String.t()}
           | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
@@ -1242,6 +1256,19 @@ defmodule Xqlite do
   atomically inside the connection lock. For zero-overhead access without the
   changes field, use `XqliteNIF.query/3` directly.
 
+  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  …) and its length must be the statement's own parameter count, otherwise
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
+  value is bound — `[]` and `nil` count as zero. A keyword list is named and
+  must name every parameter once: a key the statement lacks is
+  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
+  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
+  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
+  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
+  names `:a`.
+
   ## Options
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules.
@@ -1308,6 +1335,19 @@ defmodule Xqlite do
   Executes a non-returning SQL statement and returns a `%Xqlite.Result{}`.
 
   For DML statements, `changes` contains the number of affected rows.
+
+  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  …) and its length must be the statement's own parameter count, otherwise
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
+  value is bound — `[]` and `nil` count as zero. A keyword list is named and
+  must name every parameter once: a key the statement lacks is
+  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
+  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
+  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
+  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
+  names `:a`.
 
   ## Options
 
@@ -1431,8 +1471,9 @@ defmodule Xqlite do
   The statement runs for real, so parameters follow `query/4`'s rule: a
   positional list whose length is not the statement's own parameter count is
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before
-  anything is bound, `[]` and `nil` count as zero parameters, and a named
-  parameter the caller leaves out stays NULL.
+  anything is bound, `[]` and `nil` count as zero parameters, and a keyword
+  list must name every parameter of the statement exactly once — see
+  `query/4` for the three refusals and for how a key names a parameter.
 
   ## Options
 
@@ -1568,10 +1609,9 @@ defmodule Xqlite do
   anything else is `{:error, {:invalid_parameter_count, %{expected: _,
   provided: _}}}` at stream open, before a value is bound. `[]` and `nil`
   count as zero parameters, so they pass only on a statement that takes
-  none. A keyword list is named, and named parameters keep SQLite's own
-  rule: a name the statement does not have is
-  `{:error, {:invalid_parameter_name, _}}`, while a name the caller leaves
-  out stays NULL.
+  none. A keyword list is named and must name every parameter of the
+  statement exactly once — see `query/4` for the three refusals and for how
+  a key names a parameter. Every one of them comes at stream open too.
 
   The SQL must hold exactly one statement, the same rule `prepare/2` and
   `query/3` apply: SQL holding no statement at all — empty, whitespace or
@@ -1695,10 +1735,11 @@ defmodule Xqlite do
   count must match, otherwise `{:error, {:invalid_parameter_count,
   %{provided: _, expected: _}}}`) or a keyword list for named placeholders.
   An empty list counts as zero parameters, so it is refused by a statement
-  that takes any. Named parameters keep SQLite's own rule: a name the
-  statement does not have is `{:error, {:invalid_parameter_name, _}}`, while
-  a name left out stays NULL. Once stepping has started, call `reset/1`
-  before rebinding — SQLite rejects mid-run rebinds.
+  that takes any. A keyword list must name every parameter of the statement
+  exactly once — see `query/4` for the three refusals and for how a key names
+  a parameter — so one call hands over one complete list; two partial binds
+  in a row no longer add up. Once stepping has started, call `reset/1` before
+  rebinding — SQLite rejects mid-run rebinds.
 
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise. Pass `%Xqlite.Blob{bytes: bytes}` in either form — a
@@ -2671,6 +2712,19 @@ defmodule Xqlite do
 
   See `XqliteNIF.query_cancellable/4` for the raw NIF (list form only).
 
+  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  …) and its length must be the statement's own parameter count, otherwise
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
+  value is bound — `[]` and `nil` count as zero. A keyword list is named and
+  must name every parameter once: a key the statement lacks is
+  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
+  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
+  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
+  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
+  names `:a`.
+
   ## Options
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
@@ -2732,6 +2786,19 @@ defmodule Xqlite do
 
   @doc """
   Cancellable `execute/3`. Accepts either a single cancel token or a list.
+
+  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  …) and its length must be the statement's own parameter count, otherwise
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
+  value is bound — `[]` and `nil` count as zero. A keyword list is named and
+  must name every parameter once: a key the statement lacks is
+  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
+  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
+  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
+  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
+  names `:a`.
 
   ## Options
 
@@ -2831,6 +2898,19 @@ defmodule Xqlite do
 
   @doc """
   Cancellable `query_with_changes/3`. Accepts either a single cancel token or a list.
+
+  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  …) and its length must be the statement's own parameter count, otherwise
+  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
+  value is bound — `[]` and `nil` count as zero. A keyword list is named and
+  must name every parameter once: a key the statement lacks is
+  `{:error, {:invalid_parameter_name, key}}`, two keys on one parameter are
+  `{:error, {:duplicate_parameter_name, key}}`, and a parameter no key named
+  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `name` is
+  SQLite's own spelling, `nil` for a bare `?`, and a statement holding `?` or
+  `?3` takes a positional list only. A key starting with `:`, `@` or `$` names
+  that parameter as written; every other key gets the `:` prefix, so `[a: 1]`
+  names `:a`.
 
   ## Options
 
@@ -3269,8 +3349,14 @@ defmodule Xqlite do
   def get_create_sql(conn, object_name) when is_binary(object_name),
     do: XqliteNIF.get_create_sql(conn, object_name)
 
-  defp params_count(params) when is_list(params), do: length(params)
-  defp params_count(_), do: 0
+  # Counts the list's proper prefix by hand: `length/1` raises on a list whose
+  # tail is not a list, and this runs for the telemetry metadata before the
+  # NIF, which is where a broken tail is answered with the type that stopped
+  # the walk. `nil` and any other term count as no parameters.
+  defp params_count(params), do: params_count(params, 0)
+
+  defp params_count([_element | rest], counted), do: params_count(rest, counted + 1)
+  defp params_count(_tail, counted), do: counted
 
   @doc false
   # Public so the stream callbacks module validates through the same helper.

@@ -229,6 +229,14 @@ pub(crate) enum XqliteError {
         expected: usize,
     },
     InvalidParameterName(String),
+    // A statement parameter no key of the caller's keyword list named. `name`
+    // is SQLite's own spelling of it, and None for a bare `?`, which a keyword
+    // list can never name.
+    MissingParameter {
+        index: usize,
+        name: Option<String>,
+    },
+    DuplicateParameterName(String),
     InvalidPragmaName(Vec<u8>),
     InvalidTransactionMode,
     InvalidAuthorizerAction {
@@ -571,6 +579,13 @@ impl Display for XqliteError {
             XqliteError::InvalidParameterName(name) => {
                 write!(f, "Invalid parameter name: '{name}'")
             }
+            XqliteError::MissingParameter { index, name } => match name {
+                Some(name) => write!(f, "Parameter {index} ('{name}') was not given a value"),
+                None => write!(f, "Parameter {index} was not given a value"),
+            },
+            XqliteError::DuplicateParameterName(name) => {
+                write!(f, "Parameter '{name}' was named twice")
+            }
             XqliteError::InvalidPragmaName(name) => {
                 write!(
                     f,
@@ -809,6 +824,23 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidParameterName(name) => {
                 (atoms::invalid_parameter_name(), name).encode(env)
+            }
+            XqliteError::MissingParameter { index, name } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::index(), index)
+                    .and_then(|map| map.map_put(atoms::name(), name.encode(env)));
+                match map_result {
+                    Ok(map) => (atoms::missing_parameter(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for MissingParameter".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
+            XqliteError::DuplicateParameterName(name) => {
+                (atoms::duplicate_parameter_name(), name).encode(env)
             }
             XqliteError::InvalidPragmaName(name) => encode_pragma_name(env, name),
             XqliteError::InvalidTransactionMode => {

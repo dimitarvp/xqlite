@@ -29,6 +29,7 @@ defmodule Xqlite.StreamResourceCallbacks do
           {:ok, acc()} | {:error, Xqlite.error_reason()}
   def start_fun({conn, sql, params, opts}) do
     with {:ok, on_error} <- validate_on_error(opts),
+         :ok <- validate_batch_size(opts),
          :ok <- validate_cancel_tokens(opts) do
       open_stream(conn, sql, params, opts, on_error)
     end
@@ -38,6 +39,16 @@ defmodule Xqlite.StreamResourceCallbacks do
     case Keyword.get(opts, :on_error, :raise) do
       mode when mode in @valid_on_error -> {:ok, mode}
       other -> {:error, {:invalid_on_error, other}}
+    end
+  end
+
+  # The fetch door answers this for its own argument; judging it here means a
+  # stream that cannot fetch is refused where the caller asked for it, rather
+  # than on the first element it takes out of the stream.
+  defp validate_batch_size(opts) do
+    case Keyword.get(opts, :batch_size, 500) do
+      size when is_integer(size) and size >= 1 -> :ok
+      other -> {:error, {:invalid_batch_size, %{provided: other, minimum: 1}}}
     end
   end
 

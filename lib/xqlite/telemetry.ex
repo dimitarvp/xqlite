@@ -108,9 +108,11 @@ defmodule Xqlite.Telemetry do
   the operation was invoked through a `*_cancellable` NIF or
   `Xqlite.query_cancellable/5` and its siblings. `changes` is
   `sqlite3_changes()` read beside the rows; it is `nil` on error and on
-  the cancellable query path. `params_count` counts the parameters the
-  caller passed, which is also the number bound: the type-extension
-  chain rewrites values, never their count. A parameter an extension
+  the cancellable query path. `params_count` counts the proper prefix of
+  the list the caller passed, which is also the number bound: the
+  type-extension chain rewrites values, never their count. A list whose
+  tail is not a list counts the elements before that tail, and the NIF
+  below refuses the call. A parameter an extension
   refuses produces a normal stop event with `result_class: :error` and
   `error_reason: {:type_extension_refused, _}`, because the chain runs
   inside the span.
