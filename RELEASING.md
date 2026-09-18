@@ -41,6 +41,14 @@ of `mix.exs`: the release workflow extracts it with `sed`, and a
 `@version` attribute used as `version: @version` matches nothing, which
 would name every built binary without a version.
 
+## When to tag
+
+A tag is cut only when a Hex publish follows it, never at the end of a
+fix cycle. Breaking changes accumulate under `## [Unreleased]` in the
+CHANGELOG, and the minor bumps once, at publish time. The release
+workflow builds binaries for every `v*` tag, so a tag without a publish
+burns a version number for no user.
+
 ## Tag and push
 
 ```bash
