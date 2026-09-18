@@ -67,6 +67,17 @@ defmodule Xqlite.TypeExtensionTest do
     def decode(_), do: :skip
   end
 
+  # Both callback names, no declaration: the shape of a general-purpose JSON
+  # library, which is not an extension however well the names line up.
+  defmodule NotAnExtension do
+    def encode(_), do: :skip
+
+    def decode(_), do: :skip
+  end
+
+  @extension_modules [Xqlite.TypeExtension.JSON, Xqlite.TypeExtension.Date]
+  @non_extension_modules [:nope, :"Elixir.NoSuchExtension", NotAnExtension, Enum]
+
   # ---------------------------------------------------------------------------
   # Unit tests: DateTime extension
   # ---------------------------------------------------------------------------
@@ -1045,11 +1056,191 @@ defmodule Xqlite.TypeExtensionTest do
 
       assert :ok = Xqlite.finalize(stmt)
     end
+
+    test "an atom that names no module is refused by its position", %{conn: conn} do
+      extensions = [Xqlite.TypeExtension.JSON, :nope]
+
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 2, value_type: :atom}}}
+
+      assert expected == Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: extensions)
+      assert expected == Xqlite.query(conn, "SELECT ?1", [1], type_extensions: extensions)
+    end
+
+    test "the first element that is no extension is the one reported", %{conn: conn} do
+      extensions = [:nope, :"Elixir.NoSuchExtension"]
+
+      assert {:error,
+              {:invalid_type_extensions,
+               %{reason: :bad_element, position: 1, value_type: :atom}}} ==
+               Xqlite.query(conn, "SELECT ?1", [1], type_extensions: extensions)
+    end
+
+    test "nil and false as elements are refused, unlike the option's own nil", %{conn: conn} do
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 2, value_type: :atom}}}
+
+      assert expected ==
+               Xqlite.query(conn, "SELECT ?1", [1],
+                 type_extensions: [Xqlite.TypeExtension.JSON, nil]
+               )
+
+      assert expected ==
+               Xqlite.query(conn, "SELECT ?1", [1],
+                 type_extensions: [Xqlite.TypeExtension.JSON, false]
+               )
+    end
+
+    test "a module with both callbacks but no declaration is refused", %{conn: conn} do
+      assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE undeclared_rows (v)")
+
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 1, value_type: :atom}}}
+
+      assert expected ==
+               Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: [NotAnExtension])
+
+      assert expected ==
+               Xqlite.execute(conn, "INSERT INTO undeclared_rows (v) VALUES (?1)", [1],
+                 type_extensions: [NotAnExtension]
+               )
+    end
+
+    test "a module that declares the behaviour but has no decode/1 is refused", %{conn: conn} do
+      assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE half_rows (v)")
+
+      # The missing callback is the point of the module, so the compiler's
+      # warning about it is swallowed rather than allowed to fail the run.
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        Module.create(
+          EncodeOnlyExtension,
+          quote do
+            @behaviour Xqlite.TypeExtension
+
+            @impl true
+            def encode(_), do: :skip
+          end,
+          Macro.Env.location(__ENV__)
+        )
+      end)
+
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 1, value_type: :atom}}}
+
+      assert expected ==
+               Xqlite.execute(conn, "INSERT INTO half_rows (v) VALUES (?1)", [1],
+                 type_extensions: [EncodeOnlyExtension]
+               )
+
+      assert expected ==
+               Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: [EncodeOnlyExtension])
+
+      # A refusal is not remembered: the module, once whole, passes at once.
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        Module.create(
+          EncodeOnlyExtension,
+          quote do
+            @behaviour Xqlite.TypeExtension
+
+            @impl true
+            def encode(_), do: :skip
+
+            @impl true
+            def decode(_), do: :skip
+          end,
+          Macro.Env.location(__ENV__)
+        )
+      end)
+
+      assert {:ok, %Xqlite.Result{changes: 1}} =
+               Xqlite.execute(conn, "INSERT INTO half_rows (v) VALUES (?1)", [1],
+                 type_extensions: [EncodeOnlyExtension]
+               )
+    end
+
+    test "a module that passed is remembered for the node, a refused one is not",
+         %{conn: conn} do
+      assert {:ok, %{rows: [[1]]}} =
+               Xqlite.query(conn, "SELECT ?1", [1],
+                 type_extensions: [Xqlite.TypeExtension.JSON]
+               )
+
+      assert true ==
+               :persistent_term.get({Xqlite.TypeExtension, Xqlite.TypeExtension.JSON}, false)
+
+      assert {:error, {:invalid_type_extensions, %{reason: :bad_element, position: 1}}} =
+               Xqlite.query(conn, "SELECT ?1", [1], type_extensions: [:nope])
+
+      assert false == :persistent_term.get({Xqlite.TypeExtension, :nope}, false)
+    end
+
+    property "every door reports the first element that is no extension", %{conn: conn} do
+      assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE law_rows (v)")
+      assert {:ok, token} = Xqlite.create_cancel_token()
+      assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+
+      element = one_of([member_of(@extension_modules), member_of(@non_extension_modules)])
+
+      check all(extensions <- list_of(element, min_length: 1, max_length: 5), max_runs: 2000) do
+        expected = expected_outcome(extensions)
+
+        conn
+        |> door_answers(stmt, token, extensions)
+        |> Enum.each(fn answer -> assert expected == outcome(answer) end)
+      end
+
+      assert :ok = Xqlite.finalize(stmt)
+    end
   end
 
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  defp door_answers(conn, stmt, token, extensions) do
+    opts = [type_extensions: extensions]
+
+    [
+      Xqlite.query(conn, "SELECT ?1", [1], opts),
+      Xqlite.execute(conn, "INSERT INTO law_rows (v) VALUES (?1)", [1], opts),
+      Xqlite.explain_analyze(conn, "SELECT ?1", [1], opts),
+      Xqlite.bind(stmt, [1], opts),
+      stream_answer(conn, opts),
+      Xqlite.query_cancellable(conn, "SELECT ?1", [1], token, opts),
+      Xqlite.execute_cancellable(
+        conn,
+        "INSERT INTO law_rows (v) VALUES (?1)",
+        [1],
+        token,
+        opts
+      ),
+      Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], token, opts)
+    ]
+  end
+
+  defp stream_answer(conn, opts) do
+    case Xqlite.stream(conn, "SELECT ?1", [1], opts) do
+      {:error, _reason} = error -> error
+      stream -> Enum.to_list(stream)
+    end
+  end
+
+  defp outcome({:error, {:invalid_type_extensions, refusal}}), do: {:refused, refusal}
+  defp outcome({:error, reason}), do: {:failed, reason}
+  defp outcome(_answer), do: :accepted
+
+  defp expected_outcome(extensions) do
+    case Enum.find_index(extensions, &non_extension?/1) do
+      nil -> :accepted
+      index -> {:refused, %{reason: :bad_element, position: index + 1, value_type: :atom}}
+    end
+  end
+
+  defp non_extension?(module), do: module in @non_extension_modules
 
   # A `DateTime` carrying an arbitrary offset. Built by hand because Elixir
   # ships no time-zone database, so `DateTime.new/3` can only make UTC ones.

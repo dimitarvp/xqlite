@@ -132,6 +132,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`:not_a_list`, `:improper_tail`, or `:bad_element` with the element's
   one-based position) and the kind of term it was. `nil` and an absent option
   both mean no extensions.
+- **An element of `:type_extensions` that is no extension module is refused.**
+  Any atom used to pass the walk, so
+  `type_extensions: [Xqlite.TypeExtension.JSON, :nope]` — a misspelled module
+  name, or an empty variable holding `nil` or `false` — ran until the first
+  value was encoded and then raised `UndefinedFunctionError`. Every door that
+  takes the option now answers
+  `{:error, {:invalid_type_extensions, %{reason: :bad_element, position: n,
+  value_type: :atom}}}` before anything runs. An element counts as an
+  extension module when three things hold: the atom names a module that can
+  be loaded, the module declares `@behaviour Xqlite.TypeExtension`, and it
+  exports both `encode/1` and `decode/1`. Two kinds of list that worked
+  before now stop. A module that exports `encode/1` and `decode/1` without
+  declaring the behaviour: `Jason` and OTP's `:json` both do, and
+  `type_extensions: [Jason]` silently stored the integer `1` as the text
+  `"1"`. And a module that exports `encode/1` but not `decode/1`, on the four
+  doors that never decode — `execute/4`, `explain_analyze/3`, `bind/3` and
+  `execute_cancellable/5` — which ran it to completion. A module written to
+  the shape the `Xqlite.TypeExtension` moduledoc shows is unaffected. The
+  check runs once per module for the life of the node: a module that passed
+  is remembered, one that was refused is asked again on the next call.
 - **An integer SQLite has no room for answers a structured error.** A number
   past the signed 64-bit range used to answer
   `{:cannot_convert_to_sqlite_value, "9223372036854775808", "{error, badarg}"}`

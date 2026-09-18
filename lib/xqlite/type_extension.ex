@@ -87,6 +87,14 @@ defmodule Xqlite.TypeExtension do
 
   Return `{:ok, elixir_term}` on successful conversion. Return `:skip`
   if this extension does not handle the given value.
+
+  There is no `{:error, reason}` here, unlike `c:encode/1`, and that is by
+  design: a stored value this extension claims but cannot read back is not a
+  failed read, it is a value the extension declines, so the answer is `:skip`
+  and the value comes back as SQLite stored it. Returning anything other than
+  `{:ok, term}` or `:skip` breaks this contract and raises while the rows are
+  being consumed, where none of `Xqlite.stream/4`'s `:on_error` modes catches
+  it.
   """
   @callback decode(value :: Xqlite.sqlite_value()) :: {:ok, term()} | :skip
 

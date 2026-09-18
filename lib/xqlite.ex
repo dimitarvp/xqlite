@@ -336,6 +336,12 @@ defmodule Xqlite do
   `:expected_keyword_tuple`, `:invalid_cancel_tokens` and
   `:invalid_type_extensions`.
 
+  Under `:invalid_type_extensions`, `:bad_element` with `value_type: :atom`
+  means the atom at that position names no extension module: no module of
+  that name can be loaded, or the module does not declare
+  `@behaviour Xqlite.TypeExtension`, or it does not export both `encode/1`
+  and `decode/1`.
+
   A cancellable call takes two lists, so the tag says which one it refused:
   `:invalid_cancel_tokens` is always about the tokens, `:expected_list` always
   about the parameters. For a token argument that is no list at all the reason
@@ -1621,11 +1627,19 @@ defmodule Xqlite do
       Extensions are applied in list order; the first match wins. A parameter
       an extension refuses returns `{:error, {:type_extension_refused, _}}` at
       stream open, before any statement is prepared, as described in
-      `query/4`. The option itself must be a proper list of module names, or
-      `nil` for none: anything else returns
+      `query/4`. The option itself must be a proper list, or `nil` for none,
+      and every element must be an extension module: an atom naming a module
+      that declares `@behaviour Xqlite.TypeExtension` and exports both
+      `encode/1` and `decode/1`. Checking an element loads the module if
+      nothing has loaded it yet, so the first such call reads its `.beam`;
+      inside a release booted in embedded mode only a module that shipped
+      with the release can be loaded, and every other atom is refused. A
+      module that passed is remembered for the life of the node and never
+      asked again; a module that was refused is asked again on the next
+      call. Anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before the stream is
       opened, the refusal naming what stopped the walk and, for an element
-      that is no module name, its one-based position.
+      that is no extension module, its one-based position.
     * `:on_error` (`:raise` | `:halt` | `:emit_error`, default: `:raise`) -
       How a mid-fetch error (e.g. an invalid-UTF-8 TEXT value) is surfaced.
       Every row read before the failing one is delivered first, whatever
@@ -3514,8 +3528,7 @@ defmodule Xqlite do
   # before its telemetry metadata and before the NIF: counting an improper
   # list with `length/1` raised, and a term that is no list at all reached the
   # encode chain and raised there. `nil` and an absent option both mean no
-  # extensions. Whether an atom that passed here names a module implementing
-  # the behaviour is the chain's own later answer.
+  # extensions.
   defp type_extensions(opts) do
     case Keyword.get(opts, :type_extensions, []) do
       nil -> {:ok, []}
@@ -3526,14 +3539,52 @@ defmodule Xqlite do
 
   defp walk_type_extensions([], _position, walked), do: {:ok, Enum.reverse(walked)}
 
-  defp walk_type_extensions([extension | rest], position, walked) when is_atom(extension),
-    do: walk_type_extensions(rest, position + 1, [extension | walked])
+  defp walk_type_extensions([extension | rest], position, walked) when is_atom(extension) do
+    case extension_module?(extension) do
+      true -> walk_type_extensions(rest, position + 1, [extension | walked])
+      false -> {:error, {:invalid_type_extensions, bad_element(position, extension)}}
+    end
+  end
 
   defp walk_type_extensions([element | _rest], position, _walked),
     do: {:error, {:invalid_type_extensions, bad_element(position, element)}}
 
   defp walk_type_extensions(tail, _position, _walked),
     do: {:error, {:invalid_type_extensions, improper_tail(tail)}}
+
+  # Asking the question loads the module: `Code.ensure_loaded?/1` reads its
+  # `.beam` when nothing has yet. The declaration is what separates an
+  # extension from any module that happens to export the two names, and
+  # reading it costs more than the query the walk guards, so a module that
+  # passed is remembered for the life of the node. A module that failed is
+  # asked again on the next call, so one fixed and recompiled passes at once.
+  defp extension_module?(extension) do
+    case :persistent_term.get({Xqlite.TypeExtension, extension}, false) do
+      true -> true
+      false -> remember_extension(extension, validate_extension(extension))
+    end
+  end
+
+  defp validate_extension(extension) do
+    Code.ensure_loaded?(extension) and declares_extension?(extension) and
+      function_exported?(extension, :encode, 1) and function_exported?(extension, :decode, 1)
+  end
+
+  defp remember_extension(extension, true) do
+    :persistent_term.put({Xqlite.TypeExtension, extension}, true)
+    true
+  end
+
+  defp remember_extension(_extension, false), do: false
+
+  defp declares_extension?(extension) do
+    attributes = extension.module_info(:attributes)
+
+    attributes
+    |> Keyword.get_values(:behaviour)
+    |> List.flatten()
+    |> Enum.member?(Xqlite.TypeExtension)
+  end
 
   defp not_a_list(term), do: %{reason: :not_a_list, value_type: term_type(term)}
   defp improper_tail(tail), do: %{reason: :improper_tail, value_type: term_type(tail)}
