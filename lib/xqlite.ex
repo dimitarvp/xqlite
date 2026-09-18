@@ -235,8 +235,10 @@ defmodule Xqlite do
   reads.
 
   `:invalid_type_extensions` is the `:type_extensions` option when it is not
-  a proper list of module names, refused before anything else happens on
-  every door that takes the option.
+  a proper list of extension modules, refused before anything else happens
+  on every door that takes the option, and the extension list of
+  `Xqlite.TypeExtension.encode_params/2` and `decode_rows/2`, which judge
+  it the same way.
   """
   @type error_reason ::
           :connection_closed
@@ -1341,7 +1343,7 @@ defmodule Xqlite do
     }
 
     span_with_stop_metadata [:xqlite, :query], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
+      case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         {:ok, bound_params} -> run_query(conn, sql, bound_params, extensions, start_md)
         {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
@@ -1427,7 +1429,7 @@ defmodule Xqlite do
     }
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
+      case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         {:ok, bound_params} -> run_execute(conn, sql, bound_params, start_md)
         {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
       end
@@ -1467,7 +1469,7 @@ defmodule Xqlite do
   defp decode_result_rows(%Xqlite.Result{} = result, []), do: result
 
   defp decode_result_rows(%Xqlite.Result{rows: rows} = result, extensions) do
-    %{result | rows: Xqlite.TypeExtension.decode_rows(rows, extensions)}
+    %{result | rows: Xqlite.TypeExtension.decode_rows_checked(rows, extensions)}
   end
 
   # The cancellable forms answer a plain map, not a struct: the rows are
@@ -1475,7 +1477,7 @@ defmodule Xqlite do
   defp decode_map_rows(map, []), do: map
 
   defp decode_map_rows(%{rows: rows} = map, extensions) do
-    %{map | rows: Xqlite.TypeExtension.decode_rows(rows, extensions)}
+    %{map | rows: Xqlite.TypeExtension.decode_rows_checked(rows, extensions)}
   end
 
   defp decode_map_rows(map, _extensions), do: map
@@ -1568,7 +1570,7 @@ defmodule Xqlite do
     start_md = %{conn: conn, sql: sql, params_count: params_count(params)}
 
     span_with_stop_metadata [:xqlite, :explain_analyze], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
+      case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         {:ok, bound_params} ->
           run_explain_analyze(conn, sql, bound_params, start_md)
 
@@ -1633,10 +1635,14 @@ defmodule Xqlite do
       `encode/1` and `decode/1`. Checking an element loads the module if
       nothing has loaded it yet, so the first such call reads its `.beam`;
       inside a release booted in embedded mode only a module that shipped
-      with the release can be loaded, and every other atom is refused. A
-      module that passed is remembered for the life of the node and never
-      asked again; a module that was refused is asked again on the next
-      call. Anything else returns
+      with the release can be loaded, and every other atom is refused. Both
+      callbacks are checked on every call, so a module recompiled without
+      one, or unloaded and no longer loadable, is refused from then on, and
+      one recompiled whole passes again. The behaviour declaration is read
+      once per node and remembered, so a module recompiled with both
+      callbacks and no declaration keeps passing. A module that was refused
+      is remembered as nothing and asked again on the next call. Anything
+      else returns
       `{:error, {:invalid_type_extensions, refusal}}` before the stream is
       opened, the refusal naming what stopped the walk and, for an element
       that is no extension module, its one-based position.
@@ -1737,7 +1743,7 @@ defmodule Xqlite do
     walked_opts = Keyword.put(opts, :type_extensions, extensions)
 
     span_with_stop_metadata [:xqlite, :stream, :open], start_md do
-      case Xqlite.TypeExtension.encode_params(params, extensions) do
+      case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         {:ok, encoded_params} -> open_stream(conn, sql, encoded_params, walked_opts, start_md)
         {:error, reason} -> {{:error, reason}, stream_error_metadata(start_md, reason)}
       end
@@ -1863,7 +1869,7 @@ defmodule Xqlite do
   end
 
   defp encode_and_bind(stmt, params, extensions) do
-    case Xqlite.TypeExtension.encode_params(params, extensions) do
+    case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
       {:ok, bound_params} -> XqliteNIF.stmt_bind(stmt, bound_params)
       {:error, _reason} = err -> err
     end
@@ -2892,7 +2898,7 @@ defmodule Xqlite do
 
     span_with_stop_metadata [:xqlite, :query], start_md do
       with :ok <- validate_cancel_tokens(token_or_tokens),
-           {:ok, bound} <- Xqlite.TypeExtension.encode_params(params, extensions) do
+           {:ok, bound} <- Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         run_query_cancellable(conn, sql, bound, tokens, extensions, start_md)
       else
         {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
@@ -2980,7 +2986,7 @@ defmodule Xqlite do
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
       with :ok <- validate_cancel_tokens(token_or_tokens),
-           {:ok, bound} <- Xqlite.TypeExtension.encode_params(params, extensions) do
+           {:ok, bound} <- Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         run_execute_cancellable(conn, sql, bound, tokens, start_md)
       else
         {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
@@ -3107,7 +3113,7 @@ defmodule Xqlite do
 
     span_with_stop_metadata [:xqlite, :query_with_changes], start_md do
       with :ok <- validate_cancel_tokens(token_or_tokens),
-           {:ok, bound} <- Xqlite.TypeExtension.encode_params(params, extensions) do
+           {:ok, bound} <- Xqlite.TypeExtension.encode_params_checked(params, extensions) do
         run_changes_cancellable(conn, sql, bound, tokens, extensions, start_md)
       else
         {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
@@ -3525,69 +3531,13 @@ defmodule Xqlite do
   defp params_count(_tail, counted), do: counted
 
   # Every door that takes `:type_extensions` reads the option through here,
-  # before its telemetry metadata and before the NIF: counting an improper
-  # list with `length/1` raised, and a term that is no list at all reached the
-  # encode chain and raised there. `nil` and an absent option both mean no
-  # extensions.
+  # before its telemetry metadata and before the NIF; the walk itself lives
+  # with the chain, which judges its own list the same way.
   defp type_extensions(opts) do
-    case Keyword.get(opts, :type_extensions, []) do
-      nil -> {:ok, []}
-      given when is_list(given) -> walk_type_extensions(given, 1, [])
-      other -> {:error, {:invalid_type_extensions, not_a_list(other)}}
-    end
+    opts
+    |> Keyword.get(:type_extensions, [])
+    |> Xqlite.TypeExtension.validate_extensions()
   end
-
-  defp walk_type_extensions([], _position, walked), do: {:ok, Enum.reverse(walked)}
-
-  defp walk_type_extensions([extension | rest], position, walked) when is_atom(extension) do
-    case extension_module?(extension) do
-      true -> walk_type_extensions(rest, position + 1, [extension | walked])
-      false -> {:error, {:invalid_type_extensions, bad_element(position, extension)}}
-    end
-  end
-
-  defp walk_type_extensions([element | _rest], position, _walked),
-    do: {:error, {:invalid_type_extensions, bad_element(position, element)}}
-
-  defp walk_type_extensions(tail, _position, _walked),
-    do: {:error, {:invalid_type_extensions, improper_tail(tail)}}
-
-  # Asking the question loads the module: `Code.ensure_loaded?/1` reads its
-  # `.beam` when nothing has yet. The declaration is what separates an
-  # extension from any module that happens to export the two names, and
-  # reading it costs more than the query the walk guards, so a module that
-  # passed is remembered for the life of the node. A module that failed is
-  # asked again on the next call, so one fixed and recompiled passes at once.
-  defp extension_module?(extension) do
-    case :persistent_term.get({Xqlite.TypeExtension, extension}, false) do
-      true -> true
-      false -> remember_extension(extension, validate_extension(extension))
-    end
-  end
-
-  defp validate_extension(extension) do
-    Code.ensure_loaded?(extension) and declares_extension?(extension) and
-      function_exported?(extension, :encode, 1) and function_exported?(extension, :decode, 1)
-  end
-
-  defp remember_extension(extension, true) do
-    :persistent_term.put({Xqlite.TypeExtension, extension}, true)
-    true
-  end
-
-  defp remember_extension(_extension, false), do: false
-
-  defp declares_extension?(extension) do
-    attributes = extension.module_info(:attributes)
-
-    attributes
-    |> Keyword.get_values(:behaviour)
-    |> List.flatten()
-    |> Enum.member?(Xqlite.TypeExtension)
-  end
-
-  defp not_a_list(term), do: %{reason: :not_a_list, value_type: term_type(term)}
-  defp improper_tail(tail), do: %{reason: :improper_tail, value_type: term_type(tail)}
 
   defp bad_element(position, term),
     do: %{reason: :bad_element, position: position, value_type: term_type(term)}
@@ -3618,19 +3568,22 @@ defmodule Xqlite do
     {:error, {:invalid_cancel_tokens, %{reason: :improper_tail, value_type: term_type(tail)}}}
   end
 
+  @doc false
   # The names the NIF gives a term's kind, so a refusal reads the same
-  # whichever side of the door produced it.
-  defp term_type(term) when is_atom(term), do: :atom
-  defp term_type(term) when is_bitstring(term), do: :binary
-  defp term_type(term) when is_float(term), do: :float
-  defp term_type(term) when is_function(term), do: :function
-  defp term_type(term) when is_integer(term), do: :integer
-  defp term_type(term) when is_list(term), do: :list
-  defp term_type(term) when is_map(term), do: :map
-  defp term_type(term) when is_pid(term), do: :pid
-  defp term_type(term) when is_port(term), do: :port
-  defp term_type(term) when is_reference(term), do: :reference
-  defp term_type(term) when is_tuple(term), do: :tuple
+  # whichever side of the door produced it. Public so the extension chain
+  # names the kinds the same way.
+  @spec term_type(term()) :: atom()
+  def term_type(term) when is_atom(term), do: :atom
+  def term_type(term) when is_bitstring(term), do: :binary
+  def term_type(term) when is_float(term), do: :float
+  def term_type(term) when is_function(term), do: :function
+  def term_type(term) when is_integer(term), do: :integer
+  def term_type(term) when is_list(term), do: :list
+  def term_type(term) when is_map(term), do: :map
+  def term_type(term) when is_pid(term), do: :pid
+  def term_type(term) when is_port(term), do: :port
+  def term_type(term) when is_reference(term), do: :reference
+  def term_type(term) when is_tuple(term), do: :tuple
 
   @doc false
   # Public so the stream callbacks module emits this event through the same

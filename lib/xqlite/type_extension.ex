@@ -98,6 +98,78 @@ defmodule Xqlite.TypeExtension do
   """
   @callback decode(value :: Xqlite.sqlite_value()) :: {:ok, term()} | :skip
 
+  @doc false
+  # Every door that takes `:type_extensions`, and both chain functions below,
+  # judge the list here: counting an improper list with `length/1` raised, and
+  # a term that is no list at all reached the encode chain and raised there.
+  # `nil` means no extensions, as an absent option does.
+  @spec validate_extensions(term()) :: {:ok, [module()]} | {:error, Xqlite.error_reason()}
+  def validate_extensions(nil), do: {:ok, []}
+
+  def validate_extensions(given) when is_list(given), do: walk_extensions(given, 1, [])
+
+  def validate_extensions(other), do: {:error, {:invalid_type_extensions, not_a_list(other)}}
+
+  defp walk_extensions([], _position, walked), do: {:ok, Enum.reverse(walked)}
+
+  defp walk_extensions([extension | rest], position, walked) when is_atom(extension) do
+    case extension_module?(extension) do
+      true -> walk_extensions(rest, position + 1, [extension | walked])
+      false -> {:error, {:invalid_type_extensions, bad_element(position, extension)}}
+    end
+  end
+
+  defp walk_extensions([element | _rest], position, _walked),
+    do: {:error, {:invalid_type_extensions, bad_element(position, element)}}
+
+  defp walk_extensions(tail, _position, _walked),
+    do: {:error, {:invalid_type_extensions, improper_tail(tail)}}
+
+  # Reading the behaviour declaration costs more than the query the walk
+  # guards, so a module that passed is remembered for the life of the node.
+  # Its two callbacks are asked again on every call, which is cheap and
+  # catches one recompiled without them; a false there can also mean the
+  # module is merely unloaded, so the full check — which loads it again — has
+  # the last word. A module that failed is remembered as nothing, so one
+  # fixed and recompiled passes at once.
+  defp extension_module?(extension) do
+    case :persistent_term.get({__MODULE__, extension}, false) do
+      true -> exports_callbacks?(extension) or validate_extension(extension)
+      false -> remember_extension(extension, validate_extension(extension))
+    end
+  end
+
+  defp exports_callbacks?(extension) do
+    function_exported?(extension, :encode, 1) and function_exported?(extension, :decode, 1)
+  end
+
+  defp validate_extension(extension) do
+    Code.ensure_loaded?(extension) and declares_extension?(extension) and
+      exports_callbacks?(extension)
+  end
+
+  defp remember_extension(extension, true) do
+    :persistent_term.put({__MODULE__, extension}, true)
+    true
+  end
+
+  defp remember_extension(_extension, false), do: false
+
+  defp declares_extension?(extension) do
+    attributes = extension.module_info(:attributes)
+
+    attributes
+    |> Keyword.get_values(:behaviour)
+    |> List.flatten()
+    |> Enum.member?(__MODULE__)
+  end
+
+  defp not_a_list(term), do: %{reason: :not_a_list, value_type: Xqlite.term_type(term)}
+  defp improper_tail(tail), do: %{reason: :improper_tail, value_type: Xqlite.term_type(tail)}
+
+  defp bad_element(position, term),
+    do: %{reason: :bad_element, position: position, value_type: Xqlite.term_type(term)}
+
   @doc """
   Encodes a list of query parameters through the extension chain.
 
@@ -114,18 +186,39 @@ defmodule Xqlite.TypeExtension do
   position is 1-based and counts a keyword pair as one parameter, the same
   way the NIF numbers its bindings. `nil` in place of a list is accepted and
   answers `{:ok, nil}`.
+
+  The extension list is judged first, the way every door that takes the
+  `:type_extensions` option judges it: it must be a proper list, or `nil` for
+  none, and every element an atom naming a module that declares
+  `@behaviour Xqlite.TypeExtension` and exports both callbacks. Anything else
+  answers `{:error, {:invalid_type_extensions, refusal}}` before a single
+  parameter is touched, the refusal naming what stopped the walk and, for an
+  element that is no extension module, its one-based position.
   """
-  @spec encode_params(params :: list() | keyword() | nil, extensions :: [module()]) ::
+  @spec encode_params(params :: list() | keyword() | nil, extensions :: term()) ::
           {:ok, list() | keyword() | nil} | {:error, Xqlite.error_reason()}
-  def encode_params(params, []), do: {:ok, params}
+  def encode_params(params, extensions) do
+    case validate_extensions(extensions) do
+      {:ok, walked} -> encode_params_checked(params, walked)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-  def encode_params(nil, _extensions), do: {:ok, nil}
+  @doc false
+  # For a caller that walked the list already — every door does, before its
+  # telemetry metadata — so the list is walked once per call, not once per
+  # function that touches it.
+  @spec encode_params_checked(params :: list() | keyword() | nil, extensions :: [module()]) ::
+          {:ok, list() | keyword() | nil} | {:error, Xqlite.error_reason()}
+  def encode_params_checked(params, []), do: {:ok, params}
 
-  def encode_params([{key, _} | _] = params, extensions) when is_atom(key) do
+  def encode_params_checked(nil, _extensions), do: {:ok, nil}
+
+  def encode_params_checked([{key, _} | _] = params, extensions) when is_atom(key) do
     encode_keyword(params, extensions, 1, [])
   end
 
-  def encode_params(params, extensions) when is_list(params) do
+  def encode_params_checked(params, extensions) when is_list(params) do
     encode_positional(params, extensions, 1, [])
   end
 
@@ -161,11 +254,30 @@ defmodule Xqlite.TypeExtension do
 
   Each cell in each row is passed through the extension chain.
   Values that no extension handles pass through unchanged.
-  """
-  @spec decode_rows(rows :: [[term()]], extensions :: [module()]) :: [[term()]]
-  def decode_rows(rows, []), do: rows
 
+  Answers `{:ok, rows}` with the decoded rows. The extension list is judged
+  first, exactly as `encode_params/2` judges it, and a list that is no proper
+  list of extension modules answers
+  `{:error, {:invalid_type_extensions, refusal}}` before a single value is
+  touched.
+  """
+  @spec decode_rows(rows :: [[term()]], extensions :: term()) ::
+          {:ok, [[term()]]} | {:error, Xqlite.error_reason()}
   def decode_rows(rows, extensions) do
+    case validate_extensions(extensions) do
+      {:ok, walked} -> {:ok, decode_rows_checked(rows, walked)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  # The twin of `encode_params_checked/2` for the read side: the rows come
+  # back directly, since a caller that walked the list has nothing left to be
+  # refused for.
+  @spec decode_rows_checked(rows :: [[term()]], extensions :: [module()]) :: [[term()]]
+  def decode_rows_checked(rows, []), do: rows
+
+  def decode_rows_checked(rows, extensions) do
     Enum.map(rows, fn row ->
       Enum.map(row, fn value -> decode_value(value, extensions) end)
     end)
@@ -180,6 +292,10 @@ defmodule Xqlite.TypeExtension do
   `{:error, %{extension: module, reason: reason}}` and the chain stops
   there. The answer is always tagged, so a parameter whose own value is an
   `{:error, term}` tuple is never mistaken for a refusal.
+
+  This function runs once per value, so it does not judge the extension
+  list — the caller vouches for it. `encode_params/2` and `decode_rows/2`
+  are the two functions that judge a list, once per call.
   """
   @spec encode_value(value :: term(), extensions :: [module()]) ::
           {:ok, term()} | {:error, %{extension: module(), reason: term()}}
@@ -198,6 +314,12 @@ defmodule Xqlite.TypeExtension do
 
   Returns the decoded value from the first extension that handles it,
   or the original value if no extension matches.
+
+  This function runs once per value, so it does not judge the extension
+  list — the caller vouches for it. `encode_params/2` and `decode_rows/2`
+  are the two functions that judge a list, once per call. An extension whose
+  `decode/1` answers anything but `{:ok, term}` or `:skip` breaks the
+  callback's contract and raises here.
   """
   @spec decode_value(value :: term(), extensions :: [module()]) :: term()
   def decode_value(value, []), do: value

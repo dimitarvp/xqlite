@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The telemetry guide names the one refusal answered without an event.**
+  A `:type_extensions` option that is no proper list of extension modules is
+  refused before the span opens, so the call emits neither a start nor a
+  stop; the guide said every operation emits events. Its event table also
+  named `query_cancellable/4`, `query_with_changes_cancellable/4` and
+  `explain_analyze/3` where the doors are `/5`, `/5` and `/4`.
 - **A bind the library refused left the statement runnable.** Every one of
   the six refusals binds nothing at all, and SQLite reads a parameter nothing
   was bound to as NULL, so `Xqlite.bind(stmt, [1, 2, {:no}])` followed by
@@ -122,6 +128,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Xqlite.TypeExtension.encode_params/2` and `decode_rows/2` judge their
+  extension list.** Both are public and are what the raw-statement docs
+  recommend for the rows `step/1` and `multi_step/2` return, and both took
+  the list as given: a list that was no proper list of extension modules
+  raised from the chain, and a module such as `Jason`, which exports both
+  callback names without being an extension, silently rewrote values. Both
+  now walk the list the way every door does and answer
+  `{:error, {:invalid_type_extensions, refusal}}` for one that fails; and
+  `decode_rows/2` answers `{:ok, rows}` where it used to answer the bare
+  rows. `encode_value/2` and `decode_value/2` still take the list as given:
+  they run once per value, and the caller vouches for it.
+- **A module that passed the extension check is asked for its callbacks on
+  every call.** The check remembered a module for the life of the node, so
+  one recompiled without `encode/1` or `decode/1`, or purged, kept passing
+  and every door raised `UndefinedFunctionError`. Both callbacks are checked
+  on every call now — a false there runs the whole check again, so a module
+  merely unloaded is reloaded and passes — and only the behaviour
+  declaration is remembered.
 - **`:type_extensions` is judged before anything else runs.** A term that is
   no proper list of module names reached `length/1` or the encode chain and
   raised: `Xqlite.stream(conn, sql, params, type_extensions: [JSON | :x])`

@@ -44,7 +44,7 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
     assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT x FROM held WHERE x = ?1")
     assert :ok = Xqlite.bind(stmt, [uuid], exts)
     assert {:row, [^bytes]} = Xqlite.step(stmt)
-    assert [[^uuid]] = TypeExtension.decode_rows([[bytes]], [TypeExtension.UUID])
+    assert {:ok, [[^uuid]]} = TypeExtension.decode_rows([[bytes]], [TypeExtension.UUID])
     assert :ok = Xqlite.finalize(stmt)
   end
 
@@ -75,16 +75,16 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
       assert {:row, [raw] = row} = Xqlite.step(stmt)
       assert {^raw, ^class} = encoded_form(extension, value)
       assert_skipped(extension, raw)
-      assert [[^decoded]] = TypeExtension.decode_rows([row], [extension])
+      assert {:ok, [[^decoded]]} = TypeExtension.decode_rows([row], [extension])
 
       assert :ok = Xqlite.reset(stmt)
       assert {:ok, %{rows: [^row]}} = Xqlite.multi_step(stmt, 10)
-      assert [[^decoded]] = TypeExtension.decode_rows([row], [extension])
+      assert {:ok, [[^decoded]]} = TypeExtension.decode_rows([row], [extension])
 
       assert :ok = Xqlite.reset(stmt)
       assert {:ok, token} = Xqlite.create_cancel_token()
       assert {:ok, %{rows: [^row]}} = Xqlite.multi_step_cancellable(stmt, 10, token)
-      assert [[^decoded]] = TypeExtension.decode_rows([row], [extension])
+      assert {:ok, [[^decoded]]} = TypeExtension.decode_rows([row], [extension])
 
       assert :ok = Xqlite.finalize(stmt)
     end

@@ -233,7 +233,7 @@ defmodule Xqlite.StreamResourceCallbacks do
 
   defp map_rows_to_maps(rows, columns, type_extensions) do
     rows
-    |> Xqlite.TypeExtension.decode_rows(type_extensions)
+    |> Xqlite.TypeExtension.decode_rows_checked(type_extensions)
     |> Enum.map(fn row_list -> Map.new(Enum.zip(columns, row_list)) end)
   end
 end

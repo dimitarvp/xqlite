@@ -64,11 +64,11 @@ measurement and metadata key. A `:*` below stands for the span's
 |---|---|---|
 | `[:xqlite, :open, :*]` | `Xqlite.open/2` and the other `open_*` functions | `:path`, `:mode` |
 | `[:xqlite, :close, :*]` | `Xqlite.close/1` | `:conn`, `:path` |
-| `[:xqlite, :query, :*]` | `Xqlite.query/4`, `Xqlite.query_cancellable/4` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows` (on stop) |
+| `[:xqlite, :query, :*]` | `Xqlite.query/4`, `Xqlite.query_cancellable/5` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows` (on stop) |
 | `[:xqlite, :execute, :*]` | `Xqlite.execute/4` and cancellable variant | `:sql`, `:params_count`, `:cancellable?`, `:affected_rows` (on stop) |
 | `[:xqlite, :execute_batch, :*]` | `Xqlite.execute_batch/2` and cancellable variant | `:sql_batch_size_bytes`, `:cancellable?` |
-| `[:xqlite, :query_with_changes, :*]` | `Xqlite.query_with_changes_cancellable/4` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows`, `:changes` (on stop) |
-| `[:xqlite, :explain_analyze, :*]` | `Xqlite.explain_analyze/3` | `:params_count`, `:wall_time_ns`, `:rows_produced`, `:scan_count` |
+| `[:xqlite, :query_with_changes, :*]` | `Xqlite.query_with_changes_cancellable/5` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows`, `:changes` (on stop) |
+| `[:xqlite, :explain_analyze, :*]` | `Xqlite.explain_analyze/4` | `:params_count`, `:wall_time_ns`, `:rows_produced`, `:scan_count` |
 | `[:xqlite, :transaction, :begin / :commit / :rollback]` | `Xqlite.begin/2`, `commit/1`, `rollback/1` | `:mode` (begin), `:reason` (rollback) |
 | `[:xqlite, :savepoint, :create / :release / :rollback_to]` | `Xqlite.savepoint/2` etc. | `:name` |
 | `[:xqlite, :stream, :open, :*]` | `Xqlite.stream/4` opens a NIF stream | `:batch_size`, `:type_extensions_count`, `:cancellable?` |
@@ -88,6 +88,11 @@ measurement and metadata key. A `:*` below stands for the span's
 
 `Xqlite.backup_with_progress/6` is not in the list: it reports its
 progress to a pid and emits no telemetry.
+
+One refusal is answered without any event at all: a `:type_extensions`
+option that is no proper list of extension modules is refused before the
+span is opened, so such a call emits neither a start nor a stop. Every
+other refusal happens inside the span and ends it.
 
 ## Event surface — hook bridge events (opt-in)
 

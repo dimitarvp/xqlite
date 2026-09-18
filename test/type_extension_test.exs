@@ -526,24 +526,74 @@ defmodule Xqlite.TypeExtensionTest do
 
   describe "decode_rows/2" do
     test "empty rows unchanged" do
-      assert TypeExtension.decode_rows([], [IntDoubler]) == []
+      assert TypeExtension.decode_rows([], [IntDoubler]) == {:ok, []}
     end
 
     test "no extensions returns rows unchanged" do
       rows = [[1, "hello"], [2, "world"]]
-      assert TypeExtension.decode_rows(rows, []) == rows
+      assert TypeExtension.decode_rows(rows, []) == {:ok, rows}
     end
 
     test "decodes every cell in every row" do
       rows = [[10, "HELLO"], [20, "WORLD"]]
       result = TypeExtension.decode_rows(rows, [IntDoubler, StringUppercase])
-      assert result == [[5, "hello"], [10, "world"]]
+      assert result == {:ok, [[5, "hello"], [10, "world"]]}
     end
 
     test "nil values pass through" do
       rows = [[10, nil, "TEXT"]]
       result = TypeExtension.decode_rows(rows, [IntDoubler, StringUppercase])
-      assert result == [[5, nil, "text"]]
+      assert result == {:ok, [[5, nil, "text"]]}
+    end
+  end
+
+  describe "the chain functions judge their extension list" do
+    test "an empty list still means no extensions on both" do
+      assert TypeExtension.encode_params([1], []) == {:ok, [1]}
+      assert TypeExtension.decode_rows([[1]], []) == {:ok, [[1]]}
+    end
+
+    test "a module with both callbacks but no declaration is refused by both" do
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 1, value_type: :atom}}}
+
+      assert TypeExtension.encode_params([1], [NotAnExtension]) == expected
+      assert TypeExtension.decode_rows([[1]], [NotAnExtension]) == expected
+    end
+
+    test "an atom that names no module is refused by both, with its position" do
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 2, value_type: :atom}}}
+
+      assert TypeExtension.encode_params([1], [TypeExtension.JSON, :nope]) == expected
+      assert TypeExtension.decode_rows([[1]], [TypeExtension.JSON, :nope]) == expected
+    end
+
+    test "a list whose tail is not one is refused by both" do
+      extensions = [TypeExtension.JSON | :x]
+
+      expected =
+        {:error, {:invalid_type_extensions, %{reason: :improper_tail, value_type: :atom}}}
+
+      assert TypeExtension.encode_params([1], extensions) == expected
+      assert TypeExtension.decode_rows([[1]], extensions) == expected
+    end
+
+    test "a term that is no list at all is refused by both" do
+      expected =
+        {:error, {:invalid_type_extensions, %{reason: :not_a_list, value_type: :atom}}}
+
+      assert TypeExtension.encode_params([1], :notalist) == expected
+      assert TypeExtension.decode_rows([[1]], :notalist) == expected
+    end
+
+    test "the list is judged before any value is touched" do
+      assert TypeExtension.encode_params([Refuser.marker()], [Refuser, :nope]) ==
+               {:error,
+                {:invalid_type_extensions,
+                 %{reason: :bad_element, position: 2, value_type: :atom}}}
     end
   end
 
@@ -613,7 +663,7 @@ defmodule Xqlite.TypeExtensionTest do
     test "integers and floats pass through decode unchanged" do
       rows = [[42, 3.14, nil]]
       result = TypeExtension.decode_rows(rows, @all_extensions)
-      assert result == [[42, 3.14, nil]]
+      assert result == {:ok, [[42, 3.14, nil]]}
     end
   end
 
@@ -968,7 +1018,7 @@ defmodule Xqlite.TypeExtensionTest do
         ]
 
         decoded = TypeExtension.decode_rows(rows, extensions)
-        assert [[^dt, ^d, ^t, 99]] = decoded
+        assert {:ok, [[^dt, ^d, ^t, 99]]} = decoded
       end
     end
   end
@@ -1036,6 +1086,7 @@ defmodule Xqlite.TypeExtensionTest do
 
       assert refusal == Xqlite.explain_analyze(conn, "SELECT ?1", [1], type_extensions: bad)
       assert refusal == Xqlite.bind(stmt, [1], type_extensions: bad)
+      assert refusal == Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: bad)
 
       assert refusal ==
                Xqlite.query_cancellable(conn, "SELECT ?1", [1], token, type_extensions: bad)
@@ -1178,6 +1229,53 @@ defmodule Xqlite.TypeExtensionTest do
       assert false == :persistent_term.get({Xqlite.TypeExtension, :nope}, false)
     end
 
+    test "a module that lost a callback, or that can no longer be loaded, is refused",
+         %{conn: conn} do
+      whole =
+        quote do
+          @behaviour Xqlite.TypeExtension
+
+          @impl true
+          def encode(_), do: :skip
+
+          @impl true
+          def decode(_), do: :skip
+        end
+
+      half =
+        quote do
+          def encode(_), do: :skip
+        end
+
+      expected =
+        {:error,
+         {:invalid_type_extensions, %{reason: :bad_element, position: 1, value_type: :atom}}}
+
+      create_module(ReloadedExtension, whole)
+
+      assert {:ok, %{rows: [[1]]}} =
+               Xqlite.query(conn, "SELECT ?1", [1], type_extensions: [ReloadedExtension])
+
+      assert true ==
+               :persistent_term.get({Xqlite.TypeExtension, ReloadedExtension}, false)
+
+      create_module(ReloadedExtension, half)
+
+      assert expected ==
+               Xqlite.query(conn, "SELECT ?1", [1], type_extensions: [ReloadedExtension])
+
+      :code.purge(ReloadedExtension)
+      :code.delete(ReloadedExtension)
+
+      assert expected ==
+               Xqlite.query(conn, "SELECT ?1", [1], type_extensions: [ReloadedExtension])
+
+      create_module(ReloadedExtension, whole)
+
+      assert {:ok, %{rows: [[1]]}} =
+               Xqlite.query(conn, "SELECT ?1", [1], type_extensions: [ReloadedExtension])
+    end
+
     property "every door reports the first element that is no extension", %{conn: conn} do
       assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE law_rows (v)")
       assert {:ok, token} = Xqlite.create_cancel_token()
@@ -1218,8 +1316,18 @@ defmodule Xqlite.TypeExtensionTest do
         token,
         opts
       ),
-      Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], token, opts)
+      Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], token, opts),
+      TypeExtension.encode_params([1], extensions),
+      TypeExtension.decode_rows([[1]], extensions)
     ]
+  end
+
+  # Defining a module a second time warns on standard error, and that warning
+  # is what the test is about rather than a failure.
+  defp create_module(name, body) do
+    ExUnit.CaptureIO.capture_io(:stderr, fn ->
+      Module.create(name, body, Macro.Env.location(__ENV__))
+    end)
   end
 
   defp stream_answer(conn, opts) do
