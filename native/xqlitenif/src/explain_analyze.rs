@@ -141,7 +141,10 @@ unsafe fn bind_params<'a>(
         // SAFETY: forwarded from this function's own contract.
         Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
         Params::Named(items) => {
-            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            // SAFETY: forwarded from this function's own contract.
+            let count = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) };
+            let named_params_vec =
+                decode_exec_keyword_params(env, &items, count.max(0) as usize)?;
             // SAFETY: forwarded from this function's own contract.
             unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
                 .map_err(crate::stream::BindFailure::into_error)

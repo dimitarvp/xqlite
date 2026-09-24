@@ -125,25 +125,14 @@ fn require_named_parameters_covered(
     params: &[(String, Value)],
 ) -> Result<Vec<usize>, XqliteError> {
     let count = stmt.parameter_count();
-    let share = name_walk_share(count);
-    let mut resolver = name_resolver(stmt, params.len());
-    let mut walked: usize = 0;
-
-    // Two structures, because they answer two questions. `indices` keeps the
-    // caller's order, which is what the caller zips its values with to bind.
-    // `claimed` is one flag per parameter index, rather than a scan of the
-    // keys read so far: a list of n keys costs n steps here instead of n².
-    // The vector is sized from the statement's own parameter count, which
-    // SQLite caps at 32 766, so it is small whatever the SQL.
+    let by_name = parameter_indices_by_name(stmt);
     let mut indices: Vec<usize> = Vec::with_capacity(params.len());
     let mut claimed = vec![false; count + 1];
 
     for (name, _value) in params {
-        // Neither way of resolving a name answers one the statement does not
-        // have; rusqlite reports SQLite's index of 0 as absence itself.
-        let index = match resolver.index_of(stmt, name) {
+        let index = match by_name.get(name.as_str()) {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
-            Some(index) => index,
+            Some(index) => *index,
         };
 
         // An index the flag vector has no room for would be SQLite answering
@@ -158,12 +147,6 @@ fn require_named_parameters_covered(
                 indices.push(index);
             }
         }
-
-        // A key the statement does not have, and a second key naming one
-        // parameter, both end the walk above, so only a key that resolved and
-        // was the first to claim its parameter is counted here.
-        walked = walked.saturating_add(index);
-        resolver = map_once_share_spent(resolver, stmt, walked, share);
     }
 
     match (1..=count).find(|index| claimed.get(*index) != Some(&true)) {
@@ -172,77 +155,6 @@ fn require_named_parameters_covered(
             index,
             name: stmt.parameter_name(index).map(str::to_string),
         }),
-    }
-}
-
-/// How a walk turns a key into the parameter's one-based index.
-///
-/// The twin for the raw-FFI doors is `stream.rs:NameResolver`, and the reason
-/// for the two ways is the same: the map costs what the statement is long,
-/// while a direct lookup costs the position of the key it answers, so a
-/// list's cost is the sum of the positions its keys name.
-enum NameResolver<'a> {
-    OneByOne,
-    Map(HashMap<&'a str, usize>),
-}
-
-impl NameResolver<'_> {
-    /// The parameter's one-based index, or `None` for a name the statement
-    /// does not have. rusqlite answers absence for a name it cannot hand to
-    /// SQLite at all — one holding a NUL byte — which is absence all the same.
-    fn index_of(&self, stmt: &Statement<'_>, name: &str) -> Option<usize> {
-        match self {
-            NameResolver::Map(by_name) => by_name.get(name).copied(),
-            NameResolver::OneByOne => stmt.parameter_index(name).ok().flatten(),
-        }
-    }
-}
-
-/// Where a list's keys start being resolved: one holding half the statement's
-/// parameters' worth of keys or more reads every name into the map at once,
-/// being about to read most of them anyway; a shorter one starts a key at a
-/// time and gives that up part-way if the walking costs too much
-/// (`name_walk_share`).
-fn name_resolver<'a>(stmt: &'a Statement<'a>, keys: usize) -> NameResolver<'a> {
-    match keys.saturating_mul(2) < stmt.parameter_count() {
-        true => NameResolver::OneByOne,
-        false => NameResolver::Map(parameter_indices_by_name(stmt)),
-    }
-}
-
-/// How many names resolving keys one at a time may walk before the map is
-/// built for the keys that are left: `count * count / 32`, never less than
-/// `count`. That share measures about a sixth of a map read at SQLite's limit
-/// of 32 766 parameters, so no key shape costs more than about 1.2 map reads
-/// however far into the statement the caller's keys reach. The floor keeps
-/// the share from rounding to nothing on a short statement, where it means
-/// the map is built after a key or two and nothing measurable is spent.
-///
-/// The twin for the raw-FFI doors is `stream.rs:name_walk_share`.
-const NAME_WALK_SHARE_DIVISOR: usize = 32;
-
-#[inline]
-fn name_walk_share(count: usize) -> usize {
-    let share = count.saturating_mul(count) / NAME_WALK_SHARE_DIVISOR;
-
-    share.max(count)
-}
-
-/// The map, built for the keys still to come once the one-by-one walk has
-/// spent its share. The keys resolved before it keep their answers, so no key
-/// is resolved twice, and the check runs after every key, so the walk
-/// overshoots the share by one key's worth at most.
-fn map_once_share_spent<'a>(
-    resolver: NameResolver<'a>,
-    stmt: &'a Statement<'a>,
-    walked: usize,
-    share: usize,
-) -> NameResolver<'a> {
-    match resolver {
-        NameResolver::OneByOne if walked > share => {
-            NameResolver::Map(parameter_indices_by_name(stmt))
-        }
-        kept => kept,
     }
 }
 
@@ -296,7 +208,8 @@ pub(crate) fn core_query<'a>(
             stmt.query([])?
         }
         Params::Named(items) => {
-            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            let named_params_vec =
+                decode_exec_keyword_params(env, &items, stmt.parameter_count())?;
             let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
             require_named_within_length(conn, &named_params_vec)?;
             bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;
@@ -365,7 +278,8 @@ pub(crate) fn core_execute<'a>(
             stmt.execute([])?
         }
         Params::Named(items) => {
-            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            let named_params_vec =
+                decode_exec_keyword_params(env, &items, stmt.parameter_count())?;
             let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
             require_named_within_length(conn, &named_params_vec)?;
             bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;

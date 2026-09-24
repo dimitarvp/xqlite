@@ -112,7 +112,7 @@ defmodule Xqlite.Telemetry do
   the list the caller passed, which is also the number bound: the
   type-extension chain rewrites values, never their count. A list whose
   tail is not a list counts the elements before that tail, and the NIF
-  below refuses the call. A parameter an extension
+  below refuses the call. A parameter or a stored value an extension
   refuses produces a normal stop event with `result_class: :error` and
   `error_reason: {:type_extension_refused, _}`, because the chain runs
   inside the span.

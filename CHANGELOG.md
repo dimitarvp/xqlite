@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`Xqlite.limit/3` and `XqliteNIF.limit/3`** — SQLite's per-connection
-  limits (`sqlite3_limit`). Thirteen categories, `-1` reads without setting,
-  and the call always answers the value that was in force before it. SQLite
-  clamps a new value silently, down to its own ceiling for the category and up
-  to 30 for `:length`, so read the value back to see what took effect.
+- **`Xqlite.get_limit/2` and `Xqlite.put_limit/3`**, and the raw
+  `XqliteNIF.get_limit/2` and `XqliteNIF.put_limit/3` — SQLite's
+  per-connection limits (`sqlite3_limit`), thirteen categories.
+  `put_limit/3` answers the value now in force, read back under the same
+  lock: SQLite lowers a value to its compile-time ceiling for the category
+  and raises `:length` to 30. On `Xqlite.put_limit/3` any integer outside
+  `0..2_147_483_647` is `{:error, {:invalid_limit_value, %{category: _,
+  value: _}}}`, judged before the category; the raw stub judges the same
+  range and raises `ArgumentError` for an integer outside 64 bits.
 
 ### Fixed
 
@@ -66,13 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like every door that binds a value, answering
   `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` where it used to
   answer `{:too_big, code, message}`.
-- **A keyword list with one key the statement lacks paid for the whole name
-  map.** Resolving keys through the map costs one read per parameter of the
-  statement, so a refused list of a few keys on a 32 766-parameter statement
-  took 1.4 s and held the connection for it. A list holding fewer than half
-  the statement's parameters' worth of keys now resolves them one by one, so
-  a refused list costs what its keys cost (8 µs at the cap); a longer list
-  still pays the map, as a successful bind does.
 - **The telemetry guide names the one refusal answered without an event.**
   A `:type_extensions` option that is no proper list of extension modules is
   refused before the span opens, so the call emits neither a start nor a
@@ -240,7 +237,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Xqlite.TypeExtension.decode_rows/2` say it answers `{:ok, rows}`; the
   `:too_big` docs write its code as `code` rather than the literal 18, SQLite
   defining no extended code for that result today; the telemetry guide names
-  `Xqlite.limit/3` beside `backup_with_progress/6` as the doors that emit
+  the limit functions beside `backup_with_progress/6` as the doors that emit
   nothing; the gotchas guide, this file and the architecture map carry the
   one measured figure for the named bind; the architecture map names the
   functions the stream data flow really goes through and all of the checks
@@ -249,25 +246,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **A keyword list is no longer resolved one key at a time to the end.**
-  Resolving a key by name walks the statement's own list of names up to the
-  one it answers, so a list costs the sum of the positions its keys name — a
-  number the caller chooses. A refused list of 16 382 keys naming the high
-  half of a 32 766-parameter statement held the connection for 2 304 ms,
-  where reading every name into a map costs 1 456 ms. Such a list now starts a
-  key at a time and builds the map for the keys that are left once that
-  walking has cost a fixed share of a map read, which caps the worst shape at
-  about 1 650 ms — 1.13 map reads. Two shapes pay for the ceiling: 16 382 keys
-  naming the low half go from 775 ms to about 1 650 ms and 8 191 keys naming
-  the high quarter from 1 344 ms to about 1 650 ms. A list holding half the
-  statement's parameters' worth of keys or more still takes the map at once,
-  and a full bind costs what it did. The refusals, their order and their
-  payloads are unchanged.
+- **A keyword list is taken only on a statement of at most 2 048
+  parameters.** Above that, every door that takes a keyword list answers
+  `{:error, {:too_many_named_parameters, %{count: n, limit: 2048}}}` before a
+  value is read; a positional list binds at any count. The names of an
+  accepted list resolve through one map built per call, which costs 7.1 ms at
+  2 048 parameters on one machine and grows faster than the count. SQLite's
+  own prepare of SQL with that many names costs about twice the map, grows
+  the same way, and no parameter list avoids it: 14, 193 and 3 023 ms at
+  2 048, 8 192 and 32 766 names. Written with bare `?` the same statement
+  prepares in 1.0, 4.7 and 20.7 ms, so a statement with thousands of
+  parameters is written with `?` and bound with a positional list.
+- **A type extension's `decode/1` can refuse a stored value, and a callback
+  answer outside the three shapes is refused, not raised.** A `decode/1`
+  that claims a value but cannot read it answers `{:error, reason}`, and
+  every function that decodes rows answers `{:error,
+  {:type_extension_refused, %{column: n, extension: module, reason:
+  reason}}}`, `n` being the value's one-based place in its row. `stream/4`
+  hands over the rows decoded before it, then answers the error under its
+  `:on_error` mode. The query functions decode after the statement ran, so
+  its changes stand. An `encode/1` or `decode/1` answering anything but
+  `{:ok, value}`, `:skip` or `{:error, reason}` raised `CaseClauseError`; it
+  is now the same refusal with `reason: {:bad_return, answer}`.
+- **`Xqlite.TypeExtension.decode_value/2` answers `{:ok, decoded}` or
+  `{:error, %{extension: module, reason: reason}}`**, as `encode_value/2`
+  does, where it answered the bare decoded value: a refusal can no longer be
+  mistaken for a value that decoded to an error tuple.
 - **`{:value_too_large, _}` is now answered by every door that binds**, where
   the doors going through rusqlite used to answer
   `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw doors only
   refused values above two gigabytes. The limit in the error is the
-  connection's own, which `Xqlite.limit/3` reads and sets.
+  connection's own, which `Xqlite.get_limit/2` reads and
+  `Xqlite.put_limit/3` sets.
 - **`SQLITE_TOOBIG` is classified as `{:too_big, code, message}`** wherever
   SQLite answers it. It no longer comes from a bind, but it still comes from a
   step: SQLite checks the same limit against the row it builds, a
@@ -371,9 +381,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   puts the LLVM ones, `XQLITE_SYMBOL_TOOL` still names a tool to use instead,
   and a failed verdict now names the tool, the library and every readout line
   mentioning unwinding, so one CI log is enough to tell a wrong marker from a
-  real abort build. The release workflow's report names the tools it resolved
-  and the library it found, and says the readout was empty instead of
-  reporting a missing marker.
+  real abort build. The release workflow reads the same markers with the
+  same two tools.
 - **`XqliteNIF.stream_open/4` is `XqliteNIF.stream_open/3`.** The fourth
   argument was reserved for stream options that never arrived, and nothing
   read it — `stream_open(conn, sql, [], :garbage)` opened a stream. It is
@@ -437,11 +446,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it `priv/native/xqlitenif.{so,dll}`. It also fails, instead of passing with
   a notice, when no tool that lists symbols is on the machine; name one in
   `XQLITE_SYMBOL_TOOL` to override the search for `nm` and `llvm-nm`.
-- **The release workflow reports each built library's panic strategy.** Every
-  build job unpacks the library it produced, reads its symbols and writes what
-  it found into its own job summary. The step reports and never fails the job:
-  the marker that proves unwinding differs per target family, and one that is
-  wrong for a family would block that target's asset.
+- **The release workflow fails a target whose library does not unwind.**
+  Every build job unpacks the library it produced and, before the upload,
+  reads it for the marker `scripts/panic_strategy.exs` reads:
+  `_Unwind_RaiseException` among an ELF or Mach-O library's undefined symbols
+  (`llvm-nm -u`), `_CxxThrowException` or `__CxxFrameHandler3` in a DLL's
+  import table (`llvm-objdump -p`). A missing marker, or a library the job
+  cannot find or read, fails the job, so that target ships no asset; the job
+  summary names the library, the tool and the marker lines it found.
 - **A binary that is not UTF-8 where text was meant is an answer, not a
   raise.** Every argument the native side reads as text — the SQL of the six
   query doors and their cancellable twins, the paths and URIs of the openers,

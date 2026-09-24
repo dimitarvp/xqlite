@@ -227,14 +227,20 @@ fn autocommit(handle: ResourceArc<XqliteConn>) -> Result<bool, XqliteError> {
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn limit(
+fn get_limit(
     handle: ResourceArc<XqliteConn>,
     category: rustler::Atom,
-    new_value: i64,
-) -> Result<i64, XqliteError> {
-    connection::with_conn(&handle, |conn| {
-        crate::limits::read_or_set(conn, category, new_value)
-    })
+) -> Result<std::os::raw::c_int, XqliteError> {
+    connection::with_conn(&handle, |conn| crate::limits::read(conn, category))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn put_limit(
+    handle: ResourceArc<XqliteConn>,
+    category: rustler::Atom,
+    value: i64,
+) -> Result<std::os::raw::c_int, XqliteError> {
+    connection::with_conn(&handle, |conn| crate::limits::write(conn, category, value))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -800,7 +806,9 @@ fn stmt_bind<'a>(
             Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) }
                 .map_err(BindFailure::NothingBound),
             Params::Named(items) => {
-                let named = decode_exec_keyword_params(env, &items)?;
+                // SAFETY: the lock and the statement, as stated above.
+                let count = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) };
+                let named = decode_exec_keyword_params(env, &items, count.max(0) as usize)?;
                 // SAFETY: the lock and the statement, as stated above.
                 unsafe { bind_named_params_ffi(stmt_ptr, &named, db_handle) }
             }
@@ -1102,7 +1110,10 @@ unsafe fn bind_stream_params<'a>(
         // SAFETY: forwarded from this function's own contract.
         Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
         Params::Named(items) => {
-            let named_params_vec = decode_exec_keyword_params(env, &items)?;
+            // SAFETY: forwarded from this function's own contract.
+            let count = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) };
+            let named_params_vec =
+                decode_exec_keyword_params(env, &items, count.max(0) as usize)?;
             // SAFETY: forwarded from this function's own contract.
             unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
                 .map_err(crate::stream::BindFailure::into_error)

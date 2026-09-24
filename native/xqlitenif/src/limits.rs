@@ -14,29 +14,38 @@ use std::os::raw::c_int;
 // rather than something SQLite clamps.
 const MAX_LIMIT_VALUE: i64 = c_int::MAX as i64;
 
-/// Reads, and optionally sets, one of the connection's limits.
-///
-/// `new_value` of -1 reads without setting, and 0 to 2^31-1 sets; every other
-/// negative, and anything above 2^31-1, is refused rather than read. SQLite
-/// answers the value in force before the call and silently clamps a new one
-/// to its own compile-time ceiling — and, for `:length` alone, up to a floor
-/// of 30 — so a caller who needs the value that took effect reads it back.
+/// Callers must hold the connection Mutex.
+pub(crate) fn read(conn: &Connection, category: Atom) -> Result<c_int, XqliteError> {
+    let id = category_id(category)?;
+
+    Ok(in_force(conn, id))
+}
+
+/// Sets one of the connection's limits and answers the value now in force,
+/// which SQLite may have lowered to its compile-time ceiling for the category
+/// or, for `:length`, raised to its floor of 30.
 ///
 /// Callers must hold the connection Mutex.
-pub(crate) fn read_or_set(
+pub(crate) fn write(
     conn: &Connection,
     category: Atom,
-    new_value: i64,
-) -> Result<i64, XqliteError> {
+    value: i64,
+) -> Result<c_int, XqliteError> {
+    let requested = judge_value(category, value)?;
     let id = category_id(category)?;
-    let requested = judge_value(category, new_value)?;
 
     // SAFETY: the caller holds the connection Mutex for the whole call, so no
     // other thread is inside a `sqlite3_*` call on this connection, and
     // `handle()` is the live `sqlite3*` that Mutex guards.
-    let previous = unsafe { ffi::sqlite3_limit(conn.handle(), id, requested) };
+    unsafe { ffi::sqlite3_limit(conn.handle(), id, requested) };
 
-    Ok(previous as i64)
+    Ok(in_force(conn, id))
+}
+
+fn in_force(conn: &Connection, id: c_int) -> c_int {
+    // SAFETY: `read` and `write` are the callers and run under the connection
+    // Mutex their own callers hold; `handle()` is the live `sqlite3*` it guards.
+    unsafe { ffi::sqlite3_limit(conn.handle(), id, -1) }
 }
 
 /// The id `sqlite3_limit` takes for the category a caller named.
@@ -70,7 +79,7 @@ fn category_id(category: Atom) -> Result<c_int, XqliteError> {
 /// decoded as a 64-bit integer so that a number past `c_int`'s top is answered
 /// with an error rather than raised at the decoder.
 fn judge_value(category: Atom, value: i64) -> Result<c_int, XqliteError> {
-    let in_range = value == -1 || (0..=MAX_LIMIT_VALUE).contains(&value);
+    let in_range = (0..=MAX_LIMIT_VALUE).contains(&value);
 
     match in_range.then(|| c_int::try_from(value)) {
         Some(Ok(requested)) => Ok(requested),

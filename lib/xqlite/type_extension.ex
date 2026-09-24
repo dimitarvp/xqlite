@@ -18,9 +18,12 @@ defmodule Xqlite.TypeExtension do
       list.
 
     * `decode/1` — converts a SQLite value back to an Elixir term.
-      Return `{:ok, elixir_term}` on success or `:skip` to pass to the next
-      extension. Decoding has no refusal: a value no extension converts is
-      handed back as SQLite stored it.
+      Return `{:ok, elixir_term}` on success, `:skip` to pass to the next
+      extension, or `{:error, reason}` for a value it claims but cannot read:
+      the call fails as above, `column: n` (its place in the row) replacing
+      `position`.
+      A value no extension converts is handed back as SQLite stored it. Any
+      other answer from either callback is refused with `{:bad_return, answer}`.
 
   ## Built-in extensions
 
@@ -86,23 +89,16 @@ defmodule Xqlite.TypeExtension do
   Converts a SQLite storage value back to an Elixir term.
 
   Return `{:ok, elixir_term}` on successful conversion. Return `:skip`
-  if this extension does not handle the given value.
-
-  There is no `{:error, reason}` here, unlike `c:encode/1`, and that is by
-  design: a stored value this extension claims but cannot read back is not a
-  failed read, it is a value the extension declines, so the answer is `:skip`
-  and the value comes back as SQLite stored it. Returning anything other than
-  `{:ok, term}` or `:skip` breaks this contract and raises while the rows are
-  being consumed, where none of `Xqlite.stream/4`'s `:on_error` modes catches
-  it.
+  if this extension does not handle the given value. Return `{:error, reason}`
+  for a value it claims but cannot read — the chain stops and the caller is
+  told which column, which extension and why.
   """
-  @callback decode(value :: Xqlite.sqlite_value()) :: {:ok, term()} | :skip
+  @callback decode(value :: Xqlite.sqlite_value()) :: {:ok, term()} | :skip | {:error, term()}
 
   @doc false
   # Every door that takes `:type_extensions`, and both chain functions below,
   # judge the list here: counting an improper list with `length/1` raised, and
   # a term that is no list at all reached the encode chain and raised there.
-  # `nil` means no extensions, as an absent option does.
   @spec validate_extensions(term()) :: {:ok, [module()]} | {:error, Xqlite.error_reason()}
   def validate_extensions(nil), do: {:ok, []}
 
@@ -265,7 +261,7 @@ defmodule Xqlite.TypeExtension do
   defp encode_positional([value | rest], extensions, position, acc) do
     case encode_value(value, extensions) do
       {:ok, encoded} -> encode_positional(rest, extensions, position + 1, [encoded | acc])
-      {:error, details} -> refusal(details, position)
+      {:error, details} -> refusal(details, %{position: position})
     end
   end
 
@@ -277,7 +273,7 @@ defmodule Xqlite.TypeExtension do
   defp encode_keyword([{key, value} | rest], extensions, position, acc) do
     case encode_value(value, extensions) do
       {:ok, encoded} -> encode_keyword(rest, extensions, position + 1, [{key, encoded} | acc])
-      {:error, details} -> refusal(details, position)
+      {:error, details} -> refusal(details, %{position: position})
     end
   end
 
@@ -288,10 +284,8 @@ defmodule Xqlite.TypeExtension do
   defp encode_keyword(tail, _extensions, _position, _acc),
     do: {:error, {:expected_keyword_list, improper_tail(tail)}}
 
-  defp refusal(%{extension: extension, reason: reason}, position) do
-    {:error,
-     {:type_extension_refused, %{position: position, extension: extension, reason: reason}}}
-  end
+  defp refusal(details, place),
+    do: {:error, {:type_extension_refused, Map.merge(details, place)}}
 
   @doc """
   Decodes result rows through the extension chain.
@@ -299,7 +293,8 @@ defmodule Xqlite.TypeExtension do
   Each cell in each row is passed through the extension chain.
   Values that no extension handles pass through unchanged.
 
-  Answers `{:ok, rows}` with the decoded rows. The extension list is judged
+  Answers `{:ok, rows}` with the decoded rows, or the refusal of the first
+  value an extension refuses to decode. The extension list is judged
   first, exactly as `encode_params/2` judges it, and a list that is no proper
   list of extension modules answers
   `{:error, {:invalid_type_extensions, refusal}}` before a single value is
@@ -343,7 +338,7 @@ defmodule Xqlite.TypeExtension do
   defp decode_walked_rows([], _extensions, _position, acc), do: {:ok, Enum.reverse(acc)}
 
   defp decode_walked_rows([row | rest], extensions, position, acc) when is_list(row) do
-    case decode_row(row, extensions, []) do
+    case decode_row(row, extensions, 1, []) do
       {:ok, decoded} -> decode_walked_rows(rest, extensions, position + 1, [decoded | acc])
       {:error, reason} -> {:error, reason}
     end
@@ -355,25 +350,29 @@ defmodule Xqlite.TypeExtension do
   defp decode_walked_rows(tail, _extensions, _position, _acc),
     do: {:error, {:expected_list, improper_tail(tail)}}
 
-  defp decode_row([], _extensions, acc), do: {:ok, Enum.reverse(acc)}
+  defp decode_row([], _extensions, _column, acc), do: {:ok, Enum.reverse(acc)}
 
-  defp decode_row([value | rest], extensions, acc),
-    do: decode_row(rest, extensions, [decode_value(value, extensions) | acc])
+  defp decode_row([value | rest], extensions, column, acc) do
+    case decode_value(value, extensions) do
+      {:ok, decoded} -> decode_row(rest, extensions, column + 1, [decoded | acc])
+      {:error, details} -> refusal(details, %{column: column})
+    end
+  end
 
-  defp decode_row(tail, _extensions, _acc), do: {:error, {:expected_list, improper_tail(tail)}}
+  defp decode_row(tail, _extensions, _column, _acc),
+    do: {:error, {:expected_list, improper_tail(tail)}}
 
   @doc false
-  # The twin of `encode_params_checked/2` for the read side: the rows come
-  # back directly, since a caller that walked the list has nothing left to be
-  # refused for.
-  @spec decode_rows_checked(rows :: [[term()]], extensions :: [module()]) :: [[term()]]
-  def decode_rows_checked(rows, []), do: rows
+  @spec decode_rows_checked([[term()]], [module()]) :: {:ok, [[term()]]} | Xqlite.error()
+  def decode_rows_checked(rows, []), do: {:ok, rows}
 
-  def decode_rows_checked(rows, extensions) do
-    Enum.map(rows, fn row ->
-      Enum.map(row, fn value -> decode_value(value, extensions) end)
-    end)
-  end
+  def decode_rows_checked(rows, extensions), do: decode_walked_rows(rows, extensions, 1, [])
+
+  @doc false
+  @spec decode_row_checked([term()], [module()]) :: {:ok, [term()]} | Xqlite.error()
+  def decode_row_checked(row, []), do: {:ok, row}
+
+  def decode_row_checked(row, extensions), do: decode_row(row, extensions, 1, [])
 
   @doc """
   Encodes a single value through the extension chain.
@@ -382,7 +381,8 @@ defmodule Xqlite.TypeExtension do
   it produced, or `{:ok, value}` unchanged when no extension matched. An
   extension that claims the value but cannot store it answers
   `{:error, %{extension: module, reason: reason}}` and the chain stops
-  there. The answer is always tagged, so a parameter whose own value is an
+  there, as it does with `reason: {:bad_return, answer}` for any other
+  answer. The answer is always tagged, so a parameter whose own value is an
   `{:error, term}` tuple is never mistaken for a refusal.
 
   This function runs once per value, so it does not judge the extension
@@ -397,29 +397,34 @@ defmodule Xqlite.TypeExtension do
     case ext.encode(value) do
       {:ok, encoded} -> {:ok, encoded}
       :skip -> encode_value(value, rest)
-      {:error, reason} -> {:error, %{extension: ext, reason: reason}}
+      {:error, reason} -> chain_refusal(ext, reason)
+      other -> chain_refusal(ext, {:bad_return, other})
     end
   end
 
   @doc """
   Decodes a single value through the extension chain.
 
-  Returns the decoded value from the first extension that handles it,
-  or the original value if no extension matches.
+  Answers exactly as `encode_value/2` does, `{:ok, decoded}` or
+  `{:error, %{extension: module, reason: reason}}`, so an extension may
+  decode a value to an `{:error, term}` tuple.
 
   This function runs once per value, so it does not judge the extension
   list — the caller vouches for it. `encode_params/2` and `decode_rows/2`
-  are the two functions that judge a list, once per call. An extension whose
-  `decode/1` answers anything but `{:ok, term}` or `:skip` breaks the
-  callback's contract and raises here.
+  are the two functions that judge a list, once per call.
   """
-  @spec decode_value(value :: term(), extensions :: [module()]) :: term()
-  def decode_value(value, []), do: value
+  @spec decode_value(value :: term(), extensions :: [module()]) ::
+          {:ok, term()} | {:error, %{extension: module(), reason: term()}}
+  def decode_value(value, []), do: {:ok, value}
 
   def decode_value(value, [ext | rest]) do
     case ext.decode(value) do
-      {:ok, decoded} -> decoded
+      {:ok, decoded} -> {:ok, decoded}
       :skip -> decode_value(value, rest)
+      {:error, reason} -> chain_refusal(ext, reason)
+      other -> chain_refusal(ext, {:bad_return, other})
     end
   end
+
+  defp chain_refusal(extension, reason), do: {:error, %{extension: extension, reason: reason}}
 end

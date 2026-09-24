@@ -269,6 +269,10 @@ pub(crate) enum XqliteError {
         name: Option<String>,
     },
     DuplicateParameterName(String),
+    TooManyNamedParameters {
+        count: usize,
+        limit: usize,
+    },
     InvalidPragmaName(Vec<u8>),
     InvalidTransactionMode,
     InvalidAuthorizerAction {
@@ -278,8 +282,6 @@ pub(crate) enum XqliteError {
     InvalidLimitCategory {
         category: Atom,
     },
-    // A limit value outside what sqlite3_limit takes: -1 reads without
-    // setting, 0 to 2^31-1 sets.
     InvalidLimitValue {
         category: Atom,
         value: i64,
@@ -679,10 +681,12 @@ impl Display for XqliteError {
             XqliteError::InvalidLimitCategory { category: _ } => {
                 write!(f, "Invalid connection limit category")
             }
-            XqliteError::InvalidLimitValue { category: _, value } => write!(
+            XqliteError::InvalidLimitValue { category: _, value } => {
+                write!(f, "a limit of {value} is outside 0 to {}", i32::MAX)
+            }
+            XqliteError::TooManyNamedParameters { count, limit } => write!(
                 f,
-                "a limit of {value} is outside -1 (read) and 0 to {}",
-                i32::MAX
+                "a keyword list is refused on a statement of {count} parameters; the most is {limit}"
             ),
             XqliteError::NulErrorInString => {
                 write!(f, "Input string contains embedded null byte")
@@ -953,6 +957,21 @@ impl Encoder for XqliteError {
             }
             XqliteError::DuplicateParameterName(name) => {
                 (atoms::duplicate_parameter_name(), name).encode(env)
+            }
+            XqliteError::TooManyNamedParameters { count, limit } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::count(), count)
+                    .and_then(|map| map.map_put(atoms::limit(), limit));
+                match map_result {
+                    Ok(map) => (atoms::too_many_named_parameters(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for TooManyNamedParameters"
+                                .to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
             XqliteError::InvalidPragmaName(name) => encode_pragma_name(env, name),
             XqliteError::InvalidTransactionMode => {

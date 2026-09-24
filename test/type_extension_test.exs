@@ -388,19 +388,20 @@ defmodule Xqlite.TypeExtensionTest do
 
   describe "decode_value/2" do
     test "returns original value when no extensions" do
-      assert TypeExtension.decode_value(42, []) == 42
+      assert TypeExtension.decode_value(42, []) == {:ok, 42}
     end
 
     test "first matching extension wins" do
-      assert TypeExtension.decode_value(20, [IntDoubler, SkipAllExtension]) == 10
+      assert TypeExtension.decode_value(20, [IntDoubler, SkipAllExtension]) == {:ok, 10}
     end
 
     test "skips non-matching and tries next" do
-      assert TypeExtension.decode_value("HELLO", [IntDoubler, StringUppercase]) == "hello"
+      assert TypeExtension.decode_value("HELLO", [IntDoubler, StringUppercase]) ==
+               {:ok, "hello"}
     end
 
     test "returns original value when all extensions skip" do
-      assert TypeExtension.decode_value(nil, [IntDoubler, StringUppercase]) == nil
+      assert TypeExtension.decode_value(nil, [IntDoubler, StringUppercase]) == {:ok, nil}
     end
   end
 
@@ -745,25 +746,29 @@ defmodule Xqlite.TypeExtensionTest do
     alias Xqlite.TypeExtension.NaiveDateTime, as: NDTExt
 
     test "DateTime before NaiveDateTime: timezone string decoded as DateTime" do
-      result = TypeExtension.decode_value("2024-01-15T10:30:00Z", [DTExt, NDTExt])
+      assert {:ok, result} =
+               TypeExtension.decode_value("2024-01-15T10:30:00Z", [DTExt, NDTExt])
+
       assert %DateTime{} = result
     end
 
     test "NaiveDateTime before DateTime: timezone string decoded as NaiveDateTime" do
-      result = TypeExtension.decode_value("2024-01-15T10:30:00Z", [NDTExt, DTExt])
+      assert {:ok, result} =
+               TypeExtension.decode_value("2024-01-15T10:30:00Z", [NDTExt, DTExt])
+
       assert %NaiveDateTime{} = result
     end
 
     test "NaiveDateTime-only string: NaiveDateTime wins regardless of order" do
       value = "2024-01-15T10:30:00"
-      assert %NaiveDateTime{} = TypeExtension.decode_value(value, [DTExt, NDTExt])
-      assert %NaiveDateTime{} = TypeExtension.decode_value(value, [NDTExt, DTExt])
+      assert {:ok, %NaiveDateTime{}} = TypeExtension.decode_value(value, [DTExt, NDTExt])
+      assert {:ok, %NaiveDateTime{}} = TypeExtension.decode_value(value, [NDTExt, DTExt])
     end
 
     test "Date before DateTime: date-only string decoded as Date, not DateTime" do
       alias Xqlite.TypeExtension.Date, as: DExt
 
-      result = TypeExtension.decode_value("2024-01-15", [DExt, DTExt])
+      assert {:ok, result} = TypeExtension.decode_value("2024-01-15", [DExt, DTExt])
       assert %Date{} = result
     end
   end
@@ -851,7 +856,9 @@ defmodule Xqlite.TypeExtensionTest do
 
         assert stored == "2024-06-15T14:30:00.123456Z"
 
-        decoded = TypeExtension.decode_value(stored, [Xqlite.TypeExtension.DateTime])
+        assert {:ok, decoded} =
+                 TypeExtension.decode_value(stored, [Xqlite.TypeExtension.DateTime])
+
         assert decoded == dt
       end
 
@@ -866,7 +873,7 @@ defmodule Xqlite.TypeExtensionTest do
         {:ok, %{rows: [[raw]]}} =
           NIF.query(conn, "SELECT dt_val FROM type_ext_test WHERE id = 1", [])
 
-        assert TypeExtension.decode_value(raw, extensions) == dt
+        assert TypeExtension.decode_value(raw, extensions) == {:ok, dt}
       end
 
       test "NaiveDateTime round-trip", %{conn: conn} do
@@ -880,7 +887,7 @@ defmodule Xqlite.TypeExtensionTest do
         {:ok, %{rows: [[raw]]}} =
           NIF.query(conn, "SELECT ndt_val FROM type_ext_test WHERE id = 1", [])
 
-        assert TypeExtension.decode_value(raw, extensions) == ndt
+        assert TypeExtension.decode_value(raw, extensions) == {:ok, ndt}
       end
 
       test "Date round-trip", %{conn: conn} do
@@ -894,7 +901,7 @@ defmodule Xqlite.TypeExtensionTest do
         {:ok, %{rows: [[raw]]}} =
           NIF.query(conn, "SELECT d_val FROM type_ext_test WHERE id = 1", [])
 
-        assert TypeExtension.decode_value(raw, extensions) == d
+        assert TypeExtension.decode_value(raw, extensions) == {:ok, d}
       end
 
       test "Time round-trip", %{conn: conn} do
@@ -908,7 +915,7 @@ defmodule Xqlite.TypeExtensionTest do
         {:ok, %{rows: [[raw]]}} =
           NIF.query(conn, "SELECT t_val FROM type_ext_test WHERE id = 1", [])
 
-        assert TypeExtension.decode_value(raw, extensions) == t
+        assert TypeExtension.decode_value(raw, extensions) == {:ok, t}
       end
 
       test "all four types in one row", %{conn: conn} do
@@ -940,7 +947,7 @@ defmodule Xqlite.TypeExtensionTest do
             []
           )
 
-        decoded = Enum.map(row, fn val -> TypeExtension.decode_value(val, extensions) end)
+        assert {:ok, [decoded]} = TypeExtension.decode_rows([row], extensions)
         assert decoded == [dt, ndt, d, t]
       end
 
@@ -965,7 +972,7 @@ defmodule Xqlite.TypeExtensionTest do
           )
 
         [dt_raw, int_val, float_val, text_val] = row
-        assert TypeExtension.decode_value(dt_raw, extensions) == dt
+        assert TypeExtension.decode_value(dt_raw, extensions) == {:ok, dt}
         assert int_val == 42
         assert float_val == 3.14
         assert text_val == "plain"
@@ -991,8 +998,8 @@ defmodule Xqlite.TypeExtensionTest do
             []
           )
 
-        assert TypeExtension.decode_value(dt_raw, extensions) == nil
-        assert TypeExtension.decode_value(d_raw, extensions) == nil
+        assert TypeExtension.decode_value(dt_raw, extensions) == {:ok, nil}
+        assert TypeExtension.decode_value(d_raw, extensions) == {:ok, nil}
       end
 
       test "no extensions: raw strings returned as-is", %{conn: conn} do
@@ -1007,7 +1014,7 @@ defmodule Xqlite.TypeExtensionTest do
           NIF.query(conn, "SELECT dt_val FROM type_ext_test WHERE id = 1", [])
 
         assert raw == "2024-01-15T10:30:00Z"
-        assert TypeExtension.decode_value(raw, []) == "2024-01-15T10:30:00Z"
+        assert TypeExtension.decode_value(raw, []) == {:ok, "2024-01-15T10:30:00Z"}
       end
 
       test "stream with type_extensions option", %{conn: conn} do

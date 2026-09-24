@@ -92,7 +92,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
     end
 
     test "a bind refused for its length leaves an earlier one in force", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, @length_limit)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, @length_limit)
       assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
       assert :ok = Xqlite.bind(stmt, [7, 8])
 
@@ -104,7 +104,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
     end
 
     property "a step answers the rule whatever came before it", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, @length_limit)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, @length_limit)
 
       check all(
               count <- integer(0..4),

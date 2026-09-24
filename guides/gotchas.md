@@ -157,32 +157,25 @@ If you need `ORDER BY` to be chronological, store a sort-stable form:
   decode, because a stored integer is indistinguishable from any other integer,
   so read-side conversion back to a `DateTime` is yours to do.)
 
-### A positional list is still the cheaper way to bind many values
+### A keyword list stops at 2 048 parameters; write `?` for more
 
 SQLite resolves a parameter name by walking the statement's own list of
 names, one string comparison per name (`sqlite3_bind_parameter_index`). xqlite
 does not call that for each key: it reads the statement's names into a map
-first and binds by index, which is about 2.4 times as fast at SQLite's cap of
-32 766 parameters. It is not free either — reading the name at one index is
-itself a walk of the same list — so the cost still grows faster than the
-number of names. A positional list does none of this, binding each value
-straight at its index, and the gap grows with the number of parameters. For a
-statement with a handful of them the difference is nothing; for one with
-thousands, bind a positional list. What a keyword list costs depends on which
-parameters its keys name. Resolving one key walks the statement's names up to
-the one it answers, so keys naming the last parameters cost far more than the
-same number of keys naming the first ones. A list holding half the
-statement's parameters' worth of keys or more reads every name into the map
-at once. A shorter one is resolved a key at a time until that walking has
-cost a fixed share of what the map costs, and the map is then built for the
-keys that are left, which caps what any list can cost. At SQLite's limit of
-32 766 parameters, on one machine: the map costs 1 456 ms, the walking before
-it 192 ms, so no list costs more than about 1 650 ms whatever its keys name.
-Two shapes pay for that ceiling: a refused list of 16 382 keys naming the low
-half of the statement went from 775 ms to about 1 650 ms, and one of 8 191
-keys naming the high quarter from 1 344 ms to about 1 650 ms. The shape that
-used to be worst, 16 382 keys naming the high half, went from 2 304 ms to
-about 1 650 ms.
+once per call and binds by index. Reading the name at one index is itself a
+walk of the same list, so the map's cost grows faster than the number of
+names — 7.1 ms at 2 048 parameters on one machine. A keyword list is
+therefore taken only on a statement of at most 2 048 parameters; above that
+it is refused with
+`{:error, {:too_many_named_parameters, %{count: n, limit: 2048}}}` before any
+value is read. A positional list has no such cap: it binds each value
+straight at its index.
+
+The map is not the whole cost. SQLite's own prepare of SQL holding that many
+names costs about twice as much, grows the same way, and no parameter list
+avoids it: 14 ms at 2 048 names, 193 ms at 8 192 and 3 023 ms at 32 766. The
+same statement written with bare `?` prepares in 1.0, 4.7 and 20.7 ms. For a
+statement with thousands of parameters, write `?` and bind a positional list.
 
 ## Streaming
 

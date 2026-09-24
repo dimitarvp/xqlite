@@ -15,7 +15,10 @@ defmodule Xqlite.ParameterCoverageLawTest do
   parameter are `{:duplicate_parameter_name, key}`, and a parameter no key
   named is `{:missing_parameter, %{index: _, name: _}}` for the lowest such
   index, `name` being SQLite's own spelling of it and `nil` for a bare `?`,
-  which no keyword list can name.
+  which no keyword list can name. Ahead of all three, a keyword list on a
+  statement of more than 2 048 parameters is
+  `{:too_many_named_parameters, %{count: _, limit: 2048}}` before any value is
+  read; a positional list has no such cap.
 
   SQLite itself complains about neither shape — a parameter nothing was
   bound to reads as NULL — so `UPDATE t SET v = ?1` handed an empty list,
@@ -276,38 +279,31 @@ defmodule Xqlite.ParameterCoverageLawTest do
       assert "seed" == stored(conn)
     end
 
-    # A list short enough to have its keys resolved one at a time still gives
-    # that up part-way through when the names it has walked have cost as much
-    # as reading every name would: 99 keys naming the far end of a
-    # 200-parameter statement pass that point after a dozen keys. The three
-    # refusals, and the keys resolved before the switch, must come out the
-    # same as they do for a list that never reaches it.
-    test "a keyword list resolved partly one key at a time and partly not answers the same",
+    test "a keyword list is taken up to 2 048 parameters and refused above, on both families",
          %{conn: conn} do
-      names = Enum.map(1..200, fn index -> ":p#{index}" end)
-      sql = named_sql(names)
-      far_end = Enum.map(102..200, fn index -> {:"p#{index}", index} end)
-      unknown = Enum.map(102..199, fn index -> {:"p#{index}", index} end) ++ [{:nope, 0}]
-      duplicate = Enum.map(102..199, fn index -> {:"p#{index}", index} end) ++ [{:p102, 102}]
+      at_cap = in_list_sql(2048)
+      over_cap = in_list_sql(2049)
+      refusal = {:error, {:too_many_named_parameters, %{count: 2049, limit: 2048}}}
 
-      assert {:ok, stmt} = Xqlite.prepare(conn, sql)
+      assert {:ok, _result} = Xqlite.query(conn, at_cap, keywords(2048))
+      assert {:ok, at_cap_stmt} = Xqlite.prepare(conn, at_cap)
+      assert :ok = Xqlite.bind(at_cap_stmt, keywords(2048))
+      assert :ok = Xqlite.finalize(at_cap_stmt)
 
-      assert {:error, {:missing_parameter, %{index: 1, name: ":p1"}}} =
-               Xqlite.query(conn, sql, far_end)
+      assert {:ok, stmt} = Xqlite.prepare(conn, over_cap)
 
-      assert {:error, {:missing_parameter, %{index: 1, name: ":p1"}}} =
-               Xqlite.bind(stmt, far_end)
+      for params <- [keywords(2049), [p1: 1], [p1: <<1::1>>]] do
+        assert refusal == Xqlite.query(conn, over_cap, params)
+        assert refusal == Xqlite.bind(stmt, params)
+      end
 
-      assert {:error, {:invalid_parameter_name, ":nope"}} = Xqlite.query(conn, sql, unknown)
-      assert {:error, {:invalid_parameter_name, ":nope"}} = Xqlite.bind(stmt, unknown)
+      assert refusal == Xqlite.execute(conn, over_cap, p1: 1)
+      assert refusal == Xqlite.stream(conn, over_cap, p1: 1)
+      assert refusal == Xqlite.explain_analyze(conn, over_cap, p1: 1)
 
-      assert {:error, {:duplicate_parameter_name, ":p102"}} =
-               Xqlite.query(conn, sql, duplicate)
-
-      assert {:error, {:duplicate_parameter_name, ":p102"}} = Xqlite.bind(stmt, duplicate)
-
+      assert {:ok, _result} = Xqlite.query(conn, over_cap, Enum.to_list(1..2049))
+      assert :ok = Xqlite.bind(stmt, Enum.to_list(1..2049))
       assert :ok = Xqlite.finalize(stmt)
-      assert "seed" == stored(conn)
     end
 
     property "a keyword list is refused unless it names every parameter once",
@@ -389,6 +385,15 @@ defmodule Xqlite.ParameterCoverageLawTest do
   defp named_sql(names) do
     "UPDATE count_rows SET v = " <> Enum.join(names, " || ")
   end
+
+  # An IN list, because a chain of 2 049 `||` nests deeper than SQLite's
+  # expression depth limit of 1 000.
+  defp in_list_sql(count) do
+    "SELECT 1 WHERE 1 IN (" <>
+      Enum.map_join(1..count, ", ", fn index -> ":p#{index}" end) <> ")"
+  end
+
+  defp keywords(count), do: Enum.map(1..count, fn index -> {:"p#{index}", index} end)
 
   # A `:` name is written as the bare key the prefix rule completes; an `@`
   # or `$` name needs the key to carry the prefix itself.

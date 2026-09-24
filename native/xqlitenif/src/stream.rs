@@ -324,35 +324,23 @@ pub(crate) unsafe fn require_named_parameters_covered(
 ) -> Result<Vec<c_int>, XqliteError> {
     // SAFETY: forwarded from this function's own contract.
     let expected = unsafe { ffi::sqlite3_bind_parameter_count(raw_stmt_ptr) };
-    let count = expected.max(0) as usize;
-    let share = name_walk_share(count);
     // SAFETY: forwarded from this function's own contract.
-    let mut resolver = unsafe { name_resolver(raw_stmt_ptr, params.len(), expected) };
-    let mut walked: usize = 0;
-
-    // Two structures, because they answer two questions. `indices` keeps the
-    // caller's order, which is what the caller zips its values with to bind.
-    // `claimed` is one flag per parameter index, so a second key naming the
-    // same parameter costs one step instead of a scan of the keys read so
-    // far. SQLite caps a statement's parameter count at 32 766, which is what
-    // makes the flag vector small whatever the SQL.
+    let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
     let mut indices: Vec<c_int> = Vec::with_capacity(params.len());
-    let mut claimed = vec![false; count + 1];
+    let mut claimed = vec![false; expected.max(0) as usize + 1];
 
     for (name, _value) in params {
-        // SAFETY: forwarded from this function's own contract.
-        let index = unsafe { resolver.index_of(raw_stmt_ptr, name) };
-
-        // Zero is how SQLite says "no such parameter", and no name the map
-        // holds is zero either.
-        let slot = match usize::try_from(index).ok().filter(|slot| *slot > 0) {
+        let index = match by_name.get(name.as_str()) {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
-            Some(slot) => slot,
+            Some(index) => *index,
         };
 
         // An index the flag vector has no room for would be SQLite answering
         // outside its own count.
-        match claimed.get_mut(slot) {
+        match usize::try_from(index)
+            .ok()
+            .and_then(|slot| claimed.get_mut(slot))
+        {
             None => return Err(XqliteError::InvalidParameterName(name.clone())),
             Some(flag) if *flag => {
                 return Err(XqliteError::DuplicateParameterName(name.clone()));
@@ -362,14 +350,6 @@ pub(crate) unsafe fn require_named_parameters_covered(
                 indices.push(index);
             }
         }
-
-        // A key the statement does not have, and a second key naming one
-        // parameter, both end the walk above, so only a key that resolved and
-        // was the first to claim its parameter is counted here.
-        walked = walked.saturating_add(slot);
-        // SAFETY: forwarded from this function's own contract.
-        resolver =
-            unsafe { map_once_share_spent(resolver, raw_stmt_ptr, expected, walked, share) };
     }
 
     match (1..=expected).find(|index| !claimed_parameter(&claimed, *index)) {
@@ -399,129 +379,13 @@ pub(crate) unsafe fn require_named_parameters_covered(
     }
 }
 
-/// How a walk turns a key into the parameter's one-based index.
-///
-/// The map reads one name per parameter of the statement, so it costs what the
-/// statement is long whatever the list holds; a direct lookup walks the same
-/// names up to the one it answers, so it costs the position the caller's key
-/// named. A keyword list has to name every parameter, so a much shorter one is
-/// a list about to be refused, and resolving its keys one at a time keeps that
-/// refusal cheap — on a statement of 32 766 parameters the difference is
-/// seconds — until the positions add up, which is what `name_walk_share`
-/// bounds.
-enum NameResolver {
-    OneByOne,
-    Map(HashMap<String, c_int>),
-}
-
-impl NameResolver {
-    /// The parameter's one-based index, or 0 for a name the statement does not
-    /// have — SQLite's own answer for one.
-    ///
-    /// # Safety
-    ///
-    /// The caller holds the connection Mutex for the whole call and
-    /// `raw_stmt_ptr` is a live prepared statement of that connection.
-    unsafe fn index_of(&self, raw_stmt_ptr: *mut ffi::sqlite3_stmt, name: &str) -> c_int {
-        match self {
-            NameResolver::Map(by_name) => match by_name.get(name) {
-                None => 0,
-                Some(index) => *index,
-            },
-            // A name holding a NUL byte is no parameter name SQLite can be
-            // asked about, and is answered like any other it does not have.
-            NameResolver::OneByOne => match std::ffi::CString::new(name) {
-                Err(_interior_nul) => 0,
-                // SAFETY: forwarded from this function's own contract. The
-                // CString owns the buffer for the length of the call.
-                Ok(c_name) => unsafe {
-                    ffi::sqlite3_bind_parameter_index(raw_stmt_ptr, c_name.as_ptr())
-                },
-            },
-        }
-    }
-}
-
-/// Where a list's keys start being resolved: one holding half the statement's
-/// parameters' worth of keys or more reads every name into the map at once,
-/// being about to read most of them anyway; a shorter one starts a key at a
-/// time and gives that up part-way if the walking costs too much
-/// (`name_walk_share`).
-///
-/// # Safety
-///
-/// The caller holds the connection Mutex for the whole call and
-/// `raw_stmt_ptr` is a live prepared statement of that connection.
-unsafe fn name_resolver(
-    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
-    keys: usize,
-    expected: c_int,
-) -> NameResolver {
-    match keys.saturating_mul(2) < expected.max(0) as usize {
-        true => NameResolver::OneByOne,
-        false => {
-            // SAFETY: forwarded from this function's own contract.
-            let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
-
-            NameResolver::Map(by_name)
-        }
-    }
-}
-
-/// How many names resolving keys one at a time may walk before the map is
-/// built for the keys that are left: `count * count / 32`, never less than
-/// `count`. That share measures about a sixth of a map read at SQLite's limit
-/// of 32 766 parameters, so no key shape costs more than about 1.2 map reads
-/// however far into the statement the caller's keys reach. The floor keeps
-/// the share from rounding to nothing on a short statement, where it means
-/// the map is built after a key or two and nothing measurable is spent.
-///
-/// The twin for the doors that bind through rusqlite is
-/// `query.rs:name_walk_share`.
-const NAME_WALK_SHARE_DIVISOR: usize = 32;
-
-#[inline]
-fn name_walk_share(count: usize) -> usize {
-    let share = count.saturating_mul(count) / NAME_WALK_SHARE_DIVISOR;
-
-    share.max(count)
-}
-
-/// The map, built for the keys still to come once the one-by-one walk has
-/// spent its share. The keys resolved before it keep their answers, so no key
-/// is resolved twice, and the check runs after every key, so the walk
-/// overshoots the share by one key's worth at most.
-///
-/// # Safety
-///
-/// The caller holds the connection Mutex for the whole call and
-/// `raw_stmt_ptr` is a live prepared statement of that connection.
-unsafe fn map_once_share_spent(
-    resolver: NameResolver,
-    raw_stmt_ptr: *mut ffi::sqlite3_stmt,
-    expected: c_int,
-    walked: usize,
-    share: usize,
-) -> NameResolver {
-    match resolver {
-        NameResolver::OneByOne if walked > share => {
-            // SAFETY: forwarded from this function's own contract.
-            let by_name = unsafe { parameter_indices_by_name(raw_stmt_ptr, expected) };
-
-            NameResolver::Map(by_name)
-        }
-        kept => kept,
-    }
-}
-
 /// SQLite's own spelling of every named parameter, against its one-based
 /// index, so that each key costs one hash lookup instead of a call to
 /// `sqlite3_bind_parameter_index`, which walks the statement's whole name list
 /// with one string comparison per name. Reading one name is a walk of the same
-/// list (`sqlite3VListNumToName`), so building the map is not free either — it
-/// is about 2.4 times cheaper per name, measured at SQLite's cap of 32 766
-/// parameters, and it is the most the C interface allows. A bare `?` has no
-/// name and is left out.
+/// list (`sqlite3VListNumToName`), so building the map is not free either,
+/// and it is the most the C interface allows. A bare `?` has no name and is
+/// left out.
 ///
 /// # Safety
 ///

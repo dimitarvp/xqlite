@@ -193,7 +193,8 @@ defmodule XqliteNIF do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
   """
   @spec query(
           conn :: Xqlite.conn(),
@@ -238,7 +239,8 @@ defmodule XqliteNIF do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
   """
   @spec query_cancellable(
           conn :: Xqlite.conn(),
@@ -277,7 +279,8 @@ defmodule XqliteNIF do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
   """
   @spec query_with_changes(
           conn :: Xqlite.conn(),
@@ -305,7 +308,8 @@ defmodule XqliteNIF do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
   """
   @spec query_with_changes_cancellable(
           conn :: Xqlite.conn(),
@@ -371,7 +375,7 @@ defmodule XqliteNIF do
   Parameters follow `query/3`'s rule: a plain list is positional and its
   length must be the statement's own parameter count, a keyword list is named
   and must name every parameter of the statement exactly once. See `query/3`
-  for the three refusals and for how a key names a parameter.
+  for the three refusals, the 2 048 cap and how a key names a parameter.
   """
   @spec explain_analyze(
           conn :: Xqlite.conn(),
@@ -419,7 +423,8 @@ defmodule XqliteNIF do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
   """
   @spec execute(conn :: Xqlite.conn(), sql :: String.t(), params :: list() | keyword()) ::
           {:ok, non_neg_integer()} | Xqlite.error()
@@ -453,7 +458,8 @@ defmodule XqliteNIF do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
   """
   @spec execute_cancellable(
           conn :: Xqlite.conn(),
@@ -1032,36 +1038,21 @@ defmodule XqliteNIF do
   def autocommit(_conn), do: err()
 
   @doc """
-  Reads, and optionally sets, one of the connection's limits (raw NIF).
-
-  Most users want `Xqlite.limit/3`. Equivalent to `sqlite3_limit`: it answers
-  `{:ok, previous}`, the value in force before the call, so a read and a set
-  look the same from the outside.
-
-  `category` is one of `:length`, `:sql_length`, `:column`, `:expr_depth`,
-  `:compound_select`, `:vdbe_op`, `:function_arg`, `:attached`,
-  `:like_pattern_length`, `:variable_number`, `:trigger_depth`,
-  `:worker_threads` and `:parser_depth`; any other atom answers
-  `{:error, {:invalid_limit_category, category}}` and a term that is no atom
-  raises `ArgumentError`.
-
-  `new_value` of `-1` reads without setting. A value from `0` to
-  `2_147_483_647` sets; anything else answers
-  `{:error, {:invalid_limit_value, %{category: category, value: value}}}`, and
-  a number outside signed 64 bits, or a term that is no integer, raises
-  `ArgumentError`. SQLite clamps a new value silently — down to its own
-  compile-time ceiling for the category, and up to 30 for `:length`, which is
-  the only category with a floor — so read the value back to see what took
-  effect.
-
-  A lowered `:length` also applies to reads: SQLite refuses a row or a column
-  longer than the current limit while it runs, as
-  `{:error, {:too_big, code, message}}`, so lowering it below values already
-  stored makes reading them fail.
+  Reads one of the connection's limits (raw NIF); see `Xqlite.get_limit/2`.
+  A term that is no atom raises `ArgumentError`.
   """
-  @spec limit(conn :: Xqlite.conn(), category :: atom(), new_value :: integer()) ::
-          {:ok, integer()} | Xqlite.error()
-  def limit(_conn, _category, _new_value), do: err()
+  @spec get_limit(conn :: Xqlite.conn(), category :: atom()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def get_limit(_conn, _category), do: err()
+
+  @doc """
+  Sets one of the connection's limits and answers the value now in force (raw
+  NIF); see `Xqlite.put_limit/3`. A number outside signed 64 bits, or a term
+  of the wrong kind, raises `ArgumentError`.
+  """
+  @spec put_limit(conn :: Xqlite.conn(), category :: atom(), value :: integer()) ::
+          {:ok, non_neg_integer()} | Xqlite.error()
+  def put_limit(_conn, _category, _value), do: err()
 
   @doc """
   Returns the transaction state for the given schema (defaults to `"main"`).
@@ -1356,7 +1347,7 @@ defmodule XqliteNIF do
   is `{:invalid_parameter_count, %{expected: _, provided: _}}` and no stream
   is opened; `[]` and `nil` count as zero parameters. A keyword list must name
   every parameter of the statement exactly once — see `query/3` for the three
-  refusals and for how a key names a parameter — and no stream is opened for
+  refusals, the 2 048 cap and for how a key names a parameter — and no stream is opened for
   any of them either.
   """
   @spec stream_open(
@@ -1491,7 +1482,7 @@ defmodule XqliteNIF do
   parameters). `[]` and `nil` both mean no parameters and count as zero, so
   a statement that takes any refuses them. A keyword list must name every
   parameter of the statement exactly once — see `query/3` for the three
-  refusals and for how a key names a parameter — so one call hands over one
+  refusals, the 2 048 cap and for how a key names a parameter — so one call hands over one
   complete list; two partial binds in a row no longer add up. After stepping
   has started, `stmt_reset/1` must run before rebinding (SQLite lifecycle).
 

@@ -1,7 +1,7 @@
 defmodule Xqlite.ValueLengthLimitLawTest do
   @moduledoc """
   A connection carries a limit on how long one TEXT or BLOB value may be
-  (`Xqlite.limit/3` with `:length`, SQLite's `SQLITE_LIMIT_LENGTH`), and the
+  (`Xqlite.put_limit/3` with `:length`, SQLite's `SQLITE_LIMIT_LENGTH`), and the
   library judges every value against it before it binds anything.
 
   The law: every door that hands SQLite a value of the caller's — a parameter
@@ -61,7 +61,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
 
     test "the anchor: one byte over the limit is refused and nothing is written",
          %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
 
       assert {:error, {:value_too_large, %{byte_size: 65, limit: 64}}} =
                Xqlite.execute(conn, "UPDATE len_rows SET v = ?1 || ?2", [
@@ -73,7 +73,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
     end
 
     test "the anchor: a value under the limit binds and is stored", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
 
       assert {:ok, %{changes: 1}} =
                Xqlite.execute(conn, "UPDATE len_rows SET v = ?1", [String.duplicate("x", 20)])
@@ -83,7 +83,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
 
     test "a value of exactly the limit binds, and the row it builds does not fit",
          %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
       assert {:ok, stmt} = Xqlite.prepare(conn, "UPDATE len_rows SET v = ?1")
 
       assert :ok = Xqlite.bind(stmt, [String.duplicate("x", 64)])
@@ -95,7 +95,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
 
     test "the name an introspection door looks up is judged like a bound value",
          %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
 
       assert {:ok, nil} = NIF.get_create_sql(conn, String.duplicate("n", 30))
 
@@ -104,7 +104,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
     end
 
     test "a BLOB is judged by its bytes like a TEXT value", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
 
       assert {:error, {:value_too_large, %{byte_size: 70, limit: 64}}} =
                Xqlite.query(conn, "SELECT ?1", [%Xqlite.Blob{bytes: :binary.copy(<<0>>, 70)}])
@@ -122,7 +122,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
               max_runs: 2000
             ) do
         reseed(conn)
-        assert {:ok, _previous} = Xqlite.limit(conn, :length, limit)
+        assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, limit)
         byte_size = limit + over
         value = String.duplicate("x", byte_size)
         sql = sql_for(shape, count)
@@ -146,7 +146,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
               max_runs: 2000
             ) do
         reseed(conn)
-        assert {:ok, _previous} = Xqlite.limit(conn, :length, limit)
+        assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, limit)
         # A third of the limit leaves the row it builds room to fit too.
         value = String.duplicate("x", div(limit, 3))
         sql = sql_for(shape, count)
@@ -188,7 +188,7 @@ defmodule Xqlite.ValueLengthLimitLawTest do
   defp accepted?(_other), do: false
 
   defp reseed(conn) do
-    assert {:ok, _previous} = Xqlite.limit(conn, :length, 2_147_483_647)
+    assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 2_147_483_647)
     assert {:ok, _changes} = Xqlite.execute(conn, "UPDATE len_rows SET v = 'seed'", [])
   end
 

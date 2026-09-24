@@ -20,7 +20,8 @@ defmodule Xqlite.StreamResourceCallbacks do
           rows_total: non_neg_integer(),
           opened_at: integer(),
           on_error: Xqlite.stream_on_error(),
-          outcome: :atomics.atomics_ref()
+          outcome: :atomics.atomics_ref(),
+          decode_error: Xqlite.error_reason() | nil
         }
 
   @valid_on_error [:raise, :halt, :emit_error]
@@ -134,7 +135,8 @@ defmodule Xqlite.StreamResourceCallbacks do
       rows_total: 0,
       opened_at: Xqlite.Telemetry.monotonic_time(),
       on_error: on_error,
-      outcome: new_outcome()
+      outcome: new_outcome(),
+      decode_error: nil
     }
   end
 
@@ -169,11 +171,12 @@ defmodule Xqlite.StreamResourceCallbacks do
   @spec next_fun(acc()) ::
           {[map() | {:ok, map()} | {:error, Xqlite.error_reason()}], acc()} | {:halt, acc()}
   def next_fun(acc) do
-    case {acc.on_error, outcome(acc)} do
+    case {acc.on_error, outcome(acc), acc.decode_error} do
       # The terminal {:error, reason} element was already emitted; stop
       # without touching the (now errored) statement again.
-      {:emit_error, :errored} -> {:halt, acc}
-      _ -> fetch_batch(acc)
+      {:emit_error, :errored, _decode_error} -> {:halt, acc}
+      {_on_error, _outcome, nil} -> fetch_batch(acc)
+      {_on_error, _outcome, reason} -> handle_fetch_error(reason, acc)
     end
   end
 
@@ -182,9 +185,9 @@ defmodule Xqlite.StreamResourceCallbacks do
 
     case NIF.stream_fetch_cancellable(acc.handle, acc.batch_size, acc.cancel_tokens) do
       {:ok, %{rows: rows}} ->
-        mapped_rows = map_rows_to_maps(rows, acc.columns, acc.type_extensions)
+        {mapped_rows, refusal} = map_rows_to_maps(rows, acc.columns, acc.type_extensions, [])
         rows_count = length(mapped_rows)
-        new_acc = %{acc | rows_total: acc.rows_total + rows_count}
+        new_acc = %{acc | rows_total: acc.rows_total + rows_count, decode_error: refusal}
         emit_fetch_telemetry(fetch_started_at, rows_count, acc.handle, false)
         {shape_rows(mapped_rows, acc.on_error), new_acc}
 
@@ -262,9 +265,16 @@ defmodule Xqlite.StreamResourceCallbacks do
     :ok
   end
 
-  defp map_rows_to_maps(rows, columns, type_extensions) do
-    rows
-    |> Xqlite.TypeExtension.decode_rows_checked(type_extensions)
-    |> Enum.map(fn row_list -> Map.new(Enum.zip(columns, row_list)) end)
+  defp map_rows_to_maps([], _columns, _extensions, mapped), do: {Enum.reverse(mapped), nil}
+
+  defp map_rows_to_maps([row | rest], columns, extensions, mapped) do
+    case Xqlite.TypeExtension.decode_row_checked(row, extensions) do
+      {:ok, decoded} ->
+        row_map = columns |> Enum.zip(decoded) |> Map.new()
+        map_rows_to_maps(rest, columns, extensions, [row_map | mapped])
+
+      {:error, reason} ->
+        {Enum.reverse(mapped), reason}
+    end
   end
 end

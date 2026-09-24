@@ -43,12 +43,12 @@ would name every built binary without a version.
 
 ## When to tag
 
-A tag is cut only when a Hex publish follows it, never at the end of a
-fix cycle. Breaking changes accumulate under `## [Unreleased]` in the
-CHANGELOG, and the minor bumps once, at publish time. The release
-workflow builds binaries for every `v*` tag, so a tag without a publish
-burns a version number for no user.
-
+The maintainer cuts a tag at a milestone worth a release: a clean review
+run, or an adapter fix that needs new API. A tag builds the binaries and
+gets a release body; the Hex publish follows when the owner runs it. Until
+then changes accumulate under `## [Unreleased]` in the CHANGELOG and the
+minor bumps once, at the tag. Not every fix cycle earns a tag: a tag
+without a publish still burns a version number.
 ## Tag and push
 
 ```bash
@@ -87,19 +87,16 @@ and attaches the result to the release with `softprops/action-gh-release`
 target does not cancel the rest; jobs cap at 30 minutes, and the `cross`
 ones are slow because `cross-version: "from-source"` builds `cross` too.
 
-Each job also reads the library it built two ways and writes what it
-found about the panic strategy into its own job summary — a Rust panic
-has to unwind for rustler to catch it. `llvm-nm` reads the symbol table,
-where an ELF or Mach-O library carries `_Unwind_RaiseException`, and
-`llvm-objdump -p` reads a DLL's import table, where an MSVC build names
-`_CxxThrowException` instead; both tools come from `rustup component add
-llvm-tools`, and the summary names the two it resolved and the library it
-found inside the built archive. An empty readout is reported as "could
-not read", never as a missing marker, because a library the job never
-found would otherwise read as an abort build. The step reports and never
-fails the job — the marker that proves unwinding differs per target
-family and only one family's is measured — so the summaries are where
-that readout lives.
+Each job also checks, before its upload, that the library it built
+unwinds on a panic — a Rust panic has to unwind for rustler to catch it.
+It reads the markers `scripts/panic_strategy.exs` reads for `mix verify`:
+`llvm-nm -u` must list `_Unwind_RaiseException` among an ELF or Mach-O
+library's undefined symbols, and `llvm-objdump -p` must find
+`_CxxThrowException` or `__CxxFrameHandler3` in a DLL's import table. Both
+tools come from `rustup component add llvm-tools`. A missing marker fails
+the job, and so does a library the job cannot find or read, so that target
+ships no asset; the job summary names the library, the tool and the marker
+lines it found.
 
 ```bash
 gh run list --workflow=release.yml --limit 1   # then gh run watch <id>

@@ -369,7 +369,7 @@ defmodule Xqlite.NIF.StatementTest do
     end
 
     test "a value over the connection's length limit binds nothing", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
 
       assert :ok = Xqlite.bind(stmt, [1, "first"])
@@ -382,7 +382,7 @@ defmodule Xqlite.NIF.StatementTest do
     end
 
     test "a keyword list over the length limit binds nothing either", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT :a, :b")
 
       assert :ok = Xqlite.bind(stmt, a: 1, b: "first")
@@ -395,7 +395,7 @@ defmodule Xqlite.NIF.StatementTest do
     end
 
     test "a value of exactly the length limit binds", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 64)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 64)
       at_the_limit = String.duplicate("x", 64)
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
 
@@ -405,7 +405,7 @@ defmodule Xqlite.NIF.StatementTest do
     end
 
     test "a row longer than the limit is SQLite's own refusal at the step", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
       {:ok, stmt} = Xqlite.prepare(conn, "INSERT INTO items (label) VALUES (?1)")
 
       assert :ok = Xqlite.bind(stmt, [String.duplicate("x", 20)])
@@ -419,7 +419,7 @@ defmodule Xqlite.NIF.StatementTest do
     end
 
     test "a lowered length limit does not hide a statement", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
       # Longer than the limit, so the expansion SQLite can hand back for it is
       # capped away — which must not read as "this text holds no statement".
       sql = "DELETE FROM items WHERE label = 'no such label'"
@@ -431,7 +431,7 @@ defmodule Xqlite.NIF.StatementTest do
     end
 
     test "a lowered length limit does not hide a read-only statement", %{conn: conn} do
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
       name = String.duplicate("s", 40)
       comment = " -- " <> String.duplicate("c", 60)
 
@@ -451,7 +451,7 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:error, {:cannot_execute, _execute}} = Xqlite.execute(conn, long_comment, [])
       assert {:error, {:cannot_execute, _prepare}} = Xqlite.prepare(conn, long_comment)
 
-      assert {:ok, _previous} = Xqlite.limit(conn, :length, 30)
+      assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
 
       assert {:error, {:cannot_execute, _lowered_query}} = Xqlite.query(conn, long_comment, [])
 

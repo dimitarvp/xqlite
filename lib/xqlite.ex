@@ -232,7 +232,7 @@ defmodule Xqlite do
   — and no `:position` at all where one value was judged on its own, as
   `XqliteNIF.set_pragma/3` does. `:value_too_large` is a TEXT or BLOB
   parameter longer than the connection's own length limit, which
-  `Xqlite.limit/3` reads and sets; every door judges every value against it
+  `Xqlite.put_limit/3` sets; every door judges every value against it
   before it binds anything, so the refusal binds nothing. `:too_big` is the
   other side of the same limit: SQLite met it while it ran — a row it was
   building, a concatenation, a column read — and it carries the code SQLite
@@ -240,8 +240,11 @@ defmodule Xqlite do
   for this result today, so that code is the plain one.
 
   `:invalid_limit_category` is an atom naming none of the thirteen limits
-  `Xqlite.limit/3` takes, and `:invalid_limit_value` a limit value outside
-  `-1` (which reads) and `0..2_147_483_647` (which sets).
+  `Xqlite.get_limit/2` takes, and `:invalid_limit_value` a limit value outside
+  `0..2_147_483_647`.
+
+  `:too_many_named_parameters` is a keyword list on a statement of more than
+  `:limit` (2 048) parameters, refused before any value is read.
 
   `:invalid_batch_size` carries the caller's own term in `:provided`, whatever
   kind of term it was: the stream fetch doors take it and judge it, where the
@@ -344,8 +347,10 @@ defmodule Xqlite do
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
           | {:too_big, integer(), String.t()}
+          | {:too_many_named_parameters, %{count: pos_integer(), limit: pos_integer()}}
           | {:type_extension_refused,
-             %{position: pos_integer(), extension: module(), reason: term()}}
+             %{position: pos_integer(), extension: module(), reason: term()}
+             | %{column: pos_integer(), extension: module(), reason: term()}}
           | {:unknown_pragma, atom() | String.t()}
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
@@ -1336,7 +1341,8 @@ defmodule Xqlite do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   ## Options
 
@@ -1348,7 +1354,8 @@ defmodule Xqlite do
       fails the call with
       `{:error, {:type_extension_refused, %{position: n, extension: module,
       reason: reason}}}` before any SQL runs; `n` is the parameter's 1-based
-      place in the list.
+      place in the list. A value an extension refuses to decode fails it with
+      `column: n` instead, after the statement ran: its changes stand.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
@@ -1380,23 +1387,17 @@ defmodule Xqlite do
   end
 
   defp run_query(conn, sql, bound_params, extensions, start_md) do
-    case XqliteNIF.query_with_changes(conn, sql, bound_params) do
-      {:ok, map} ->
-        result =
-          map
-          |> Xqlite.Result.from_map()
-          |> decode_result_rows(extensions)
-
-        {{:ok, result},
-         Map.merge(start_md, %{
-           result_class: :ok,
-           error_reason: nil,
-           num_rows: result.num_rows,
-           changes: result.changes
-         })}
-
-      {:error, reason} = err ->
-        {err, query_error_metadata(start_md, reason)}
+    with {:ok, map} <- XqliteNIF.query_with_changes(conn, sql, bound_params),
+         {:ok, result} <- decode_result_rows(map, extensions) do
+      {{:ok, result},
+       Map.merge(start_md, %{
+         result_class: :ok,
+         error_reason: nil,
+         num_rows: result.num_rows,
+         changes: result.changes
+       })}
+    else
+      {:error, reason} = err -> {err, query_error_metadata(start_md, reason)}
     end
   end
 
@@ -1428,7 +1429,8 @@ defmodule Xqlite do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   ## Options
 
@@ -1497,21 +1499,21 @@ defmodule Xqlite do
     })
   end
 
-  defp decode_result_rows(%Xqlite.Result{} = result, []), do: result
-
-  defp decode_result_rows(%Xqlite.Result{rows: rows} = result, extensions) do
-    %{result | rows: Xqlite.TypeExtension.decode_rows_checked(rows, extensions)}
+  defp decode_result_rows(map, extensions) do
+    with {:ok, decoded} <- decode_map_rows(map, extensions),
+         do: {:ok, Xqlite.Result.from_map(decoded)}
   end
 
   # The cancellable forms answer a plain map, not a struct: the rows are
   # rewritten in place so the term keeps its shape.
-  defp decode_map_rows(map, []), do: map
+  defp decode_map_rows(map, []), do: {:ok, map}
 
   defp decode_map_rows(%{rows: rows} = map, extensions) do
-    %{map | rows: Xqlite.TypeExtension.decode_rows_checked(rows, extensions)}
+    with {:ok, decoded} <- Xqlite.TypeExtension.decode_rows_checked(rows, extensions),
+         do: {:ok, %{map | rows: decoded}}
   end
 
-  defp decode_map_rows(map, _extensions), do: map
+  defp decode_map_rows(map, _extensions), do: {:ok, map}
 
   @doc """
   Executes a SQL batch (multiple statements separated by semicolons).
@@ -1563,7 +1565,7 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before
   anything is bound, `[]` and `nil` count as zero parameters, and a keyword
   list must name every parameter of the statement exactly once — see
-  `query/4` for the three refusals and for how a key names a parameter.
+  `query/4` for the three refusals, the 2 048 cap and how a key names a parameter.
 
   ## Options
 
@@ -1660,7 +1662,8 @@ defmodule Xqlite do
       Extensions are applied in list order; the first match wins. A parameter
       an extension refuses returns `{:error, {:type_extension_refused, _}}` at
       stream open, before any statement is prepared, as described in
-      `query/4`. The option itself must be a proper list, or `nil` for none,
+      `query/4`; a stored value one refuses to decode is a mid-fetch error,
+      surfaced per `:on_error`. The option itself must be a proper list, or `nil` for none,
       and every element must be an extension module: an atom naming a module
       that declares `@behaviour Xqlite.TypeExtension` and exports both
       `encode/1` and `decode/1`. Checking an element loads the module if
@@ -1740,7 +1743,7 @@ defmodule Xqlite do
   provided: _}}}` at stream open, before a value is bound. `[]` and `nil`
   count as zero parameters, so they pass only on a statement that takes
   none. A keyword list is named and must name every parameter of the
-  statement exactly once — see `query/4` for the three refusals and for how
+  statement exactly once — see `query/4` for the three refusals, the 2 048 cap and for how
   a key names a parameter. Every one of them comes at stream open too.
 
   The SQL must hold exactly one statement, the same rule `prepare/2` and
@@ -1877,7 +1880,7 @@ defmodule Xqlite do
   %{provided: _, expected: _}}}`) or a keyword list for named placeholders.
   An empty list counts as zero parameters, so it is refused by a statement
   that takes any. A keyword list must name every parameter of the statement
-  exactly once — see `query/4` for the three refusals and for how a key names
+  exactly once — see `query/4` for the three refusals, the 2 048 cap and for how a key names
   a parameter — so one call hands over one complete list; two partial binds
   in a row no longer add up. Once stepping has started, call `reset/1` before
   rebinding — SQLite rejects mid-run rebinds, and `clear_bindings/1` is
@@ -2938,7 +2941,8 @@ defmodule Xqlite do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   ## Options
 
@@ -2946,7 +2950,8 @@ defmodule Xqlite do
       parameters are encoded through the chain before binding and the
       result's rows are decoded through it, as in `query/4`. The result
       stays a plain map — only its `:rows` are rewritten. A parameter an
-      extension refuses returns `{:error, {:type_extension_refused, _}}`.
+      extension refuses returns `{:error, {:type_extension_refused, _}}`; so
+      does a value it refuses to decode, after the statement ran: its changes stand.
       Default: `[]`.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
@@ -2991,18 +2996,16 @@ defmodule Xqlite do
   end
 
   defp run_query_cancellable(conn, sql, bound_params, tokens, extensions, start_md) do
-    case XqliteNIF.query_cancellable(conn, sql, bound_params, tokens) do
-      {:ok, result} ->
-        decoded = decode_map_rows(result, extensions)
-
-        {{:ok, decoded},
-         Map.merge(start_md, %{
-           result_class: :ok,
-           error_reason: nil,
-           num_rows: Map.get(decoded, :num_rows, 0),
-           changes: nil
-         })}
-
+    with {:ok, result} <- XqliteNIF.query_cancellable(conn, sql, bound_params, tokens),
+         {:ok, decoded} <- decode_map_rows(result, extensions) do
+      {{:ok, decoded},
+       Map.merge(start_md, %{
+         result_class: :ok,
+         error_reason: nil,
+         num_rows: Map.get(decoded, :num_rows, 0),
+         changes: nil
+       })}
+    else
       {:error, :operation_cancelled} = err ->
         emit_cancel_honored(conn, :query, tokens)
         {err, query_error_metadata(start_md, :operation_cancelled)}
@@ -3029,7 +3032,8 @@ defmodule Xqlite do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   ## Options
 
@@ -3157,7 +3161,8 @@ defmodule Xqlite do
   `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement.
+  named, read from the statement. A statement of more than 2 048 parameters
+  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   ## Options
 
@@ -3165,7 +3170,8 @@ defmodule Xqlite do
       parameters are encoded through the chain before binding and the
       result's rows are decoded through it, as in `query/4`. The result
       stays a plain map — only its `:rows` are rewritten. A parameter an
-      extension refuses returns `{:error, {:type_extension_refused, _}}`.
+      extension refuses returns `{:error, {:type_extension_refused, _}}`; so
+      does a value it refuses to decode, after the statement ran: its changes stand.
       Default: `[]`.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
@@ -3210,18 +3216,17 @@ defmodule Xqlite do
   end
 
   defp run_changes_cancellable(conn, sql, bound_params, tokens, extensions, start_md) do
-    case XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens) do
-      {:ok, map} ->
-        decoded = decode_map_rows(map, extensions)
-
-        {{:ok, decoded},
-         Map.merge(start_md, %{
-           result_class: :ok,
-           error_reason: nil,
-           num_rows: Map.get(decoded, :num_rows, 0),
-           changes: Map.get(decoded, :changes, 0)
-         })}
-
+    with {:ok, map} <-
+           XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens),
+         {:ok, decoded} <- decode_map_rows(map, extensions) do
+      {{:ok, decoded},
+       Map.merge(start_md, %{
+         result_class: :ok,
+         error_reason: nil,
+         num_rows: Map.get(decoded, :num_rows, 0),
+         changes: Map.get(decoded, :changes, 0)
+       })}
+    else
       {:error, :operation_cancelled} = err ->
         emit_cancel_honored(conn, :query_with_changes, tokens)
         {err, query_error_metadata(start_md, :operation_cancelled)}
@@ -3443,44 +3448,42 @@ defmodule Xqlite do
   def autocommit(conn), do: XqliteNIF.autocommit(conn)
 
   @doc """
-  Reads, and optionally sets, one of the connection's limits.
-
-  Wraps `XqliteNIF.limit/3`, which is SQLite's `sqlite3_limit`. The answer is
-  `{:ok, previous}` — the value in force before the call — whether the call
-  read or set, so reading back after a set is how a caller sees what took
-  effect. No telemetry is emitted.
-
-  `category` is one of `:length`, `:sql_length`, `:column`, `:expr_depth`,
+  Reads one of the connection's limits (SQLite's `sqlite3_limit`), answering
+  `{:ok, value}`. No telemetry is emitted. `category` is one of `:length`, `:sql_length`, `:column`, `:expr_depth`,
   `:compound_select`, `:vdbe_op`, `:function_arg`, `:attached`,
   `:like_pattern_length`, `:variable_number`, `:trigger_depth`,
   `:worker_threads` and `:parser_depth`. Any other atom answers
   `{:error, {:invalid_limit_category, category}}`; a term that is no atom
   raises `FunctionClauseError`.
+  """
+  @spec get_limit(conn(), atom()) :: {:ok, non_neg_integer()} | error()
+  def get_limit(conn, category) when is_atom(category), do: XqliteNIF.get_limit(conn, category)
 
-  `new_value` of `-1` reads without setting. A value from `0` to
-  `2_147_483_647` sets it; any other integer answers
-  `{:error, {:invalid_limit_value, %{category: category, value: value}}}`, a
-  number outside signed 64 bits raises `ArgumentError` from the NIF, and a
-  term that is no integer raises `FunctionClauseError`.
+  @doc """
+  Sets one of the thirteen limits `get_limit/2` names and answers
+  `{:ok, value}`, the value now in force, read back under the same lock:
+  SQLite lowers a value to its compile-time ceiling for the category and
+  raises `:length` to 30. No telemetry is emitted. An integer outside
+  `0..2_147_483_647` answers `{:error, {:invalid_limit_value, %{category:
+  category, value: value}}}` before the category is looked at; a term of the
+  wrong kind raises `FunctionClauseError`.
 
-  SQLite clamps a new value silently: down to its own compile-time ceiling for
-  the category, and up to 30 for `:length`, the only category with a floor.
-
-  `:length` is the limit every door checks a TEXT or BLOB parameter against
-  before it binds — a longer one is
-  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` — and the one
-  SQLite itself checks while it runs, so lowering it below values already
-  stored makes reading them answer `{:error, {:too_big, code, message}}`.
+  `:length` bounds every TEXT or BLOB parameter a door binds
+  (`:value_too_large`) and every value SQLite reads or builds (`:too_big`).
 
   ## Examples
 
-      {:ok, previous} = Xqlite.limit(conn, :length, 64)
-      {:ok, 64} = Xqlite.limit(conn, :length, -1)
+      {:ok, 64} = Xqlite.put_limit(conn, :length, 64)
+      {:ok, 30} = Xqlite.put_limit(conn, :length, 0)
 
   """
-  @spec limit(conn(), atom(), integer()) :: {:ok, integer()} | error()
-  def limit(conn, category, new_value) when is_atom(category) and is_integer(new_value),
-    do: XqliteNIF.limit(conn, category, new_value)
+  @spec put_limit(conn(), atom(), integer()) :: {:ok, non_neg_integer()} | error()
+  def put_limit(conn, category, value)
+      when is_atom(category) and is_integer(value) and value in 0..2_147_483_647,
+      do: XqliteNIF.put_limit(conn, category, value)
+
+  def put_limit(_conn, category, value) when is_atom(category) and is_integer(value),
+    do: {:error, {:invalid_limit_value, %{category: category, value: value}}}
 
   @doc """
   Returns the transaction state of a schema: `:none`, `:read`,

@@ -53,14 +53,10 @@ jobs:
           cross-version: "from-source"
           project-dir: "native/xqlitenif"
 
-      # Report-only on purpose. The symbol that proves unwinding differs per
-      # target family — glibc imports the unwinder, musl links it in and may
-      # hide it, MSVC unwinds through Windows exceptions — so a marker that is
-      # wrong for one family would block that target's asset and force a patch
-      # release. The job summaries of the first tag that runs this step say
-      # what each family really shows; the check turns blocking after that.
+      # A Rust panic has to unwind for rustler to catch it, so a library built
+      # to abort fails its job here, before the upload. The markers are the
+      # ones scripts/panic_strategy.exs reads; this job has no Erlang to run it.
       - name: Panic strategy of the built library
-        continue-on-error: true
         shell: bash
         run: |
           set -u
@@ -73,64 +69,40 @@ jobs:
           HOST="$(rustc -vV | sed -n 's/^host: //p')"
           BIN="${SYSROOT}/lib/rustlib/${HOST}/bin"
 
-          NM="${BIN}/llvm-nm"
-          [ -x "${NM}" ] || NM="${NM}.exe"
-          # A Windows DLL's imports are not in the symbol table llvm-nm reads,
-          # so the import directory is read with llvm-objdump instead.
-          OBJDUMP="${BIN}/llvm-objdump"
-          [ -x "${OBJDUMP}" ] || OBJDUMP="${OBJDUMP}.exe"
-
           UNPACKED="$(mktemp -d)"
           tar -xzf "${{ steps.build-crate.outputs.file-path }}" -C "${UNPACKED}"
           LIBRARY="$(find "${UNPACKED}" -type f \( -name '*.so' -o -name '*.dll' -o -name '*.dylib' \) | head -n 1)"
 
-          if [ -n "${LIBRARY}" ]; then
-            LIBRARY_LINE="${LIBRARY}"
-          else
-            LIBRARY_LINE="none found under ${UNPACKED}"
-          fi
+          # A DLL has no symbol table for llvm-nm; MSVC unwinds through
+          # Windows exceptions, which its import table names.
+          case "${LIBRARY}" in
+            *.dll) TOOL="${BIN}/llvm-objdump"; ARGS="-p"; MARKERS='_CxxThrowException|__CxxFrameHandler3' ;;
+            *) TOOL="${BIN}/llvm-nm"; ARGS="-u"; MARKERS='_Unwind_RaiseException' ;;
+          esac
+          [ -x "${TOOL}" ] || TOOL="${TOOL}.exe"
 
-          READOUT="$({
-            "${NM}" "${LIBRARY}"
-            "${NM}" --dynamic "${LIBRARY}"
-            "${OBJDUMP}" -p "${LIBRARY}"
-          } 2>&1 || true)"
-          MARKERS="$(printf '%s\n' "${READOUT}" | grep -E 'Unwind|CxxThrow|CxxFrameHandler|rust_panic|panic_unwind' || true)"
-
-          # An empty readout is "could not read", not "the marker is absent":
-          # a library that was never found reads as a negative verdict
-          # otherwise, which is the opposite of what it means.
-          if [ -z "${READOUT//[[:space:]]/}" ]; then
-            UNWIND="could not read (empty readout)"
-            THROW="could not read (empty readout)"
-          else
-            if printf '%s\n' "${READOUT}" | grep -q '_Unwind_RaiseException'; then
-              UNWIND="yes — _Unwind_RaiseException is there (ELF and Mach-O)"
-            else
-              UNWIND="no _Unwind_RaiseException"
-            fi
-
-            if printf '%s\n' "${READOUT}" | grep -q '_CxxThrowException'; then
-              THROW="yes — _CxxThrowException is imported (MSVC)"
-            else
-              THROW="no _CxxThrowException"
-            fi
-          fi
+          READ_EXIT=0; READOUT="$([ -n "${LIBRARY}" ] && "${TOOL}" ${ARGS} "${LIBRARY}")" || READ_EXIT=$?
+          FOUND="$(printf '%s\n' "${READOUT}" | grep -E "${MARKERS}" || true)"
 
           {
             echo "### Panic strategy — ${{ matrix.job.target }}"
             echo
-            echo "Library: ${LIBRARY_LINE}"
-            echo "Symbol tool: ${NM}"
-            echo "Import-table tool: ${OBJDUMP}"
-            echo
-            echo "- unwinding runtime: ${UNWIND}"
-            echo "- Windows exceptions: ${THROW}"
+            echo "Library: ${LIBRARY:-none found under ${UNPACKED}}"
+            echo "Read with: ${TOOL} ${ARGS}"
             echo
             echo '```'
-            printf '%s\n' "${MARKERS}"
+            printf '%s\n' "${FOUND:-no ${MARKERS} marker}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${READ_EXIT}" -ne 0 ] || [ -z "${READOUT//[[:space:]]/}" ]; then
+            echo "::error::could not read a library out of the built archive"
+            exit 1
+          fi
+          if [ -z "${FOUND}" ]; then
+            echo "::error::no ${MARKERS} marker: this build aborts on a panic"
+            exit 1
+          fi
 
       - name: Artifact upload
         uses: actions/upload-artifact@v4
