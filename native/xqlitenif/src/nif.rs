@@ -801,6 +801,21 @@ fn stmt_bind<'a>(
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
         // Each call below: with_live_stmt holds the connection Mutex for the
         // whole closure and proved stmt_ptr a live statement of it.
+        // SAFETY: the lock and the statement, as stated above.
+        let mid_run = unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } != 0;
+
+        if mid_run && stmt_handle.takes_parameters() {
+            return Err(XqliteError::StatementMidRun);
+        }
+
+        // SQLite refuses a bind on a statement whose run has ended, though its
+        // next step would reset that statement unasked; resetting here lets
+        // the bind land. The return code repeats the last step's error.
+        if !mid_run {
+            // SAFETY: the lock and the statement, as stated above.
+            unsafe { ffi::sqlite3_reset(stmt_ptr) };
+        }
+
         let bound = match crate::util::walk_params(params_term)? {
             // SAFETY: the lock and the statement, as stated above.
             Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) }
@@ -821,13 +836,6 @@ fn stmt_bind<'a>(
 
         // The flag moves under the same lock as the bind, so a step that took
         // the lock straight after a bind answered `:ok` never reads it unset.
-        // A bind that took no value leaves an earlier successful one in force:
-        // every refusal of the library's own, and SQLite's own refusal of a
-        // bind on a statement mid-run. A failure after at least one value was
-        // taken left values half-applied, so the statement stops running until
-        // a bind succeeds or `clear_bindings` runs — with the length check
-        // ahead of the loop, an allocation failure is the one way into that
-        // arm, which no test can force.
         match bound {
             Ok(()) => {
                 stmt_handle.mark_parameters_set();
@@ -954,9 +962,9 @@ fn stmt_multi_step_impl<'a>(
                     done = true;
                     break;
                 }
-                // The step itself failed, so no row was stepped past and the
-                // statement is finished where SQLite left it: answer now and
-                // discard the batch's rows, exactly as a cancellation does.
+                // The step itself failed, so no row was stepped past and the run
+                // is over, save a busy lock SQLite keeps for a retry: answer now
+                // and discard the batch's rows, exactly as a cancellation does.
                 Err(StepFailure::Failed(e)) => return Err(e),
                 Err(StepFailure::Unreadable(e)) => {
                     // The row is lost either way. Hand back the rows this
@@ -1022,8 +1030,7 @@ fn stmt_clear_bindings(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) 
         // clear, so the statement is in one state for both.
         //
         // SAFETY: with_live_stmt holds the connection mutex and proved
-        // stmt_ptr live. sqlite3_stmt_busy is non-zero exactly while a step
-        // has run and neither SQLITE_DONE nor a reset has followed.
+        // stmt_ptr live.
         let mid_run = unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } != 0;
 
         match mid_run && stmt_handle.takes_parameters() {
@@ -1760,7 +1767,6 @@ fn backup_with_progress<'a>(
             rusqlite::backup::Backup::new_with_names(conn, schema.as_str(), &mut dst, "main")?;
 
         loop {
-            // OR-semantics: any signalled token cancels the backup.
             let cancelled = cancel_flags.iter().any(|t| t.load(Ordering::Acquire));
             if cancelled {
                 return Err(XqliteError::OperationCancelled);

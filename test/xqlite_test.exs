@@ -3,6 +3,7 @@ defmodule XqliteTest do
   use ExUnitProperties
 
   import ExUnit.CaptureLog, only: [with_log: 1]
+  import Xqlite.Telemetry.TestSupport, only: [attach_capture: 1, detach: 1]
 
   alias Xqlite.TestUtil
   alias XqliteNIF, as: NIF
@@ -17,17 +18,14 @@ defmodule XqliteTest do
   # can slip through before the check comes round.
   @cancel_subject "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<200) SELECT x FROM n"
 
-  # Use the multi-DB test pattern
   for {type_tag, prefix, _opener_mfa} <- TestUtil.connection_openers() do
     describe "Xqlite.stream/4 using #{prefix}" do
       @describetag type_tag
 
-      # Setup for each connection type
       setup context do
         {mod, fun, args} = TestUtil.find_opener_mfa!(context)
         assert {:ok, conn} = apply(mod, fun, args)
 
-        # Create and populate a test table
         assert :ok =
                  NIF.execute_batch(
                    conn,
@@ -50,7 +48,6 @@ defmodule XqliteTest do
       test "streams all results as a list of maps", %{conn: conn} do
         stream = Xqlite.stream(conn, "SELECT id, name FROM stream_test_users ORDER BY id;")
 
-        # Verify it's a stream
         assert Enumerable.impl_for(stream) != nil
 
         results = Enum.to_list(stream)
@@ -192,6 +189,55 @@ defmodule XqliteTest do
                  Enum.to_list(stream)
 
         assert {:utf8_error, 0, _detail} = reason
+      end
+
+      # --- a stream runs once ---
+
+      test "on_error: :raise raises :stream_consumed on a pass after a take", %{conn: conn} do
+        handler_id = attach_capture([[:xqlite, :stream, :close]])
+        on_exit(fn -> detach(handler_id) end)
+        stream = Xqlite.stream(conn, "SELECT id FROM stream_test_users ORDER BY id;")
+
+        assert [%{"id" => 1}] = Enum.take(stream, 1)
+        error = assert_raise(Xqlite.StreamError, fn -> Enum.to_list(stream) end)
+        assert error.reason == :stream_consumed
+
+        assert_received {:telemetry_event, [:xqlite, :stream, :close], _, %{reason: :halted}}
+        refute_received {:telemetry_event, [:xqlite, :stream, :close], _, _}
+      end
+
+      test "on_error: :emit_error yields only :stream_consumed after a failed pass", %{
+        conn: conn
+      } do
+        seed_utf8_error_table(conn)
+
+        stream =
+          Xqlite.stream(conn, "SELECT v FROM bad_utf8 ORDER BY id;", [],
+            on_error: :emit_error,
+            batch_size: 1
+          )
+
+        assert [{:ok, _}, {:ok, _}, {:error, {:utf8_error, _, _}}] = Enum.to_list(stream)
+        assert Enum.to_list(stream) == [{:error, :stream_consumed}]
+      end
+
+      test "on_error: :halt logs a second pass and yields nothing", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users ORDER BY id;"
+        stream = Xqlite.stream(conn, sql, [], on_error: :halt)
+
+        assert length(Enum.to_list(stream)) == @record_count
+        {rows, log} = with_log(fn -> Enum.to_list(stream) end)
+        assert rows == []
+        assert log != ""
+      end
+
+      test "a pass started while the first still runs raises :stream_consumed", %{conn: conn} do
+        sql = "SELECT id FROM stream_test_users ORDER BY id;"
+        stream = Xqlite.stream(conn, sql, [], batch_size: 2)
+        pairs = Stream.zip(stream, Stream.drop(stream, 1))
+
+        error = assert_raise(Xqlite.StreamError, fn -> Enum.to_list(pairs) end)
+        assert error.reason == :stream_consumed
       end
 
       test "stream/4 rejects an unsupported :on_error mode at open", %{conn: conn} do
@@ -402,7 +448,6 @@ defmodule XqliteTest do
           """
         )
 
-      # With FK enforcement disabled, inserting a child with no matching parent succeeds
       assert {:ok, 1} =
                NIF.execute(conn, "INSERT INTO fk_child (id, parent_id) VALUES (1, 999)", [])
     end

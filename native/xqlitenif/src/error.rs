@@ -638,7 +638,7 @@ impl Display for XqliteError {
             XqliteError::StatementMidRun => {
                 write!(
                     f,
-                    "Statement is mid-run: reset it before clearing its bindings"
+                    "Statement is mid-run: reset it before binding or clearing its parameters"
                 )
             }
             XqliteError::InternalEncodingError { context } => {
@@ -1278,7 +1278,6 @@ impl From<RusqliteError> for XqliteError {
                 offset,
             } => {
                 let classified = classify_sqlite_error(ffi_err, msg);
-                // Preserve the richer SqlInputError if classification is generic
                 if let XqliteError::SqliteFailure { .. } = classified {
                     XqliteError::SqlInputError {
                         code: ffi_err.extended_code,

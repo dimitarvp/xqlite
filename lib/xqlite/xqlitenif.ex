@@ -1395,9 +1395,11 @@ defmodule XqliteNIF do
     - `{:error, reason}` when a read fails with no row of that batch in hand,
       and on the fetch after a partial batch. Such a failure finalizes the
       statement too, so the fetch after the error is `:done` — except
-      `:connection_closed`, which leaves the stream open and repeats on every
-      fetch until `stream_close/1`. `stream_close/1` drops a held-back error,
-      so a fetch after the close answers `:done`.
+      `:connection_closed`: closing the connection finalizes the stream, every
+      later fetch answers `:connection_closed`, `stream_close/1` answers `:ok`
+      without changing that, and `stream_get_columns/1` answers the names
+      captured at open. `stream_close/1` drops a held-back error, so a fetch
+      after the close answers `:done`.
 
   `Xqlite.stream/4` drives all of this; use it unless you are stepping the
   stream by hand.
@@ -1482,9 +1484,11 @@ defmodule XqliteNIF do
   parameters). `[]` and `nil` both mean no parameters and count as zero, so
   a statement that takes any refuses them. A keyword list must name every
   parameter of the statement exactly once — see `query/3` for the three
-  refusals, the 2 048 cap and for how a key names a parameter — so one call hands over one
-  complete list; two partial binds in a row no longer add up. After stepping
-  has started, `stmt_reset/1` must run before rebinding (SQLite lifecycle).
+  refusals, the 2 048 cap and for how a key names a parameter — so one call
+  hands over one complete list; two partial binds in a row no longer add up. A
+  statement that takes parameters and is mid-run (see `stmt_clear_bindings/1`)
+  answers `{:error, :statement_mid_run}` and keeps its values; once the run is
+  over the bind resets the statement, so the next step takes the new values.
 
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise; wrap it as `%Xqlite.Blob{bytes: bytes}` to store a `BLOB`
@@ -1512,7 +1516,9 @@ defmodule XqliteNIF do
   error in the SQL, a trigger's `RAISE`, a cancellation — is answered at
   once. No row was stepped past, so the statement is left where SQLite left
   it and the next step is SQLite's own rerun from the top, which meets the
-  same failure; `stmt_reset/1` changes nothing about that. A row that came
+  same failure; `stmt_reset/1` changes nothing about that. The exception is
+  a step refused as busy while taking or committing its lock, whose run
+  SQLite keeps for a retry, so the next step carries on. A row that came
   back and could not be read — a TEXT column holding bytes that are not
   valid UTF-8 — is different: SQLite has already stepped past it, so the
   error is held back and answered by the next call that reads a row, and the
@@ -1543,7 +1549,9 @@ defmodule XqliteNIF do
   and this batch's rows go with it. No row was stepped past, so the statement
   is left where SQLite left it and the next step is SQLite's own rerun from
   the top, which meets the same failure; `stmt_reset/1` changes nothing about
-  that. A row that came back and could not be read — a TEXT column holding
+  that. The exception is a step refused as busy while taking or committing
+  its lock, whose run SQLite keeps for a retry, so the next step carries on.
+  A row that came back and could not be read — a TEXT column holding
   bytes that are not valid UTF-8 — is different: the rows read before it come
   back now with `done: false`, the error waits, and the next call that reads
   a row answers it; the statement carries on at the row after the bad one.
@@ -1598,7 +1606,9 @@ defmodule XqliteNIF do
   this has run.
 
   A statement that takes parameters and is mid-run — a step has answered a
-  row and neither `:done` nor `stmt_reset/1` has followed — answers
+  row, or was refused as busy while taking or committing its lock (SQLite
+  keeps that run for a retry), and neither `:done`, another failure nor
+  `stmt_reset/1` has followed — answers
   `{:error, :statement_mid_run}` and keeps its values, because SQLite would
   release them in place and leave every row still to come reading NULL.
   A statement that takes no parameters has nothing to release and answers
@@ -1623,9 +1633,11 @@ defmodule XqliteNIF do
 
   Most users want `Xqlite.finalize/1`. Idempotent — finalizing an
   already-finalized statement returns `:ok`. Abandoned statements are also
-  finalized when garbage-collected, but explicit finalization is preferred:
-  closing a connection while statements are still outstanding keeps the
-  underlying SQLite handle alive until the process exits.
+  finalized when garbage-collected, but explicit finalization frees the
+  handle at once. Closing the connection finalizes every statement still
+  open on it: every later step, bind, reset and clear answers
+  `{:error, :connection_closed}`, this answers `:ok`, and
+  `stmt_column_names/1` answers the names captured at prepare.
   """
   @spec stmt_finalize(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
   def stmt_finalize(_stmt), do: err()

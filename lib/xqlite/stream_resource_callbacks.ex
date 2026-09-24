@@ -1,8 +1,6 @@
 defmodule Xqlite.StreamResourceCallbacks do
   @moduledoc false
 
-  # Callbacks for implementing Xqlite.stream/4 via Stream.resource/3.
-
   import Xqlite.Telemetry, only: [emit: 3]
 
   alias XqliteNIF, as: NIF
@@ -10,7 +8,7 @@ defmodule Xqlite.StreamResourceCallbacks do
   require Logger
 
   @type acc :: %{
-          handle: reference(),
+          handle: reference() | nil,
           conn: Xqlite.conn(),
           columns: [String.t()],
           batch_size: pos_integer(),
@@ -21,7 +19,8 @@ defmodule Xqlite.StreamResourceCallbacks do
           opened_at: integer(),
           on_error: Xqlite.stream_on_error(),
           outcome: :atomics.atomics_ref(),
-          decode_error: Xqlite.error_reason() | nil
+          decode_error: Xqlite.error_reason() | nil,
+          claim: :atomics.atomics_ref()
         }
 
   @valid_on_error [:raise, :halt, :emit_error]
@@ -136,7 +135,8 @@ defmodule Xqlite.StreamResourceCallbacks do
       opened_at: Xqlite.Telemetry.monotonic_time(),
       on_error: on_error,
       outcome: new_outcome(),
-      decode_error: nil
+      decode_error: nil,
+      claim: :atomics.new(1, signed: false)
     }
   end
 
@@ -168,6 +168,15 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp code_outcome(1), do: :drained
   defp code_outcome(2), do: :errored
 
+  # A later pass gets no handle and an outcome cell of its own: the first may still run.
+  @spec claim(acc()) :: acc()
+  def claim(acc) do
+    case :atomics.compare_exchange(acc.claim, 1, 0, 1) do
+      :ok -> acc
+      1 -> %{acc | handle: nil, outcome: new_outcome()}
+    end
+  end
+
   @spec next_fun(acc()) ::
           {[map() | {:ok, map()} | {:error, Xqlite.error_reason()}], acc()} | {:halt, acc()}
   def next_fun(acc) do
@@ -179,6 +188,8 @@ defmodule Xqlite.StreamResourceCallbacks do
       {_on_error, _outcome, reason} -> handle_fetch_error(reason, acc)
     end
   end
+
+  defp fetch_batch(%{handle: nil} = acc), do: handle_fetch_error(:stream_consumed, acc)
 
   defp fetch_batch(acc) do
     fetch_started_at = Xqlite.Telemetry.monotonic_time()
@@ -239,6 +250,8 @@ defmodule Xqlite.StreamResourceCallbacks do
   end
 
   @spec after_fun(acc()) :: :ok
+  def after_fun(%{handle: nil}), do: :ok
+
   def after_fun(acc) do
     metadata =
       case NIF.stream_close(acc.handle) do

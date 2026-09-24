@@ -21,6 +21,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A second enumeration of an `Xqlite.stream/4` stream read on where the
+  first stopped, or looked like an empty table.** The statement opens at the
+  call, so a second `Enum.to_list/1`, the rest after an `Enum.take/2`, or a
+  retry after a rescued `Xqlite.StreamError` answered `[]`, and a pass started
+  while the first still ran — `Stream.zip(s, Stream.drop(s, 1))`, a nested
+  `Enum.take/2`, a pass after the first consumer was killed — handed out rows
+  from the wrong batches with no error. The stream now runs once: every
+  enumeration after the first answers `:stream_consumed` through `:on_error` —
+  `:raise` raises `Xqlite.StreamError` with it, `:emit_error` yields
+  `{:error, :stream_consumed}` alone, `:halt` logs it and yields nothing —
+  without fetching, closing or sending a telemetry event of its own. Call
+  `stream/4` again for a second pass.
+- **A bind on a statement that had already stepped answered SQLite's bare
+  misuse tuple.** Mid-run, `bind/3` answered
+  `{:error, {:sqlite_failure, 21, 21, _}}` after walking the whole parameter
+  list under the connection lock, while `clear_bindings/1` answered
+  `{:error, :statement_mid_run}`. A bind on a statement that takes parameters
+  and is mid-run now answers `{:error, :statement_mid_run}` before it reads the
+  list, and keeps the values bound before. After the run has ended — `:done`
+  or a failed step — the bind resets the statement itself, so the next step
+  reruns with the new values; `reset/1` is no longer needed first.
+- **Docs: a step refused as busy keeps its run, and what a closed connection
+  leaves behind.** A step SQLite refused as busy while taking or committing its
+  lock keeps its run for a retry — the statement stays mid-run and the retry
+  writes once — where the docs said every failed step ended the run. After the
+  connection is closed, every step, bind, reset, clear and fetch answers
+  `{:error, :connection_closed}`, finalize and `stream_close/1` answer `:ok`,
+  and the column-name calls answer the names captured at prepare or open;
+  `XqliteNIF.stmt_finalize/1` said the SQLite handle stayed alive and
+  `XqliteNIF.stream_fetch/2` said the error repeated until `stream_close/1`.
+
 - **`Xqlite.clear_bindings/1` mid-run nulled the rest of the read.**
   `sqlite3_clear_bindings` has no mid-run check where every `sqlite3_bind_*`
   answers `SQLITE_MISUSE`, so a clear between two rows released the values in

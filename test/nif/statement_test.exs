@@ -115,13 +115,12 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
-    test "rebinding a stepped statement is rejected until reset", %{conn: conn} do
+    test "rebinding a statement mid-run is rejected until reset", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
       :ok = Xqlite.bind(stmt, [1])
       assert {:row, [1]} = Xqlite.step(stmt)
 
-      assert {:error, {:sqlite_failure, code, _extended, _message}} = Xqlite.bind(stmt, [2])
-      assert is_integer(code)
+      assert {:error, :statement_mid_run} = Xqlite.bind(stmt, [2])
 
       assert :ok = Xqlite.reset(stmt)
       assert :ok = Xqlite.bind(stmt, [2])
@@ -130,29 +129,29 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
-    test "a bind SQLite refuses mid-run takes no value and retires nothing", %{conn: conn} do
+    test "a bind refused mid-run takes no value and retires nothing", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
       :ok = Xqlite.bind(stmt, [1])
 
       assert {:row, [1]} = Xqlite.step(stmt)
-      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, [2])
+      assert {:error, :statement_mid_run} = Xqlite.bind(stmt, [2])
+      assert {:error, :statement_mid_run} = Xqlite.bind(stmt, [2, 3])
       assert :ok = Xqlite.reset(stmt)
       assert {:row, [1]} = Xqlite.step(stmt)
 
       assert :done = Xqlite.step(stmt)
-      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, [3])
-      assert :ok = Xqlite.reset(stmt)
-      assert {:ok, %{rows: [[1]], done: false}} = Xqlite.multi_step(stmt, 1)
+      assert :ok = Xqlite.bind(stmt, [3])
+      assert {:ok, %{rows: [[3]], done: false}} = Xqlite.multi_step(stmt, 1)
 
       assert :ok = Xqlite.finalize(stmt)
     end
 
-    test "a keyword bind SQLite refuses mid-run takes no value either", %{conn: conn} do
+    test "a keyword bind refused mid-run takes no value either", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT :a, :b")
       :ok = Xqlite.bind(stmt, a: 1, b: 2)
 
       assert {:ok, %{rows: [[1, 2]], done: false}} = Xqlite.multi_step(stmt, 1)
-      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, a: 3, b: 4)
+      assert {:error, :statement_mid_run} = Xqlite.bind(stmt, a: 3, b: 4)
       assert :ok = Xqlite.reset(stmt)
       assert {:row, [1, 2]} = Xqlite.step(stmt)
 
@@ -189,14 +188,16 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
-    test "after :done a clear is allowed where a bind is refused", %{conn: conn} do
+    test "after :done a bind takes new values and a clear takes NULLs", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
       :ok = Xqlite.bind(stmt, [1])
 
       assert {:row, [1]} = Xqlite.step(stmt)
       assert :done = Xqlite.step(stmt)
 
-      assert {:error, {:sqlite_failure, 21, 21, _misuse}} = Xqlite.bind(stmt, [2])
+      assert :ok = Xqlite.bind(stmt, [2])
+      assert {:row, [2]} = Xqlite.step(stmt)
+      assert :done = Xqlite.step(stmt)
       assert :ok = Xqlite.clear_bindings(stmt)
       assert {:row, [nil]} = Xqlite.step(stmt)
 
@@ -564,6 +565,27 @@ defmodule Xqlite.NIF.StatementTest do
     assert {:error, :connection_closed} = Xqlite.bind(stmt, [1])
     assert {:ok, ["one"]} = Xqlite.column_names(stmt)
     assert :ok = Xqlite.finalize(stmt)
+  end
+
+  test "a step refused as busy keeps its run: a bind waits and the retry writes once" do
+    path = Xqlite.TestUtil.tmp_db_path("busy_step")
+    {:ok, holder} = Xqlite.open(path)
+    {:ok, conn} = Xqlite.open(path, busy_timeout: 0)
+    on_exit(fn -> Enum.each([conn, holder], &NIF.close/1) end)
+
+    :ok = NIF.execute_batch(holder, "CREATE TABLE t (v TEXT);")
+    {:ok, stmt} = Xqlite.prepare(conn, "INSERT INTO t (v) VALUES (?1)")
+    :ok = Xqlite.bind(stmt, ["x"])
+    :ok = NIF.execute_batch(holder, "BEGIN IMMEDIATE;")
+
+    assert {:error, {:database_busy_or_locked, _code, _message}} = Xqlite.step(stmt)
+    assert {:error, :statement_mid_run} = Xqlite.bind(stmt, ["y"])
+    assert {:error, :statement_mid_run} = Xqlite.clear_bindings(stmt)
+
+    :ok = NIF.execute_batch(holder, "COMMIT;")
+    assert :done = Xqlite.step(stmt)
+    assert :ok = Xqlite.finalize(stmt)
+    assert {:ok, %{rows: [["x"]]}} = Xqlite.query(holder, "SELECT v FROM t", [])
   end
 
   test "text params with interior NUL bytes bind and round-trip" do

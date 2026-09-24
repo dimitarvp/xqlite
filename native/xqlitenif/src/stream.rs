@@ -23,7 +23,6 @@ pub(crate) struct XqliteStream {
     // other way round.
     pending_error: Mutex<Option<XqliteError>>,
 
-    // These are immutable after stream_open completes
     pub(crate) conn_resource_arc: ResourceArc<XqliteConn>,
     pub(crate) column_names: Vec<String>,
 }
@@ -135,12 +134,12 @@ impl Drop for XqliteStream {
 }
 
 /// Why a single step produced no row to deliver. The two are not
-/// interchangeable: only `Unreadable` leaves a run that can carry on.
+/// interchangeable: only `Unreadable` has stepped past a row.
 pub(crate) enum StepFailure {
     /// `sqlite3_step` returned neither a row nor done — a locked database, an
     /// I/O error, a runtime error in the SQL, a trigger's RAISE, a
-    /// cancellation. No row was stepped past and the statement is finished
-    /// where SQLite left it.
+    /// cancellation. No row was stepped past, and the run is over unless a
+    /// lock was refused as busy, which SQLite keeps in progress for a retry.
     Failed(XqliteError),
     /// A row came back and could not be turned into terms. SQLite has already
     /// stepped past it, so the run continues at the row after it.

@@ -277,6 +277,7 @@ defmodule Xqlite do
           | :operation_cancelled
           | :statement_finalized
           | :statement_mid_run
+          | :stream_consumed
           | :transaction_in_progress
           | {:authorization_denied, integer(), String.t()}
           | {:busy_timeout_write_refused, %{policy: boolean(), observers: non_neg_integer()}}
@@ -1737,6 +1738,14 @@ defmodule Xqlite do
   as returning a stream that silently errors on first consume would hide
   setup failures (e.g., invalid SQL, closed connection).
 
+  The Enumerable runs once, because this call opens the statement. A second
+  enumeration, after the first or while it still runs (as in
+  `Stream.zip(s, Stream.drop(s, 1))`), fetches nothing and answers
+  `:stream_consumed` through `:on_error`: `:raise` raises
+  `Xqlite.StreamError` with it, `:emit_error` yields only
+  `{:error, :stream_consumed}` and `:halt` logs it and yields nothing. Call
+  `stream/4` again to read the rows again.
+
   Parameters follow `query/4`'s rule. A plain list is positional (`?1`,
   `?2`, …) and its length must be the statement's own parameter count;
   anything else is `{:error, {:invalid_parameter_count, %{expected: _,
@@ -1797,12 +1806,13 @@ defmodule Xqlite do
 
   defp open_stream(conn, sql, encoded_params, opts, start_md) do
     start_fun = &Xqlite.StreamResourceCallbacks.start_fun/1
+    claim_fun = &Xqlite.StreamResourceCallbacks.claim/1
     next_fun = &Xqlite.StreamResourceCallbacks.next_fun/1
     after_fun = &Xqlite.StreamResourceCallbacks.after_fun/1
 
     case start_fun.({conn, sql, encoded_params, opts}) do
       {:ok, acc} ->
-        {Stream.resource(fn -> acc end, next_fun, after_fun),
+        {Stream.resource(fn -> claim_fun.(acc) end, next_fun, after_fun),
          Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
       {:error, reason} = error ->
@@ -1882,11 +1892,11 @@ defmodule Xqlite do
   that takes any. A keyword list must name every parameter of the statement
   exactly once — see `query/4` for the three refusals, the 2 048 cap and for how a key names
   a parameter — so one call hands over one complete list; two partial binds
-  in a row no longer add up. Once stepping has started, call `reset/1` before
-  rebinding — SQLite rejects mid-run rebinds, and `clear_bindings/1` is
-  refused there too. After `:done` the two part company: the bind is still
-  SQLite's misuse refusal, while a clear is allowed and the next step reruns
-  the statement with NULL in every parameter.
+  in a row no longer add up. A statement that takes parameters and is mid-run
+  (see `clear_bindings/1`) answers `{:error, :statement_mid_run}` before the
+  list is read and keeps its values: call `reset/1` first. Once the run is
+  over the bind resets the statement itself, so the next step reruns it with
+  the new values.
 
   A term that is no list at all answers
   `{:error, {:expected_list, %{reason: :not_a_list, value_type: kind}}}`, and
@@ -1966,7 +1976,9 @@ defmodule Xqlite do
   changes nothing. What that rerun answers depends on the failure — the
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
-  stops on such an error rather than stepping on.
+  stops on such an error rather than stepping on. The exception is a step
+  refused as busy while taking or committing its lock: SQLite keeps that run
+  for a retry, so the statement stays mid-run and the next step carries on.
 
   A statement that takes parameters is refused until something sets them:
   before a successful `bind/3` the answer is
@@ -2036,7 +2048,9 @@ defmodule Xqlite do
   changes nothing. What that rerun answers depends on the failure — the
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
-  stops on such an error rather than stepping on.
+  stops on such an error rather than stepping on. The exception is a step
+  refused as busy while taking or committing its lock: SQLite keeps that run
+  for a retry, so the statement stays mid-run and the next step carries on.
 
   A statement that takes parameters is refused until something sets them:
   before a successful `bind/3` the answer is
@@ -2107,7 +2121,9 @@ defmodule Xqlite do
   changes nothing. What that rerun answers depends on the failure — the
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
-  stops on such an error rather than stepping on.
+  stops on such an error rather than stepping on. The exception is a step
+  refused as busy while taking or committing its lock: SQLite keeps that run
+  for a retry, so the statement stays mid-run and the next step carries on.
 
   A statement that takes parameters is refused until something sets them:
   before a successful `bind/3` the answer is
@@ -2145,7 +2161,9 @@ defmodule Xqlite do
 
   An unreadable-value error a batch held back is dropped here: the run it
   belonged to is over. After a step that failed outright a reset changes
-  nothing — the statement was already back at the top.
+  nothing — the statement was already back at the top — unless SQLite
+  refused the step as busy: it keeps that run for a retry, and a reset gives
+  it up.
   """
   @spec reset(stmt()) :: :ok | error()
   def reset(stmt), do: XqliteNIF.stmt_reset(stmt)
@@ -2154,7 +2172,9 @@ defmodule Xqlite do
   Clears all parameter bindings on a prepared statement back to NULL.
 
   A statement that takes parameters and is mid-run — a step has answered a
-  row and neither `:done` nor a `reset/1` has followed — is refused with
+  row, or was refused as busy while taking or committing its lock (SQLite
+  keeps that run for a retry), and neither `:done`, another failure nor a
+  `reset/1` has followed — is refused with
   `{:error, :statement_mid_run}`, and keeps the values it was bound. SQLite
   itself allows the call there and would release the values in place, which
   leaves every row still to come reading NULL. Call `reset/1` first.
@@ -2162,10 +2182,8 @@ defmodule Xqlite do
   A statement that takes no parameters has nothing to release and answers
   `:ok` wherever it is, as `bind(stmt, [])` on it does.
 
-  After `:done` the two stop agreeing: a bind is SQLite's own misuse refusal
-  there, while a clear is allowed and the next step reruns the statement from
-  the top with NULL in every parameter. That is deliberate — a finished run
-  has no rows left to change.
+  Once the run is over a clear is allowed, as a bind is, and the next step
+  reruns the statement from the top with NULL in every parameter.
   """
   @spec clear_bindings(stmt()) :: :ok | error()
   def clear_bindings(stmt), do: XqliteNIF.stmt_clear_bindings(stmt)
