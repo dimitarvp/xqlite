@@ -3,7 +3,7 @@
 A map of the code as it stands. `lib/` is Elixir; `native/xqlitenif/src/`
 is a Rust crate compiled into a NIF library by Rustler, talking to a
 statically linked SQLite through rusqlite. `XqliteNIF` holds nothing but
-100 raw NIF stub declarations (every body is `err()`, replaced at load
+101 raw NIF stub declarations (every body is `err()`, replaced at load
 time by the native function); `Xqlite` wraps most of them with option
 validation, result structs and telemetry.
 
@@ -18,7 +18,7 @@ Elixir paths are relative to `lib/`, Rust paths to
   cancellation, backup/serialize, PRAGMA get/set, schema introspection,
   STRICT-table helpers. It has no wrapper for the update / WAL / commit /
   rollback / log hooks — those are called on `XqliteNIF` directly.
-- `xqlite/xqlitenif.ex` — the 100 stubs plus `use RustlerPrecompiled`.
+- `xqlite/xqlitenif.ex` — the 101 stubs plus `use RustlerPrecompiled`.
 - `xqlite/result.ex`, `explain_analyze.ex` — result structs with
   `from_map/1`; `Result` also implements `Table.Reader`.
   `xqlite/stream_resource_callbacks.ex` and `stream_error.ex` hold the
@@ -37,8 +37,8 @@ Elixir paths are relative to `lib/`, Rust paths to
 - `xqlite/schema/*.ex` — the six structs the Rust side builds, plus
   `Types`; `mix/tasks/verify.ex` and `test_seq.ex` — the pre-commit gate
   (cargo runs with cwd set to the crate directory) and the test runner.
-- `lib.rs` — atoms, module list, `rustler::init!`; `nif.rs` — all 100
-  `#[rustler::nif]` functions, 94 of them `DirtyIo`; `connection.rs` —
+- `lib.rs` — atoms, module list, `rustler::init!`; `nif.rs` — all 101
+  `#[rustler::nif]` functions, 95 of them `DirtyIo`; `connection.rs` —
   the `XqliteConn` resource (a `Mutex<Option<Connection>>`, the child
   registry, and every hook slot), `with_conn`, `with_conn_mut`,
   open/close, result encoding.
@@ -361,7 +361,7 @@ pins to `test/`.
 | `span-events-share-one-shape` | Every span fires three events with fixed measurement keys: :start carries monotonic_time and system_time, :stop and :exception carry duration and monotonic_time, and all three carry the same telemetry_span_context reference. The :stop metadata replaces the :start metadata instead of merging into it, and a span block may return {value, stop_metadata} or {value, extra_measurements, stop_metadata}. | `xqlite/telemetry.ex:run_span/3`, `xqlite/telemetry.ex:emit_stop/4` | `telemetry_test.exs: ":start and :stop share one telemetry_span_context reference"; "a block returning {value, extra_measurements, stop_metadata} merges the extras"` |
 | `object-name-errors-carry-the-name` | The four errors that name a database object carry that name, not the sentence around it: {:no_such_table, name}, {:no_such_index, name}, {:table_exists, name} and {:index_exists, name}. The quoting and the schema qualifier are SQLite's own and differ between the pairs — the two 'no such' errors give the resolved name unquoted and keep a qualifier the statement wrote, the two 'already exists' errors never carry a qualifier, :table_exists echoes the identifier exactly as the statement spelled it and :index_exists gives the resolved name. A reworded SQLite message leaves the whole text in the payload. The library's own rejections — {:no_such_table, name} from the strict helpers, the introspection functions and the Pragma functions, {:no_such_index, name}, {:no_such_object, name} and {:no_such_schema, name} — carry the caller's name as given, a Pragma function's atom staying an atom, while SQLite's own keep its qualified form (main.Nope). | `error.rs:classify_sqlite_error`, `error.rs:name_after`, `error.rs:name_between` | `nif/execution_test.exs: "execute/3 returns error for NoSuchTable on INSERT"` |
 | `object-type-atoms-match-across-the-boundary` | The object types the schema reader reports are one set of atoms on both sides — :table, :view, :shadow, :virtual, :sequence — spelled the same in the Rust atom table and in Xqlite.Schema.Types.object_type/0; a Rust raw identifier gets an explicit string so the atom is not named after its escape. | `lib.rs:atoms` | `schema_introspection_test.exs: "schema_list_objects names a virtual table and its shadow tables"` |
-| `callback-sends-run-on-a-dirty-scheduler` | Every enif_send with a NULL calling environment in this crate runs inside a NIF scheduled DirtyIo; nif.rs carries 100 #[rustler::nif] functions, 94 of them scheduled DirtyIo, and the six that carry no schedule (create_cancel_token, cancel_operation, is_cancel_token, sqlite_version, register_log_hook, unregister_log_hook) drive no SQLite callback, so none of them can reach such a send. | `hook_util.rs` | unpinned |
+| `callback-sends-run-on-a-dirty-scheduler` | Every enif_send with a NULL calling environment in this crate runs inside a NIF scheduled DirtyIo; nif.rs carries 101 #[rustler::nif] functions, 95 of them scheduled DirtyIo, and the six that carry no schedule (create_cancel_token, cancel_operation, is_cancel_token, sqlite_version, register_log_hook, unregister_log_hook) drive no SQLite callback, so none of them can reach such a send. | `hook_util.rs` | unpinned |
 | `blob-wrapper-forces-blob-storage` | A plain binary parameter is stored as TEXT when its bytes are valid UTF-8 and as a BLOB otherwise, while %Xqlite.Blob{bytes: bytes} is always stored as a BLOB; the wrapper is accepted as a positional element and as the value of a keyword pair on every parameter-taking path; bytes is an enforced key (the literal without it does not compile, struct! raises), and a bytes field that is not a binary — a nil built through struct/2 included — answers {:invalid_blob_bytes, %{position, type}} with the one-based position in the list the caller passed and type naming the term found (one of eleven term-type atoms, :bitstring for a bitstring that is not a whole number of bytes, never :binary); and a value read back is a plain binary, never wrapped. | `util.rs:blob_struct_bytes`, `util.rs:blob_struct_value`, `util.rs:elixir_term_to_rusqlite_value` | `nif/blob_param_test.exs: "the same bytes are TEXT plain and BLOB wrapped"` |
 | `strict-rebuild-restores-the-two-pragmas` | The STRICT rebuild reads PRAGMA foreign_keys and PRAGMA legacy_alter_table before it starts, turns foreign_keys off before the BEGIN (SQLite ignores that pragma inside a transaction) and legacy_alter_table on just before the RENAME TO, and puts both back on every path, success or failure; it rejects a call inside a caller's transaction with :transaction_in_progress and an existing <table>_xqlite_strict_rebuild in the same schema with {:table_exists, name}, both before any statement runs. | `xqlite.ex:rebuild_pragmas/1`, `xqlite.ex:suspend_foreign_keys/2`, `xqlite.ex:restore_pragmas/3` | `strict_table_test.exs: "a successful rebuild preserves the schema, the rows and the pragmas"` |
 | `param-list-shape-decided-by-the-first-element` | Whether a parameter list is positional or a keyword list is decided once, from the first element — a two-element tuple with an atom key means keyword, anything else means positional — and the whole list is then treated that way. | `util.rs:is_keyword` | `nif/blob_param_test.exs: "a positional list whose first element is a wrapper binds every element"; "a named parameter called :blob still binds by name"` |

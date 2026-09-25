@@ -624,6 +624,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list's own length everywhere. The refusal itself, and the `expected`
   number, are unchanged.
 
+### Internal
+
+- **Every public function is fuzzed in a second VM.** `test/fuzz_law_test.exs`
+  calls each public function of `Xqlite`, `XqliteNIF`, `Xqlite.Pragma` and
+  `Xqlite.TypeExtension` 2000 times with values of its `@spec` types and
+  hostile terms, in a child VM, so a crash in native code cannot take the
+  suite down. The law fails on a crash, on a call that never returns, or on
+  an answer outside the documented shapes, and names the call that caused it.
+
 ## [0.15.0] - 2026-09-18
 
 ### Fixed
