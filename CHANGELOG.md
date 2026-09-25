@@ -21,6 +21,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` judge an image
+  before it replaces anything.** A rejected image answers
+  `{:error, {:invalid_image, %{reason: reason, code: code}}}` and leaves the
+  schema's contents alone. `reason` is `:not_a_database` (code 26) for bytes
+  that do not start with SQLite's 16-byte header, the empty binary included.
+  It is `:malformed` or `:not_a_database`, with SQLite's own code, for an
+  image whose header and schema SQLite cannot read on a scratch in-memory
+  connection. It is `:encoding_mismatch` (code 1) for an image in a text
+  encoding the target does not take. An attached schema takes only the
+  connection's text encoding; `main` takes only a UTF-8 image, and only on a
+  UTF-8 connection. To load a UTF-16 database, deserialize it into an
+  attached schema of a connection with the same encoding, or open its file
+  directly. These images used to load. The next statement then failed with
+  code 26, 11, 14 or 1, and into an attached schema that took the whole
+  connection down. A UTF-8 image into `main` of a UTF-16 connection
+  switched the connection to UTF-8, so later writes put UTF-8 bytes into
+  its attached UTF-16 databases, silently. The empty binary used to answer
+  a false out-of-memory error. The scratch read costs a second copy of the
+  image; running out of memory for it still answers the out-of-memory
+  error. Deserialize's own encoding read passes a `:pragma` deny list.
+- **An image of a WAL database now loads.** `serialize/2` of a WAL database,
+  and a WAL database file's bytes, carry header bytes 18 and 19 set to 2,
+  which SQLite's memory storage cannot open (code 14 on every later
+  statement). `deserialize/4` now sets them to 1 in its own copy, as SQLite
+  documents.
+- **A read-only open stays read-only on a shared cache and with a
+  `mode=memory` URI.** SQLite dropped the read-only flag of an
+  `open_readonly/1` or `open_in_memory_readonly/1` connection that joined a
+  shared cache another connection opened read-write, and of any URI with
+  `mode=memory`, so the connection wrote. Those connections now get `PRAGMA
+  query_only = 1` at open; `restore/3`, `PRAGMA query_only = 0` and a
+  `journal_mode` change still pass it (see the openers' docs). A private
+  read-only connection still creates TEMP tables. Such an open now returns
+  `{:error, {:cannot_open_database, uri, 262, _}}` while the shared cache's
+  writer holds an uncommitted schema change, because `query_only` cannot be
+  set then; it opens once the writer commits.
+- **The execute functions report the statement's own count.**
+  `XqliteNIF.execute/3`, `execute_cancellable/4`, `Xqlite.execute/4` and
+  `execute_cancellable/5` answered SQLite's sticky `sqlite3_changes()`, so
+  CREATE, BEGIN, COMMIT, PRAGMA, VACUUM and DROP reported the previous
+  write's count; they now answer 0 for a statement that changed no row, as
+  `query_with_changes` does.
+- **A `Stream.zip` cleanup no longer leaves an `Xqlite.stream/4` statement
+  open.** A raise on the first pair of a zip holding the stream (from the
+  consumer, the other enumerable, or `Enum.zip_reduce`) left the first
+  pass's statement open until garbage collection, so writes to its tables
+  failed meanwhile. The fresh start the cleanup halts now closes the first
+  pass and sends its close event, with that pass's outcome and row count;
+  a first pass closed that way answers `:stream_consumed` on its next
+  fetch instead of ending early.
+- **`Xqlite.unregister_busy_observer/2` and `unregister_progress_hook/2`
+  take any non-negative integer**, one past 64 bits too (it answered
+  `ArgumentError`); `unregister_progress_hook/2` now raises
+  `FunctionClauseError` for a negative handle, as its twin does.
+  **`Xqlite.backup_with_progress/6` answers `{:error,
+  {:invalid_pages_per_step, value}}` for any `pages_per_step` outside
+  `1..2_147_483_647`** — bignums, floats and atoms included — after the
+  cancel tokens and before any file is created (it raised `ArgumentError`).
+
 - **A cancel token already signalled when a cancellable call starts now
   cancels it before its statement runs.** `execute_cancellable`,
   `query_cancellable`, `query_with_changes_cancellable`,
@@ -290,6 +349,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **A `:busy` backup progress message sent before any step copied pages
+  carries `remaining: nil, total: nil`** (was `0` and `0`); a `:busy` after
+  a copied step carries that step's counts.
 
 - **On the four one-shot cancellable calls a signalled token answers
   `{:error, :operation_cancelled}` before an SQL or parameter error,** since

@@ -235,6 +235,43 @@ defmodule XqliteTest do
         assert error.reason == :stream_consumed
       end
 
+      for {shape, on_error} <- [drop: :raise, each: :raise, each: :halt, each: :emit_error] do
+        test "zip cleanup closes the first pass once (#{shape}, #{on_error})", %{conn: conn} do
+          handler_id = attach_capture([[:xqlite, :stream, :close]])
+          on_exit(fn -> detach(handler_id) end)
+          opts = [batch_size: 3, on_error: unquote(on_error)]
+          stream = Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], opts)
+          catch_error(zip_and_fail(stream, unquote(shape)))
+          assert {:ok, _} = NIF.execute(conn, "DROP TABLE stream_test_users", [])
+          assert_received {:telemetry_event, [:xqlite, :stream, :close], _, %{reason: :halted}}
+          refute_received {:telemetry_event, [:xqlite, :stream, :close], _, _}
+          assert is_function(stream, 2)
+        end
+      end
+
+      test "a nested start never ends the first pass short without an error", %{conn: conn} do
+        opts = [batch_size: 3, on_error: :emit_error]
+        stream = Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], opts)
+        rows = Enum.flat_map(stream, &[&1 | Enum.to_list(Stream.zip([], stream))])
+        assert List.last(rows) in [{:ok, %{"id" => @record_count}}, {:error, :stream_consumed}]
+      end
+
+      test "a nested pass that fetches never closes the first pass", %{conn: conn} do
+        opts = [batch_size: 3, on_error: :emit_error]
+        stream = Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], opts)
+        rows = Enum.flat_map(stream, &[&1 | Enum.to_list(stream)])
+        assert Enum.count(rows, &match?({:ok, _}, &1)) == @record_count
+      end
+
+      test "another process's zip cleanup leaves a suspended first pass alone", %{conn: conn} do
+        stream = Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], batch_size: 3)
+        count = fn _row, n -> if n == 0, do: {:suspend, 1}, else: {:cont, n + 1} end
+        {:suspended, 1, rest} = Enumerable.reduce(stream, {:cont, 0}, count)
+        zip = Task.async(fn -> catch_error(Enum.zip(stream, 1..3)) end)
+        assert %Xqlite.StreamError{reason: :stream_consumed} = Task.await(zip)
+        assert {:halted, @record_count} = rest.({:cont, 1})
+      end
+
       test "stream/4 rejects an unsupported :on_error mode at open", %{conn: conn} do
         assert {:error, {:invalid_on_error, :bogus}} =
                  Xqlite.stream(conn, "SELECT id FROM stream_test_users;", [], on_error: :bogus)
@@ -557,6 +594,12 @@ defmodule XqliteTest do
       StreamData.integer(-1_000_000..0)
     ])
   end
+
+  defp zip_and_fail(stream, :drop),
+    do: stream |> Stream.zip(Stream.drop(stream, 1)) |> Enum.to_list()
+
+  defp zip_and_fail(stream, :each),
+    do: stream |> Stream.zip(1..3) |> Enum.each(&raise(inspect(&1)))
 
   # Seeds a table whose 3rd row (by id) holds an invalid-UTF-8 TEXT value, so a
   # stream reading it row-by-row errors mid-fetch after two good rows.

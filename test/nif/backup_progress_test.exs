@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.BackupProgressTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1, tmp_db_path: 1]
 
@@ -222,8 +223,39 @@ defmodule Xqlite.NIF.BackupProgressTest do
         assert {:error, {:database_busy_or_locked, ^code, _}} =
                  NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
 
-        assert_received {:xqlite_backup_progress, %{status: :busy, remaining: 0, total: 0}}
+        assert_received {:xqlite_backup_progress, %{status: :busy, remaining: nil, total: nil}}
         assert :ok = NIF.rollback(conn)
+      end
+
+      test "a :busy after a copied step carries that step's counts", %{backup_path: path} do
+        src_path = tmp_db_path("bkp_busy_source")
+        {:ok, src} = Xqlite.open(src_path, journal_mode: :delete, busy_timeout: 0)
+        :ok = NIF.execute_batch(src, "CREATE TABLE t AS SELECT zeroblob(12e6) AS v;")
+        me = self()
+        backup = Task.async(fn -> NIF.backup_with_progress(src, "main", path, me, 1, []) end)
+        assert_receive {:xqlite_backup_progress, %{status: :copied}}
+        {:ok, holder} = NIF.open(src_path)
+        {:ok, 0} = NIF.execute(holder, "BEGIN EXCLUSIVE", [])
+        assert {:error, {:database_busy_or_locked, _, _}} = Task.await(backup)
+        assert_receive {:xqlite_backup_progress, %{status: :busy, remaining: n, total: total}}
+        assert is_integer(n) and n > 0 and total > n
+        Enum.each([holder, src], &NIF.close/1)
+      end
+
+      property "step counts outside 1..2^31-1 are rejected", %{conn: conn, backup_path: path} do
+        assert :ok = Xqlite.backup_with_progress(conn, "main", path, self(), 2_147_483_647, [])
+        File.rm!(path)
+
+        big = map(integer(0..300), &(2_147_483_647 + 2 ** &1))
+        small = map(integer(0..300), &(1 - 2 ** &1))
+        halves = map(integer(), &(&1 / 2))
+
+        check all(pages <- one_of([big, small, halves, atom(:alphanumeric)]), max_runs: 2000) do
+          assert {:error, {:invalid_pages_per_step, ^pages}} =
+                   Xqlite.backup_with_progress(conn, "main", path, self(), pages, [])
+
+          refute File.exists?(path)
+        end
       end
 
       test "pages_per_step 1 produces many progress messages", %{conn: conn, backup_path: path} do

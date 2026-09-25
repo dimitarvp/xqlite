@@ -233,17 +233,7 @@ pub(crate) fn core_query<'a>(
     })
 }
 
-/// Runs a query and reports how many rows THIS statement changed.
-///
-/// `sqlite3_changes()` is sticky — it keeps the last INSERT/UPDATE/DELETE's
-/// count across intervening SELECT/DDL/PRAGMA statements. Detecting "did this
-/// statement change rows" by empty columns is wrong twice: an `… RETURNING`
-/// DML has columns yet changed rows, and a DDL/PRAGMA has no columns yet must
-/// report 0 (not the stale prior count). We instead observe
-/// `sqlite3_total_changes()` across the statement: a non-zero delta means this
-/// statement (or its triggers) changed rows, so the fresh `sqlite3_changes()`
-/// is meaningful; a zero delta means it changed nothing, so we report 0
-/// regardless of the sticky counter.
+/// Runs a query and reports how many rows this statement changed.
 pub(crate) fn core_query_with_changes<'a>(
     env: Env<'a>,
     conn: &Connection,
@@ -252,12 +242,18 @@ pub(crate) fn core_query_with_changes<'a>(
 ) -> Result<(XqliteQueryResult<'a>, u64), XqliteError> {
     let before = conn.total_changes();
     let qr = core_query(env, conn, sql, params_term)?;
-    let changes = if conn.total_changes() == before {
-        0
-    } else {
-        conn.changes()
-    };
-    Ok((qr, changes))
+    Ok((qr, changes_since(conn, before)))
+}
+
+/// The rows the statement just ran changed. `sqlite3_changes()` is sticky: it
+/// keeps the last INSERT, UPDATE or DELETE's count across statements that
+/// change nothing (DDL, PRAGMA, BEGIN, VACUUM), so it counts only when
+/// `sqlite3_total_changes()` moved across the statement.
+fn changes_since(conn: &Connection, total_before: u64) -> u64 {
+    match conn.total_changes() == total_before {
+        true => 0,
+        false => conn.changes(),
+    }
 }
 
 pub(crate) fn core_execute<'a>(
@@ -265,15 +261,16 @@ pub(crate) fn core_execute<'a>(
     conn: &Connection,
     sql: &str,
     params_term: Term<'a>,
-) -> Result<usize, XqliteError> {
+) -> Result<u64, XqliteError> {
+    let before = conn.total_changes();
     reject_interior_nul(sql)?;
     let mut stmt = conn.prepare(sql)?;
     reject_no_statement(conn, &stmt)?;
 
-    let affected_rows = match walk_params(params_term)? {
+    match walk_params(params_term)? {
         Params::Empty => {
             require_parameter_count(&stmt, 0)?;
-            stmt.execute([])?
+            stmt.execute([])?;
         }
         Params::Named(items) => {
             let named_params_vec =
@@ -281,7 +278,7 @@ pub(crate) fn core_execute<'a>(
             let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
             require_named_within_length(conn, &named_params_vec)?;
             bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;
-            stmt.raw_execute()?
+            stmt.raw_execute()?;
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
@@ -289,11 +286,11 @@ pub(crate) fn core_execute<'a>(
             require_positional_within_length(conn, &positional_values)?;
             let params_slice: Vec<&dyn ToSql> =
                 positional_values.iter().map(|v| v as &dyn ToSql).collect();
-            stmt.execute(params_slice.as_slice())?
+            stmt.execute(params_slice.as_slice())?;
         }
-    };
+    }
 
-    Ok(affected_rows)
+    Ok(changes_since(conn, before))
 }
 
 pub(crate) fn core_execute_batch(

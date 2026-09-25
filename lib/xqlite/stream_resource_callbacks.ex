@@ -15,12 +15,12 @@ defmodule Xqlite.StreamResourceCallbacks do
           cancel_tokens: [reference()],
           type_extensions: [module()],
           original_opts: keyword(),
-          rows_total: non_neg_integer(),
           opened_at: integer(),
           on_error: Xqlite.stream_on_error(),
           outcome: :atomics.atomics_ref(),
           decode_error: Xqlite.error_reason() | nil,
-          claim: :atomics.atomics_ref()
+          claim: :atomics.atomics_ref(),
+          first_pass: acc() | nil
         }
 
   @valid_on_error [:raise, :halt, :emit_error]
@@ -131,12 +131,12 @@ defmodule Xqlite.StreamResourceCallbacks do
       cancel_tokens: cancel_tokens,
       type_extensions: Keyword.get(opts, :type_extensions, []),
       original_opts: opts,
-      rows_total: 0,
       opened_at: Xqlite.Telemetry.monotonic_time(),
       on_error: on_error,
       outcome: new_outcome(),
       decode_error: nil,
-      claim: :atomics.new(1, signed: false)
+      claim: :atomics.new(2, signed: false),
+      first_pass: nil
     }
   end
 
@@ -145,7 +145,7 @@ defmodule Xqlite.StreamResourceCallbacks do
   # accumulator at all, and `Stream.resource/3` then hands the after
   # function the one the last successful fetch returned.
   defp new_outcome do
-    cell = :atomics.new(1, signed: false)
+    cell = :atomics.new(2, signed: false)
     :atomics.put(cell, 1, outcome_code(:halted))
     cell
   end
@@ -168,12 +168,17 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp code_outcome(1), do: :drained
   defp code_outcome(2), do: :errored
 
-  # A later pass gets no handle and an outcome cell of its own: the first may still run.
+  # Stream.zip, cleaning up after a raise, halts a fresh start instead of the pass it read,
+  # so a later pass halted unread in the first pass's process closes that pass for it.
   @spec claim(acc()) :: acc()
   def claim(acc) do
     case :atomics.compare_exchange(acc.claim, 1, 0, 1) do
-      :ok -> acc
-      1 -> %{acc | handle: nil, outcome: new_outcome()}
+      :ok ->
+        Process.put({__MODULE__, acc.claim}, true)
+        acc
+
+      1 ->
+        %{acc | handle: nil, outcome: new_outcome(), first_pass: acc}
     end
   end
 
@@ -192,13 +197,23 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp fetch_batch(%{handle: nil} = acc), do: handle_fetch_error(:stream_consumed, acc)
 
   defp fetch_batch(acc) do
+    case :atomics.get(acc.claim, 2) do
+      0 -> fetch_rows(acc)
+      1 -> handle_fetch_error(:stream_consumed, acc)
+    end
+  end
+
+  defp fetch_rows(acc) do
     fetch_started_at = Xqlite.Telemetry.monotonic_time()
 
     case NIF.stream_fetch_cancellable(acc.handle, acc.batch_size, acc.cancel_tokens) do
       {:ok, %{rows: rows}} ->
-        {mapped_rows, refusal} = map_rows_to_maps(rows, acc.columns, acc.type_extensions, [])
+        {mapped_rows, decode_error} =
+          map_rows_to_maps(rows, acc.columns, acc.type_extensions, [])
+
         rows_count = length(mapped_rows)
-        new_acc = %{acc | rows_total: acc.rows_total + rows_count, decode_error: refusal}
+        :atomics.add(acc.outcome, 2, rows_count)
+        new_acc = %{acc | decode_error: decode_error}
         emit_fetch_telemetry(fetch_started_at, rows_count, acc.handle, false)
         {shape_rows(mapped_rows, acc.on_error), new_acc}
 
@@ -250,9 +265,25 @@ defmodule Xqlite.StreamResourceCallbacks do
   end
 
   @spec after_fun(acc()) :: :ok
-  def after_fun(%{handle: nil}), do: :ok
+  def after_fun(%{handle: nil} = acc) do
+    case outcome(acc) == :halted and Process.get({__MODULE__, acc.claim}, false) do
+      true -> close_once(acc.first_pass)
+      false -> :ok
+    end
+  end
 
-  def after_fun(acc) do
+  def after_fun(acc), do: close_once(acc)
+
+  defp close_once(acc) do
+    case :atomics.compare_exchange(acc.claim, 2, 0, 1) do
+      :ok -> close(acc)
+      1 -> :ok
+    end
+  end
+
+  defp close(acc) do
+    Process.delete({__MODULE__, acc.claim})
+
     metadata =
       case NIF.stream_close(acc.handle) do
         :ok ->
@@ -270,7 +301,7 @@ defmodule Xqlite.StreamResourceCallbacks do
       %{
         monotonic_time: now,
         total_duration: now - acc.opened_at,
-        total_rows: acc.rows_total
+        total_rows: :atomics.get(acc.outcome, 2)
       },
       metadata
     )

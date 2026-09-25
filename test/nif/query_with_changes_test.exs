@@ -199,6 +199,28 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
         assert {:error, _} =
                  NIF.query_with_changes(conn, "INSERT INTO qwc VALUES (?1, ?2)", [1])
       end
+
+      test "the execute functions count only the rows the statement changed", %{conn: conn} do
+        {:ok, token} = NIF.create_cancel_token()
+        ddl = "CREATE TRIGGER t AFTER INSERT ON qwc BEGIN INSERT INTO log VALUES (1), (2); END"
+        :ok = NIF.execute_batch(conn, "CREATE TABLE log (x); #{ddl};")
+
+        executes = [
+          &NIF.execute(conn, &1, []),
+          &NIF.execute_cancellable(conn, &1, [], [token]),
+          fn sql ->
+            with {:ok, result} <- Xqlite.execute(conn, sql), do: {:ok, result.changes}
+          end,
+          &Xqlite.execute_cancellable(conn, &1, [], token)
+        ]
+
+        idle = ["CREATE TABLE u (x)", "BEGIN", "COMMIT", "PRAGMA user_version = 7", "VACUUM"]
+
+        for execute <- executes do
+          assert {:ok, 3} = execute.("INSERT INTO qwc (val) VALUES ('a'), ('b'), ('c')")
+          for sql <- idle ++ ["DROP TABLE u"], do: assert({:ok, 0} = execute.(sql))
+        end
+      end
     end
   end
 

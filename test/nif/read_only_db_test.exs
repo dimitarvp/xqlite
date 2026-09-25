@@ -153,4 +153,39 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
 
     NIF.close(ro_conn)
   end
+
+  test "a read-only connection on a shared cache opened read-write writes nothing" do
+    uri = "file:ro_shared_#{System.unique_integer([:positive])}?cache=shared"
+    {:ok, rw} = NIF.open_in_memory(uri)
+    :ok = NIF.execute_batch(rw, "CREATE TABLE s (id); INSERT INTO s VALUES (1), (2), (3);")
+    {:ok, ro} = Xqlite.open_in_memory_readonly(uri)
+
+    dml = ["INSERT INTO s VALUES (4)", "UPDATE s SET id = 9", "DELETE FROM s"]
+
+    for sql <- dml ++ ["CREATE TABLE u (x)", "DROP TABLE s", "PRAGMA user_version = 99"] do
+      assert {:error, {:read_only_database, 8, _}} = NIF.execute(ro, sql, [])
+    end
+
+    assert {:ok, %{rows: [[1], [2], [3]]}} = NIF.query(rw, "SELECT id FROM s ORDER BY id", [])
+    Enum.each([ro, rw], &NIF.close/1)
+  end
+
+  test "a mode=memory URI opens read-only on both openers" do
+    for open <- [&Xqlite.open_readonly/1, &Xqlite.open_in_memory_readonly/1] do
+      {:ok, conn} = open.("file:ro_mode_#{System.unique_integer([:positive])}?mode=memory")
+      assert {:error, {:read_only_database, 8, _}} = NIF.execute(conn, "CREATE TABLE t(x)", [])
+      NIF.close(conn)
+    end
+  end
+
+  test "a private read-only connection keeps its TEMP tables" do
+    file = fn -> Xqlite.open_readonly(create_temp_db_file()) end
+
+    for open <- [file, &Xqlite.open_in_memory_readonly/0] do
+      {:ok, conn} = open.()
+      assert {:ok, 0} = NIF.execute(conn, "CREATE TEMP TABLE scratch (x)", [])
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO scratch VALUES (1)", [])
+      NIF.close(conn)
+    end
+  end
 end

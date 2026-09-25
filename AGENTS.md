@@ -148,8 +148,9 @@ of `- [x] did a thing`, nothing else — the reader is a dev skimming.
   while C's `SQLITE_BUSY` is 5, so `error.rs` compares
   `extended_code & 0xFF` against SQLite's C constants.
 - **`sqlite3_changes()` is sticky**: SELECT, DDL and PRAGMA leave it
-  alone, so use `query_with_changes`, which reads it in the same Mutex
-  hold and reports it only when `sqlite3_total_changes()` moved.
+  alone, so `query_with_changes` and the execute functions read it in
+  the same Mutex hold and report it only when `sqlite3_total_changes()`
+  moved (`query.rs:changes_since`).
 - **Zero-arity NIFs.** Rustler generates no Elixir wrapper for a Rust
   default argument, so `Xqlite.open_in_memory/0` is written by hand as
   `open_in_memory(opts \\ [])`; `XqliteNIF` declares zero-arity stubs

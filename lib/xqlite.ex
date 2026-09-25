@@ -89,6 +89,8 @@ defmodule Xqlite do
     :mmap_size
   ]
 
+  @largest_hook_handle 18_446_744_073_709_551_615
+
   @typedoc """
   A value a result row can hold.
 
@@ -318,6 +320,8 @@ defmodule Xqlite do
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
           | {:invalid_conflict_strategy, atom()}
+          | {:invalid_image,
+             %{reason: :not_a_database | :malformed | :encoding_mismatch, code: integer()}}
           | {:invalid_limit_category, atom()}
           | {:invalid_limit_value, %{category: atom(), value: integer()}}
           | {:invalid_on_error, term()}
@@ -325,7 +329,7 @@ defmodule Xqlite do
              %{key: term(), value: term(), reason: :unknown_key, allowed: [atom()]}
              | %{key: atom(), value: term(), reason: :duplicate_key | :invalid_value}
              | %{key: nil, value: term(), reason: :not_a_pair}}
-          | {:invalid_pages_per_step, integer()}
+          | {:invalid_pages_per_step, term()}
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
@@ -479,9 +483,13 @@ defmodule Xqlite do
 
   Useful for connecting to a named shared-cache in-memory database opened
   read-write by another connection — pass its URI as `uri`, or omit it to
-  open a private (empty) read-only `:memory:` database.
+  open a private (empty) read-only `:memory:` database. Such a shared cache,
+  and a URI with `mode=memory`, keep the connection read-only only through
+  `PRAGMA query_only = 1`, with the limits `open_readonly/1` states. While the
+  cache's writer holds an uncommitted schema change, `query_only` cannot be set:
+  the open returns `{:error, {:cannot_open_database, uri, 262, _}}` until the writer commits.
 
-  No PRAGMAs are applied; read-only databases can't persist most settings.
+  No other PRAGMAs are applied; read-only databases can't persist most settings.
   """
   @spec open_in_memory_readonly(String.t()) :: {:ok, conn()} | error()
   def open_in_memory_readonly(uri \\ ":memory:") when is_binary(uri) do
@@ -503,10 +511,18 @@ defmodule Xqlite do
   Opens a read-only connection to an existing database file.
 
   Fails with a structured error if the file does not exist — read-only
-  opens never create. No PRAGMAs are applied; read-only databases
-  can't persist most settings. Writes fail with
+  opens never create. Writes fail with
   `{:error, {:read_only_database, extended_code, message}}`.
   `path` is judged as in `open/2`.
+
+  SQLite drops the read-only flag for a `cache=shared` URI whose cache another
+  connection opened read-write, and for a URI with `mode=memory`. There the
+  connection is kept read-only by `PRAGMA query_only = 1`, set at open: SQL on
+  the connection can turn it off, and `restore/3` and a `journal_mode` change
+  pass it, so keep untrusted SQL out with `set_authorizer/2`. While the shared
+  cache's writer holds an uncommitted schema change, `query_only` cannot be set:
+  the open returns `{:error, {:cannot_open_database, path, 262, _}}` until the writer commits.
+  Otherwise no PRAGMAs are applied, and TEMP tables can still be created.
 
   Emits `[:xqlite, :open, :start | :stop]` telemetry with mode
   `:readonly`.
@@ -2226,7 +2242,9 @@ defmodule Xqlite do
   Serializes a database to a contiguous binary.
 
   Returns a binary snapshot of the entire database — an atomic, point-in-time
-  copy. No pages are locked during serialization.
+  copy of every page the connection reads, taken inside one read transaction:
+  a WAL database's image holds what its WAL file holds, and an image taken
+  inside the connection's own write transaction holds its uncommitted changes.
 
   `schema` identifies which attached database to serialize. Defaults to
   `"main"`. Use `"temp"` for the temp database or the name of an attached
@@ -2260,9 +2278,22 @@ defmodule Xqlite do
   @doc """
   Deserializes a binary into a database, replacing its current contents.
 
-  The binary must be a valid SQLite database image (as produced by
-  `serialize/2`). After deserialization the connection operates on the new
-  database entirely in memory.
+  The binary is a database image: what `serialize/2` returns, or the bytes of
+  a database file. The connection then works on it in memory, in rollback-journal
+  mode: a WAL image loads with header bytes 18 and 19 set from 2 to 1 in the
+  library's copy, as SQLite documents, since memory holds no WAL file.
+
+  The image is judged after the connection and `schema`, before anything is
+  replaced; a rejected one returns `{:error, {:invalid_image, %{reason: reason,
+  code: code}}}`. `:not_a_database` (code 26): the bytes lack SQLite's 16-byte
+  header, the empty binary included. `:malformed` (a corrupt image) or
+  `:not_a_database`, with SQLite's code: a scratch in-memory connection, which
+  costs a second copy of the image, cannot read its header and schema (running
+  out of memory there returns that error). `:encoding_mismatch` (code 1): an
+  attached schema takes only the connection's text encoding, and `"main"` only
+  UTF-8 on a UTF-8 connection: load a UTF-16 image into an attached schema of a
+  connection with the same encoding, or open its file directly. An image damaged
+  only past its schema loads, and fails when those pages are read.
 
   `schema` identifies which attached database to replace (default `"main"`).
   `read_only` marks the deserialized image as read-only (default `false`).
@@ -2687,11 +2718,13 @@ defmodule Xqlite do
   @doc """
   Unregisters a busy-contention observer by handle.
 
-  Idempotent — an unknown or already-removed handle is a no-op.
+  Idempotent — an unknown or already-removed handle is a no-op. Every
+  non-negative integer is taken, one past 64 bits too, which nothing ever
+  issued; a closed connection returns `{:error, :connection_closed}`.
   """
   @spec unregister_busy_observer(conn(), non_neg_integer()) :: :ok | error()
   def unregister_busy_observer(conn, handle) when is_integer(handle) and handle >= 0 do
-    XqliteNIF.unregister_busy_observer(conn, handle)
+    XqliteNIF.unregister_busy_observer(conn, min(handle, @largest_hook_handle))
   end
 
   @doc """
@@ -2886,12 +2919,13 @@ defmodule Xqlite do
   @doc """
   Unregisters a progress-tick subscriber by handle.
 
-  Idempotent — unregistering an unknown handle returns `:ok`. Returns
+  Idempotent — unregistering an unknown handle returns `:ok`, for every
+  non-negative integer, one past 64 bits too. Returns
   `{:error, :connection_closed}` if the connection is closed.
   """
   @spec unregister_progress_hook(conn(), non_neg_integer()) :: :ok | error()
-  def unregister_progress_hook(conn, handle) when is_integer(handle) do
-    XqliteNIF.unregister_progress_hook(conn, handle)
+  def unregister_progress_hook(conn, handle) when is_integer(handle) and handle >= 0 do
+    XqliteNIF.unregister_progress_hook(conn, min(handle, @largest_hook_handle))
   end
 
   @doc """
@@ -3304,13 +3338,15 @@ defmodule Xqlite do
   step copied pages and `:busy` when a lock blocked it, which ends the call
   with the error `backup/3` gives: at once for a source in its own write
   transaction, after rusqlite's 5000 ms busy timeout for a destination another
-  connection holds. A `:busy` message before the first copied step carries
-  `remaining: 0, total: 0`. Returns `{:error, :operation_cancelled}` if any
-  token signals between steps.
+  connection holds. In a `:busy` message sent before any step copied pages,
+  `remaining` and `total` are `nil`; after one, they are the last copied
+  step's counts. Returns `{:error, :operation_cancelled}` if any token
+  signals between steps.
 
-  `pages_per_step` must be a positive integer. A non-positive value returns
-  `{:error, {:invalid_pages_per_step, value}}` — passing `0` would otherwise
-  make SQLite copy no pages while reporting "more", spinning forever.
+  `pages_per_step` is an integer from 1 to 2_147_483_647, the count SQLite
+  takes. Any other term returns `{:error, {:invalid_pages_per_step, value}}`
+  once the tokens are judged, before any file is created — `0` would make
+  SQLite copy no pages while reporting "more", forever.
   """
   @spec backup_with_progress(
           conn(),
@@ -3323,12 +3359,12 @@ defmodule Xqlite do
   def backup_with_progress(conn, schema, dest_path, pid, pages_per_step, token_or_tokens) do
     tokens = List.wrap(token_or_tokens)
 
-    case validate_cancel_tokens(token_or_tokens) do
-      :ok ->
-        XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages_per_step, tokens)
-
-      {:error, _reason} = error ->
-        error
+    with :ok <- validate_cancel_tokens(token_or_tokens),
+         true <- pages_per_step in 1..2_147_483_647 do
+      XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages_per_step, tokens)
+    else
+      false -> {:error, {:invalid_pages_per_step, pages_per_step}}
+      {:error, _reason} = error -> error
     end
   end
 

@@ -135,7 +135,11 @@ defmodule XqliteNIF do
   Write operations (INSERT, UPDATE, DELETE, CREATE TABLE, etc.) will fail
   with `{:error, {:read_only_database, extended_code, message}}`.
 
-  Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_URI` flags.
+  Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_URI` flags,
+  and sets `PRAGMA query_only = 1` when SQLite still reports the database
+  writable after the open, as `Xqlite.open_readonly/1` describes. While a shared
+  cache's writer holds an uncommitted schema change, `query_only` cannot be set:
+  the open returns `{:error, {:cannot_open_database, path, 262, _}}` until the writer commits.
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
@@ -151,7 +155,11 @@ defmodule XqliteNIF do
   `"file:memdb1?mode=memory&cache=shared"`. Pass `":memory:"` for a
   private, empty read-only database.
 
-  Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_MEMORY | SQLITE_OPEN_URI` flags.
+  Uses `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX | SQLITE_OPEN_MEMORY | SQLITE_OPEN_URI` flags,
+  and sets `PRAGMA query_only = 1` when SQLite still reports the database
+  writable after the open, as `Xqlite.open_readonly/1` describes. While a shared
+  cache's writer holds an uncommitted schema change, `query_only` cannot be set:
+  the open returns `{:error, {:cannot_open_database, uri, 262, _}}` until the writer commits.
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
@@ -421,9 +429,12 @@ defmodule XqliteNIF do
   its bytes are valid UTF-8 and as a `BLOB` otherwise; wrap it as
   `%Xqlite.Blob{bytes: bytes}` to store a `BLOB` whatever the bytes are.
 
-  Returns `{:ok, affected_rows}` on success, where `affected_rows` is a non-negative
-  integer indicating the number of rows modified, inserted, or deleted. For DDL
-  statements like `CREATE TABLE`, `affected_rows` is typically `0`.
+  Returns `{:ok, affected_rows}` on success: the rows this statement inserted,
+  updated or deleted, a trigger's rows not counted, and `0` for a statement
+  that changed none — DDL, `BEGIN`, `PRAGMA`, `VACUUM` — whatever an earlier
+  write changed, which `changes/1` keeps reporting. A `DROP TABLE` of a table
+  a foreign key references, with `foreign_keys` on, counts the rows of the
+  `DELETE` SQLite runs first.
   Returns `{:error, reason}` on failure. For example, `{:error, :execute_returned_results}`
   if a statement unexpectedly returns data (e.g., a `SELECT` statement or an
   `INSERT ... RETURNING` statement was passed).
@@ -1928,8 +1939,13 @@ defmodule XqliteNIF do
   @doc """
   Deserializes a binary into the named schema, replacing its contents.
 
-  The binary must be a valid SQLite database image (as produced by
-  `serialize/2`). After deserialization the connection operates on the
+  The binary is what `serialize/2` returns or a database file's bytes, judged
+  as `Xqlite.deserialize/4` describes. A rejected image replaces nothing and returns
+  `{:error, {:invalid_image, %{reason: reason, code: code}}}`, `reason` being
+  `:not_a_database`, `:malformed` or `:encoding_mismatch`. An attached schema
+  takes only the connection's text encoding, and `"main"` only UTF-8 on a UTF-8
+  connection: load a UTF-16 image into an attached schema of a connection with
+  the same encoding, or open its file directly. A deserialized connection operates on the
   new database entirely in memory.
 
   When `read_only` is `true`, write operations on the schema fail with
@@ -2012,7 +2028,7 @@ defmodule XqliteNIF do
   after each step: `status` is `:copied`, or `:busy` when a lock blocked the
   step, which then ends the call with the error `backup/3` answers for the
   same lock (see `Xqlite.backup_with_progress/6`). A `:busy` message before
-  the first copied step carries `remaining: 0, total: 0`. Between steps, all of
+  any step copied pages carries `remaining: nil, total: nil`. Between steps, all of
   `cancel_tokens` are polled —
   if *any* is signalled, returns `{:error, :operation_cancelled}`
   (OR-semantics). Pass an empty list for no-cancellation.

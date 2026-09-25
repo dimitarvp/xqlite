@@ -52,7 +52,7 @@ fn open_readonly(path: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> 
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
         | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-    let result = Connection::open_with_flags(path.as_str(), flags);
+    let result = Connection::open_with_flags(path.as_str(), flags).and_then(keep_read_only);
     connection::handle_open_result(result, path.into_string())
 }
 
@@ -62,8 +62,19 @@ fn open_in_memory_readonly(uri: TextArg) -> Result<ResourceArc<XqliteConn>, Xqli
         | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
         | rusqlite::OpenFlags::SQLITE_OPEN_MEMORY
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-    let result = Connection::open_with_flags(uri.as_str(), flags);
+    let result = Connection::open_with_flags(uri.as_str(), flags).and_then(keep_read_only);
     connection::handle_open_result(result, uri.into_string())
+}
+
+/// Sets `query_only` on a read-only open whose main database SQLite still
+/// reports writable: a shared cache another connection opened read-write, or a
+/// URI whose `mode=memory` replaced the read-only flag. A private read-only
+/// connection keeps its TEMP tables.
+fn keep_read_only(conn: Connection) -> rusqlite::Result<Connection> {
+    match conn.is_readonly(rusqlite::MAIN_DB)? {
+        true => Ok(conn),
+        false => conn.pragma_update(None, "query_only", 1).map(|()| conn),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -105,7 +116,7 @@ fn execute<'a>(
     handle: ResourceArc<XqliteConn>,
     sql: TextArg,
     params_term: Term<'a>,
-) -> Result<usize, XqliteError> {
+) -> Result<u64, XqliteError> {
     connection::with_conn(&handle, |conn| {
         query::core_execute(env, conn, &sql, params_term)
     })
@@ -188,7 +199,7 @@ fn execute_cancellable<'a>(
     sql: TextArg,
     params_term: Term<'a>,
     tokens_term: Term<'a>,
-) -> Result<usize, XqliteError> {
+) -> Result<u64, XqliteError> {
     let token_bools = crate::cancel::decode_tokens(tokens_term)?;
     connection::with_conn(&handle, |conn| {
         cancel_if_signalled(&token_bools)?;
@@ -1660,11 +1671,92 @@ fn deserialize<'a>(
     let result = connection::with_conn_mut(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
         let bytes = data.as_slice();
-        let cursor = Cursor::new(bytes);
-        conn.deserialize_read_exact(schema.as_str(), cursor, bytes.len(), read_only)?;
+        judge_image(bytes)?;
+        judge_image_encoding(conn, &handle.busy_flags, &schema, bytes)?;
+        let image = rollback_image(bytes);
+        conn.deserialize_read_exact(schema.as_str(), image, bytes.len(), read_only)?;
         Ok(())
     });
     singular_ok_or_error_tuple(env, result)
+}
+
+/// Rejects an image before it replaces anything: bytes without SQLite's
+/// 16-byte header, the empty binary included, and an image whose header and
+/// schema SQLite cannot read on a scratch in-memory connection. Running out of
+/// memory there says nothing about the image and keeps its own error.
+fn judge_image(bytes: &[u8]) -> Result<(), XqliteError> {
+    if !bytes.starts_with(b"SQLite format 3\0") {
+        return Err(XqliteError::InvalidImage {
+            reason: atoms::not_a_database(),
+            code: ffi::SQLITE_NOTADB,
+        });
+    }
+    let mut scratch = Connection::open_in_memory()?;
+    scratch
+        .deserialize_read_exact("main", rollback_image(bytes), bytes.len(), true)
+        .and_then(|()| scratch.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(())))
+        .map_err(|err| match err {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.code != ffi::ErrorCode::OutOfMemory =>
+            {
+                XqliteError::InvalidImage {
+                    reason: match failure.code {
+                        ffi::ErrorCode::DatabaseCorrupt => atoms::malformed(),
+                        _ => atoms::not_a_database(),
+                    },
+                    code: failure.extended_code,
+                }
+            }
+            other => XqliteError::from(other),
+        })
+}
+
+/// Rejects an image whose text encoding, header bytes 56 to 59, is not the
+/// connection's. SQLite checks an attached schema against it, and a loaded
+/// `main` resets it while the connection's other schemas keep theirs, so
+/// `main` takes only a UTF-8 image on a UTF-8 connection, the one pairing
+/// that loads safely on every connection. A zero field, which SQLite leaves
+/// unchecked, counts as the UTF-8 the scratch read checked the image in.
+fn judge_image_encoding(
+    conn: &Connection,
+    flags: &busy_handler::BusySlotFlags,
+    schema: &str,
+    bytes: &[u8],
+) -> Result<(), XqliteError> {
+    let field = bytes
+        .get(56..60)
+        .and_then(|field| field.try_into().ok())
+        .map_or(0, u32::from_be_bytes);
+    let image = match (field, field & 3) {
+        (0, _) | (_, 1) => Some("UTF-8"),
+        (_, 2) => Some("UTF-16le"),
+        (_, 3) => Some("UTF-16be"),
+        _ => None,
+    };
+    let connection: String =
+        flags.own_read(|| conn.pragma_query_value(None, "encoding", |row| row.get(0)))?;
+    let main = schema.eq_ignore_ascii_case("main");
+    match image == Some(connection.as_str()) && (!main || connection == "UTF-8") {
+        true => Ok(()),
+        false => Err(XqliteError::InvalidImage {
+            reason: atoms::encoding_mismatch(),
+            code: ffi::SQLITE_ERROR,
+        }),
+    }
+}
+
+/// The image as SQLite gets it: header bytes 18 and 19 set to 1 where they
+/// read 2. A WAL database's image carries 2, which SQLite's memory storage
+/// cannot open, and SQLite documents this change before a deserialize.
+fn rollback_image(bytes: &[u8]) -> impl std::io::Read + '_ {
+    use std::io::Read;
+    let (head, rest) = bytes.split_at(bytes.len().min(18));
+    let (versions, tail) = rest.split_at(rest.len().min(2));
+    let versions: Vec<u8> = versions
+        .iter()
+        .map(|&version| if version == 2 { 1 } else { version })
+        .collect();
+    head.chain(Cursor::new(versions)).chain(tail)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1800,7 +1892,7 @@ fn backup_with_progress<'a>(
     // A non-positive step count is out of the documented `pos_integer()`
     // contract: `sqlite3_backup_step(0)` copies nothing yet reports "more", so
     // the loop would spin forever — pinning the connection Mutex and flooding
-    // `pid` with progress messages. Reject it loudly instead of hanging.
+    // `pid` with progress messages.
     if pages_per_step < 1 {
         return (
             atoms::error(),
@@ -1819,6 +1911,7 @@ fn backup_with_progress<'a>(
         let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
         let backup =
             rusqlite::backup::Backup::new_with_names(conn, schema.as_str(), &mut dst, "main")?;
+        let mut counts = None;
 
         loop {
             let cancelled = cancel_flags.iter().any(|t| t.load(Ordering::Acquire));
@@ -1827,13 +1920,17 @@ fn backup_with_progress<'a>(
             }
 
             let step_result = backup.step(pages_per_step)?;
-            let progress = backup.progress();
+            if matches!(
+                step_result,
+                rusqlite::backup::StepResult::Done | rusqlite::backup::StepResult::More
+            ) {
+                let progress = backup.progress();
+                counts = Some((progress.remaining, progress.pagecount));
+            }
             let send = |status: &[u8]| {
                 // SAFETY: enif_send with NULL caller_env is valid from dirty
                 // scheduler threads (OTP 26.1+). All data is copied into msg_env.
-                unsafe {
-                    send_backup_progress(&pid, progress.remaining, progress.pagecount, status)
-                }
+                unsafe { send_backup_progress(&pid, counts, status) }
             };
 
             match step_result {
@@ -1874,13 +1971,15 @@ fn rejected_step(code: std::ffi::c_int) -> XqliteError {
     ))
 }
 
+/// `counts` are the last copied step's `(remaining, total)`, `None` before a
+/// step has copied pages, when SQLite has no counts yet; `nil` goes out then.
+///
 /// # Safety
 ///
 /// Sends with a NULL `caller_env`, which `hook_util`'s module doc covers.
 unsafe fn send_backup_progress(
     pid: &rustler::types::LocalPid,
-    remaining: std::ffi::c_int,
-    total: std::ffi::c_int,
+    counts: Option<(std::ffi::c_int, std::ffi::c_int)>,
     status: &[u8],
 ) {
     use crate::hook_util::make_atom;
@@ -1898,9 +1997,13 @@ unsafe fn send_backup_progress(
             make_atom(msg_env, b"total"),
             make_atom(msg_env, b"status"),
         ];
+        let count = |value: Option<std::ffi::c_int>| match value {
+            Some(value) => enif_make_int64(msg_env, i64::from(value)),
+            None => make_atom(msg_env, b"nil"),
+        };
         let values = [
-            enif_make_int64(msg_env, remaining as i64),
-            enif_make_int64(msg_env, total as i64),
+            count(counts.map(|(remaining, _)| remaining)),
+            count(counts.map(|(_, total)| total)),
             make_atom(msg_env, status),
         ];
         let mut map: ERL_NIF_TERM = 0;

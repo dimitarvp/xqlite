@@ -83,7 +83,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Diagnostics & connection state:** `compile_options/1`, `sqlite_version/0`, `connection_stats/1` (per-connection `sqlite3_db_status` counters), `autocommit/1`, `txn_state/2`, structured `wal_checkpoint/3`
 - **Result integration:** `Xqlite.Result` implements `Table.Reader` (works with Explorer, Kino, VegaLite)
 
-Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 82 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
+Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 83 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
 
 ## Focused examples
 
@@ -228,7 +228,7 @@ A read is a window over the bytes that are there: `blob_read/3` answers up to `l
 
 ### Serialize / deserialize -- atomic in-memory snapshots
 
-`serialize/1` captures the entire live database as a single self-contained binary. That binary is byte-for-byte what the database's disk file would look like -- write it with `File.write/2` and it is a valid SQLite file you can open from any other SQLite tool. `deserialize/2` loads the binary back into a fresh connection where it behaves as a normal in-memory DB (read, write, indexes, everything).
+`serialize/1` captures the entire live database as a single self-contained binary: every page the connection reads, including what a WAL database still holds in its WAL file and not yet in its main file. Write it with `File.write/2` and it is a valid SQLite file you can open from any other SQLite tool. `deserialize/2` loads that binary, or a database file's bytes, into a connection where it behaves as a normal in-memory DB (read, write, indexes, everything); a UTF-16 database loads only into an attached schema of a connection with the same encoding; bytes SQLite cannot read, or an image in an encoding the target does not take, return `{:error, {:invalid_image, _}}` and replace nothing.
 
 Different from `backup_with_progress/6`, which streams page by page while the source is live, and from sessions, which capture _changes_ since a point in time. Serialize is a one-shot atomic snapshot of the _whole_ database into a BEAM binary, useful for shipping DB state between nodes/processes, cloning a DB without disk I/O, or handing off to a Task without worrying about file locks.
 

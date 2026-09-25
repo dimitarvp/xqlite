@@ -183,19 +183,29 @@ fn busy_timeout_action(action: &AuthAction<'_>) -> Option<BusyTimeout> {
     }
 }
 
-/// The answer for one action: the busy slot's own rules about `busy_timeout`
-/// first, then the kinds the caller denied.
+/// `PRAGMA encoding` without a value: the read `deserialize` runs on its target.
+fn encoding_read(action: &AuthAction<'_>) -> bool {
+    matches!(
+        action,
+        AuthAction::Pragma { pragma_name, pragma_value: None, .. }
+            if pragma_name.eq_ignore_ascii_case("encoding")
+    )
+}
+
+/// The answer for one action: xqlite's own reads and the busy slot's rules
+/// about `busy_timeout` first, then the kinds the caller denied.
 fn decide(
     action: &AuthAction<'_>,
     denied: &HashSet<ActionKind>,
     flags: &BusySlotFlags,
 ) -> Authorization {
     match busy_timeout_action(action) {
-        Some(BusyTimeout::Read) if flags.reading_own_timeout() => Authorization::Allow,
+        Some(BusyTimeout::Read) if flags.reading_own_pragma() => Authorization::Allow,
         Some(BusyTimeout::Write) if flags.slot_held() => {
             flags.note_write_refused();
             Authorization::Deny
         }
+        None if flags.reading_own_pragma() && encoding_read(action) => Authorization::Allow,
         _ => user_decision(action, denied),
     }
 }

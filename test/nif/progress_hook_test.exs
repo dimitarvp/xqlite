@@ -48,6 +48,23 @@ defmodule Xqlite.NIF.ProgressHookTest do
         :ok = NIF.unregister_progress_hook(conn, h)
         assert :ok = NIF.unregister_progress_hook(conn, h)
       end
+
+      property "a handle of any width answers what the connection's state says", %{conn: conn} do
+        {:ok, closed} = Xqlite.open_in_memory()
+        :ok = Xqlite.close(closed)
+        unregisters = [&Xqlite.unregister_progress_hook/2, &Xqlite.unregister_busy_observer/2]
+        assert :ok = Xqlite.unregister_progress_hook(conn, 2 ** 64)
+        assert_raise FunctionClauseError, fn -> Xqlite.unregister_progress_hook(conn, -1) end
+
+        check all(exponent <- integer(0..200), offset <- integer(0..1000), max_runs: 2000) do
+          handle = 2 ** exponent + offset - 1
+
+          for unregister <- unregisters do
+            assert :ok = unregister.(conn, handle)
+            assert {:error, :connection_closed} = unregister.(closed, handle)
+          end
+        end
+      end
     end
 
     describe "#{prefix}: tick delivery" do

@@ -33,8 +33,17 @@ impl BusySlotFlags {
     }
 
     #[inline]
-    pub(crate) fn reading_own_timeout(&self) -> bool {
+    pub(crate) fn reading_own_pragma(&self) -> bool {
         self.internal_read.load(Ordering::Relaxed)
+    }
+
+    /// Run `read`, a PRAGMA read of xqlite's own, with the flag that lets the
+    /// authorizer closure pass it whatever the caller denied.
+    pub(crate) fn own_read<T>(&self, read: impl FnOnce() -> T) -> T {
+        self.internal_read.store(true, Ordering::Relaxed);
+        let value = read();
+        self.internal_read.store(false, Ordering::Relaxed);
+        value
     }
 
     #[inline]
@@ -203,9 +212,9 @@ fn fallback_delay_ms(retries: u32, timeout_ms: u64) -> Option<u64> {
 /// this PRAGMA is xqlite's own, so a caller who denies `:pragma` cannot hide
 /// the wait their connection had.
 fn read_busy_timeout(conn: &Connection, flags: &BusySlotFlags) -> Result<u64, XqliteError> {
-    flags.internal_read.store(true, Ordering::Relaxed);
-    let read = conn.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0));
-    flags.internal_read.store(false, Ordering::Relaxed);
+    let read = flags.own_read(|| {
+        conn.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
+    });
 
     let ms = read?;
     u64::try_from(ms).map_err(|_| XqliteError::InternalEncodingError {

@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.SerializeTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.ConnCase
 
@@ -360,6 +361,83 @@ defmodule Xqlite.NIF.SerializeTest do
                %{"id" => 2, "val" => "b"}
              ]
     end
+
+    property "no binary without SQLite's header replaces the contents", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE kept (x); INSERT INTO kept VALUES (1);")
+
+      for bytes <- ["not a database, just text", :binary.copy(<<0>>, 4096), <<>>] do
+        assert {:error, {:invalid_image, %{reason: :not_a_database}}} =
+                 Xqlite.deserialize(conn, bytes)
+      end
+
+      check all(bytes <- binary(), not match?("SQLite format 3\0" <> _, bytes), max_runs: 2000) do
+        assert {:error, {:invalid_image, %{reason: :not_a_database, code: 26}}} =
+                 NIF.deserialize(conn, "main", bytes, false)
+      end
+
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT x FROM kept", [])
+    end
+
+    test "a WAL database's image loads, from serialize/2 or from its file", %{conn: conn} do
+      path = Xqlite.TestUtil.tmp_db_path("wal_image")
+      {:ok, src} = Xqlite.open(path)
+      :ok = NIF.execute_batch(src, "CREATE TABLE t (v); INSERT INTO t VALUES (1), (2);")
+      {:ok, <<_::binary-size(18), 2, 2, _::binary>> = image} = Xqlite.serialize(src)
+      {:ok, _} = Xqlite.wal_checkpoint(src, :truncate)
+      :ok = NIF.close(src)
+
+      for bytes <- [image, File.read!(path)] do
+        assert :ok = Xqlite.deserialize(conn, bytes)
+        assert {:ok, %{rows: [[2]]}} = NIF.query(conn, "SELECT count(*) FROM t", [])
+      end
+    end
+
+    test "an image SQLite cannot read is rejected before it replaces a schema", %{conn: conn} do
+      {:ok, src} = NIF.open_in_memory(":memory:")
+      :ok = NIF.execute_batch(src, "CREATE TABLE t AS SELECT zeroblob(20000) AS v;")
+      {:ok, image} = NIF.serialize(src, "main")
+      :ok = NIF.close(src)
+      :ok = NIF.execute_batch(conn, "CREATE TABLE kept (x); ATTACH ':memory:' AS aux;")
+
+      assert {:error, {:invalid_image, %{reason: :malformed}}} =
+               Xqlite.deserialize(conn, binary_part(image, 0, div(byte_size(image), 2)), "aux")
+
+      assert {:ok, %{rows: [[0]]}} = NIF.query(conn, "SELECT count(*) FROM main.kept", [])
+      assert {:ok, 0} = NIF.execute(conn, "DETACH aux", [])
+    end
+
+    test "an image in a text encoding the target cannot take is rejected, with :pragma denied",
+         %{conn: conn} do
+      {:ok, src} = NIF.open_in_memory(":memory:")
+      :ok = NIF.execute_batch(src, "PRAGMA encoding = 'UTF-16le'; CREATE TABLE u (v);")
+      {:ok, utf16} = NIF.serialize(src, "main")
+      file = Xqlite.TestUtil.tmp_db_path("utf16_attached")
+      :ok = NIF.execute_batch(src, "ATTACH '#{file}' AS f; CREATE TABLE f.t (v);")
+      :ok = NIF.execute_batch(conn, "CREATE TABLE kept (x); ATTACH ':memory:' AS aux;")
+      {:ok, utf8} = NIF.serialize(conn, "main")
+      {:ok, fresh} = NIF.open_in_memory(":memory:")
+      :ok = Xqlite.set_authorizer(conn, [:pragma])
+
+      mismatch = {:error, {:invalid_image, %{reason: :encoding_mismatch, code: 1}}}
+      assert Xqlite.deserialize(conn, utf16, "aux") == mismatch
+      assert Xqlite.deserialize(conn, utf16) == mismatch
+      assert Xqlite.deserialize(fresh, utf16) == mismatch
+      assert Xqlite.deserialize(src, utf8) == mismatch
+      assert {:ok, %{rows: [[0]]}} = NIF.query(conn, "SELECT count(*) FROM main.kept", [])
+      assert {:ok, 0} = NIF.execute(conn, "DETACH aux", [])
+      assert {:ok, %{rows: [["UTF-16le"]]}} = NIF.query(src, "PRAGMA encoding", [])
+      Enum.each([src, fresh], &NIF.close/1)
+    end
+
+    test "a rollback-journal image loads byte for byte", %{conn: conn} do
+      path = Xqlite.TestUtil.tmp_db_path("delete_image")
+      {:ok, src} = Xqlite.open(path, journal_mode: :delete)
+      :ok = NIF.execute_batch(src, "CREATE TABLE t AS SELECT 1 AS v;")
+      {:ok, image} = Xqlite.serialize(src)
+      assert :ok = Xqlite.deserialize(conn, image)
+      assert {:ok, ^image} = Xqlite.serialize(conn)
+      NIF.close(src)
+    end
   end
 
   # -------------------------------------------------------------------
@@ -377,21 +455,6 @@ defmodule Xqlite.NIF.SerializeTest do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
     assert {:error, :connection_closed} = NIF.deserialize(conn, "main", <<>>, false)
-  end
-
-  test "deserialize with empty binary returns error" do
-    {:ok, conn} = NIF.open_in_memory(":memory:")
-    result = NIF.deserialize(conn, "main", <<>>, false)
-    NIF.close(conn)
-    assert {:error, _} = result
-  end
-
-  test "deserialize with garbage binary accepts but querying fails" do
-    {:ok, conn} = NIF.open_in_memory(":memory:")
-    # SQLite accepts garbage at deserialize time — validation is lazy
-    :ok = NIF.deserialize(conn, "main", "not a valid sqlite database at all", false)
-    assert {:error, _} = NIF.query(conn, "SELECT 1", [])
-    NIF.close(conn)
   end
 
   test "transfer database between two independent connections" do

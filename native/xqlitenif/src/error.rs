@@ -250,6 +250,13 @@ pub(crate) enum XqliteError {
         position: usize,
         term_type: TermType,
     },
+    // An image deserialize rejected before loading it. `code` is SQLite's:
+    // SQLITE_NOTADB for bytes without its header, the scratch read's answer,
+    // or SQLITE_ERROR for a text encoding the target does not use.
+    InvalidImage {
+        reason: Atom,
+        code: c_int,
+    },
     BlobWriteOutOfBounds {
         offset: usize,
         byte_size: usize,
@@ -576,6 +583,9 @@ impl Display for XqliteError {
                     "Blob parameter at position {position} holds {other:?} instead of a binary"
                 ),
             },
+            XqliteError::InvalidImage { reason: _, code } => {
+                write!(f, "Database image rejected before loading (code {code})")
+            }
             XqliteError::BlobWriteOutOfBounds {
                 offset,
                 byte_size,
@@ -981,6 +991,20 @@ impl Encoder for XqliteError {
                     Err(_) => {
                         let err = XqliteError::InternalEncodingError {
                             context: "Failed map create for InvalidBlobBytes".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
+            XqliteError::InvalidImage { reason, code } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::reason(), *reason)
+                    .and_then(|map| map.map_put(atoms::code(), code));
+                match map_result {
+                    Ok(map) => (atoms::invalid_image(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidImage".to_string(),
                         };
                         err.encode(env)
                     }
