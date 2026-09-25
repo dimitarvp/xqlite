@@ -476,7 +476,9 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert :ok = Xqlite.set_authorizer(c, [:pragma])
         assert {:ok, :none} = NIF.txn_state(c, "MAIN")
         assert {:error, {:no_such_schema, :no}} = Pragma.get(c, :cache_size, db_name: :no)
-        assert {:error, {:no_such_schema, "no"}} = Pragma.put(c, :cache_size, 1, db_name: "no")
+
+        assert {:error, {:no_such_schema, "no"}} =
+                 Pragma.put(c, :cache_size, {:pages, 1}, db_name: "no")
       end
 
       test "schema_columns handles various declared types and resolves correct affinity", %{

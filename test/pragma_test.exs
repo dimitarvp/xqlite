@@ -12,13 +12,12 @@ defmodule XqlitePragmaTest do
   @write_test_cases [
     # Simple set/get with representative values
     {:application_id, [0, 12345, 98765, -1000], nil},
-    {:analysis_limit, [0, 100], nil},
+    {:analysis_limit, [:unlimited, 100], nil},
     {:user_version, [0, 5, 10, -100], nil},
     # Can only be set on a fresh DB
     {:page_size, [2048, 4096, 8192], nil},
     {:busy_timeout, [0, 1000, 5000], nil},
-    # -1 means no limit
-    {:journal_size_limit, [0, -1, 102_400], nil},
+    {:journal_size_limit, [0, :unlimited, 102_400], nil},
     {:max_page_count, [1, 1_000_000], nil},
 
     # All boolean PRAGMAs
@@ -85,16 +84,16 @@ defmodule XqlitePragmaTest do
      ]},
 
     # Advisory values
-    # Test with a positive, negative (if applicable), and zero value
-    {:cache_size, [0, 8, -16], &verify_is_integer/4},
+    {:cache_size,
+     [{{:pages, 0}, {:pages, 0}}, {{:pages, 8}, {:pages, 8}}, {{:kib, 16}, {:kib, 16}}]},
     # Both heap limits belong to the operating-system process, not to the
     # connection, and a hard limit is never released once it is lowered: a
     # small one here would make every later test in this process fail with
     # "out of memory". Only values that lower nothing are written.
-    {:soft_heap_limit, [0, 9_223_372_036_854_775_807], &verify_is_integer/4},
-    {:hard_heap_limit, [0, 9_223_372_036_854_775_807], &verify_is_integer/4},
+    {:soft_heap_limit, [9_223_372_036_854_775_807], &verify_is_integer/4},
+    {:hard_heap_limit, [9_223_372_036_854_775_807], &verify_is_integer/4},
     {:threads, [0, 1, 8], &verify_is_integer/4},
-    {:wal_autocheckpoint, [0, 1000], &verify_is_integer/4},
+    {:wal_autocheckpoint, [:off, 1000]},
     {:mmap_size, [0, 256 * 1024], &verify_mmap_size_value/4}
   ]
 
@@ -198,24 +197,32 @@ defmodule XqlitePragmaTest do
     end
 
     test "get with db_name: main reads from main schema", %{db: db} do
-      assert {:ok, cache_size} = P.get(db, :cache_size, [], db_name: "main")
-      assert is_integer(cache_size)
+      assert {:ok, {:kib, 2000}} = P.get(db, :cache_size, [], db_name: "main")
     end
 
     test "put with db_name: main writes to main schema", %{db: db} do
-      assert {:ok, _} = P.put(db, :cache_size, 5000, db_name: "main")
-      assert {:ok, 5000} = P.get(db, :cache_size, [], db_name: "main")
+      assert {:ok, _} = P.put(db, :cache_size, {:pages, 5000}, db_name: "main")
+      assert {:ok, {:pages, 5000}} = P.get(db, :cache_size, [], db_name: "main")
     end
 
     test "get/put on an attached database", %{db: db} do
       NIF.execute_batch(db, "ATTACH ':memory:' AS aux;")
 
-      assert {:ok, _} = P.put(db, :cache_size, 3000, db_name: "aux")
-      assert {:ok, 3000} = P.get(db, :cache_size, [], db_name: "aux")
+      assert {:ok, _} = P.put(db, :cache_size, {:pages, 3000}, db_name: "aux")
+      assert {:ok, {:pages, 3000}} = P.get(db, :cache_size, [], db_name: "aux")
 
       # main schema should be unaffected
       {:ok, main_cache} = P.get(db, :cache_size)
-      refute main_cache == 3000
+      refute main_cache == {:pages, 3000}
+    end
+
+    test "the two reads this library answers itself reject a db_name", %{db: db} do
+      for name <- [:busy_timeout, :wal_autocheckpoint] do
+        assert {:error,
+                {:invalid_pragma_argument,
+                 %{pragma: ^name, value: {:db_name, "main"}, reason: :invalid_options}}} =
+                 P.get(db, name, db_name: "main")
+      end
     end
 
     test "get list-returning pragma with db_name", %{db: db} do
@@ -431,7 +438,7 @@ defmodule XqlitePragmaTest do
               opts <- StreamData.member_of([[], [db_name: "main"]]),
               max_runs: 2000
             ) do
-        assert argument_verdict(name, shape) ==
+        assert verdict(name, shape, opts) ==
                  classify_answer(answer_for(db, name, shape, opts))
       end
     end
@@ -691,8 +698,16 @@ defmodule XqlitePragmaTest do
     |> StreamData.list_of(min_length: 1, max_length: 2)
   end
 
+  # The two reads this library answers from its own state take no `:db_name`.
+  defp verdict(name, {:options, kw}, opts), do: verdict(name, :none, kw ++ opts)
+
+  defp verdict(name, :none, [{:db_name, db_name} | _])
+       when name in [:busy_timeout, :wal_autocheckpoint],
+       do: {:refused, name, :invalid_options, {:db_name, db_name}}
+
+  defp verdict(name, shape, _opts), do: argument_verdict(name, shape)
+
   defp argument_verdict(name, :none), do: no_argument_verdict(name)
-  defp argument_verdict(name, {:options, _kw}), do: no_argument_verdict(name)
   defp argument_verdict(name, {:list, list}), do: {:refused, name, :not_a_scalar, list}
   defp argument_verdict(name, {:nil_argument, nil}), do: {:refused, name, :not_a_scalar, nil}
 
@@ -916,6 +931,9 @@ defmodule XqlitePragmaTest do
                             %{valid_values: %Range{}} ->
                               []
 
+                            %{valid_values: nil} ->
+                              [{:kib, 2_000}, {:pages, 0}]
+
                             %{valid_values: values} ->
                               Enum.flat_map(values, fn
                                 value when is_binary(value) ->
@@ -1028,12 +1046,13 @@ defmodule XqlitePragmaTest do
 
     # The hard limit belongs to the operating-system process and SQLite applies
     # it only when it lowers the limit in force, so the only value that is safe
-    # to write here is one that lowers nothing. A write of 0 does not release
-    # it either: it answers the limit already in force.
-    test "hard_heap_limit takes a 64-bit value, and zero does not release it", %{conn: conn} do
+    # to write here is one that lowers nothing. `:unlimited`, the 0 SQLite
+    # stores for no limit, does not release it: it answers the limit in force.
+    test "hard_heap_limit takes a 64-bit value, and :unlimited does not release it",
+         %{conn: conn} do
       assert {:ok, limit} = P.put(conn, :hard_heap_limit, 9_223_372_036_854_775_807)
       assert is_integer(limit)
-      assert {:ok, ^limit} = P.put(conn, :hard_heap_limit, 0)
+      assert {:ok, ^limit} = P.put(conn, :hard_heap_limit, :unlimited)
       assert {:ok, ^limit} = P.get(conn, :hard_heap_limit)
     end
 
@@ -1108,12 +1127,12 @@ defmodule XqlitePragmaTest do
             [synchronous: :normal],
             [synchronous: :full],
             [synchronous: :extra],
-            [cache_size: -64_000],
-            [cache_size: 2_000],
+            [cache_size: {:kib, 64_000}],
+            [cache_size: {:pages, 2_000}],
             [temp_store: :default],
             [temp_store: :file],
             [temp_store: :memory],
-            [wal_autocheckpoint: 0],
+            [wal_autocheckpoint: :off],
             [wal_autocheckpoint: 1_000],
             [mmap_size: 0],
             [auto_vacuum: :none],
@@ -1131,7 +1150,7 @@ defmodule XqlitePragmaTest do
                Xqlite.open_in_memory(busy_timeout: 3_000_000_000)
 
       assert {:error, {:invalid_pragma_value, %{pragma: :cache_size}}} =
-               Xqlite.open_in_memory(cache_size: -10_000_000_000)
+               Xqlite.open_in_memory(cache_size: {:kib, 10_000_000_000})
 
       assert {:error, {:invalid_pragma_value, %{pragma: :wal_autocheckpoint}}} =
                Xqlite.open_in_memory(wal_autocheckpoint: 3_000_000_000)

@@ -293,7 +293,7 @@ pub(crate) enum XqliteError {
     InvalidAuthorizerAction {
         action: Atom,
     },
-    InvalidHookOption {
+    InvalidOption {
         key: Atom,
         value: u32,
     },
@@ -719,8 +719,8 @@ impl Display for XqliteError {
             XqliteError::InvalidAuthorizerAction { action: _ } => {
                 write!(f, "Invalid authorizer action atom")
             }
-            XqliteError::InvalidHookOption { key: _, value } => {
-                write!(f, "Invalid hook option value {value}")
+            XqliteError::InvalidOption { key: _, value } => {
+                write!(f, "Invalid option value {value}")
             }
             XqliteError::InvalidLimitCategory { category: _ } => {
                 write!(f, "Invalid connection limit category")
@@ -1065,16 +1065,16 @@ impl Encoder for XqliteError {
             XqliteError::InvalidAuthorizerAction { action } => {
                 (atoms::invalid_authorizer_action(), *action).encode(env)
             }
-            XqliteError::InvalidHookOption { key, value } => {
+            XqliteError::InvalidOption { key, value } => {
                 let map_result = map_new(env)
                     .map_put(atoms::key(), *key)
                     .and_then(|map| map.map_put(atoms::value(), value))
                     .and_then(|map| map.map_put(atoms::reason(), atoms::invalid_value()));
                 match map_result {
-                    Ok(map) => (atoms::invalid_hook_option(), map).encode(env),
+                    Ok(map) => (atoms::invalid_option(), map).encode(env),
                     Err(_) => {
                         let err = XqliteError::InternalEncodingError {
-                            context: "Failed map create for InvalidHookOption".to_string(),
+                            context: "Failed map create for InvalidOption".to_string(),
                         };
                         err.encode(env)
                     }

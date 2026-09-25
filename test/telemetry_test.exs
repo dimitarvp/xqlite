@@ -433,7 +433,7 @@ defmodule Xqlite.TelemetryTest do
       :ok = Xqlite.rollback_to_savepoint(conn, "sp")
       :ok = Xqlite.release_savepoint(conn, "sp")
       {:ok, _} = Xqlite.get_pragma(conn, :cache_size)
-      {:ok, _} = Xqlite.set_pragma(conn, :cache_size, 2_000)
+      {:ok, _} = Xqlite.set_pragma(conn, :cache_size, {:pages, 2_000})
       [_ | _] = conn |> Xqlite.stream("SELECT id FROM t", [], batch_size: 1) |> Enum.to_list()
       :ok = Xqlite.close(conn)
 

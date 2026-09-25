@@ -106,7 +106,9 @@ defmodule XqliteNIF do
   Pass `":memory:"` for a private, temporary in-memory database, or a URI
   filename like `"file:memdb1?mode=memory&cache=shared"` to create a
   shared-cache in-memory database reachable from other connections in the
-  same process.
+  same process. The database is in memory whatever `uri` says: a name other
+  than `":memory:"` opens with `SQLITE_OPEN_MEMORY`, so it creates no file, and
+  SQLite then opens every database that connection ATTACHes in memory too.
 
   Returns `{:ok, conn_resource}` on success or `{:error, reason}` on failure.
   """
@@ -605,7 +607,8 @@ defmodule XqliteNIF do
   than issuing the PRAGMA: SQLite only reports a threshold while its own
   internal WAL hook occupies the hook slot, which xqlite's master callback
   holds (see `register_wal_hook/2`). A raw `PRAGMA wal_autocheckpoint;`
-  query would always report `0` on an xqlite connection.
+  query would always report `0` on an xqlite connection; `busy_timeout` reads
+  the timeout a held busy slot keeps, for the same reason.
   """
   @spec get_pragma(conn :: Xqlite.conn(), name :: String.t()) ::
           {:ok, term() | :no_value} | Xqlite.error()
@@ -637,7 +640,7 @@ defmodule XqliteNIF do
   Setting `busy_timeout` while a busy policy or a busy observer is
   installed returns `{:error, {:busy_timeout_write_refused, %{policy:
   boolean, observers: count}}}`: the PRAGMA would replace xqlite's busy
-  callback. `Xqlite.busy_timeout/2` changes the wait instead.
+  callback. `Xqlite.put_busy_timeout/2` sets the timeout instead.
 
   Setting `wal_autocheckpoint` through this function additionally repairs
   the WAL hook slot: the PRAGMA installs SQLite's internal autocheckpoint
@@ -1193,8 +1196,8 @@ defmodule XqliteNIF do
   > fails as it is prepared with `{:error, {:busy_timeout_write_refused,
   > %{policy: boolean, observers: count}}}`. It would otherwise replace
   > the installed callback at the SQLite C level and the policy would
-  > stop applying. Use `Xqlite.busy_timeout/2` to switch to a plain
-  > timeout.
+  > stop applying. Use `Xqlite.put_busy_timeout/2` to change the timeout
+  > the slot keeps.
 
   Returns `:ok`.
   """
@@ -1258,12 +1261,12 @@ defmodule XqliteNIF do
   @doc """
   Sets the connection's busy timeout through the busy slot (raw NIF).
 
-  Most users want `Xqlite.busy_timeout/2`.
+  Most users want `Xqlite.put_busy_timeout/2`.
 
-  Removes the retry policy first. With busy observers registered, the
+  Leaves the retry policy in place. With busy observers registered, the
   slot stays theirs and carries the new timeout: observers keep
   receiving `{:xqlite_busy, …}` messages, and unregistering the last
-  one keeps this timeout. With no observers, SQLite's own timeout
+  one keeps this timeout. With the slot empty, SQLite's own timeout
   handler takes the slot. `0` disables waiting.
 
   This is the one way to change the wait while the slot is held: it
@@ -1860,7 +1863,7 @@ defmodule XqliteNIF do
   the value returned in `{:ok, handle}` and is what `unregister_progress_hook/2`
   expects.
 
-  `every_n` of `0` returns `{:error, {:invalid_hook_option, %{key: :every_n,
+  `every_n` of `0` returns `{:error, {:invalid_option, %{key: :every_n,
   value: 0, reason: :invalid_value}}}`. `tag` is a string (typically
   `Atom.to_string(:my_atom)` from the `Xqlite.register_progress_hook/3`
   wrapper) used to disambiguate messages from multiple subscribers
@@ -1991,8 +1994,9 @@ defmodule XqliteNIF do
   Copies `pages_per_step` pages at a time, sending
   `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to `pid`
   after each step: `status` is `:copied`, or `:busy` when a lock blocked the
-  step, which is then retried every 100 ms. A `:busy` message before the first
-  copied step carries `remaining: 0, total: 0`. Between steps, all of
+  step, which then ends the call with the error `backup/3` answers for the
+  same lock (see `Xqlite.backup_with_progress/6`). A `:busy` message before
+  the first copied step carries `remaining: 0, total: 0`. Between steps, all of
   `cancel_tokens` are polled —
   if *any* is signalled, returns `{:error, :operation_cancelled}`
   (OR-semantics). Pass an empty list for no-cancellation.

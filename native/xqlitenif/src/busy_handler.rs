@@ -291,11 +291,11 @@ pub(crate) fn remove_policy(
     swap_in(conn, handle, next)
 }
 
-/// Set how long the connection waits on a locked database, removing
-/// any retry policy first. With observers still registered the slot
-/// keeps our callback and carries the new timeout; with none left the
-/// slot empties and SQLite's own handler takes the C slot at `ms`.
-/// Callers must hold the connection Mutex.
+/// Set the busy timeout the connection keeps, leaving any retry policy in
+/// place. A held slot keeps it: our callback waits it out when no policy
+/// decides, and emptying the slot hands it to SQLite's own handler. With
+/// the slot empty SQLite's own handler takes it at once. Callers must hold
+/// the connection Mutex.
 pub(crate) fn set_timeout(
     conn: &Connection,
     handle: &XqliteConn,
@@ -303,16 +303,24 @@ pub(crate) fn set_timeout(
 ) -> Result<(), XqliteError> {
     busy_timeout_c_int(timeout_ms)?;
     let mut next = snapshot(&handle.busy_handler);
-    next.policy = None;
 
-    if next.observers.is_empty() {
-        // `swap_in` puts back the displaced timeout; overwrite it after.
-        swap_in(conn, handle, next)?;
+    if next.policy.is_none() && next.observers.is_empty() {
         apply_busy_timeout(conn, timeout_ms)
     } else {
         next.fallback_timeout_ms = timeout_ms;
         swap_in(conn, handle, next)
     }
+}
+
+/// The busy timeout a held slot keeps, or `None` while the slot is empty
+/// and SQLite's own handler holds the wait. Callers must hold the
+/// connection Mutex.
+pub(crate) fn kept_timeout(handle: &XqliteConn) -> Option<u64> {
+    let current = handle.busy_handler.load(Ordering::Acquire);
+    // SAFETY: a non-null slot pointer always points to a live
+    // BusySlotState; the connection Mutex the caller holds excludes its
+    // reclamation.
+    unsafe { current.as_ref() }.map(|state| state.fallback_timeout_ms)
 }
 
 /// Register an observer pid; returns its unregistration handle.

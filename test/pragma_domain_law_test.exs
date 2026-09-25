@@ -22,7 +22,11 @@ defmodule Xqlite.PragmaDomainLawTest do
   mapping of three modes, such as `auto_vacuum`'s, gives a boolean no meaning
   and keeps refusing the words.
 
-  All three run on fresh in-memory connections. Two of the value bands SQLite
+  The fourth: a PRAGMA that codes a mode into its number answers what the
+  number SQLite stored means, by a rule written in this file, and writes that
+  answer back to the same number.
+
+  All four run on fresh in-memory connections. Two of the value bands SQLite
   floors are out of reach that way rather than by exclusion: `max_page_count`
   below the database's own page count, and `auto_vacuum` on a file database,
   which cannot change without a VACUUM. The PRAGMAs listed in
@@ -39,6 +43,9 @@ defmodule Xqlite.PragmaDomainLawTest do
   @moduletag timeout: 300_000
 
   @law_exclusions %{
+    analysis_limit: "SQLite keeps 0 for no limit, which put takes as :unlimited only",
+    cache_size: "SQLite keeps the signed number, which put takes as {:pages, n} or {:kib, n}",
+    soft_heap_limit: "SQLite keeps 0 for no limit, which put takes as :unlimited only",
     cache_spill:
       "below the cache's own page count SQLite answers the page count, not the value",
     hard_heap_limit:
@@ -162,6 +169,42 @@ defmodule Xqlite.PragmaDomainLawTest do
     end
   end
 
+  test "the anchor: a coded PRAGMA answers and takes its word or its tagged count" do
+    db = fresh()
+    assert {:ok, {:kib, 2000}} = P.get(db, :cache_size)
+    assert {:ok, :unlimited} = P.get(db, :analysis_limit)
+    assert {:ok, :unlimited} = P.get(db, :hard_heap_limit)
+    assert {:ok, :unlimited} = P.put(db, :journal_size_limit, :unlimited)
+    assert {:ok, :off} = P.put(db, :wal_autocheckpoint, :off)
+    assert {:ok, :off} = Xqlite.get_pragma(db, "WAL_AUTOCHECKPOINT")
+    assert {:ok, _} = Xqlite.set_pragma(db, :cache_spill, :off)
+    assert {:ok, :off} = P.get(db, :cache_spill)
+    assert {:ok, :unlimited} = Xqlite.set_pragma(db, :soft_heap_limit, :unlimited)
+
+    for {name, bare} <-
+          [cache_size: -2_000, cache_size: {:kib, 0}, wal_autocheckpoint: 0] ++
+            [journal_size_limit: -1, soft_heap_limit: 0] do
+      assert {:error, {:invalid_pragma_value, %{pragma: ^name, value: ^bare}}} =
+               P.put(db, name, bare)
+    end
+  end
+
+  property "a coded PRAGMA answers what SQLite's own number means, and writes it back" do
+    check all({name, raw} <- coded_write(), max_runs: 2000) do
+      db = fresh()
+      :ok = NIF.execute_batch(db, "PRAGMA #{name} = #{raw};")
+      stored = raw_read(db, name)
+      typed = coded_meaning(name, stored)
+
+      assert {name, {:ok, typed}} == {name, P.get(db, name)}
+      assert {name, {:ok, typed}} == {name, Xqlite.get_pragma(db, name)}
+      other = fresh()
+      assert {name, {:ok, _}} = {name, P.put(other, name, typed)}
+      assert {name, stored} == {name, raw_read(other, name)}
+      reset_soft_heap_limit()
+    end
+  end
+
   property "every word of a mapping round-trips, however it is spelled" do
     check all({name, word, spelling} <- mapped_spelling(), max_runs: 2000) do
       db = fresh()
@@ -197,13 +240,6 @@ defmodule Xqlite.PragmaDomainLawTest do
     bind(member_of(@law_pragmas), fn {name, range} ->
       map(value_of(name, range), fn value -> {name, value} end)
     end)
-  end
-
-  # A small soft heap limit would cap this operating-system process for every
-  # test after it, so the generated inside-value stays above a band no test
-  # here can reach; the edges, which are what a range gets wrong, still run.
-  defp value_of(:soft_heap_limit, first..last//_) do
-    one_of([member_of([first, last, first - 1, last + 1]), integer(67_108_864..last)])
   end
 
   defp value_of(_name, first..last//_) do
@@ -270,6 +306,36 @@ defmodule Xqlite.PragmaDomainLawTest do
       {:ok, %{rows: [[read_back]]}} -> read_back == value
       _no_row -> false
     end
+  end
+
+  # A small soft heap limit would cap this operating-system process for every
+  # test after it, so a generated one stays above a band no test here reaches.
+  defp coded_write do
+    bands = [
+      cache_size: -2_147_483_648..2_147_483_647,
+      journal_size_limit: 0..(2 ** 63 - 1),
+      analysis_limit: 0..2_147_483_647,
+      soft_heap_limit: (2 ** 26)..(2 ** 63 - 1),
+      cache_spill: 0..100_000
+    ]
+
+    gen all({name, band} <- member_of(bands), raw <- one_of([integer(-9..0), integer(band)])) do
+      {name, raw}
+    end
+  end
+
+  # What SQLite's number means, written out here rather than read from the
+  # spec: a negative cache size counts KiB, and one number is no limit or off.
+  defp coded_meaning(:cache_size, count) when count < 0, do: {:kib, -count}
+  defp coded_meaning(:cache_size, count), do: {:pages, count}
+  defp coded_meaning(:journal_size_limit, -1), do: :unlimited
+  defp coded_meaning(:cache_spill, 0), do: :off
+  defp coded_meaning(name, 0) when name in [:analysis_limit, :soft_heap_limit], do: :unlimited
+  defp coded_meaning(_name, count), do: count
+
+  defp raw_read(db, name) do
+    assert {:ok, %{rows: [[value]]}} = Xqlite.query(db, "PRAGMA #{name};", [])
+    value
   end
 
   defp put_accepts?(name, value) do

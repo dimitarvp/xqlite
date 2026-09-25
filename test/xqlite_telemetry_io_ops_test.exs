@@ -229,11 +229,11 @@ defmodule Xqlite.XqliteTelemetryIoOpsTest do
     test "set fires :pragma, :set with name + value", %{conn: conn} do
       handler_id = attach_capture([[:xqlite, :pragma, :set]])
 
-      {:ok, _} = Xqlite.set_pragma(conn, "cache_size", 100)
+      {:ok, _} = Xqlite.set_pragma(conn, "cache_size", {:pages, 100})
 
       assert_receive {:telemetry_event, [:xqlite, :pragma, :set], _, metadata}
       assert metadata.name == "cache_size"
-      assert metadata.value == 100
+      assert metadata.value == {:pages, 100}
 
       detach(handler_id)
     end

@@ -277,6 +277,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Xqlite.busy_timeout/2` is now `Xqlite.put_busy_timeout/2`, and it no
+  longer removes the retry policy:** while a policy is set it decides the wait,
+  and the timeout written applies once `remove_busy_policy/1` runs. New
+  `Xqlite.get_busy_timeout/1` answers the timeout the connection keeps;
+  `get_pragma/2`, `Xqlite.Pragma.get/2` and `XqliteNIF.get_pragma/2` answer it
+  too while a policy or an observer holds the busy slot, where they used to
+  answer SQLite's 0. `Xqlite.Pragma.get/3` rejects `:db_name` for
+  `busy_timeout` and `wal_autocheckpoint`.
+- **One tag for a bad option list everywhere:** `{:invalid_option, %{key,
+  value, reason: :unknown_key | :duplicate_key | :invalid_value |
+  :not_a_pair}}` (with `allowed` on `:unknown_key`) replaces
+  `:invalid_open_option`, `:invalid_hook_option` and the telemetry bridge's
+  `{:invalid_hook, _, valid: _}`. `set_busy_policy/2`,
+  `register_progress_hook/3`, `stream/4`, the `:type_extensions` functions,
+  `Xqlite.Telemetry.bridge/2` (its `:progress` list included) and
+  `bridge_log/1` now reject a misspelled key instead of installing the
+  default, reject a key given twice instead of using its first value, and
+  answer instead of raising for an out-of-range number or a malformed list.
+- **`Xqlite.open/2` and `Xqlite.open_readonly/1` reject `""` and `":memory:"`
+  with `{:invalid_path, %{path}}`;** use `open_temporary/0` and
+  `open_in_memory/1`. `file:` URIs pass as written.
+- **`XqliteNIF.open_in_memory/1` opens any name but `":memory:"`, `file:` URIs
+  included, with `SQLITE_OPEN_MEMORY` and ATTACHes files in memory;** a plain
+  file name no longer creates a file. `":memory:"`, the name
+  `Xqlite.open_in_memory/1` passes, is unchanged.
+- **`backup_with_progress/6` answers a blocked step with `{:error,
+  {:database_busy_or_locked, code, message}}`,** as `backup/3` does, instead of
+  retrying every 100 ms until a token fires.
+- **Seven PRAGMAs take and answer typed values instead of coded numbers:**
+  `cache_size` `{:pages, n}` or `{:kib, n}` (the open default is now
+  `{:kib, 64_000}`), `wal_autocheckpoint` and `cache_spill` `:off` or a
+  count, `journal_size_limit`, `analysis_limit`, `soft_heap_limit` and
+  `hard_heap_limit` `:unlimited` or a count. A bare coded number is
+  rejected.
+
 - **`txn_state/2` and `schema_list_objects/2` default to `"main"` and take
   `:all` for every attached database;** `nil` no longer means every database.
   `XqliteNIF.txn_state/2`, `wal_checkpoint/3` and `schema_list_objects/2` lose

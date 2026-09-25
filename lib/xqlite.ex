@@ -12,6 +12,10 @@ defmodule Xqlite do
   `txn_state/2` and `wal_checkpoint/3` answer a schema of the wrong type, `nil`
   included, with `{:error, {:invalid_schema_name, schema}}`. How a schema name
   of the right type is judged is in `XqliteNIF`'s moduledoc.
+
+  An option list is judged whole before anything runs, and anything wrong in it
+  is an answer whatever its type: `{:error, {:invalid_option, _}}`, unless the
+  option has a reason of its own (see `t:error_reason/0`).
   """
 
   import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
@@ -45,10 +49,10 @@ defmodule Xqlite do
                           "Synchronous mode. `:normal` is safe with WAL and significantly faster than `:full`."
                       ],
                       cache_size: [
-                        type: :integer,
-                        default: -64_000,
+                        type: {:tuple, [{:in, [:pages, :kib]}, :integer]},
+                        default: {:kib, 64_000},
                         doc:
-                          "Page cache size. Negative values mean KB (e.g., `-64000` = 64MB). SQLite default is 2MB."
+                          "Page cache size, as `{:pages, n}` or `{:kib, n}` (`{:kib, 64_000}` is 64MB). SQLite default is 2MB."
                       ],
                       temp_store: [
                         type: {:in, [:default, :file, :memory]},
@@ -56,10 +60,10 @@ defmodule Xqlite do
                         doc: "Where to store temporary tables and indices."
                       ],
                       wal_autocheckpoint: [
-                        type: :non_neg_integer,
+                        type: {:or, [{:in, [:off]}, :pos_integer]},
                         default: 1000,
                         doc:
-                          "WAL auto-checkpoint threshold in pages. 0 disables auto-checkpoint."
+                          "WAL auto-checkpoint threshold in pages. `:off` disables auto-checkpoint."
                       ],
                       mmap_size: [
                         type: :non_neg_integer,
@@ -177,19 +181,18 @@ defmodule Xqlite do
   outside `A-Z`, `a-z`, `0-9` and `_`, which the native side refuses because
   it writes the name into the statement.
 
-  Three more name the option or argument that was wrong and why.
-  `:invalid_hook_option` carries the option key a hook registration could not
-  take, its value, and `:invalid_value`. `:invalid_pragma_argument` carries
+  Three more name the option, argument or path that was wrong and why.
+  `:invalid_option` is a key the function does not take (`:unknown_key`, the
+  keys it takes in `:allowed`), a key given twice (`:duplicate_key`, with the
+  second value), a value it cannot take (`:invalid_value`), or an element or
+  tail that is no `{key, value}` pair (`:not_a_pair`, no key).
+  `:invalid_path` is `""` or `":memory:"` given to a function that opens a file.
+  `:invalid_pragma_argument` carries
   the PRAGMA, the argument and one of `:not_a_scalar` (a term no PRAGMA
   argument can be, a list included), `:missing` (a PRAGMA that reads only
   with an argument, called without one), `:takes_no_argument` (a PRAGMA
   with no one-argument read form, called with one) and `:invalid_utf8` (a
   binary whose bytes are not UTF-8, in the argument or in a `:db_name`).
-  `:invalid_open_option` carries an option key the openers do not know with
-  `:unknown_key`, a value they refuse with `:invalid_value`, or, for an
-  element of the options list that is not a `{key, value}` pair, that
-  element with `:not_a_pair` and no key. A list ending in something other
-  than `[]` answers `:not_a_pair` too, carrying that tail.
 
   `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
   never the statement built around it — and why it could not run.
@@ -315,19 +318,18 @@ defmodule Xqlite do
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
           | {:invalid_conflict_strategy, atom()}
-          | {:invalid_hook_option,
-             %{key: :every_n | :tag, value: term(), reason: :invalid_value}}
           | {:invalid_limit_category, atom()}
           | {:invalid_limit_value, %{category: atom(), value: integer()}}
           | {:invalid_on_error, term()}
-          | {:invalid_open_option,
-             %{key: atom(), reason: :unknown_key, allowed: [atom()], value: nil}
-             | %{key: atom(), reason: :invalid_value, value: term(), message: String.t()}
-             | %{key: nil, reason: :not_a_pair, value: term()}}
+          | {:invalid_option,
+             %{key: term(), value: term(), reason: :unknown_key, allowed: [atom()]}
+             | %{key: atom(), value: term(), reason: :duplicate_key | :invalid_value}
+             | %{key: nil, value: term(), reason: :not_a_pair}}
           | {:invalid_pages_per_step, integer()}
           | {:invalid_parameter_count,
              %{provided: non_neg_integer(), expected: non_neg_integer()}}
           | {:invalid_parameter_name, String.t()}
+          | {:invalid_path, %{path: String.t()}}
           | {:invalid_pragma_argument,
              %{
                pragma: atom(),
@@ -420,6 +422,10 @@ defmodule Xqlite do
   All PRAGMAs are applied on the same connection immediately after opening,
   with no window for another process to observe an unconfigured state.
 
+  `path` names a file: `""` and `":memory:"` answer `{:error, {:invalid_path,
+  %{path: path}}}` (`open_temporary/0` and `open_in_memory/1` open those), and
+  a `file:` URI is handed to SQLite as written.
+
   ## Options
 
   #{NimbleOptions.docs(@open_opts_schema)}
@@ -436,7 +442,8 @@ defmodule Xqlite do
 
     span_with_stop_metadata [:xqlite, :open], start_md do
       result =
-        with {:ok, validated} <- validate_open_opts(opts),
+        with :ok <- judge_path(path),
+             {:ok, validated} <- validate_open_opts(opts),
              {:ok, conn} <- XqliteNIF.open(path),
              :ok <- apply_pragmas(conn, validated) do
           {:ok, conn}
@@ -499,6 +506,7 @@ defmodule Xqlite do
   opens never create. No PRAGMAs are applied; read-only databases
   can't persist most settings. Writes fail with
   `{:error, {:read_only_database, extended_code, message}}`.
+  `path` is judged as in `open/2`.
 
   Emits `[:xqlite, :open, :start | :stop]` telemetry with mode
   `:readonly`.
@@ -508,7 +516,7 @@ defmodule Xqlite do
     start_md = %{path: path, mode: :readonly}
 
     span_with_stop_metadata [:xqlite, :open], start_md do
-      result = XqliteNIF.open_readonly(path)
+      result = with :ok <- judge_path(path), do: XqliteNIF.open_readonly(path)
       {result, open_stop_metadata(start_md, result)}
     end
   end
@@ -594,57 +602,48 @@ defmodule Xqlite do
     end
   end
 
+  defp judge_path(path) do
+    case path in ["", ":memory:"] do
+      true -> {:error, {:invalid_path, %{path: path}}}
+      false -> :ok
+    end
+  end
+
   defp validate_open_opts(opts) do
-    allowed = allowed_open_opt_keys()
+    with :ok <- judge_options(opts, Keyword.keys(@open_opts_schema.schema)) do
+      case NimbleOptions.validate(opts, @open_opts_schema) do
+        {:ok, _validated} = ok ->
+          ok
 
-    case open_opts_fault(opts, allowed) do
-      nil ->
-        validated_open_opts(opts)
-
-      {:unknown_key, key} ->
-        {:error,
-         {:invalid_open_option,
-          %{key: key, reason: :unknown_key, allowed: allowed, value: nil}}}
-
-      {:not_a_pair, element} ->
-        {:error, {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: element}}}
+        {:error, %NimbleOptions.ValidationError{key: key, value: value}} ->
+          invalid_option(key, value, :invalid_value)
+      end
     end
   end
 
-  defp open_opts_fault([], _allowed), do: nil
+  @doc false
+  @spec judge_options(term(), [atom()], [atom()]) :: :ok | error()
+  def judge_options(opts, allowed, seen \\ [])
 
-  defp open_opts_fault([{key, _value} | rest], allowed) do
-    case key in allowed do
-      true -> open_opts_fault(rest, allowed)
-      false -> {:unknown_key, key}
+  def judge_options([], _allowed, _seen), do: :ok
+
+  def judge_options([{key, value} | rest], allowed, seen) do
+    case {key in allowed, key in seen} do
+      {true, false} -> judge_options(rest, allowed, [key | seen])
+      {true, true} -> invalid_option(key, value, :duplicate_key)
+      {false, _} -> invalid_option(key, value, :unknown_key, %{allowed: allowed})
     end
   end
 
-  defp open_opts_fault([element | _rest], _allowed), do: {:not_a_pair, element}
+  def judge_options([element | _rest], _allowed, _seen),
+    do: invalid_option(nil, element, :not_a_pair)
 
-  # A list the caller built by hand can end in something other than `[]`.
-  defp open_opts_fault(tail, _allowed), do: {:not_a_pair, tail}
+  def judge_options(tail, _allowed, _seen), do: invalid_option(nil, tail, :not_a_pair)
 
-  defp validated_open_opts(opts) do
-    case NimbleOptions.validate(opts, @open_opts_schema) do
-      {:ok, _validated} = ok ->
-        ok
-
-      {:error, %NimbleOptions.ValidationError{} = err} ->
-        {:error,
-         {:invalid_open_option,
-          %{
-            key: err.key,
-            reason: :invalid_value,
-            value: err.value,
-            message: Exception.message(err)
-          }}}
-    end
-  end
-
-  @spec allowed_open_opt_keys() :: [atom()]
-  defp allowed_open_opt_keys do
-    Keyword.keys(@open_opts_schema.schema)
+  @doc false
+  @spec invalid_option(term(), term(), atom(), map()) :: error()
+  def invalid_option(key, value, reason, details \\ %{}) do
+    {:error, {:invalid_option, Map.merge(details, %{key: key, value: value, reason: reason})}}
   end
 
   defp apply_pragmas(conn, validated) do
@@ -658,8 +657,6 @@ defmodule Xqlite do
     end)
   end
 
-  # The option names SQLite has no word for become the number it stores; the
-  # checked clause below then judges every one of them by the same rule.
   defp set_pragma_value(conn, :busy_timeout, :infinity),
     do: set_pragma_value(conn, :busy_timeout, 2_147_483_647)
 
@@ -1781,7 +1778,7 @@ defmodule Xqlite do
   @spec stream(conn(), String.t(), list() | keyword(), keyword()) ::
           Enumerable.t() | error()
   def stream(conn, sql, params \\ [], opts \\ []) do
-    case type_extensions(opts) do
+    case type_extensions(opts, [:batch_size, :cancel_tokens, :on_error, :type_extensions]) do
       {:ok, extensions} -> stream_span(conn, sql, params, extensions, opts)
       {:error, _reason} = error -> error
     end
@@ -2476,6 +2473,8 @@ defmodule Xqlite do
   is `nil`: it is an atom, but `to_string(nil)` is the empty string, which is
   no PRAGMA name. `true` and `false` stay names SQLite parses and ignores.
 
+  A number that codes a mode reads as `Xqlite.Pragma` types it.
+
   Wraps `XqliteNIF.get_pragma/2` and emits `[:xqlite, :pragma, :get]`.
   """
   @spec get_pragma(conn(), String.t() | atom()) :: {:ok, term()} | error()
@@ -2485,14 +2484,14 @@ defmodule Xqlite do
     name_str = pragma_name_string(name)
 
     case XqliteNIF.get_pragma(conn, name_str) do
-      {:ok, _value} = ok ->
+      {:ok, value} ->
         emit(
           [:xqlite, :pragma, :get],
           %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
           %{conn: conn, name: name_str}
         )
 
-        ok
+        {:ok, Xqlite.Pragma.reading(name_str, value)}
 
       err ->
         err
@@ -2554,19 +2553,21 @@ defmodule Xqlite do
 
   defp write_pragma(conn, name_str, sent, reported) do
     case XqliteNIF.set_pragma(conn, name_str, sent) do
-      {:ok, _new_value} = ok ->
+      {:ok, echo} ->
         emit(
           [:xqlite, :pragma, :set],
           %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
           %{conn: conn, name: name_str, value: reported}
         )
 
-        ok
+        {:ok, Xqlite.Pragma.reading(name_str, echo)}
 
       err ->
         err
     end
   end
+
+  @u64 0..18_446_744_073_709_551_615
 
   @doc """
   Sets the busy retry POLICY on the connection.
@@ -2591,6 +2592,8 @@ defmodule Xqlite do
       what you want).
 
   Replacing an existing policy is atomic; observers are unaffected.
+  Another key, or a number past 2^32 - 1 (`:max_retries`) or 2^64 - 1 (the
+  other two), answers `{:error, {:invalid_option, _}}` and installs nothing.
 
   > #### Note — a busy sleep pins the connection {: .info}
   >
@@ -2612,14 +2615,16 @@ defmodule Xqlite do
   > Values of `0` or less are rejected the same way: SQLite treats them
   > as "stop waiting" and drops the callback too. Reading `PRAGMA
   > busy_timeout` is still allowed, and reads `0` while the slot is
-  > held. `busy_timeout/2` is the way to change the wait.
+  > held; `get_busy_timeout/1` and `put_busy_timeout/2` read and set the wait.
   """
   @spec set_busy_policy(conn(), keyword()) :: :ok | error()
   def set_busy_policy(conn, opts \\ []) when is_list(opts) do
-    max_retries = Keyword.get(opts, :max_retries, 50)
-    max_elapsed_ms = Keyword.get(opts, :max_elapsed_ms, 5_000)
-    sleep_ms = Keyword.get(opts, :sleep_ms, 10)
-    XqliteNIF.set_busy_policy(conn, max_retries, max_elapsed_ms, sleep_ms)
+    with :ok <- judge_options(opts, [:max_retries, :max_elapsed_ms, :sleep_ms]),
+         {:ok, max_retries} <- bounded_option(opts, :max_retries, 50, 0..4_294_967_295),
+         {:ok, max_elapsed_ms} <- bounded_option(opts, :max_elapsed_ms, 5_000, @u64),
+         {:ok, sleep_ms} <- bounded_option(opts, :sleep_ms, 10, @u64) do
+      XqliteNIF.set_busy_policy(conn, max_retries, max_elapsed_ms, sleep_ms)
+    end
   end
 
   @doc """
@@ -2627,9 +2632,8 @@ defmodule Xqlite do
 
   Observers registered with `register_busy_observer/2` keep receiving
   `{:xqlite_busy, …}` messages; without a policy the connection waits
-  up to the `busy_timeout` that was in effect when the busy slot was
-  taken, then surfaces `SQLITE_BUSY`. Safe to call when no policy is
-  installed.
+  up to the busy timeout the slot keeps (see `get_busy_timeout/1`), then
+  surfaces `SQLITE_BUSY`. Safe to call when no policy is installed.
   """
   @spec remove_busy_policy(conn()) :: :ok | error()
   def remove_busy_policy(conn), do: XqliteNIF.remove_busy_policy(conn)
@@ -2669,7 +2673,7 @@ defmodule Xqlite do
   > observers: count}}}`, whether it is raw SQL in any spelling or
   > `XqliteNIF.set_pragma(conn, "busy_timeout", ms)`. It would
   > otherwise replace our C callback with SQLite's built-in one and
-  > silence every observer. `busy_timeout/2` goes through the slot
+  > silence every observer. `put_busy_timeout/2` goes through the slot
   > instead: it keeps your observers and applies the new timeout
   > through them.
   """
@@ -2692,18 +2696,15 @@ defmodule Xqlite do
   Sets how long the connection waits on a locked database, going
   through the xqlite busy slot.
 
-  Removes the busy retry policy first (as `remove_busy_policy/1`
-  does), then applies `ms`:
+  The busy retry policy stays in place: while one is set it decides the
+  wait, and `ms` applies once `remove_busy_policy/1` runs. Without one:
 
     * With busy observers registered, the slot stays theirs and the
       timeout applies through it: observers keep receiving
       `{:xqlite_busy, …}` messages, the connection waits up to `ms` on
       SQLite's own retry schedule, and unregistering the last observer
-      keeps this timeout. While the slot is held, `PRAGMA busy_timeout`
-      reads `0` — SQLite zeroes it whenever a callback is installed —
-      even though the wait still applies.
-    * With no observers, SQLite's own timeout handler takes the slot
-      and `PRAGMA busy_timeout` reads `ms` back.
+      keeps this timeout.
+    * With no observers, SQLite's own timeout handler takes the slot.
 
   `ms` is the timeout in milliseconds. `0` disables the timeout entirely
   (SQLite returns `SQLITE_BUSY` immediately on contention). SQLite stores
@@ -2712,19 +2713,28 @@ defmodule Xqlite do
   %{pragma: :busy_timeout, value: ms}}}` before anything reaches SQLite, the
   answer `open/2` and `set_pragma/3` give for the same value.
 
-  This function always works, slot held or not: it calls
-  `sqlite3_busy_timeout` directly and no authorizer is consulted. A raw
+  This function always works, slot held or not, and no authorizer is
+  consulted. A raw
   `PRAGMA busy_timeout = N`, or `XqliteNIF.set_pragma(conn,
   "busy_timeout", ms)`, is rejected while the slot is held — see
   `set_busy_policy/2` — because it would replace our C callback with
   SQLite's built-in one and silence the policy and every observer.
   """
-  @spec busy_timeout(conn(), non_neg_integer()) :: :ok | error()
-  def busy_timeout(conn, ms) do
+  @spec put_busy_timeout(conn(), non_neg_integer()) :: :ok | error()
+  def put_busy_timeout(conn, ms) do
     with {:ok, ms} <- Xqlite.Pragma.check_value(:busy_timeout, ms) do
       XqliteNIF.set_busy_timeout(conn, ms)
     end
   end
+
+  @doc """
+  Reads the busy timeout the connection keeps, in milliseconds, also while a
+  retry policy or an observer holds the busy slot, as `get_pragma/2` and
+  `Xqlite.Pragma.get/2` do. `PRAGMA busy_timeout` read in SQL (`query/4`,
+  `stream/4`, a prepared statement) answers `0` while the slot is held.
+  """
+  @spec get_busy_timeout(conn()) :: {:ok, non_neg_integer()} | error()
+  def get_busy_timeout(conn), do: get_pragma(conn, :busy_timeout)
 
   @doc """
   Installs a deny-list authorizer on the connection.
@@ -2847,28 +2857,29 @@ defmodule Xqlite do
 
   Both options are checked before the connection is touched: a `:tag` that is
   not an atom and an `:every_n` outside that range answer
-  `{:error, {:invalid_hook_option, %{key: key, value: value,
+  `{:error, {:invalid_option, %{key: key, value: value,
   reason: :invalid_value}}}`.
   """
   @spec register_progress_hook(conn(), pid(), keyword()) ::
           {:ok, non_neg_integer()} | error()
   def register_progress_hook(conn, pid, opts \\ []) when is_pid(pid) and is_list(opts) do
-    with {:ok, every_n} <- hook_every_n(Keyword.get(opts, :every_n, 1000)),
+    with :ok <- judge_options(opts, [:every_n, :tag]),
+         {:ok, every_n} <- bounded_option(opts, :every_n, 1000, 1..4_294_967_295),
          {:ok, tag} <- hook_tag(Keyword.get(opts, :tag)) do
       XqliteNIF.register_progress_hook(conn, pid, every_n, tag)
     end
   end
 
-  defp hook_every_n(every_n) when every_n in 1..4_294_967_295, do: {:ok, every_n}
-  defp hook_every_n(value), do: {:error, invalid_hook_option(:every_n, value)}
+  defp bounded_option(opts, key, default, first..last//_) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value >= first and value <= last -> {:ok, value}
+      value -> invalid_option(key, value, :invalid_value)
+    end
+  end
 
   defp hook_tag(nil), do: {:ok, nil}
   defp hook_tag(tag) when is_atom(tag), do: {:ok, Atom.to_string(tag)}
-  defp hook_tag(value), do: {:error, invalid_hook_option(:tag, value)}
-
-  defp invalid_hook_option(key, value) do
-    {:invalid_hook_option, %{key: key, value: value, reason: :invalid_value}}
-  end
+  defp hook_tag(value), do: invalid_option(:tag, value, :invalid_value)
 
   @doc """
   Unregisters a progress-tick subscriber by handle.
@@ -3276,8 +3287,10 @@ defmodule Xqlite do
 
   Sends `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to
   `pid` after each `pages_per_step`-page step: `status` is `:copied` when the
-  step copied pages and `:busy` when a lock blocked it, the step then being
-  retried every 100 ms. A `:busy` message before the first copied step carries
+  step copied pages and `:busy` when a lock blocked it, which ends the call
+  with the error `backup/3` gives: at once for a source in its own write
+  transaction, after rusqlite's 5000 ms busy timeout for a destination another
+  connection holds. A `:busy` message before the first copied step carries
   `remaining: 0, total: 0`. Returns `{:error, :operation_cancelled}` if any
   token signals between steps.
 
@@ -3696,13 +3709,12 @@ defmodule Xqlite do
   defp params_count([_element | rest], counted), do: params_count(rest, counted + 1)
   defp params_count(_tail, counted), do: counted
 
-  # Every door that takes `:type_extensions` reads the option through here,
-  # before its telemetry metadata and before the NIF; the walk itself lives
-  # with the chain, which judges its own list the same way.
-  defp type_extensions(opts) do
-    opts
-    |> Keyword.get(:type_extensions, [])
-    |> Xqlite.TypeExtension.validate_extensions()
+  defp type_extensions(opts, allowed \\ [:type_extensions]) do
+    with :ok <- judge_options(opts, allowed) do
+      opts
+      |> Keyword.get(:type_extensions, [])
+      |> Xqlite.TypeExtension.validate_extensions()
+    end
   end
 
   defp bad_element(position, term),
@@ -3729,7 +3741,6 @@ defmodule Xqlite do
     end
   end
 
-  # A list the caller built by hand can end in something other than `[]`.
   defp walk_cancel_tokens(tail, _position) do
     {:error, {:invalid_cancel_tokens, %{reason: :improper_tail, value_type: term_type(tail)}}}
   end

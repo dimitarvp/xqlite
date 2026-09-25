@@ -151,19 +151,19 @@ defmodule Xqlite.ArgumentValidationLawTest do
       assert {:ok, :none} == Xqlite.txn_state(conn)
     end
 
-    test "busy_timeout/2 refuses a negative integer, a string and 2^64", %{conn: conn} do
+    test "put_busy_timeout/2 rejects a negative integer, a string and 2^64", %{conn: conn} do
       for ms <- [-1, "5", 2 ** 64] do
         assert {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ^ms}}} =
-                 Xqlite.busy_timeout(conn, ms)
+                 Xqlite.put_busy_timeout(conn, ms)
       end
     end
 
-    property "busy_timeout/2 refuses every term that is not an integer from 0 to 2^31 - 1",
+    property "put_busy_timeout/2 rejects every term that is not an integer from 0 to 2^31 - 1",
              %{conn: conn} do
       check all(ms <- non_timeout_term(), max_runs: 2000) do
         rejected = {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}
         assert {:ok, before} = Xqlite.get_pragma(conn, :busy_timeout)
-        assert ^rejected = Xqlite.busy_timeout(conn, ms)
+        assert ^rejected = Xqlite.put_busy_timeout(conn, ms)
         assert {:ok, ^before} = Xqlite.get_pragma(conn, :busy_timeout)
       end
     end
@@ -198,10 +198,10 @@ defmodule Xqlite.ArgumentValidationLawTest do
       assert :ok = NIF.blob_close(blob)
     end
 
-    test "busy_timeout/2 accepts zero and a positive integer", %{conn: conn} do
-      assert :ok = Xqlite.busy_timeout(conn, 0)
+    test "put_busy_timeout/2 accepts zero and a positive integer", %{conn: conn} do
+      assert :ok = Xqlite.put_busy_timeout(conn, 0)
       assert {:ok, 0} = Xqlite.get_pragma(conn, :busy_timeout)
-      assert :ok = Xqlite.busy_timeout(conn, 250)
+      assert :ok = Xqlite.put_busy_timeout(conn, 250)
       assert {:ok, 250} = Xqlite.get_pragma(conn, :busy_timeout)
     end
   end

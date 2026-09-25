@@ -345,13 +345,13 @@ defmodule Xqlite.XqliteTelemetryTest do
     test "a failed open fires :stop with result_class :error" do
       handler_id = attach_capture([[:xqlite, :open, :stop]])
 
-      assert {:error, {:invalid_open_option, %{key: :bogus_key}}} =
+      assert {:error, {:invalid_option, %{key: :bogus_key}}} =
                Xqlite.open_in_memory(bogus_key: 1)
 
       assert_receive {:telemetry_event, [:xqlite, :open, :stop], _measurements, metadata}
       assert metadata.mode == :memory
       assert metadata.result_class == :error
-      assert {:invalid_open_option, %{key: :bogus_key}} = metadata.error_reason
+      assert {:invalid_option, %{key: :bogus_key}} = metadata.error_reason
 
       detach(handler_id)
     end

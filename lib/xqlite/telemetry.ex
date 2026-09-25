@@ -607,6 +607,11 @@ defmodule Xqlite.Telemetry do
     * `:progress` — keyword opts forwarded to
       `register_progress_hook/3` (default `every_n: 1000`).
 
+  An unknown or repeated key, here or in `:progress`, and a `:hooks` value that
+  is neither `:all` nor a list of those kinds answer `{:error, {:invalid_option,
+  _}}` before anything is registered; a `:progress` value the hook rejects
+  answers the same once the hooks registered before it are removed.
+
   Returns `{:error, :telemetry_disabled}` when telemetry is
   compile-disabled — the bridge would otherwise install hooks that
   produce nothing.
@@ -635,6 +640,8 @@ defmodule Xqlite.Telemetry do
   ## Options
 
     * `:tag` — arbitrary term forwarded as `:tag` in event metadata.
+
+  Any other key answers `{:error, {:invalid_option, _}}`.
   """
   @spec bridge_log(keyword()) :: {:ok, struct()} | {:error, term()}
   def bridge_log(opts \\ []) when is_list(opts) do

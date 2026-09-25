@@ -207,18 +207,22 @@ defmodule Xqlite.NIF.BackupProgressTest do
         assert result == {:error, :operation_cancelled} or result == :ok
       end
 
-      test "a blocked step says :busy", %{conn: conn, backup_path: path} do
+      test "a blocked step says :busy and answers what backup/3 answers",
+           %{conn: conn, backup_path: path} do
         :ok = NIF.execute_batch(conn, "BEGIN IMMEDIATE")
         {:ok, token} = NIF.create_cancel_token()
-        pid = self()
 
-        run =
-          Task.async(fn -> NIF.backup_with_progress(conn, "main", path, pid, 1, [token]) end)
+        spawn(fn ->
+          Process.sleep(2_000)
+          NIF.cancel_operation(token)
+        end)
 
-        assert_receive {:xqlite_backup_progress, %{status: :busy} = progress}, 5000
-        assert %{remaining: 0, total: 0} = progress
-        :ok = NIF.cancel_operation(token)
-        assert {:error, :operation_cancelled} = Task.await(run, 5_000)
+        assert {:error, {:database_busy_or_locked, code, _}} = NIF.backup(conn, "main", path)
+
+        assert {:error, {:database_busy_or_locked, ^code, _}} =
+                 NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
+
+        assert_received {:xqlite_backup_progress, %{status: :busy, remaining: 0, total: 0}}
         assert :ok = NIF.rollback(conn)
       end
 

@@ -38,7 +38,11 @@ fn open(path: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn open_in_memory(uri: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
-    let result = Connection::open(uri.as_str());
+    let flags = match uri.as_str() {
+        ":memory:" => rusqlite::OpenFlags::default(),
+        _ => rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_MEMORY,
+    };
+    let result = Connection::open_with_flags(uri.as_str(), flags);
     connection::handle_open_result(result, uri.into_string())
 }
 
@@ -520,19 +524,20 @@ fn get_pragma<'a>(
     pragma_name: rustler::Binary<'a>,
 ) -> Result<Term<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
-        // The real PRAGMA read would always report 0 here: SQLite only
-        // reports a wal_autocheckpoint threshold while ITS internal
-        // hook occupies the wal_hook slot, and our master callback
-        // holds that slot (emulating the autocheckpoint). Report the
-        // emulated threshold — the effective value.
-        if pragma_name
-            .as_slice()
-            .eq_ignore_ascii_case(b"wal_autocheckpoint")
-        {
+        // SQLite reads both as 0 while our own callback holds the slot the
+        // setting belongs to: wal_autocheckpoint while the master WAL hook
+        // emulates the autocheckpoint, busy_timeout while the busy slot is
+        // held. Report the value the slot keeps instead.
+        let name = pragma_name.as_slice();
+        if name.eq_ignore_ascii_case(b"wal_autocheckpoint") {
             let pages = handle.wal_hook.autocheckpoint_pages.load(Ordering::Relaxed);
             Ok((pages as i64).encode(env))
+        } else if name.eq_ignore_ascii_case(b"busy_timeout")
+            && let Some(ms) = busy_handler::kept_timeout(&handle)
+        {
+            Ok(ms.encode(env))
         } else {
-            pragma::get(env, conn, pragma_name.as_slice())
+            pragma::get(env, conn, name)
         }
     })
 }
@@ -1568,7 +1573,7 @@ fn register_progress_hook(
     tag: MaybeTextArg,
 ) -> Term<'_> {
     if every_n == 0 {
-        let err = XqliteError::InvalidHookOption {
+        let err = XqliteError::InvalidOption {
             key: atoms::every_n(),
             value: every_n,
         };
@@ -1818,15 +1823,36 @@ fn backup_with_progress<'a>(
                     return Ok(());
                 }
                 rusqlite::backup::StepResult::More => send(b"copied"),
-                rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => {
+                rusqlite::backup::StepResult::Busy => {
                     send(b"busy");
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    return Err(rejected_step(ffi::SQLITE_BUSY));
+                }
+                rusqlite::backup::StepResult::Locked => {
+                    send(b"busy");
+                    return Err(rejected_step(ffi::SQLITE_LOCKED));
                 }
                 _ => continue,
             }
         }
     });
     singular_ok_or_error_tuple(env, result)
+}
+
+/// The error `Connection::backup` answers for a step SQLite rejected with `code`.
+fn rejected_step(code: std::ffi::c_int) -> XqliteError {
+    // SAFETY: sqlite3_errstr reads no connection; it answers a pointer to a
+    // static string, or NULL for a code it has no text for.
+    let text = unsafe { ffi::sqlite3_errstr(code) };
+    let message = (!text.is_null()).then(|| {
+        // SAFETY: a non-NULL answer points to a static NUL-terminated string.
+        unsafe { std::ffi::CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned()
+    });
+    XqliteError::from(rusqlite::Error::SqliteFailure(
+        ffi::Error::new(code),
+        message,
+    ))
 }
 
 /// # Safety

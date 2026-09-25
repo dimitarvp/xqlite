@@ -170,7 +170,7 @@ bypasses the repair and silently steals the hook slot).
 
 :ok = Xqlite.unregister_busy_observer(conn, handle)
 :ok = Xqlite.remove_busy_policy(conn)                      # observers keep firing
-:ok = Xqlite.busy_timeout(conn, 1_000)                     # plain timeout instead
+:ok = Xqlite.put_busy_timeout(conn, 1_000)                     # plain timeout instead
 ```
 
 The policy is single-slot by design (a retry decision cannot compose);
@@ -184,7 +184,7 @@ observation is fan-out, and the telemetry bridge re-emits it as
 > boolean, observers: count}}}`. It would otherwise replace the whole
 > callback at the SQLite C level: the policy would stop applying and
 > every observer's `{:xqlite_busy, …}` stream would go quiet. Use
-> `Xqlite.busy_timeout/2` — it works whether the slot is held or not.
+> `Xqlite.put_busy_timeout/2` — it works whether the slot is held or not.
 >
 > The other direction is handled for you. Installing a policy or a busy
 > observer takes SQLite's single busy callback, which zeroes whatever

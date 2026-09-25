@@ -94,17 +94,18 @@ defmodule Xqlite.Telemetry.Bridge do
 
   if @telemetry_enabled do
     @per_conn_hooks [:wal, :commit, :rollback, :update, :progress, :busy]
-    @valid_per_conn_hooks @per_conn_hooks ++ [:all]
 
     @doc false
     def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts) do
-      hooks = expand_hooks(Keyword.get(opts, :hooks, :all))
-      tag = Keyword.get(opts, :tag)
-      progress_opts = Keyword.get(opts, :progress, [])
-
-      with :ok <- validate_hooks(hooks),
+      with :ok <- Xqlite.judge_options(opts, [:hooks, :tag, :progress]),
+           hooks = Keyword.get(opts, :hooks, :all),
+           :ok <- validate_hooks(hooks),
+           progress_opts = Keyword.get(opts, :progress, []),
+           :ok <- Xqlite.judge_options(progress_opts, [:every_n, :tag]),
+           tag = Keyword.get(opts, :tag),
            {:ok, pid} <- start_link({:conn, conn}, tag),
-           {:ok, handles} <- register_per_conn_hooks(pid, conn, hooks, progress_opts) do
+           {:ok, handles} <-
+             register_per_conn_hooks(pid, conn, expand_hooks(hooks), progress_opts) do
         {:ok,
          %__MODULE__{
            pid: pid,
@@ -112,16 +113,14 @@ defmodule Xqlite.Telemetry.Bridge do
            tag: tag,
            hook_handles: handles
          }}
-      else
-        {:error, _} = err -> err
       end
     end
 
     @doc false
     def bridge_log_global(opts) when is_list(opts) do
-      tag = Keyword.get(opts, :tag)
-
-      with {:ok, pid} <- start_link(:log, tag),
+      with :ok <- Xqlite.judge_options(opts, [:tag]),
+           tag = Keyword.get(opts, :tag),
+           {:ok, pid} <- start_link(:log, tag),
            {:ok, handle} <- NIF.register_log_hook(pid) do
         {:ok,
          %__MODULE__{
@@ -130,8 +129,6 @@ defmodule Xqlite.Telemetry.Bridge do
            tag: tag,
            hook_handles: [{:log, handle}]
          }}
-      else
-        {:error, _} = err -> err
       end
     end
 
@@ -139,12 +136,11 @@ defmodule Xqlite.Telemetry.Bridge do
     defp expand_hooks(list) when is_list(list), do: list
 
     defp validate_hooks(hooks) do
-      case Enum.find(hooks, fn h -> h not in @valid_per_conn_hooks end) do
-        nil ->
-          :ok
-
-        bad ->
-          {:error, {:invalid_hook, bad, valid: @valid_per_conn_hooks}}
+      case hooks == :all or
+             (is_list(hooks) and not List.improper?(hooks) and
+                Enum.all?(hooks, &(&1 in @per_conn_hooks))) do
+        true -> :ok
+        false -> Xqlite.invalid_option(:hooks, hooks, :invalid_value)
       end
     end
 
@@ -180,18 +176,8 @@ defmodule Xqlite.Telemetry.Bridge do
     defp register_per_conn_hook(pid, conn, :busy, _opts),
       do: NIF.register_busy_observer(conn, pid)
 
-    defp register_per_conn_hook(pid, conn, :progress, opts) do
-      every_n = Keyword.get(opts, :every_n, 1000)
-      tag = Keyword.get(opts, :tag)
-
-      tag_str =
-        case tag do
-          nil -> nil
-          a when is_atom(a) -> Atom.to_string(a)
-        end
-
-      NIF.register_progress_hook(conn, pid, every_n, tag_str)
-    end
+    defp register_per_conn_hook(pid, conn, :progress, opts),
+      do: Xqlite.register_progress_hook(conn, pid, opts)
   else
     @doc false
     def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts),

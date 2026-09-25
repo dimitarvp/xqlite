@@ -16,7 +16,7 @@ defmodule Xqlite.OpenOptsTest do
     end
 
     test "rejects unknown option" do
-      assert {:error, {:invalid_open_option, details}} =
+      assert {:error, {:invalid_option, details}} =
                Xqlite.open_in_memory(typo_option: true)
 
       assert details.key == :typo_option
@@ -27,62 +27,58 @@ defmodule Xqlite.OpenOptsTest do
 
     test "rejects invalid journal_mode" do
       assert {:error,
-              {:invalid_open_option,
-               %{key: :journal_mode, reason: :invalid_value, value: :bogus}}} =
+              {:invalid_option, %{key: :journal_mode, reason: :invalid_value, value: :bogus}}} =
                Xqlite.open_in_memory(journal_mode: :bogus)
     end
 
     test "rejects invalid busy_timeout type" do
       assert {:error,
-              {:invalid_open_option,
+              {:invalid_option,
                %{key: :busy_timeout, reason: :invalid_value, value: "five seconds"}}} =
                Xqlite.open_in_memory(busy_timeout: "five seconds")
     end
 
     test "rejects negative busy_timeout" do
       assert {:error,
-              {:invalid_open_option, %{key: :busy_timeout, reason: :invalid_value, value: -1}}} =
+              {:invalid_option, %{key: :busy_timeout, reason: :invalid_value, value: -1}}} =
                Xqlite.open_in_memory(busy_timeout: -1)
     end
 
     test "rejects invalid foreign_keys type" do
       assert {:error,
-              {:invalid_open_option,
-               %{key: :foreign_keys, reason: :invalid_value, value: "yes"}}} =
+              {:invalid_option, %{key: :foreign_keys, reason: :invalid_value, value: "yes"}}} =
                Xqlite.open_in_memory(foreign_keys: "yes")
     end
 
     test "rejects invalid synchronous value" do
       assert {:error,
-              {:invalid_open_option,
-               %{key: :synchronous, reason: :invalid_value, value: :turbo}}} =
+              {:invalid_option, %{key: :synchronous, reason: :invalid_value, value: :turbo}}} =
                Xqlite.open_in_memory(synchronous: :turbo)
     end
 
     test "rejects invalid temp_store value" do
       assert {:error,
-              {:invalid_open_option, %{key: :temp_store, reason: :invalid_value, value: :ssd}}} =
+              {:invalid_option, %{key: :temp_store, reason: :invalid_value, value: :ssd}}} =
                Xqlite.open_in_memory(temp_store: :ssd)
     end
 
     test "rejects invalid auto_vacuum value" do
       assert {:error,
-              {:invalid_open_option,
+              {:invalid_option,
                %{key: :auto_vacuum, reason: :invalid_value, value: :aggressive}}} =
                Xqlite.open_in_memory(auto_vacuum: :aggressive)
     end
 
     test "rejects negative mmap_size" do
-      assert {:error,
-              {:invalid_open_option, %{key: :mmap_size, reason: :invalid_value, value: -1}}} =
+      assert {:error, {:invalid_option, %{key: :mmap_size, reason: :invalid_value, value: -1}}} =
                Xqlite.open_in_memory(mmap_size: -1)
     end
 
-    test "rejects negative wal_autocheckpoint" do
-      assert {:error,
-              {:invalid_open_option,
-               %{key: :wal_autocheckpoint, reason: :invalid_value, value: -1}}} =
-               Xqlite.open_in_memory(wal_autocheckpoint: -1)
+    test "rejects a bare number where the typed value belongs" do
+      for {key, bare} <- [wal_autocheckpoint: -1, wal_autocheckpoint: 0, cache_size: -2_000] do
+        assert {:error, {:invalid_option, %{key: ^key, reason: :invalid_value, value: ^bare}}} =
+                 Xqlite.open_in_memory([{key, bare}])
+      end
     end
   end
 
@@ -166,7 +162,7 @@ defmodule Xqlite.OpenOptsTest do
     end
 
     test "cache_size custom value" do
-      {:ok, conn} = Xqlite.open_in_memory(cache_size: -32_000)
+      {:ok, conn} = Xqlite.open_in_memory(cache_size: {:kib, 32_000})
       {:ok, cache} = NIF.get_pragma(conn, "cache_size")
       assert cache == -32_000
       NIF.close(conn)
@@ -187,8 +183,8 @@ defmodule Xqlite.OpenOptsTest do
       NIF.close(conn)
     end
 
-    test "wal_autocheckpoint 0 disables" do
-      {:ok, conn} = Xqlite.open_in_memory(wal_autocheckpoint: 0)
+    test "wal_autocheckpoint :off disables" do
+      {:ok, conn} = Xqlite.open_in_memory(wal_autocheckpoint: :off)
       {:ok, val} = NIF.get_pragma(conn, "wal_autocheckpoint")
       assert val == 0
       NIF.close(conn)
@@ -224,7 +220,7 @@ defmodule Xqlite.OpenOptsTest do
           busy_timeout: 15_000,
           foreign_keys: false,
           synchronous: :off,
-          cache_size: -128_000
+          cache_size: {:kib, 128_000}
         )
 
       {:ok, timeout} = NIF.get_pragma(conn, "busy_timeout")
@@ -252,6 +248,17 @@ defmodule Xqlite.OpenOptsTest do
       path = tmp_db_path("open_opts")
       {:ok, conn} = Xqlite.open(path)
       assert File.exists?(path)
+      NIF.close(conn)
+    end
+
+    test "the two bare sentinel strings are rejected and a file URI opens as written" do
+      for path <- ["", ":memory:"] do
+        assert {:error, {:invalid_path, %{path: ^path}}} = Xqlite.open(path)
+        assert {:error, {:invalid_path, %{path: ^path}}} = Xqlite.open_readonly(path)
+      end
+
+      assert {:ok, conn} = Xqlite.open("file::memory:")
+      assert {:ok, nil} = Xqlite.db_path(conn)
       NIF.close(conn)
     end
 

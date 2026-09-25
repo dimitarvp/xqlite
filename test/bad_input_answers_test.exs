@@ -70,11 +70,11 @@ defmodule Xqlite.BadInputAnswersTest do
       path = Xqlite.TestUtil.tmp_db_path("bad_open_opts")
 
       assert {:error,
-              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+              {:invalid_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
                Xqlite.open(path, [:busy_timeout])
 
       assert {:error,
-              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+              {:invalid_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
                Xqlite.open_in_memory([:busy_timeout])
     end
 
@@ -83,11 +83,11 @@ defmodule Xqlite.BadInputAnswersTest do
       improper = [{:foreign_keys, true} | :busy_timeout]
 
       assert {:error,
-              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+              {:invalid_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
                apply(Xqlite, :open, [path, improper])
 
       assert {:error,
-              {:invalid_open_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
+              {:invalid_option, %{key: nil, reason: :not_a_pair, value: :busy_timeout}}} =
                apply(Xqlite, :open_in_memory, [improper])
     end
 

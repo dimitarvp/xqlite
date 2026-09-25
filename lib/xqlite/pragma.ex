@@ -12,6 +12,14 @@ defmodule Xqlite.Pragma do
   these functions do not judge is the connection: a term that is not one
   raises `ArgumentError` from the native function it is handed to.
 
+  Seven PRAGMAs take and answer a word or a tagged count where SQLite codes a
+  mode into the number: `cache_size` is `{:pages, 0..2_147_483_647}` or
+  `{:kib, 1..2_147_483_648}`, `wal_autocheckpoint` and `cache_spill` `:off` or
+  a count from 1, `journal_size_limit` `:unlimited` or a count from 0, and
+  `analysis_limit`, `soft_heap_limit` and `hard_heap_limit` `:unlimited` or a
+  count from 1. The bare coded number is rejected. `Xqlite.get_pragma/2`,
+  `Xqlite.set_pragma/3` and `Xqlite.open/2` use these forms too.
+
   ## The two heap limits
 
   `soft_heap_limit` and `hard_heap_limit` belong to the operating-system
@@ -28,7 +36,8 @@ defmodule Xqlite.Pragma do
   @type name :: String.t() | atom()
   @type pragma_opts :: keyword()
   @type pragma_key :: String.t() | atom()
-  @type pragma_value :: String.t() | integer() | boolean() | atom()
+  @type pragma_value ::
+          String.t() | integer() | boolean() | atom() | {:pages | :kib, integer()}
 
   @typedoc """
   What a read door answers.
@@ -47,6 +56,7 @@ defmodule Xqlite.Pragma do
            | atom()
            | String.t()
            | list()
+           | {:pages | :kib, non_neg_integer()}
            | nil}
           | Xqlite.error()
 
@@ -63,23 +73,28 @@ defmodule Xqlite.Pragma do
 
   @signed_i32 -2_147_483_648..0x7FFFFFFF
   @u32 0..0x7FFFFFFF
+  @positive_i32 1..0x7FFFFFFF
   @bool 0..1
 
-  # SQLite's own domains, where they are wider or narrower than the shared
-  # 32-bit constants above, each measured by writing the value and reading it
-  # back: a page count up to 2^32 - 2, a heap limit up to 2^63 - 1, a worker
-  # count capped at the compile-time maximum, and -1 for "no limit" where every
-  # other negative is stored as -1 anyway. The memory-map size ends at the
-  # bundled build's own MAX_MMAP_SIZE, which stores the maximum for anything
-  # above it and 0 for anything below zero.
   @page_count 1..4_294_967_294
-  @heap_limit 0..0x7FFFFFFFFFFFFFFF
+  @heap_limit 1..0x7FFFFFFFFFFFFFFF
   @worker_threads 0..8
-  @journal_size -1..0x7FFFFFFFFFFFFFFF
+  @journal_size 0..0x7FFFFFFFFFFFFFFF
   @mmap_size 0..0x7FFF0000
 
   @true_words ~w(on yes true)
   @false_words ~w(off no false)
+
+  @coded %{
+    {:analysis_limit, :unlimited} => 0,
+    {:cache_spill, :off} => 0,
+    {:hard_heap_limit, :unlimited} => 0,
+    {:journal_size_limit, :unlimited} => -1,
+    {:soft_heap_limit, :unlimited} => 0,
+    {:wal_autocheckpoint, :off} => 0
+  }
+
+  @words Map.new(@coded, fn {{name, word}, coded} -> {{Atom.to_string(name), coded}, word} end)
 
   @schema %{
     application_id: %PragmaSpec{
@@ -93,7 +108,7 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @u32
+      valid_values: @positive_i32
     },
     busy_timeout: %PragmaSpec{
       return_type: :int,
@@ -105,8 +120,7 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       schema_prefix: true,
-      writable: true,
-      valid_values: @signed_i32
+      writable: true
     },
     # A value between 1 and the cache's own page count is stored as written but
     # reads back as that page count, so a read after a write can differ.
@@ -114,7 +128,7 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @u32
+      valid_values: @positive_i32
     },
     data_version: %PragmaSpec{return_type: :int, read_arities: [0]},
     freelist_count: %PragmaSpec{
@@ -190,7 +204,7 @@ defmodule Xqlite.Pragma do
       return_type: :int,
       read_arities: [0],
       writable: true,
-      valid_values: @u32
+      valid_values: @positive_i32
     },
     auto_vacuum: %PragmaSpec{
       return_type: :int,
@@ -463,6 +477,7 @@ defmodule Xqlite.Pragma do
     * a pragma that names a mode takes the words its spec lists, as atoms
       or strings in any case, and the integers its spec lists. It answers
       the spec's own upper-case spelling of the word.
+    * a pragma whose number codes a mode takes its word or tagged count.
 
   Answers `{:ok, value_for_sqlite}`, or one of:
 
@@ -479,7 +494,8 @@ defmodule Xqlite.Pragma do
   @spec check_value(pragma_key(), term()) :: {:ok, pragma_value()} | Xqlite.error()
   def check_value(key, value) do
     with {:ok, name} <- resolve_name(key),
-         {:ok, spec} <- writable_spec(name) do
+         {:ok, spec} <- writable_spec(name),
+         :error <- Map.fetch(@coded, {name, value}) do
       check_spec_value(name, spec, value)
     end
   end
@@ -495,6 +511,17 @@ defmodule Xqlite.Pragma do
   """
   @spec canonical_name(pragma_key()) :: {:ok, atom()} | Xqlite.error()
   def canonical_name(key), do: resolve_name(key)
+
+  @doc false
+  @spec reading(String.t(), term()) :: term()
+  def reading("cache_size", count) when is_integer(count) do
+    case count < 0 do
+      true -> {:kib, -count}
+      false -> {:pages, count}
+    end
+  end
+
+  def reading(name, value), do: Map.get(@words, {name, value}, value)
 
   defp resolve_name(key) when is_atom(key) do
     case Map.fetch(@string_to_atom_map, downcased_name(key)) do
@@ -551,6 +578,12 @@ defmodule Xqlite.Pragma do
       :error -> invalid_value(name, value)
     end
   end
+
+  defp check_spec_value(:cache_size, _spec, {:pages, count}) when count in 0..0x7FFFFFFF,
+    do: {:ok, count}
+
+  defp check_spec_value(:cache_size, _spec, {:kib, count}) when count in 1..0x80000000,
+    do: {:ok, -count}
 
   defp check_spec_value(name, %PragmaSpec{valid_values: range}, value)
        when is_struct(range, Range) and is_integer(value) do
@@ -715,7 +748,8 @@ defmodule Xqlite.Pragma do
   `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
   reason: :invalid_options}}}` before a statement is built — `value` being
   the whole term when it is no keyword list and the `{key, value}` pair that
-  could not be read when it is one.
+  could not be read when it is one. `busy_timeout` and `wal_autocheckpoint`,
+  read from this library's own state, reject a `:db_name` other than `nil`.
 
   A PRAGMA the connection has no row for answers `{:ok, :no_value}`:
   `get(db, :mmap_size)` on an in-memory database is the plain case, memory
@@ -868,8 +902,12 @@ defmodule Xqlite.Pragma do
 
   defp read_without_arg(db, name, spec, opts) do
     case name in @readable_with_zero_args do
-      true -> dispatch_get(db, name, spec, opts)
-      false -> {:error, invalid_argument(name, nil, :missing)}
+      true ->
+        with {:ok, value} <- dispatch_get(db, name, spec, opts),
+             do: {:ok, name |> Atom.to_string() |> reading(value)}
+
+      false ->
+        {:error, invalid_argument(name, nil, :missing)}
     end
   end
 
@@ -1035,7 +1073,8 @@ defmodule Xqlite.Pragma do
   defp put_checked(db, key_atom, val, opts) do
     case Keyword.get(opts, :db_name) do
       nil ->
-        XqliteNIF.set_pragma(db, to_string(key_atom), val)
+        name = Atom.to_string(key_atom)
+        with {:ok, echo} <- XqliteNIF.set_pragma(db, name, val), do: {:ok, reading(name, echo)}
 
       db_name ->
         sql = "PRAGMA #{quote_name(db_name)}.#{key_atom} = #{format_pragma_value(val)};"
@@ -1051,6 +1090,9 @@ defmodule Xqlite.Pragma do
     case Keyword.get(opts, :db_name) do
       nil ->
         XqliteNIF.get_pragma(db, to_string(key))
+
+      db_name when key in [:busy_timeout, :wal_autocheckpoint] ->
+        {:error, invalid_argument(key, {:db_name, db_name}, :invalid_options)}
 
       db_name ->
         sql = "PRAGMA #{quote_name(db_name)}.#{key};"

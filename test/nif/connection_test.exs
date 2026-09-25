@@ -318,9 +318,16 @@ defmodule Xqlite.NIF.ConnectionTest do
                NIF.open(@invalid_db_path)
     end
 
-    test "open_in_memory/1 fails for an invalid URI schema" do
-      assert {:error, {:cannot_open_database, "http://invalid", _code, _reason}} =
-               NIF.open_in_memory("http://invalid")
+    test "open_in_memory/1 opens in memory whatever it is named, as its read-only sibling does" do
+      path = Xqlite.TestUtil.tmp_db_path("in_memory_name")
+
+      for opener <- [:open_in_memory, :open_in_memory_readonly] do
+        assert {:ok, conn} = apply(NIF, opener, [path])
+        assert {opener, {:ok, nil}} == {opener, NIF.db_path(conn)}
+        assert :ok = NIF.close(conn)
+      end
+
+      refute File.exists?(path)
     end
   end
 

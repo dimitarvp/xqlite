@@ -217,7 +217,8 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
     end
 
     test "rejects invalid hook names", %{conn: conn} do
-      assert {:error, {:invalid_hook, :nonsense, valid: _}} =
+      assert {:error,
+              {:invalid_option, %{key: :hooks, value: [:nonsense], reason: :invalid_value}}} =
                Xqlite.Telemetry.bridge(conn, hooks: [:nonsense])
     end
 

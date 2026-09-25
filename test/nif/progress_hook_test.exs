@@ -24,8 +24,7 @@ defmodule Xqlite.NIF.ProgressHookTest do
       end
 
       test "every_n must be >= 1", %{conn: conn} do
-        assert {:error,
-                {:invalid_hook_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
+        assert {:error, {:invalid_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
                  NIF.register_progress_hook(conn, self(), 0, nil)
       end
 
@@ -395,27 +394,23 @@ defmodule Xqlite.NIF.ProgressHookTest do
     end
 
     test "a value neither option takes is an answer, not a crash", %{conn: conn} do
-      assert {:error, {:invalid_hook_option, %{key: :tag, value: "t", reason: :invalid_value}}} =
+      assert {:error, {:invalid_option, %{key: :tag, value: "t", reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), tag: "t")
 
-      assert {:error, {:invalid_hook_option, %{key: :tag, value: 42, reason: :invalid_value}}} =
+      assert {:error, {:invalid_option, %{key: :tag, value: 42, reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), tag: 42)
 
-      assert {:error,
-              {:invalid_hook_option, %{key: :every_n, value: :foo, reason: :invalid_value}}} =
+      assert {:error, {:invalid_option, %{key: :every_n, value: :foo, reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), every_n: :foo)
 
-      assert {:error,
-              {:invalid_hook_option, %{key: :every_n, value: -1, reason: :invalid_value}}} =
+      assert {:error, {:invalid_option, %{key: :every_n, value: -1, reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), every_n: -1)
 
-      assert {:error,
-              {:invalid_hook_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
+      assert {:error, {:invalid_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), every_n: 0)
 
       assert {:error,
-              {:invalid_hook_option,
-               %{key: :every_n, value: 4_294_967_296, reason: :invalid_value}}} =
+              {:invalid_option, %{key: :every_n, value: 4_294_967_296, reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), every_n: 4_294_967_296)
     end
 
@@ -428,8 +423,7 @@ defmodule Xqlite.NIF.ProgressHookTest do
 
     property "no value outside what an option takes reaches the NIF", %{conn: conn} do
       check all({key, value} <- bad_hook_option(), max_runs: 2000) do
-        assert {:error,
-                {:invalid_hook_option, %{key: ^key, value: ^value, reason: :invalid_value}}} =
+        assert {:error, {:invalid_option, %{key: ^key, value: ^value, reason: :invalid_value}}} =
                  Xqlite.register_progress_hook(conn, self(), [{key, value}])
       end
     end

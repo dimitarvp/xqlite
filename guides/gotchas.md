@@ -398,11 +398,12 @@ the typed `Xqlite.set_pragma(conn, :busy_timeout, ms)` /
 value of `0` or less — SQLite treats anything at or below zero as "stop
 waiting" and drops the callback just as destructively.
 
-Reading is untouched: `PRAGMA busy_timeout` still works and reads `0` while the
-slot is held, because SQLite zeroes the stored value whenever a callback is
-installed. To change the wait, use `Xqlite.busy_timeout/2` — it goes through the
-slot, keeps your observers, and works whether the slot is held or empty. With
-the slot empty the raw PRAGMA is accepted as before.
+Reading is untouched: `PRAGMA busy_timeout` in SQL still works and reads `0`
+while the slot is held, because SQLite zeroes the stored value whenever a
+callback is installed; `Xqlite.get_busy_timeout/1` answers the timeout the slot
+keeps. To change it, use `Xqlite.put_busy_timeout/2` — it goes through the slot,
+keeps your observers and your retry policy, and works whether the slot is held
+or empty. With the slot empty the raw PRAGMA is accepted as before.
 
 ### A busy retry and the WAL autocheckpoint pin the connection
 
