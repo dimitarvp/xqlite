@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cancel token already signalled when a cancellable call starts now
+  cancels it before its statement runs.** `execute_cancellable`,
+  `query_cancellable`, `query_with_changes_cancellable`,
+  `execute_batch_cancellable`, `multi_step_cancellable` on a statement that
+  has not started, and a stream's first fetch used to commit a one-row write
+  and still answer `{:error, :operation_cancelled}`.
+- **A cancel that reaches SQLite's progress check after a statement's last
+  step no longer turns a finished write into `{:error, :operation_cancelled}`;**
+  the call answers its normal result. A cancelled answer now always means the
+  run was stopped, and for a write the whole transaction rolled back, an
+  explicit one included. The gotchas guide states what a cancelled answer
+  means and when SQLite checks for a cancel, replacing "checked every 8 VM
+  instructions".
+
 - **A second enumeration of an `Xqlite.stream/4` stream read on where the
   first stopped, or looked like an empty table.** The statement opens at the
   call, so a second `Enum.to_list/1`, the rest after an `Enum.take/2`, or a
@@ -277,6 +291,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On the four one-shot cancellable calls a signalled token answers
+  `{:error, :operation_cancelled}` before an SQL or parameter error,** since
+  the tokens are read before the SQL is prepared.
+
 - **`Xqlite.busy_timeout/2` is now `Xqlite.put_busy_timeout/2`, and it no
   longer removes the retry policy:** while a policy is set it decides the wait,
   and the timeout written applies once `remove_busy_policy/1` runs. New
@@ -354,12 +372,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:invalid_schema_name, term}` (`wal_checkpoint/3`, `txn_state/2`),
   `{:invalid_transaction_mode, mode}` and `{:invalid_conflict_strategy,
   strategy}` (were bare atoms), `{:blob_write_out_of_bounds, %{offset,
-  byte_size, blob_size}}`, `{:invalid_hook_option, _}` from the raw
+  byte_size, blob_size}}`, `{:invalid_option, _}` from the raw
   progress-hook NIF, and `{:invalid_pragma_value, %{pragma: :busy_timeout,
-  value}}` from `busy_timeout/2` and the raw setters.
+  value}}` from `put_busy_timeout/2` and the raw setters.
 - **`XqliteNIF.set_pragma(conn, "busy_timeout", n)` rejects an integer above
   2_147_483_647** instead of storing 0.
-- **`busy_timeout/2` answers the rejection for 2^64 and above instead of
+- **`put_busy_timeout/2` answers the rejection for 2^64 and above instead of
   raising**; `register_progress_hook/3` does for `every_n` above
   4_294_967_295.
 

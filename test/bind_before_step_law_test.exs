@@ -43,10 +43,10 @@ defmodule Xqlite.BindBeforeStepLawTest do
   The law drives bind, clear, reset, step and both batch calls, a cancelled
   one included, over a read, a write and a write with `RETURNING`, and reads
   the table back through SQLite after each case; every write appends, so each
-  run applied shows once. A signalled cancel token stops a batch only if
-  SQLite reaches its progress check first, and SQLite checks once more after
-  a write's last step has committed it: the law follows either answer, and
-  reads the table when a cancelled batch had reached the end.
+  run applied shows once. A signalled cancel token stops a batch before its
+  first step when the statement has not started, or at SQLite's next progress
+  check while the run goes on: a cancelled answer means the run wrote nothing,
+  and a batch that reaches the statement's end first answers its completion.
   """
 
   use ExUnit.Case, async: true
@@ -246,7 +246,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
 
     case shape(Xqlite.multi_step_cancellable(stmt, k, [token])) do
       {:error, :operation_cancelled} when s.set? and s.held == nil ->
-        cancelled(expected, next, rolled_back(s))
+        rolled_back(s)
 
       answer ->
         assert expected == answer
@@ -327,14 +327,6 @@ defmodule Xqlite.BindBeforeStepLawTest do
     do: %{s | pos: 0, applied: Enum.drop(s.applied, -1)}
 
   defp rolled_back(s), do: %{s | pos: 0}
-
-  defp cancelled({:ok, %{done: true}}, next, back) when next.applied != back.applied do
-    rows = stored_table(back)
-    assert rows in [table(next.applied), table(back.applied)]
-    Enum.find([next, back], &(table(&1.applied) == rows))
-  end
-
-  defp cancelled(_expected, _next, back), do: back
 
   defp table(applied) do
     for {id, letter} <- [{1, "a"}, {2, "b"}, {3, "c"}] do

@@ -271,10 +271,7 @@ A cancellation token (`Xqlite.create_cancel_token/0`) wraps a flag that is set
 and it stays that way for the life of the token — signalling twice is
 idempotent, but there is no un-signal. So a token you have already signalled is
 *spent*: hand it to another cancellable operation and that operation is
-cancelled the moment it starts stepping, before it does any real work.
-(`big_table` below stands for a real table; against a missing table the
-prepare error comes first, because cancellation is only checked while
-stepping.)
+cancelled before its statement runs, so it does no work at all.
 
 ```elixir
 {:ok, token} = Xqlite.create_cancel_token()
@@ -321,6 +318,37 @@ stops being one part-way through. `Xqlite.stream/4` answers it at stream
 open, the others at the call, and the raw `XqliteNIF` functions answer the
 same map — except for a term that is no list at all, which they refuse as
 `{:expected_list, _}`, taking a list and nothing else.
+
+### A cancelled write rolls back the whole transaction
+
+A token that is already signalled when a cancellable call starts cancels the
+call before its statement runs, as long as that statement has not started:
+the one-shot calls such as `Xqlite.execute_cancellable/4`,
+`Xqlite.multi_step_cancellable/3` on a statement not started or finished, and
+a stream's first fetch. Nothing is written then, and a transaction you opened
+stays as it was. A statement already mid-run is stepped, one that SQLite keeps
+running after `SQLITE_BUSY` included, and so is every statement once it
+starts: a signal takes effect at SQLite's next progress check, and SQLite
+does not check on a clock. It checks at certain jumps (the bottom of a loop,
+a trigger's entry, the end of a statement's setup) and at the end of every
+step, once at least 8 VM instructions have run since the last check, counting
+across runs of the same prepared statement. A one-row `UPDATE` run through a
+one-shot call is first checked after it has ended; a signal that lands then
+changes nothing, and the call answers its normal result with the write in
+place. SQLite also checks while it compiles a statement, but xqlite lets the
+compile finish: a signal during a long compile takes effect once the
+statement runs.
+
+A signal that stops a write while it runs undoes more than that statement.
+SQLite rolls back the whole transaction, a `BEGIN` you issued included, and
+turns autocommit back on: every statement you run afterwards commits on its
+own, and a later `COMMIT` or `ROLLBACK` answers an error because no
+transaction is open. `Xqlite.autocommit/1` tells you whether the transaction
+survived. A cancelled read rolls back nothing.
+`Xqlite.execute_batch_cancellable/3` keeps what the statements before the
+cancelled one committed. Rows that a `RETURNING` write handed out before the
+cancel, through `Xqlite.multi_step_cancellable/3` or a stream, describe
+changes the cancel took back.
 
 ### Delete sessions before the connection
 

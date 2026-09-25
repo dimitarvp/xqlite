@@ -19,6 +19,19 @@ defmodule XqliteNIF do
   3. To interrupt the NIF, call `cancel_operation/1` with the token from another process.
      The NIF will then typically return `{:error, :operation_cancelled}`.
 
+  A token already signalled when a call starts cancels it before its statement
+  runs if that statement has not started: the one-shot calls, a multi-step on
+  a statement not started or finished, a stream's first fetch. Nothing is
+  written then, and an open transaction stays as it was. A statement already
+  mid-run, one SQLite keeps running after `SQLITE_BUSY` included, is stepped,
+  and a signal takes effect at SQLite's next progress check (see
+  `Xqlite.create_cancel_token/0`); a statement that reaches its end first
+  answers its normal result. A cancelled write rolls back the whole
+  transaction, an explicit one included, and turns autocommit back on; a
+  cancelled read rolls back nothing. `execute_batch_cancellable/3` keeps what
+  the statements before the cancelled one committed, and rows a `RETURNING`
+  write handed out before the cancel describe changes the cancel took back.
+
   **Error handling:**
   Most functions return `{:ok, value}` or `:ok` on success, and
   `{:error, reason_tuple}` on failure. The `reason_tuple` provides structured
@@ -1448,13 +1461,16 @@ defmodule XqliteNIF do
   `stream_close/1` still answers `:ok`. Rows read before the cancel in the
   same batch are discarded with it; a cancellation is the one failure that
   throws rows away, while every other mid-batch error hands them back first.
-  A token signalled before the call cancels during the first batch. Tokens
-  are single-use, so a signalled token ends every stream it is handed to.
+  A token already signalled when the first fetch starts cancels it before it
+  steps. Tokens are single-use, so a signalled token ends every stream it is
+  handed to.
 
   An empty list behaves exactly like `stream_fetch/2`.
 
-  Cancellation is checked every 8 SQLite VM instructions, so a statement
-  whose whole run is cheaper than that finishes before the first check.
+  A signal during a fetch takes effect at SQLite's next progress check (see
+  `Xqlite.create_cancel_token/0`), so a statement that reaches its end first
+  answers its rows and then `:done`. A cancel over a `RETURNING` write rolls
+  back the changes that rows of earlier fetches described.
 
   Most users want `Xqlite.stream/4` and its `:cancel_tokens` option.
   """
@@ -1847,8 +1863,8 @@ defmodule XqliteNIF do
   @doc """
   Registers a progress-tick subscriber on the connection.
 
-  After every `8 × every_n` SQLite VM instructions (the handler runs every
-  8 of them, and one message goes out per `every_n` runs), forwards
+  Once per `every_n` runs of SQLite's progress handler (see
+  `Xqlite.create_cancel_token/0` for when SQLite runs it), forwards
 
       {:xqlite_progress, count, elapsed_ms}              # tag = nil
       {:xqlite_progress, tag, count, elapsed_ms}         # tag != nil

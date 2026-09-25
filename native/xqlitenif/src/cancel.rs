@@ -1,6 +1,7 @@
 use crate::error::{ListRefusal, XqliteError};
 use crate::progress_dispatch::{CancelSubscriber, ProgressDispatch};
 use crate::util::walk_list;
+use rusqlite::ffi;
 use rustler::{Resource, ResourceArc, Term, resource_impl};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,12 +49,14 @@ pub(crate) fn decode_tokens(term: Term<'_>) -> Result<Vec<Arc<AtomicBool>>, Xqli
     Ok(flags)
 }
 
-// The guard pushes one cancel subscriber per token onto
-// `dispatch.cancels`, holds the owning `Arc<AtomicBool>` for each
-// (so the raw pointer stored in the subscriber stays valid), and
-// unregisters them all on drop. The SQLite progress callback was
-// already installed eagerly at connection open and stays put — no
-// FFI work happens here.
+/// A call whose statement has not started reads its tokens here, before the
+/// guard registers them, so a signalled one runs nothing.
+pub(crate) fn cancel_if_signalled(tokens: &[Arc<AtomicBool>]) -> Result<(), XqliteError> {
+    match tokens.iter().any(|token| token.load(Ordering::Acquire)) {
+        true => Err(XqliteError::OperationCancelled),
+        false => Ok(()),
+    }
+}
 
 pub(crate) struct ProgressHandlerGuard<'d> {
     dispatch: &'d ProgressDispatch,
@@ -70,8 +73,22 @@ impl<'d> ProgressHandlerGuard<'d> {
     /// guard (cheaper than guarding every call site against empty
     /// vectors).
     ///
+    /// With tokens, the guard also records in the dispatch how many of the
+    /// connection's statements are mid-run now, `stepped` left out: the
+    /// statement the call steps, or null when the call prepares its own.
+    /// Guards never overlap, each being built and dropped under the Mutex.
+    ///
     /// Caller must hold the connection Mutex.
-    pub(crate) fn new(dispatch: &'d ProgressDispatch, tokens: Vec<Arc<AtomicBool>>) -> Self {
+    pub(crate) fn new(
+        dispatch: &'d ProgressDispatch,
+        stepped: *mut ffi::sqlite3_stmt,
+        tokens: Vec<Arc<AtomicBool>>,
+    ) -> Self {
+        if !tokens.is_empty() {
+            // SAFETY: the caller holds the connection Mutex.
+            let busy = unsafe { dispatch.busy_statements(stepped) };
+            dispatch.busy_before.store(busy, Ordering::Relaxed);
+        }
         let mut entries = Vec::with_capacity(tokens.len());
         for token in tokens {
             let raw = Arc::as_ptr(&token);

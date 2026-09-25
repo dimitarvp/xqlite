@@ -26,9 +26,7 @@ defmodule Xqlite.FuzzLawTest do
   own answers; `Xqlite.TypeExtension.encode_value/2` and `decode_value/2`,
   whose caller vouches for the extension list; and the atom `:hard_heap_limit`,
   because a small hard heap limit binds the whole OS process for good and
-  every later open fails. The writable blob sits on a connection no call
-  receives: its open write transaction would keep `backup_with_progress/6`
-  retrying forever.
+  every later open fails.
   """
 
   use ExUnit.Case, async: true

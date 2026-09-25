@@ -14,16 +14,14 @@
 //!
 //! The C callback is registered exactly once at connection open and
 //! stays installed. Both subscriber lists may be empty, in which case
-//! the callback is a 2-load no-op. This eliminates the lazy-install
-//! coordination problem that the previous per-query
-//! `sqlite3_progress_handler` registration in `cancel.rs` carried.
+//! the callback is a 2-load no-op.
 //!
 //! Safety story for the callback itself:
 //!
 //! * `user_data` is a stable `*const ProgressDispatch` pointing into
-//!   the heap-allocated `XqliteConn` (held in a `ResourceArc`). The
-//!   callback only fires inside `sqlite3_step`, which only runs while
-//!   the conn `Mutex` is held by some thread; that thread also holds
+//!   the heap-allocated `XqliteConn` (held in a `ResourceArc`). SQLite
+//!   calls it while stepping or compiling, which runs only while the
+//!   conn `Mutex` is held by some thread; that thread also holds
 //!   the `XqliteConn` `ResourceArc`, so the dispatch is alive.
 //! * `HookList::for_each_snapshot` reads via atomic load — the C
 //!   callback is wait-free.
@@ -41,17 +39,18 @@ use rustler::sys::{
 };
 use rustler::types::LocalPid;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// Number of SQLite VM instructions between progress callback
-/// invocations. Hardcoded — tighter values regress cancellation
-/// latency without giving meaningful tick precision (SQLite VM op
-/// cost varies wildly per op anyway).
+/// SQLite runs the progress callback at certain jumps (a loop's bottom, a
+/// trigger's entry, the end of a statement's setup) and at the end of every
+/// step once this many VM instructions have run since the last call, counting
+/// across runs of the same statement, and while it compiles. Tighter values
+/// regress cancellation latency without giving meaningful tick precision
+/// (SQLite VM op cost varies wildly per op anyway).
 pub(crate) const PROGRESS_NUM_OPS: c_int = 8;
 
-/// One cancel-check subscriber. Cloned on register/unregister Vec
-/// rebuild — `*const AtomicBool` is `Copy` so cloning is trivial.
+/// One cancel-check subscriber.
 #[derive(Debug, Clone)]
 pub(crate) struct CancelSubscriber {
     /// Raw pointer into the `Arc<AtomicBool>` owned by the cancel
@@ -128,6 +127,10 @@ impl TickSubscriber {
 pub(crate) struct ProgressDispatch {
     pub(crate) cancels: HookList<CancelSubscriber>,
     pub(crate) ticks: HookList<TickSubscriber>,
+    db: AtomicPtr<ffi::sqlite3>,
+    /// The live guard's count of the connection's mid-run statements, taken
+    /// when it registered its tokens, the statement its call steps left out.
+    pub(crate) busy_before: AtomicUsize,
 }
 
 impl ProgressDispatch {
@@ -135,7 +138,33 @@ impl ProgressDispatch {
         Self {
             cancels: HookList::new(),
             ticks: HookList::new(),
+            db: AtomicPtr::new(std::ptr::null_mut()),
+            busy_before: AtomicUsize::new(0),
         }
+    }
+
+    /// # Safety
+    ///
+    /// `install_callback` has run, and the caller holds the connection Mutex,
+    /// which every step and compile on the connection runs under.
+    pub(crate) unsafe fn busy_statements(&self, except: *mut ffi::sqlite3_stmt) -> usize {
+        let db = self.db.load(Ordering::Acquire);
+        let mut busy = 0;
+        // SAFETY: this function's own contract keeps the connection open and
+        // its statement list unchanged while the list is walked.
+        unsafe {
+            let mut stmt = ffi::sqlite3_next_stmt(db, std::ptr::null_mut());
+            while !stmt.is_null() {
+                // A blob handle is a statement without SQL text, and an R*Tree
+                // keeps one running until its write transaction ends.
+                let sql = ffi::sqlite3_sql(stmt);
+                busy += usize::from(
+                    stmt != except && !sql.is_null() && ffi::sqlite3_stmt_busy(stmt) != 0,
+                );
+                stmt = ffi::sqlite3_next_stmt(db, stmt);
+            }
+        }
+        busy
     }
 }
 
@@ -158,6 +187,7 @@ pub(crate) unsafe fn install_callback(
     // signature for sqlite3_progress_handler matches our callback;
     // user_data lives long enough.
     unsafe {
+        dispatch.db.store(conn.handle(), Ordering::Release);
         ffi::sqlite3_progress_handler(
             conn.handle(),
             PROGRESS_NUM_OPS,
@@ -168,7 +198,7 @@ pub(crate) unsafe fn install_callback(
 }
 
 /// The single C callback registered with SQLite. Walks both subscriber
-/// lists; cancel checks short-circuit if any token signals.
+/// lists, the cancel checks first.
 ///
 /// # Safety
 ///
@@ -180,29 +210,28 @@ unsafe extern "C" fn progress_dispatch_callback(user_data: *mut c_void) -> c_int
     // catches a panic before it unwinds into SQLite's C stack. Fallback 0
     // is the callback's normal-path "do not interrupt" value — a panic
     // must never spuriously abort a user query, and 0 leaves SQLite state
-    // untouched (a missed cancel is re-checked on the next fire, 8 VM ops
-    // later).
+    // untouched (a missed cancel waits for SQLite's next check, if any).
     hook_util::guard_ffi_callback("progress_dispatch_callback", 0, move || {
         // SAFETY: user_data is the dispatch pointer we registered;
-        // guaranteed alive while a step is in flight.
+        // guaranteed alive while a step or a compile is in flight.
         let dispatch = unsafe { &*(user_data as *const ProgressDispatch) };
 
-        // Cancel pass first: any signalled token interrupts the query.
-        // Use a flag rather than `?`-style early return so we still walk
-        // the full list (cheap; lets every cancel-checker pay the same
-        // cost regardless of order).
-        let mut should_interrupt = false;
+        let mut signalled = false;
         // SAFETY: dispatch outlives the snapshot borrow (module invariants).
         unsafe {
             dispatch.cancels.for_each_snapshot(|entry| {
                 // SAFETY: CancelSubscriber::flag invariant.
-                let flag = &*entry.state.flag;
-                if flag.load(Ordering::Acquire) {
-                    should_interrupt = true;
-                }
+                signalled |= (*entry.state.flag).load(Ordering::Acquire);
             });
         }
-        if should_interrupt {
+        // SQLite runs this after a statement's last step too, past its commit
+        // (sqlite3.c:105815): interrupt only while the call's statement runs.
+        let running = || {
+            // SAFETY: SQLite calls this under the connection Mutex.
+            let busy = unsafe { dispatch.busy_statements(std::ptr::null_mut()) };
+            busy > dispatch.busy_before.load(Ordering::Relaxed)
+        };
+        if signalled && running() {
             return 1;
         }
 
@@ -267,5 +296,29 @@ unsafe fn send_tick_to_pid(
         let _ = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, msg);
 
         enif_free_env(msg_env);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_rtree_node_blob_kept_open_is_not_a_running_statement() {
+        let dispatch = ProgressDispatch::new();
+        let conn = rusqlite::Connection::open_in_memory().expect("an in-memory connection");
+        // SAFETY: `dispatch` is declared first, so it outlives `conn`, and this
+        // thread owns the connection outright.
+        unsafe { install_callback(&conn, &dispatch) };
+        conn.execute_batch("CREATE VIRTUAL TABLE r USING rtree(id, x0, x1); BEGIN;")
+            .expect("an R*Tree table and an open transaction");
+
+        // SAFETY: this thread owns the connection, and no step is in flight.
+        let before = unsafe { dispatch.busy_statements(std::ptr::null_mut()) };
+        conn.execute("INSERT INTO r VALUES (1, 0, 1)", [])
+            .expect("an R*Tree insert");
+        // SAFETY: as above.
+        let after = unsafe { dispatch.busy_statements(std::ptr::null_mut()) };
+        assert_eq!(after, before);
     }
 }

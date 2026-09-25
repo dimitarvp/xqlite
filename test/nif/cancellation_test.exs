@@ -34,6 +34,9 @@ defmodule Xqlite.NIF.CancellationTest do
   @batch_cancel_setup "CREATE TABLE #{@batch_cancel_table} (id INTEGER PRIMARY KEY, data TEXT); INSERT INTO #{@batch_cancel_table} (id, data) VALUES (0, 'initial');"
   @await_timeout 5_000
 
+  @one_row "CREATE TABLE t (id INTEGER PRIMARY KEY, v); INSERT INTO t VALUES (1, 'a');"
+  @writes ["UPDATE t SET v = 2 WHERE id = 1", "INSERT INTO t VALUES (2, 2)", "DELETE FROM t"]
+
   # Test token creation separately, doesn't need the loop/connection setup.
   test "create_cancel_token/0 returns a resource" do
     assert {:ok, token} = NIF.create_cancel_token()
@@ -257,7 +260,40 @@ defmodule Xqlite.NIF.CancellationTest do
                    type_extensions: [Xqlite.TypeExtension.Date]
                  )
       end
+
+      test "a signalled token cancels a one-row write before it runs", %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, @one_row)
+        {:ok, token} = NIF.create_cancel_token()
+        :ok = NIF.cancel_operation(token)
+
+        for sql <- @writes, {name, call} <- one_shot_calls() do
+          assert {^name, ^sql, {:error, :operation_cancelled}, {:ok, %{rows: [[1, "a"]]}}} =
+                   {name, sql, call.(conn, sql, [token]),
+                    NIF.query(conn, "SELECT * FROM t", [])}
+        end
+      end
     end
+  end
+
+  defp one_shot_calls do
+    [
+      query_cancellable: &NIF.query_cancellable(&1, &2, [], &3),
+      execute_cancellable: &NIF.execute_cancellable(&1, &2, [], &3),
+      query_with_changes_cancellable: &NIF.query_with_changes_cancellable(&1, &2, [], &3),
+      execute_batch_cancellable: &NIF.execute_batch_cancellable/3,
+      stmt_multi_step_cancellable: &fresh_multi_step/3,
+      stream_fetch_cancellable: &first_fetch/3
+    ]
+  end
+
+  defp fresh_multi_step(conn, sql, tokens) do
+    assert {:ok, stmt} = NIF.stmt_prepare(conn, sql)
+    NIF.stmt_multi_step_cancellable(stmt, 10, tokens)
+  end
+
+  defp first_fetch(conn, sql, tokens) do
+    assert {:ok, stream} = NIF.stream_open(conn, sql, [])
+    NIF.stream_fetch_cancellable(stream, 10, tokens)
   end
 
   defp generate_long_batch(table_name) do
@@ -270,33 +306,14 @@ defmodule Xqlite.NIF.CancellationTest do
     """
   end
 
-  # Helper function to assert cancellation in a deterministic way.
+  # Signals once a progress tick shows the call running, never before it starts.
   defp assert_cancellation(conn, nif_fun) do
     {:ok, token} = NIF.create_cancel_token()
-    parent = self()
-
-    task =
-      Task.async(fn ->
-        send(parent, {:nif_started, self()})
-        # The provided function is called with the conn and a single
-        # token; lambdas wrap it with `[token]` themselves to match the
-        # NIF signature.
-        nif_fun.(conn, token)
-      end)
-
-    # Wait for the task to signal it has started the NIF call
-    receive do
-      {:nif_started, _task_pid} ->
-        :ok
-    after
-      # Use a reasonable timeout in case the task fails to start
-      1000 -> flunk("Test process did not receive :nif_started message from task")
-    end
-
-    # As soon as we get the signal, we cancel
+    {:ok, ticks} = NIF.register_progress_hook(conn, self(), 1_000_000, nil)
+    task = Task.async(fn -> nif_fun.(conn, token) end)
+    assert_receive {:xqlite_progress, _count, _elapsed_ms}, @await_timeout
     assert :ok = NIF.cancel_operation(token)
-
-    result = Task.await(task, @await_timeout)
-    assert {:error, :operation_cancelled} == result
+    assert {:error, :operation_cancelled} == Task.await(task, @await_timeout)
+    assert :ok = NIF.unregister_progress_hook(conn, ticks)
   end
 end

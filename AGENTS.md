@@ -155,8 +155,10 @@ of `- [x] did a thing`, nothing else — the reader is a dev skimming.
   `open_in_memory(opts \\ [])`; `XqliteNIF` declares zero-arity stubs
   only for Rust functions that really take none — `open_temporary/0`,
   `create_cancel_token/0`, `sqlite_version/0`.
-- **Cancellation** is checked every 8 SQLite VM operations
-  (`PROGRESS_NUM_OPS` in `progress_dispatch.rs`); quote it from there only.
+- **Cancellation** is checked at a loop's bottom and at the end of a step,
+  once 8 SQLite VM instructions have run since the last check, counting
+  across runs (`PROGRESS_NUM_OPS` in `progress_dispatch.rs`); a statement
+  without a loop is first checked after its end. Quote it from there only.
 - **rusqlite upgrades break `error.rs` first**, its error enum being the
   recurring breakage point; `UPGRADE_PLAYBOOK.md` is the checklist for a
   bundled SQLite, rusqlite or rustler bump.

@@ -2,7 +2,7 @@ use crate::atoms;
 use crate::authorizer;
 use crate::blob::{self, XqliteBlob};
 use crate::busy_handler;
-use crate::cancel::XqliteCancelToken;
+use crate::cancel::{ProgressHandlerGuard, XqliteCancelToken, cancel_if_signalled};
 use crate::connection::{self, ChildHandle, XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
 use crate::explain_analyze::{self, ExplainAnalyze};
@@ -27,6 +27,7 @@ use rustler::{
     },
 };
 use std::io::Cursor;
+use std::ptr::null_mut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -151,8 +152,9 @@ fn query_with_changes_cancellable<'a>(
         Err(e) => return (error(), e).encode(env),
     };
     let result = connection::with_conn(&handle, |conn| {
+        cancel_if_signalled(&token_bools)?;
         let _guard =
-            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+            ProgressHandlerGuard::new(&handle.progress_dispatch, null_mut(), token_bools);
         query::core_query_with_changes(env, conn, &sql, params_term)
     });
 
@@ -172,8 +174,9 @@ fn query_cancellable<'a>(
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
     let token_bools = crate::cancel::decode_tokens(tokens_term)?;
     connection::with_conn(&handle, |conn| {
+        cancel_if_signalled(&token_bools)?;
         let _guard =
-            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+            ProgressHandlerGuard::new(&handle.progress_dispatch, null_mut(), token_bools);
         query::core_query(env, conn, &sql, params_term)
     })
 }
@@ -188,8 +191,9 @@ fn execute_cancellable<'a>(
 ) -> Result<usize, XqliteError> {
     let token_bools = crate::cancel::decode_tokens(tokens_term)?;
     connection::with_conn(&handle, |conn| {
+        cancel_if_signalled(&token_bools)?;
         let _guard =
-            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+            ProgressHandlerGuard::new(&handle.progress_dispatch, null_mut(), token_bools);
         query::core_execute(env, conn, &sql, params_term)
     })
 }
@@ -206,8 +210,9 @@ fn execute_batch_cancellable<'a>(
         Err(e) => return (error(), e).encode(env),
     };
     let execution_result = connection::with_conn(&handle, |conn| {
+        cancel_if_signalled(&token_bools)?;
         let _guard =
-            crate::cancel::ProgressHandlerGuard::new(&handle.progress_dispatch, token_bools);
+            ProgressHandlerGuard::new(&handle.progress_dispatch, null_mut(), token_bools);
         query::core_execute_batch(conn, &sql_batch)
     });
     singular_ok_or_error_tuple(env, execution_result)
@@ -938,12 +943,17 @@ fn stmt_multi_step_impl<'a>(
             return Err(pending);
         }
 
-        // Registers the cancel tokens on the connection's progress dispatch
-        // for the duration of the step loop (RAII; empty input is a no-op
-        // guard). with_live_stmt holds the connection Mutex, satisfying the
-        // guard's contract.
-        let _guard = crate::cancel::ProgressHandlerGuard::new(
+        // SAFETY: with_live_stmt holds the connection mutex and proved
+        // stmt_ptr live.
+        if unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } == 0 {
+            cancel_if_signalled(&token_bools)?;
+        }
+
+        // with_live_stmt holds the connection Mutex, satisfying the guard's
+        // contract.
+        let _guard = ProgressHandlerGuard::new(
             &stmt_handle.conn_resource_arc.progress_dispatch,
+            stmt_ptr,
             token_bools,
         );
 
@@ -1319,9 +1329,17 @@ fn stream_fetch_impl<'a>(
     // for sqlite3_errmsg within process_single_step.
     let db_handle_for_errors = unsafe { conn_ref.handle() };
 
-    // Registers the cancel tokens on the connection's progress dispatch for
-    // the whole batch loop (RAII; an empty list is a no-op guard).
-    //
+    let stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
+    // SAFETY: conn_lock_guard is held, and a non-null pointer is this stream's
+    // live statement.
+    let fresh = !stmt_ptr.is_null() && unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } == 0;
+    if fresh && let Err(cancelled) = cancel_if_signalled(&token_bools) {
+        // SAFETY: conn_lock_guard is held. The registry result is dropped: a
+        // cancelled fetch closes the stream, as a cancelled step does below.
+        let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
+        return (error(), cancelled).encode(env);
+    }
+
     // SAFETY: the declaration order is load-bearing. Rust drops locals in
     // reverse declaration order, so declaring the guard after conn_lock_guard
     // drops it while the connection Mutex is still held, which is the guard's
@@ -1329,8 +1347,9 @@ fn stream_fetch_impl<'a>(
     // atomic swap, while the C progress callback reads that vector without a
     // lock. Unregistering with the Mutex released would be a use-after-free
     // inside the callback.
-    let _progress_guard = crate::cancel::ProgressHandlerGuard::new(
+    let _progress_guard = ProgressHandlerGuard::new(
         &stream_handle.conn_resource_arc.progress_dispatch,
+        stmt_ptr,
         token_bools,
     );
 

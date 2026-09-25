@@ -195,7 +195,7 @@ observation is fan-out, and the telemetry bridge re-emits it as
 
 ```elixir
 {:ok, token} = XqliteNIF.create_cancel_token()
-:ok = XqliteNIF.backup_with_progress(conn, "main", "/path/to/backup.db", self(), 10, token)
+:ok = XqliteNIF.backup_with_progress(conn, "main", "/path/to/backup.db", self(), 10, [token])
 # receive {:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}} messages
 # cancel from any process: XqliteNIF.cancel_operation(token)
 ```
@@ -289,7 +289,7 @@ Architectural limits SQLite imposes (not Xqlite choices):
 
 ### Cancellation over `sqlite3_interrupt`
 
-Xqlite cancels operations via SQLite's progress handler, checked every 8 VM instructions, rather than via `sqlite3_interrupt()`. The interrupt API is fire-and-forget, per-connection, and is known to let slow operations continue running after being asked to stop. The progress-handler approach is per-operation, fine-grained, and any process can cancel without holding the connection handle -- which maps well onto DBConnection's timeout model and, by extension, to most Ecto-using apps.
+Xqlite cancels operations via SQLite's progress handler, which SQLite calls at certain jumps such as a loop's bottom, at the end of every step and while compiling, rather than via `sqlite3_interrupt()`. The interrupt API is fire-and-forget, per-connection, and is known to let slow operations continue running after being asked to stop. The progress-handler approach is per-operation, fine-grained, and any process can cancel without holding the connection handle -- which maps well onto DBConnection's timeout model and, by extension, to most Ecto-using apps.
 
 ### Rust `Mutex` vs SQLite's `NO_MUTEX`
 

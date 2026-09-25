@@ -1714,7 +1714,9 @@ defmodule Xqlite do
       makes. Signalling any one of them ends the fetch it lands in with
       `{:error, :operation_cancelled}` and closes the stream; that error
       then follows the `:on_error` mode above, like any other fetch error.
-      Rows already read in the same batch are discarded with it. Tokens are
+      Rows already read in the same batch are discarded with it, and over a
+      `RETURNING` write the cancel rolls back the changes that rows of
+      earlier fetches described. Tokens are
       single-use, so a token you have already signalled kills the next
       stream you hand it to on its first fetch — create a fresh one per
       stream. Any value that is not a live token, or a list holding one,
@@ -2831,7 +2833,7 @@ defmodule Xqlite do
   @doc """
   Registers a progress-tick subscriber on the connection.
 
-  After every 8 SQLite VM instructions × `every_n`, sends
+  Once per `every_n` runs of SQLite's progress callback, sends
 
       {:xqlite_progress, count, elapsed_ms}              # tag = nil
       {:xqlite_progress, tag, count, elapsed_ms}         # tag set
@@ -2845,8 +2847,8 @@ defmodule Xqlite do
   ## Options
 
     * `:every_n` (integer from `1` to `4_294_967_295`, default `1000`) — emit every Nth
-      progress callback fire. The progress callback fires every 8 SQLite
-      VM instructions (currently fixed); `every_n` decimates further.
+      progress callback fire. SQLite runs the callback where
+      `create_cancel_token/0` says it checks; `every_n` decimates further.
     * `:tag` (atom, default `nil`) — included in each emitted message
       as the second tuple element when set. Useful when a single
       listener process subscribes to multiple connections and needs to
@@ -2905,6 +2907,18 @@ defmodule Xqlite do
   already-signalled token cancels the next operation the moment it starts —
   create a fresh token per cancellable operation. See the "Cancel tokens are
   single-use" section of the Gotchas guide.
+
+  A token already signalled when a call starts cancels it before its statement
+  runs if that statement has not started: nothing is written, and an open
+  transaction stays as it was. A statement already mid-run is stepped, and a
+  signal takes effect at SQLite's next progress check: at certain jumps (a
+  loop's bottom, a trigger's entry, the end of a statement's setup) and at the
+  end of every step, once 8 VM instructions have run since the last check. A
+  statement that reaches its end first answers its normal result. SQLite also
+  checks while it compiles; a signal then takes effect once the statement
+  runs. A cancelled write rolls back the whole transaction, an explicit one
+  included, and turns autocommit back on; a cancelled read rolls back nothing.
+  See "A cancelled write rolls back the whole transaction" in the Gotchas guide.
   """
   @spec create_cancel_token() :: {:ok, reference()} | error()
   def create_cancel_token do

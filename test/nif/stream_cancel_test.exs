@@ -10,10 +10,10 @@ defmodule Xqlite.NIF.StreamCancelTest do
   mid-batch error discards them.
 
   The law's subject is a recursive CTE because cancellability follows the
-  *shape* of a statement, not its size. SQLite consults the progress callback
-  every 8 VM instructions, so a statement whose whole run is cheaper than that
-  — `SELECT 1`, a one-row `VALUES`, a PRAGMA read, a scan that finds no row —
-  finishes before the first check and cannot be cancelled. A recursive CTE is
+  *shape* of a statement, not its size. A token signalled before the first
+  fetch cancels any stream; after it, SQLite checks at certain jumps and step
+  ends, at least 8 VM instructions apart, so a statement whose run is cheaper —
+  `SELECT 1`, a scan that finds no row — ends before a check. A recursive CTE is
   past that line at every depth, including 0, so the assertion can stay
   strict: the very next fetch after the signal is the cancelled one. A plain
   table scan is past the line too, but its rows are so cheap that two or three
@@ -39,6 +39,7 @@ defmodule Xqlite.NIF.StreamCancelTest do
   @max_prefetches 3
 
   @scan_rows 200
+  @three_rows "CREATE TABLE w (id INTEGER PRIMARY KEY, v); INSERT INTO w VALUES (1, 0), (2, 0), (3, 0);"
 
   for_each_opener "stream cancellation" do
     property "a signalled token ends the next fetch and closes the stream", %{conn: conn} do
@@ -227,13 +228,29 @@ defmodule Xqlite.NIF.StreamCancelTest do
       assert :ok = NIF.cancel_operation(token)
 
       # A scanned row is about three VM instructions, and the progress
-      # callback fires every eight, so up to two more single-row fetches can
+      # check waits for eight, so up to two more single-row fetches can
       # be served before the check comes round. Nothing here is timing based:
       # the instruction count is deterministic.
       results = for _ <- 1..3, do: NIF.stream_fetch_cancellable(stream, 1, [token])
       assert {:error, :operation_cancelled} in results
 
       assert :ok = NIF.stream_close(stream)
+    end
+
+    test "a cancel on a later fetch of a RETURNING write leaves nothing written", %{conn: conn} do
+      assert :ok = NIF.execute_batch(conn, @three_rows)
+
+      for first <- 1..3, batch <- [1, 2, 10] do
+        assert :ok = NIF.execute_batch(conn, "UPDATE w SET v = 0;")
+        assert {:ok, stream} = NIF.stream_open(conn, "UPDATE w SET v = v + 1 RETURNING id", [])
+        for _ <- 1..first, do: assert({:ok, %{rows: [_]}} = NIF.stream_fetch(stream, 1))
+        tokens = create_tokens(1)
+        signal(tokens, 0)
+        answer = NIF.stream_fetch_cancellable(stream, batch, tokens)
+        assert :ok = NIF.stream_close(stream)
+        assert {:ok, %{rows: [[sum]]}} = NIF.query(conn, "SELECT sum(v) FROM w", [])
+        assert {first, batch, written(answer)} == {first, batch, sum}
+      end
     end
   end
 
@@ -381,6 +398,11 @@ defmodule Xqlite.NIF.StreamCancelTest do
     token = Enum.at(tokens, index)
     assert :ok = NIF.cancel_operation(token)
   end
+
+  # Closing the stream finishes a run that the last fetch left mid-way.
+  defp written({:error, :operation_cancelled}), do: 0
+  defp written({:ok, %{rows: _}}), do: 3
+  defp written(:done), do: 3
 
   defp seed_scan_table(conn) do
     assert :ok =
