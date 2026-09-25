@@ -97,7 +97,8 @@ defmodule Xqlite.ValueLengthLimitLawTest do
          %{conn: conn} do
       assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
 
-      assert {:ok, nil} = NIF.get_create_sql(conn, String.duplicate("n", 30))
+      assert {:error, {:no_such_object, _}} =
+               NIF.get_create_sql(conn, String.duplicate("n", 30))
 
       assert {:error, {:value_too_large, %{byte_size: 31, limit: 30}}} =
                NIF.get_create_sql(conn, String.duplicate("n", 31))

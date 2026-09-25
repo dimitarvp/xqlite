@@ -36,7 +36,7 @@ defmodule Xqlite.NIF.SessionTest do
       NIF.session_delete(session)
     end
 
-    test "attach nil tracks all tables", %{conn: conn} do
+    test "attach :all tracks all tables, \"\" is a table name and nil is none", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, """
         CREATE TABLE sess_all1 (id INTEGER PRIMARY KEY, val TEXT);
@@ -44,7 +44,9 @@ defmodule Xqlite.NIF.SessionTest do
         """)
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      assert_raise ArgumentError, fn -> NIF.session_attach(session, nil) end
+      assert :ok = NIF.session_attach(session, "")
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_all1 VALUES (1, 'a')", [])
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_all2 VALUES (1, 'b')", [])
@@ -79,7 +81,7 @@ defmodule Xqlite.NIF.SessionTest do
         )
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_ins VALUES (1, 'hello')", [])
 
@@ -100,7 +102,7 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_upd VALUES (1, 'old')", [])
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "UPDATE sess_cs_upd SET val = 'new' WHERE id = 1", [])
 
@@ -120,7 +122,7 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cs_del VALUES (1, 'doomed')", [])
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_cs_del WHERE id = 1", [])
 
@@ -134,7 +136,7 @@ defmodule Xqlite.NIF.SessionTest do
       :ok = NIF.execute_batch(conn, "CREATE TABLE sess_cs_empty (id INTEGER PRIMARY KEY);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       assert {:ok, changeset} = NIF.session_changeset(session)
       assert byte_size(changeset) == 0
@@ -147,7 +149,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_ps (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ps VALUES (1, 'patch')", [])
 
@@ -163,7 +165,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_ap (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap VALUES (1, 'replicated')", [])
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap VALUES (2, 'also')", [])
@@ -192,7 +194,7 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_u VALUES (1, 'before')", [])
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "UPDATE sess_ap_u SET val = 'after' WHERE id = 1", [])
 
@@ -223,7 +225,7 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_ap_d VALUES (2, 'safe')", [])
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "DELETE FROM sess_ap_d WHERE id = 1", [])
 
@@ -252,7 +254,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_inv (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_inv VALUES (1, 'hello')", [])
 
@@ -274,7 +276,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_dinv (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_dinv VALUES (1, 'test')", [])
 
@@ -305,13 +307,13 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_cat (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, s1} = NIF.session_new(conn)
-      :ok = NIF.session_attach(s1, nil)
+      :ok = NIF.session_attach(s1, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cat VALUES (1, 'first')", [])
       {:ok, cs1} = NIF.session_changeset(s1)
       NIF.session_delete(s1)
 
       {:ok, s2} = NIF.session_new(conn)
-      :ok = NIF.session_attach(s2, nil)
+      :ok = NIF.session_attach(s2, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_cat VALUES (2, 'second')", [])
       {:ok, cs2} = NIF.session_changeset(s2)
       NIF.session_delete(s2)
@@ -337,7 +339,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_omit (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_omit VALUES (1, 'from_source')", [])
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
@@ -363,7 +365,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_repl (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl VALUES (1, 'from_source')", [])
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
@@ -389,7 +391,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_abrt (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_abrt VALUES (1, 'from_source')", [])
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
@@ -424,7 +426,7 @@ defmodule Xqlite.NIF.SessionTest do
         )
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl_c VALUES (1, 'x')", [])
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
@@ -462,7 +464,7 @@ defmodule Xqlite.NIF.SessionTest do
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_repl_nf VALUES (1, 'a')", [])
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
       {:ok, 1} = NIF.execute(conn, "UPDATE sess_repl_nf SET val = 'b' WHERE id = 1", [])
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
@@ -489,7 +491,7 @@ defmodule Xqlite.NIF.SessionTest do
       :ok = NIF.execute_batch(conn, "CREATE TABLE sess_bad (id INTEGER PRIMARY KEY);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_bad VALUES (1)", [])
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
@@ -507,7 +509,7 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (3, 'delete_me')", [])
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_mix VALUES (4, 'new')", [])
       {:ok, 1} = NIF.execute(conn, "UPDATE sess_mix SET val = 'updated' WHERE id = 2", [])
@@ -540,7 +542,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_null (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} = NIF.execute(conn, "INSERT INTO sess_null VALUES (1, NULL)", [])
 
@@ -571,7 +573,7 @@ defmodule Xqlite.NIF.SessionTest do
         )
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       {:ok, 1} =
         NIF.execute(
@@ -606,7 +608,7 @@ defmodule Xqlite.NIF.SessionTest do
         NIF.execute_batch(conn, "CREATE TABLE sess_bulk (id INTEGER PRIMARY KEY, val TEXT);")
 
       {:ok, session} = NIF.session_new(conn)
-      :ok = NIF.session_attach(session, nil)
+      :ok = NIF.session_attach(session, :all)
 
       for i <- 1..500 do
         {:ok, 1} =
@@ -667,7 +669,7 @@ defmodule Xqlite.NIF.SessionTest do
     {:ok, session} = NIF.session_new(conn)
     :ok = NIF.close(conn)
 
-    assert {:error, _} = NIF.session_attach(session, nil)
+    assert {:error, _} = NIF.session_attach(session, :all)
     assert {:error, _} = NIF.session_changeset(session)
     assert {:error, _} = NIF.session_patchset(session)
 

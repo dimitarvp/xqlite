@@ -92,6 +92,7 @@ pub(crate) fn open(
     read_only: bool,
 ) -> Result<ResourceArc<XqliteBlob>, XqliteError> {
     connection::with_conn(handle, |conn| {
+        crate::schema::require_schema(conn, db)?;
         let c_db = std::ffi::CString::new(db).map_err(|_| XqliteError::NulErrorInString)?;
         let c_table =
             std::ffi::CString::new(table).map_err(|_| XqliteError::NulErrorInString)?;

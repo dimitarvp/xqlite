@@ -48,6 +48,15 @@ defmodule XqliteNIF do
       and its cancellable twin) take an integer argument, so anything else
       raises there — that is what keeps a huge batch size out.
 
+  **Schema names:**
+  A function that takes a schema name judges it under the connection lock
+  before SQLite is asked, with SQLite's own lookup: `temp` is always known,
+  ASCII case is folded, and no SQL runs, so no authorizer can deny it. A
+  name that is not attached answers `{:error, {:no_such_schema, name}}` before
+  anything is changed or any file is opened, and `""`, which SQLite reads as
+  every database, `{:error, {:invalid_schema_name, ""}}`. `txn_state/2` and
+  `schema_list_objects/2` take `:all` for every attached database.
+
   **Usage note:**
   These are low-level functions. For more idiomatic Elixir usage, consider
   the helper functions in the `Xqlite` module or higher-level abstractions
@@ -789,15 +798,13 @@ defmodule XqliteNIF do
   @doc """
   Lists schema objects (tables, views, etc.) in a specified database schema.
 
-  Corresponds to the `PRAGMA table_list;` statement, filtered by the optional
-  `schema_name`. This PRAGMA primarily lists tables, views, and virtual tables.
+  Corresponds to `PRAGMA "schema_name".table_list`, or to the bare
+  `PRAGMA table_list` over every attached database for `:all`. This PRAGMA
+  primarily lists tables, views, and virtual tables.
 
   `conn` is the database connection resource.
-  `schema_name` (optional String.t()): The name of the schema (e.g., "main", "temp",
-  or an attached database name). If `nil` or omitted, information for all schemas
-  accessible by the connection may be returned (behavior can depend on how `PRAGMA table_list`
-  is implemented if no schema is specified, though SQLite typically defaults to "main" or all).
-  It is recommended to specify a schema for predictable results.
+  `schema_name` (String.t() | :all): a schema such as "main", "temp" or an
+  attached database's name, in any ASCII case.
 
   Returns `{:ok, list_of_object_info}` on success, where `list_of_object_info`
   is a list of `Xqlite.Schema.SchemaObjectInfo` structs for objects matching
@@ -811,9 +818,9 @@ defmodule XqliteNIF do
     - `:strict` (boolean()): `true` if the table was declared using `STRICT` mode.
   Returns `{:error, reason}` on failure.
   """
-  @spec schema_list_objects(conn :: Xqlite.conn(), schema_name :: String.t() | nil) ::
+  @spec schema_list_objects(conn :: Xqlite.conn(), schema_name :: String.t() | :all) ::
           {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | Xqlite.error()
-  def schema_list_objects(_conn, _schema \\ nil), do: err()
+  def schema_list_objects(_conn, _schema), do: err()
 
   @doc """
   Retrieves detailed information about columns in a specific table or view.
@@ -827,7 +834,7 @@ defmodule XqliteNIF do
 
   Returns `{:ok, list_of_column_info}` on success, where `list_of_column_info`
   is a list of `Xqlite.Schema.ColumnInfo` structs, ordered by column ID.
-  If the table does not exist, an empty list is returned within the `{:ok, []}` tuple.
+  A name no table or view carries answers `{:error, {:no_such_table, table_name}}`.
   Each struct contains:
     - `:column_id` (integer()): 0-indexed ID of the column within the table.
     - `:name` (String.t()): Name of the column.
@@ -860,8 +867,8 @@ defmodule XqliteNIF do
   are to be listed. Case-sensitive based on SQLite's handling.
 
   Returns `{:ok, list_of_foreign_key_info}` on success. `list_of_foreign_key_info`
-  is a list of `Xqlite.Schema.ForeignKeyInfo` structs. If the table does not
-  exist or has no foreign keys, an empty list is returned within the `{:ok, []}` tuple.
+  is a list of `Xqlite.Schema.ForeignKeyInfo` structs, `[]` for a table without
+  any; a name no table or view carries answers `{:error, {:no_such_table, table_name}}`.
   Each struct contains:
     - `:id` (integer()): ID of the foreign key constraint (0-based index for the table).
     - `:column_sequence` (integer()): 0-based index of the column within the FK (for compound FKs).
@@ -889,8 +896,8 @@ defmodule XqliteNIF do
   Case-sensitive based on SQLite's handling.
 
   Returns `{:ok, list_of_index_info}` on success. `list_of_index_info` is a list
-  of `Xqlite.Schema.IndexInfo` structs. If the table does not exist or has no
-  indexes, an empty list is returned within the `{:ok, []}` tuple.
+  of `Xqlite.Schema.IndexInfo` structs, `[]` for a table without any; a name no
+  table or view carries answers `{:error, {:no_such_table, table_name}}`.
   Each struct contains:
     - `:name` (String.t()): Name of the index.
     - `:unique` (boolean()): `true` if the index enforces uniqueness.
@@ -916,8 +923,8 @@ defmodule XqliteNIF do
 
   Returns `{:ok, list_of_index_column_info}` on success. `list_of_index_column_info`
   is a list of `Xqlite.Schema.IndexColumnInfo` structs, ordered by their sequence
-  within the index definition. If the index does not exist, an empty list is
-  returned within the `{:ok, []}` tuple.
+  within the index definition, or the key columns of a WITHOUT ROWID table of that
+  name. A name that is neither answers `{:error, {:no_such_index, index_name}}`.
   Each struct contains:
     - `:index_column_sequence` (integer()): 0-based position of this column in the index key.
     - `:table_column_id` (integer()): ID of the column in the base table (`cid` from
@@ -938,16 +945,18 @@ defmodule XqliteNIF do
   @doc """
   Retrieves the original SQL text used to create a specific schema object.
 
-  This function queries the `sqlite_schema` table (formerly `sqlite_master`)
-  for the `sql` column corresponding to the given object name.
+  This function reads the `sql` column of main's `sqlite_schema` table (formerly
+  `sqlite_master`) for the row whose name is exactly the given one: an object in
+  `temp` or an attached database is not looked for, and the case must match.
 
   `conn` is the database connection resource.
   `object_name` (String.t()): The name of the table, index, trigger, or view
-  whose creation SQL is to be retrieved. Object names are typically case-sensitive.
+  whose creation SQL is to be retrieved.
 
   Returns `{:ok, sql_string}` on success if the object exists, where `sql_string`
-  is the `CREATE ...` statement.
-  Returns `{:ok, nil}` if no object with the given name is found in the schema.
+  is the `CREATE ...` statement, and `{:ok, nil}` for an automatic index, which
+  has none. A name no row carries answers `{:error, {:no_such_object, object_name}}`,
+  whichever kind of object was meant.
   Returns `{:error, reason}` for other failures.
   """
   @spec get_create_sql(conn :: Xqlite.conn(), object_name :: String.t()) ::
@@ -1057,7 +1066,8 @@ defmodule XqliteNIF do
   def put_limit(_conn, _category, _value), do: err()
 
   @doc """
-  Returns the transaction state for the given schema (defaults to `"main"`).
+  Returns the transaction state of the named schema, or the highest over every
+  attached database for `:all`.
 
   Equivalent to `sqlite3_txn_state`. Zero-cost; always available.
 
@@ -1076,16 +1086,16 @@ defmodule XqliteNIF do
   `assert()` inside SQLite with a real performance cost. We do not compile
   with it. `txn_state` is the honest production-safe substitute.
   """
-  @spec txn_state(Xqlite.conn(), String.t() | nil) ::
+  @spec txn_state(Xqlite.conn(), String.t() | :all) ::
           {:ok, :none | :read | :write | :unknown} | Xqlite.error()
-  def txn_state(_conn, _schema \\ nil), do: err()
+  def txn_state(_conn, _schema), do: err()
 
   @doc """
   Forces a WAL checkpoint. Equivalent to `sqlite3_wal_checkpoint_v2`.
 
   `mode` picks the checkpoint strategy:
 
-    * `:passive` (default) — checkpoints as many pages as possible
+    * `:passive` — checkpoints as many pages as possible
       without blocking readers or writers.
     * `:full` — waits for any concurrent writers to finish, then
       checkpoints all pages. Will set `busy: true` if readers prevent
@@ -1094,8 +1104,8 @@ defmodule XqliteNIF do
       drain so the next writer can restart the WAL from the beginning.
     * `:truncate` — as `:restart`, plus truncates the WAL file on disk.
 
-  `schema` is the attached-database name (defaults to `nil`, meaning the
-  main database).
+  `schema` names the one database to checkpoint; checkpoint each by name, as
+  SQLite's every-database form reports the first database's counts alone.
 
   Returns `{:ok, %{log_pages: n, checkpointed_pages: n, busy: bool}}`:
 
@@ -1105,20 +1115,18 @@ defmodule XqliteNIF do
     * `busy` — `true` if the checkpoint did not complete all of its work
       because other connections held back progress.
 
-  A named `schema` whose database is not in WAL mode as this connection
+  A `schema` whose database is not in WAL mode as this connection
   sees it returns `{:error, :not_in_wal_mode}`, and so does a WAL database
   this connection has not read yet. A checkpoint lock another connection
-  holds returns `{:error, {:database_busy_or_locked, 5, message}}`. With
-  `nil` the counts can read `-1`, which SQLite writes for a database it did
-  not checkpoint. Any other atom as `mode` returns
-  `{:error, {:invalid_checkpoint_mode, mode}}`.
+  holds returns `{:error, {:database_busy_or_locked, 5, message}}`. Any other
+  atom as `mode` returns `{:error, {:invalid_checkpoint_mode, mode}}`.
   """
   @spec wal_checkpoint(
           Xqlite.conn(),
           :passive | :full | :restart | :truncate,
-          String.t() | nil
+          String.t()
         ) :: {:ok, map()} | Xqlite.error()
-  def wal_checkpoint(_conn, _mode \\ :passive, _schema \\ nil), do: err()
+  def wal_checkpoint(_conn, _mode, _schema), do: err()
 
   @doc """
   Returns a structured snapshot of `sqlite3_db_status` counters for the
@@ -2015,9 +2023,10 @@ defmodule XqliteNIF do
   @doc """
   Attaches a table to be tracked by the session.
 
-  Pass a table name to track that table, or `nil` to track all tables.
+  Pass a table name to track that table, `""` included, or `:all` to track all
+  tables.
   """
-  @spec session_attach(session :: reference(), table :: String.t() | nil) ::
+  @spec session_attach(session :: reference(), table :: String.t() | :all) ::
           :ok | Xqlite.error()
   def session_attach(_session, _table), do: err()
 

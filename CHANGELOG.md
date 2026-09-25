@@ -277,6 +277,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`txn_state/2` and `schema_list_objects/2` default to `"main"` and take
+  `:all` for every attached database;** `nil` no longer means every database.
+  `XqliteNIF.txn_state/2`, `wal_checkpoint/3` and `schema_list_objects/2` lose
+  their defaults, and `session_attach/2` takes `:all` instead of `nil`.
+- **A schema name that is not attached answers `{:error, {:no_such_schema,
+  name}}`** on every function that takes one, before anything is opened or
+  changed; `""` answers `{:error, {:invalid_schema_name, ""}}` (SQLite read it
+  as every database, so `wal_checkpoint(conn, mode, "")` checkpointed all of
+  them).
+- **A table or index name that names nothing answers `{:error,
+  {:no_such_table, name}}` or `{:error, {:no_such_index, name}}`** instead of
+  `{:ok, []}` on `schema_columns/2`, `schema_foreign_keys/2`,
+  `schema_indexes/2`, `schema_index_columns/2` and the Pragma functions
+  `table_info`, `table_xinfo`, `index_list`, `index_info`, `index_xinfo` and
+  `foreign_key_list`.
+- **`get_create_sql/2` answers `{:error, {:no_such_object, name}}`** instead of
+  `{:ok, nil}` for a name nothing carries; `{:ok, nil}` now means an automatic
+  index.
+- **`schema_list_objects(conn, "MAIN")` lists main's objects;** the listing
+  used to compare the name byte for byte and answer `{:ok, []}`.
+- **`restore/3` from a path that does not exist, or from a name SQLite gives
+  no file for (`""`, `":memory:"`, `"file::memory:"`, a `mode=memory` or
+  `vfs=memdb` URI), answers `{:error, {:cannot_open_database, path, code,
+  message}}` and changes nothing;** it used to create an empty file and copy
+  it over the schema.
+
 - **SQL holding no statement answers `{:error, :no_statement}`** instead of
   `{:error, {:cannot_execute, "SQL contains no statement"}}`.
 - **`wal_checkpoint/3` on a named database not in WAL mode answers

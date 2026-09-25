@@ -337,9 +337,6 @@ pub(crate) enum XqliteError {
     },
     OperationCancelled,
 
-    // `name` is what SQLite printed after the sanctioned message prefix and
-    // is what Elixir receives; `message` keeps the whole sentence for
-    // `Display`.
     NoSuchTable {
         name: String,
         message: String,
@@ -348,6 +345,9 @@ pub(crate) enum XqliteError {
         name: String,
         message: String,
     },
+    NoSuchObject(String),
+    NoSuchSchema(String),
+    EmptySchemaName,
     TableExists {
         name: String,
         message: String,
@@ -604,6 +604,11 @@ impl Display for XqliteError {
             }
             XqliteError::NoSuchIndex { name: _, message } => {
                 write!(f, "No such index: {message}")
+            }
+            XqliteError::NoSuchObject(name) => write!(f, "No such object: {name}"),
+            XqliteError::NoSuchSchema(name) => write!(f, "No such schema: {name}"),
+            XqliteError::EmptySchemaName => {
+                write!(f, "An empty schema name reads as every database")
             }
             XqliteError::TableExists { name: _, message } => {
                 write!(f, "Table already exists: {message}")
@@ -878,6 +883,9 @@ impl Encoder for XqliteError {
             XqliteError::NoSuchIndex { name, message: _ } => {
                 (atoms::no_such_index(), name).encode(env)
             }
+            XqliteError::NoSuchObject(name) => (atoms::no_such_object(), name).encode(env),
+            XqliteError::NoSuchSchema(name) => (atoms::no_such_schema(), name).encode(env),
+            XqliteError::EmptySchemaName => (atoms::invalid_schema_name(), "").encode(env),
             XqliteError::TableExists { name, message: _ } => {
                 (atoms::table_exists(), name).encode(env)
             }

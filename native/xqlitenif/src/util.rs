@@ -78,6 +78,28 @@ impl<'a> Decoder<'a> for MaybeTextArg {
     }
 }
 
+/// A name, or the atom `:all` where SQLite reads a NULL name as every schema or
+/// every table. `nil` is no name here: it raises like any other term that is
+/// no text.
+#[derive(Debug)]
+pub(crate) struct NameOrAll(Option<String>);
+
+impl NameOrAll {
+    #[inline]
+    pub(crate) fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+impl<'a> Decoder<'a> for NameOrAll {
+    fn decode(term: Term<'a>) -> rustler::NifResult<Self> {
+        match term.decode::<Atom>() {
+            Ok(atom) if atom == atoms::all() => Ok(NameOrAll(None)),
+            _not_all => Ok(NameOrAll(Some(term.decode::<TextArg>()?.into_string()))),
+        }
+    }
+}
+
 impl<'a> Decoder<'a> for TextArg {
     fn decode(term: Term<'a>) -> rustler::NifResult<Self> {
         let bytes: Binary<'a> = term.decode()?;

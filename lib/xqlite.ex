@@ -8,7 +8,10 @@ defmodule Xqlite do
   (`FunctionClauseError`) or from the native function's argument decoding
   (`ArgumentError`), whichever the term reaches first. A value of the right
   type that this library or SQLite refuses is an answer instead —
-  `{:error, reason}`, with the reason saying what was wrong.
+  `{:error, reason}`, with the reason saying what was wrong. One exception:
+  `txn_state/2` and `wal_checkpoint/3` answer a schema of the wrong type, `nil`
+  included, with `{:error, {:invalid_schema_name, schema}}`. How a schema name
+  of the right type is judged is in `XqliteNIF`'s moduledoc.
   """
 
   import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
@@ -344,8 +347,10 @@ defmodule Xqlite do
           | {:invalid_type_extensions, list_refusal()}
           | {:lock_error, String.t()}
           | {:missing_parameter, %{index: pos_integer(), name: String.t() | nil}}
-          | {:no_such_index, String.t()}
-          | {:no_such_table, String.t()}
+          | {:no_such_index, String.t() | atom() | integer()}
+          | {:no_such_object, String.t()}
+          | {:no_such_schema, String.t() | atom()}
+          | {:no_such_table, String.t() | atom() | integer()}
           | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
           | {:parameters_unbound, %{expected: non_neg_integer()}}
           | {:read_only_database, integer(), String.t()}
@@ -736,7 +741,7 @@ defmodule Xqlite do
   defp resolve_object(conn, table) do
     folded = String.downcase(table, :ascii)
 
-    with {:ok, objects} <- schema_list_objects(conn) do
+    with {:ok, objects} <- schema_list_objects(conn, :all) do
       objects
       |> Enum.filter(fn object -> String.downcase(object.name, :ascii) == folded end)
       |> resolved_object(table)
@@ -2328,6 +2333,12 @@ defmodule Xqlite do
 
   Replaces the named schema (default `"main"`) with the contents of the file
   at `src_path`. Existing data in that schema is overwritten.
+
+  The file is opened read-only and never created. A path that names no
+  database file — a missing one, `""`, `":memory:"` or another in-memory
+  name — answers `{:error, {:cannot_open_database, src_path, code, message}}`
+  and changes nothing. A WAL-mode source keeps the `-wal` and `-shm` files
+  the read-only open creates beside it.
   """
   @spec restore(conn(), String.t(), String.t()) :: :ok | error()
   def restore(conn, src_path, schema \\ "main")
@@ -2411,7 +2422,9 @@ defmodule Xqlite do
   `{:error, {:database_busy_or_locked, 5, message}}`.
 
   Any other `mode` returns `{:error, {:invalid_checkpoint_mode, mode}}` and a
-  `schema` that is not a string `{:error, {:invalid_schema_name, schema}}`.
+  `schema` that is not a string `{:error, {:invalid_schema_name, schema}}`; a
+  name that is not attached `{:error, {:no_such_schema, name}}`, and `""`,
+  which SQLite reads as every database, `{:error, {:invalid_schema_name, ""}}`.
   """
   @spec wal_checkpoint(conn(), term(), term()) :: {:ok, map()} | error()
   def wal_checkpoint(conn, mode \\ :passive, schema \\ "main")
@@ -3513,18 +3526,18 @@ defmodule Xqlite do
   Returns the transaction state of a schema: `:none`, `:read`,
   `:write`, or `:unknown` (a future SQLite state not mapped yet).
 
-  `schema` defaults to `nil`, meaning `"main"`. Wraps
-  `XqliteNIF.txn_state/2` (see it for why there is no full five-state
-  lock ladder). No telemetry is emitted.
+  `schema` defaults to `"main"`; `:all` answers the highest state over every
+  attached database. Wraps `XqliteNIF.txn_state/2` (see it for why there is
+  no full five-state lock ladder). No telemetry is emitted.
 
-  A `schema` that is neither a string nor `nil` returns
+  A `schema` that is neither a string nor `:all`, `nil` included, returns
   `{:error, {:invalid_schema_name, schema}}`.
   """
   @spec txn_state(conn(), term()) ::
           {:ok, :none | :read | :write | :unknown} | error()
-  def txn_state(conn, schema \\ nil)
+  def txn_state(conn, schema \\ "main")
 
-  def txn_state(conn, schema) when is_binary(schema) or is_nil(schema),
+  def txn_state(conn, schema) when is_binary(schema) or schema == :all,
     do: XqliteNIF.txn_state(conn, schema)
 
   def txn_state(_conn, schema), do: {:error, {:invalid_schema_name, schema}}
@@ -3607,19 +3620,19 @@ defmodule Xqlite do
   Lists tables, views, and virtual tables as
   `Xqlite.Schema.SchemaObjectInfo` structs (`PRAGMA table_list`).
 
-  `schema` defaults to `nil`; pass `"main"`, `"temp"`, or an attached
-  database name for predictable results. Wraps
-  `XqliteNIF.schema_list_objects/2`. No telemetry is emitted.
+  `schema` defaults to `"main"` and matches in any ASCII case; `:all` lists
+  every attached database. Wraps `XqliteNIF.schema_list_objects/2`. No
+  telemetry is emitted.
   """
-  @spec schema_list_objects(conn(), String.t() | nil) ::
+  @spec schema_list_objects(conn(), String.t() | :all) ::
           {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | error()
-  def schema_list_objects(conn, schema \\ nil) when is_binary(schema) or is_nil(schema),
+  def schema_list_objects(conn, schema \\ "main") when is_binary(schema) or schema == :all,
     do: XqliteNIF.schema_list_objects(conn, schema)
 
   @doc """
   Returns column details for a table or view as
   `Xqlite.Schema.ColumnInfo` structs (`PRAGMA table_xinfo`), or
-  `{:ok, []}` when the table does not exist.
+  `{:error, {:no_such_table, table_name}}` when no table or view has the name.
 
   Wraps `XqliteNIF.schema_columns/2`. No telemetry is emitted.
   """
@@ -3663,9 +3676,10 @@ defmodule Xqlite do
     do: XqliteNIF.schema_index_columns(conn, index_name)
 
   @doc """
-  Returns the `CREATE ...` SQL for a schema object as recorded in
-  `sqlite_schema`, or `{:ok, nil}` when no object with that name
-  exists.
+  Returns the `CREATE ...` SQL for a schema object as recorded in main's
+  `sqlite_schema`, found by its exact name, or `{:ok, nil}` for an automatic
+  index, which has none. A name no object in main carries, whatever its kind,
+  answers `{:error, {:no_such_object, object_name}}`.
 
   Wraps `XqliteNIF.get_create_sql/2`. No telemetry is emitted.
   """

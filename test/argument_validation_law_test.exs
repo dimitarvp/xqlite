@@ -48,7 +48,7 @@ defmodule Xqlite.ArgumentValidationLawTest do
   end
 
   defp non_schema_term do
-    StreamData.filter(any_term(), fn term -> not (is_binary(term) or is_nil(term)) end)
+    StreamData.filter(any_term(), fn term -> not (is_binary(term) or term == :all) end)
   end
 
   defp non_timeout_term do
@@ -84,7 +84,7 @@ defmodule Xqlite.ArgumentValidationLawTest do
              %{conn: conn} do
       check all(a <- atom_other_than(@raw_atoms_taken), max_runs: 2000) do
         assert {:error, {:invalid_transaction_mode, ^a}} = NIF.begin(conn, a)
-        assert {:error, {:invalid_checkpoint_mode, ^a}} = NIF.wal_checkpoint(conn, a, nil)
+        assert {:error, {:invalid_checkpoint_mode, ^a}} = NIF.wal_checkpoint(conn, a, "main")
         assert {:error, {:invalid_conflict_strategy, ^a}} = NIF.changeset_apply(conn, <<>>, a)
       end
     end
@@ -139,15 +139,15 @@ defmodule Xqlite.ArgumentValidationLawTest do
       end
     end
 
-    property "txn_state/2 refuses a schema that is neither a string nor nil", %{conn: conn} do
+    property "txn_state/2 rejects a schema that is neither a string nor :all", %{conn: conn} do
       check all(schema <- non_schema_term(), max_runs: 2000) do
         assert {:error, {:invalid_schema_name, ^schema}} = Xqlite.txn_state(conn, schema)
       end
     end
 
-    test "txn_state/2 accepts a string schema and nil", %{conn: conn} do
+    test "txn_state/2 accepts a string schema and :all", %{conn: conn} do
       assert {:ok, :none} == Xqlite.txn_state(conn, "main")
-      assert {:ok, :none} == Xqlite.txn_state(conn, nil)
+      assert {:ok, :none} == Xqlite.txn_state(conn, :all)
       assert {:ok, :none} == Xqlite.txn_state(conn)
     end
 

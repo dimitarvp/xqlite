@@ -1,8 +1,11 @@
 defmodule Xqlite.SchemaIntrospectionTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
-  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
+  import Xqlite.Pragma, only: [quote_name: 1]
+  import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1, tmp_db_path: 1]
 
+  alias Xqlite.Pragma
   alias Xqlite.Schema
   alias XqliteNIF, as: NIF
 
@@ -19,6 +22,8 @@ defmodule Xqlite.SchemaIntrospectionTest do
   INSERT INTO users (user_id, category_id, full_name, email, balance) VALUES (1, 10, 'Alice Alpha', 'alice@example.com', 100.50), (2, 20, 'Bob Beta', 'bob@example.com', 0.0);
   INSERT INTO items (sku, description, value) VALUES ('ITEM001', 'Laptop', 1200.00), ('ITEM002', 'Guide Book', 25.50);
   INSERT INTO user_items (user_id, item_sku, quantity) VALUES (1, 'ITEM002', 2);
+  CREATE TEMP TABLE tt(x); CREATE INDEX temp.tix ON tt(x);
+  ATTACH ':memory:' AS aux; CREATE TABLE aux.at(y); CREATE INDEX aux.aix ON at(y);
   """
 
   # --- Helper Functions ---
@@ -403,25 +408,75 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert is_binary(sql_trigger) and String.starts_with?(sql_trigger, "CREATE TRIGGER")
       end
 
-      # --- Tests for "Not Found" cases ---
-      test "schema_columns returns empty list for non-existent table", %{conn: conn} do
-        assert {:ok, []} == NIF.schema_columns(conn, "non_existent_table")
+      test "a missing name answers its tag, a table without keys no rows", %{conn: conn} do
+        assert {:ok, []} = NIF.schema_foreign_keys(conn, "categories")
+        assert {:error, {:no_such_table, "nope"}} = NIF.schema_foreign_keys(conn, "nope")
+        assert {:error, {:no_such_table, "at"}} = Pragma.index_list(conn, "at", db_name: :main)
+        assert {:ok, nil} = NIF.get_create_sql(conn, "sqlite_autoindex_users_1")
+        assert {:error, {:no_such_object, "tt"}} = NIF.get_create_sql(conn, "tt")
       end
 
-      test "schema_foreign_keys returns empty list for non-existent table", %{conn: conn} do
-        assert {:ok, []} == NIF.schema_foreign_keys(conn, "non_existent_table")
+      property "a name answers rows when found and its tag when not", %{conn: conn} do
+        indexes = ~w(idx_users_email_desc sqlite_autoindex_users_1 items tix aix)
+        names = object_name(~w(users person_view sqlite_schema tt at) ++ indexes)
+
+        check all(name <- names, max_runs: 2000) do
+          table? = match?({:ok, _}, NIF.query(conn, "SELECT * FROM #{quote_name(name)}", []))
+          index? = String.downcase(name, :ascii) in indexes
+          found = %{no_such_table: table?, no_such_index: index?}
+
+          for {tag, answer} <- object_answers(conn, name) do
+            assert {name, match?({:ok, _}, answer)} == {name, found[tag]}
+            assert found[tag] or answer == {:error, {tag, name}}
+          end
+        end
       end
 
-      test "schema_indexes returns empty list for non-existent table", %{conn: conn} do
-        assert {:ok, []} == NIF.schema_indexes(conn, "non_existent_table")
+      property "a schema name SQLite does not know is rejected by every function", %{
+        conn: conn
+      } do
+        path = tmp_db_path("unknown_schema")
+
+        check all(name <- object_name(~w(main temp aux)), max_runs: 2000) do
+          rejected = {:error, {:no_such_schema, name}}
+          sql = "PRAGMA #{quote_name(name)}.schema_version"
+          attached? = match?({:ok, _}, NIF.query(conn, sql, []))
+          rejections = conn |> schema_answers(name) |> Enum.map(&(&1 == rejected))
+          assert rejections == List.duplicate(not attached?, 8)
+          unattached = if attached?, do: [], else: unattached_answers(conn, name, path)
+          assert Enum.uniq(unattached) in [[], [rejected]]
+        end
+
+        refute File.exists?(path)
       end
 
-      test "schema_index_columns returns empty list for non-existent index", %{conn: conn} do
-        assert {:ok, []} == NIF.schema_index_columns(conn, "non_existent_index")
+      test "an empty schema name is rejected by every function that takes one", %{conn: conn} do
+        path = tmp_db_path("empty_schema")
+        answers = schema_answers(conn, "") ++ unattached_answers(conn, "", path)
+        assert Enum.uniq(answers) == [{:error, {:invalid_schema_name, ""}}]
+        refute File.exists?(path)
       end
 
-      test "get_create_sql returns nil for non-existent object", %{conn: conn} do
-        assert {:ok, nil} == NIF.get_create_sql(conn, "non_existent_object")
+      test "the listing takes :all or any case of a name; nil is no name", %{conn: conn} do
+        assert {:ok, all} = NIF.schema_list_objects(conn, :all)
+        assert {:ok, main} = NIF.schema_list_objects(conn, "MAIN")
+        assert main |> Enum.map(& &1.schema) |> Enum.uniq() == ["main"]
+        assert length(all) > length(main) and Enum.any?(all, &(&1.name == "at"))
+        assert_raise ArgumentError, fn -> NIF.txn_state(conn, nil) end
+        assert_raise ArgumentError, fn -> NIF.wal_checkpoint(conn, :passive, nil) end
+
+        assert_raise FunctionClauseError, fn ->
+          apply(Xqlite, :schema_list_objects, [conn, nil])
+        end
+      end
+
+      test "a schema name is judged with no SQL, temp before its first use included" do
+        assert {:ok, c} = NIF.open_in_memory(":memory:")
+        assert {:ok, :none} = NIF.txn_state(c, "temp")
+        assert :ok = Xqlite.set_authorizer(c, [:pragma])
+        assert {:ok, :none} = NIF.txn_state(c, "MAIN")
+        assert {:error, {:no_such_schema, :no}} = Pragma.get(c, :cache_size, db_name: :no)
+        assert {:error, {:no_such_schema, "no"}} = Pragma.put(c, :cache_size, 1, db_name: "no")
       end
 
       test "schema_columns handles various declared types and resolves correct affinity", %{
@@ -496,9 +551,49 @@ defmodule Xqlite.SchemaIntrospectionTest do
       assert is_binary(sql)
       assert String.starts_with?(sql, "CREATE TABLE gcs_test")
     end
+  end
 
-    test "returns nil for a non-existent table", %{conn: conn} do
-      assert {:ok, nil} = NIF.get_create_sql(conn, "no_such_table_ever")
-    end
+  defp object_name(names) do
+    cased = Enum.flat_map(names, &[&1, String.upcase(&1), String.capitalize(&1)])
+    other = StreamData.string(:printable, min_length: 1, max_length: 8)
+    StreamData.one_of([StreamData.member_of(cased), other])
+  end
+
+  defp object_answers(conn, name) do
+    [
+      no_such_table: NIF.schema_columns(conn, name),
+      no_such_table: NIF.schema_foreign_keys(conn, name),
+      no_such_table: NIF.schema_indexes(conn, name),
+      no_such_table: Pragma.table_info(conn, name),
+      no_such_table: Pragma.table_xinfo(conn, name),
+      no_such_table: Pragma.index_list(conn, name),
+      no_such_table: Pragma.get(conn, :foreign_key_list, name),
+      no_such_index: NIF.schema_index_columns(conn, name),
+      no_such_index: Pragma.index_info(conn, name),
+      no_such_index: Pragma.index_xinfo(conn, name)
+    ]
+  end
+
+  defp schema_answers(conn, name) do
+    [
+      Xqlite.txn_state(conn, name),
+      Xqlite.wal_checkpoint(conn, :passive, name),
+      Xqlite.schema_list_objects(conn, name),
+      NIF.txn_state(conn, name),
+      NIF.wal_checkpoint(conn, :passive, name),
+      NIF.serialize(conn, name),
+      NIF.schema_list_objects(conn, name),
+      Pragma.get(conn, :user_version, db_name: name)
+    ]
+  end
+
+  defp unattached_answers(conn, name, path) do
+    [
+      NIF.deserialize(conn, name, <<>>, false),
+      NIF.backup(conn, name, path),
+      NIF.restore(conn, name, path),
+      NIF.backup_with_progress(conn, name, path, self(), 1, []),
+      NIF.blob_open(conn, name, "users", "config", 1, true)
+    ]
   end
 end

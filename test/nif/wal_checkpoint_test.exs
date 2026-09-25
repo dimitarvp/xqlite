@@ -22,22 +22,23 @@ defmodule Xqlite.NIF.WalCheckpointTest do
         assert {:error, :not_in_wal_mode} = Xqlite.wal_checkpoint(conn)
       end
 
-      test "the every-database call still checkpoints an attached WAL file", %{conn: conn} do
+      test "an empty name is rejected and leaves an attached WAL file alone", %{conn: conn} do
         aux = tmp_db_path("checkpoint_aux")
         :ok = NIF.execute_batch(conn, "ATTACH '#{aux}' AS aux; PRAGMA aux.journal_mode = WAL")
         :ok = NIF.execute_batch(conn, "CREATE TABLE aux.t(x); INSERT INTO aux.t VALUES (1)")
         assert File.stat!(aux <> "-wal").size > 0
 
-        assert {:ok, _} = NIF.wal_checkpoint(conn, :truncate, nil)
-        assert File.stat!(aux <> "-wal").size == 0
+        assert {:error, {:invalid_schema_name, ""}} = NIF.wal_checkpoint(conn, :truncate, "")
+        assert File.stat!(aux <> "-wal").size > 0
       end
 
       test "rejects an unknown mode atom with a structured error", %{conn: conn} do
-        assert {:error, {:invalid_checkpoint_mode, :bogus}} = NIF.wal_checkpoint(conn, :bogus)
+        assert {:error, {:invalid_checkpoint_mode, :bogus}} =
+                 NIF.wal_checkpoint(conn, :bogus, "main")
       end
 
       test "unknown schema surfaces as an error", %{conn: conn} do
-        assert {:error, _} = NIF.wal_checkpoint(conn, :passive, "does_not_exist")
+        assert {:error, {:no_such_schema, "nope"}} = NIF.wal_checkpoint(conn, :passive, "nope")
       end
     end
   end

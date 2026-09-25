@@ -15,7 +15,7 @@ use crate::session::{self, XqliteSession};
 use crate::statement::{self, XqliteStatement};
 use crate::stream::{XqliteStream, finalize_stream_stmt_locked};
 use crate::transaction;
-use crate::util::{MaybeTextArg, TextArg, singular_ok_or_error_tuple};
+use crate::util::{MaybeTextArg, NameOrAll, TextArg, singular_ok_or_error_tuple};
 use rusqlite::Connection;
 use rusqlite::ffi;
 use rusqlite::session::{ConflictAction, ConflictType};
@@ -247,19 +247,20 @@ fn put_limit(
 fn txn_state<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
-    schema: MaybeTextArg,
+    schema: NameOrAll,
 ) -> Result<Term<'a>, XqliteError> {
-    use rusqlite::TransactionState as TS;
-
-    let state = connection::with_conn(&handle, |conn| {
-        conn.transaction_state(schema.as_deref())
-            .map_err(XqliteError::from)
+    let state = connection::with_conn(&handle, |conn| match schema.as_deref() {
+        Some(name) => crate::schema::require_schema(conn, name),
+        // SAFETY: with_conn holds the connection Mutex, so `handle()` is the
+        // live `sqlite3*`; a NULL name asks for the highest state over every
+        // attached database.
+        None => Ok(unsafe { ffi::sqlite3_txn_state(conn.handle(), std::ptr::null()) }),
     })?;
 
     let atom = match state {
-        TS::None => atoms::none(),
-        TS::Read => atoms::read(),
-        TS::Write => atoms::write(),
+        ffi::SQLITE_TXN_NONE => atoms::none(),
+        ffi::SQLITE_TXN_READ => atoms::read(),
+        ffi::SQLITE_TXN_WRITE => atoms::write(),
         _ => atoms::unknown(),
     };
 
@@ -353,7 +354,7 @@ fn wal_checkpoint<'a>(
     env: Env<'a>,
     handle: ResourceArc<XqliteConn>,
     mode: rustler::Atom,
-    schema: MaybeTextArg,
+    schema: TextArg,
 ) -> Result<Term<'a>, XqliteError> {
     let mode_int = match () {
         _ if mode == atoms::passive() => ffi::SQLITE_CHECKPOINT_PASSIVE,
@@ -364,28 +365,19 @@ fn wal_checkpoint<'a>(
     };
 
     connection::with_conn(&handle, |conn| {
+        crate::schema::require_schema(conn, &schema)?;
+        let c_schema = std::ffi::CString::new(schema.as_str())
+            .map_err(|_| XqliteError::NulErrorInString)?;
         // SAFETY: with_conn holds the connection Mutex. db handle is
-        // valid for the duration of the closure. zDb is either null
-        // or a valid NUL-terminated string whose lifetime spans the FFI
-        // call.
+        // valid for the duration of the closure. zDb is a valid
+        // NUL-terminated string whose lifetime spans the FFI call.
         unsafe {
             let db = conn.handle();
-            let c_schema = match schema.as_deref() {
-                None => None,
-                Some(s) => Some(
-                    std::ffi::CString::new(s).map_err(|_| XqliteError::NulErrorInString)?,
-                ),
-            };
-            let schema_ptr = c_schema
-                .as_ref()
-                .map(|c| c.as_ptr())
-                .unwrap_or(std::ptr::null());
-
             let mut log_pages: std::os::raw::c_int = 0;
             let mut ckpt_pages: std::os::raw::c_int = 0;
             let rc = ffi::sqlite3_wal_checkpoint_v2(
                 db,
-                schema_ptr,
+                c_schema.as_ptr(),
                 mode_int,
                 &mut log_pages,
                 &mut ckpt_pages,
@@ -394,10 +386,8 @@ fn wal_checkpoint<'a>(
             // SQLite leaves both counts at -1 for a database whose WAL it did
             // not checkpoint: one not in WAL mode as this connection sees it
             // (SQLITE_OK), or one whose checkpoint lock another connection
-            // holds (SQLITE_BUSY). Without a name the counts are the first
-            // database's alone, so only a named call can tell the two apart.
-            let named = schema.as_deref().is_some_and(|s| !s.is_empty());
-            let counts_unwritten = named && log_pages == -1 && ckpt_pages == -1;
+            // holds (SQLITE_BUSY).
+            let counts_unwritten = log_pages == -1 && ckpt_pages == -1;
 
             match rc {
                 ffi::SQLITE_OK if counts_unwritten => Err(XqliteError::NotInWalMode),
@@ -660,7 +650,7 @@ fn schema_databases(
 #[rustler::nif(schedule = "DirtyIo")]
 fn schema_list_objects(
     handle: ResourceArc<XqliteConn>,
-    schema: MaybeTextArg,
+    schema: NameOrAll,
 ) -> Result<Vec<SchemaObjectInfo>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         crate::schema::list_objects(conn, schema.as_deref())
@@ -1622,6 +1612,7 @@ fn serialize<'a>(
     schema: TextArg,
 ) -> Result<rustler::Binary<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
+        crate::schema::require_schema(conn, &schema)?;
         let data = conn.serialize(schema.as_str())?;
         let bytes: &[u8] = &data;
         let mut binary = rustler::OwnedBinary::new(bytes.len()).ok_or_else(|| {
@@ -1643,6 +1634,7 @@ fn deserialize<'a>(
     read_only: bool,
 ) -> Term<'a> {
     let result = connection::with_conn_mut(&handle, |conn| {
+        crate::schema::require_schema(conn, &schema)?;
         let bytes = data.as_slice();
         let cursor = Cursor::new(bytes);
         conn.deserialize_read_exact(schema.as_str(), cursor, bytes.len(), read_only)?;
@@ -1701,6 +1693,7 @@ fn backup<'a>(
     dest_path: TextArg,
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
+        crate::schema::require_schema(conn, &schema)?;
         conn.backup(schema.as_str(), dest_path.as_str(), None)?;
         Ok(())
     });
@@ -1715,14 +1708,59 @@ fn restore<'a>(
     src_path: TextArg,
 ) -> Term<'a> {
     let result = connection::with_conn_mut(&handle, |conn| {
-        conn.restore(
-            schema.as_str(),
-            src_path.as_str(),
-            None::<fn(rusqlite::backup::Progress)>,
-        )?;
-        Ok(())
+        crate::schema::require_schema(conn, &schema)?;
+        restore_from(conn, &schema, &src_path)
     });
     singular_ok_or_error_tuple(env, result)
+}
+
+/// Copies the main database of the file at `src_path` over `schema`. The file
+/// is opened read-only and never created, and a source SQLite reports no file
+/// name for — `""`, `:memory:` or another in-memory name, which it opens as a
+/// new empty database — is rejected like a missing file, before anything is
+/// copied. A busy step is retried twice, 100 ms apart, and a locked one is an
+/// error, as rusqlite's own restore does.
+fn restore_from(
+    conn: &mut Connection,
+    schema: &str,
+    src_path: &str,
+) -> Result<(), XqliteError> {
+    use rusqlite::backup::{Backup, StepResult};
+
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let src = Connection::open_with_flags(src_path, flags).map_err(|err| match err {
+        rusqlite::Error::SqliteFailure(ffi_err, message) => XqliteError::CannotOpenDatabase {
+            path: src_path.to_string(),
+            code: ffi_err.extended_code,
+            message: message.unwrap_or_else(|| ffi_err.to_string()),
+        },
+        other => XqliteError::from(other),
+    })?;
+    if src.path().is_none_or(str::is_empty) {
+        return Err(XqliteError::CannotOpenDatabase {
+            path: src_path.to_string(),
+            code: ffi::SQLITE_CANTOPEN,
+            message: format!("no database file at {src_path:?}"),
+        });
+    }
+    let restore = Backup::new_with_names(&src, "main", conn, schema)?;
+    let mut busy_steps = 0;
+    loop {
+        let code = match restore.step(100)? {
+            StepResult::Done => return Ok(()),
+            StepResult::More => continue,
+            StepResult::Busy if busy_steps < 2 => {
+                busy_steps += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            StepResult::Busy => ffi::SQLITE_BUSY,
+            _locked => ffi::SQLITE_LOCKED,
+        };
+        return Err(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None).into());
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1753,6 +1791,7 @@ fn backup_with_progress<'a>(
     };
 
     let result = connection::with_conn(&handle, |conn| {
+        crate::schema::require_schema(conn, &schema)?;
         let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
         let backup =
             rusqlite::backup::Backup::new_with_names(conn, schema.as_str(), &mut dst, "main")?;
@@ -1898,7 +1937,7 @@ fn session_new<'a>(env: Env<'a>, handle: ResourceArc<XqliteConn>) -> Term<'a> {
 fn session_attach<'a>(
     env: Env<'a>,
     session_handle: ResourceArc<XqliteSession>,
-    table: MaybeTextArg,
+    table: NameOrAll,
 ) -> Term<'a> {
     let result = session::with_session_mut(&session_handle, |s| {
         match table.as_deref() {

@@ -232,14 +232,16 @@ defmodule XqlitePragmaTest do
     # A PRAGMA takes no bound parameter, so its argument is quoted into the
     # statement text; a quote inside the argument has to be doubled or the
     # statement ends early. `table_info` of a name no table carries answers
-    # with an empty list, while a broken quote is a syntax error instead.
+    # with the tag, while a broken quote is a syntax error instead.
     test "get quotes an argument holding a double quote", %{db: db} do
-      assert {:ok, []} = P.get(db, :table_info, "a\"b", db_name: "main")
+      assert {:error, {:no_such_table, "a\"b"}} =
+               P.get(db, :table_info, "a\"b", db_name: "main")
     end
 
     property "get accepts an argument whatever characters it holds", %{db: db} do
       check all(value <- pragma_string_value(), max_runs: 2000) do
-        assert {:ok, []} = P.get(db, :table_info, value, db_name: "main")
+        assert {:error, {:no_such_table, ^value}} =
+                 P.get(db, :table_info, value, db_name: "main")
       end
     end
   end
@@ -629,8 +631,8 @@ defmodule XqlitePragmaTest do
       assert {:ok, ["ok"]} = P.get(db, :integrity_check, 1)
     end
 
-    test "the anchor: a name no table carries reads empty", %{db: db} do
-      assert {:ok, []} = P.table_info(db, "no_such")
+    test "the anchor: a name no table carries answers the tag", %{db: db} do
+      assert {:error, {:no_such_table, :no_such}} = P.table_info(db, :no_such)
     end
 
     # The getter flattens single-column rows; the values are SQLite's own.

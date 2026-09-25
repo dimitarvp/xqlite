@@ -87,7 +87,7 @@ defmodule Xqlite.IntrospectionWrappersTest do
 
         assert {:ok, create_sql} = Xqlite.get_create_sql(conn, "wrap_items")
         assert String.starts_with?(create_sql, "CREATE TABLE")
-        assert {:ok, nil} = Xqlite.get_create_sql(conn, "no_such_object")
+        assert {:error, {:no_such_object, "nope"}} = Xqlite.get_create_sql(conn, "nope")
       end
 
       test "closed-connection errors pass through", %{conn: conn} do

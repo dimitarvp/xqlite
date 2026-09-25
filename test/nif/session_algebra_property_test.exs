@@ -205,7 +205,7 @@ defmodule Xqlite.NIF.SessionAlgebraPropertyTest do
 
   defp capture(conn, ops_by_table) do
     assert {:ok, session} = NIF.session_new(conn)
-    assert :ok = NIF.session_attach(session, nil)
+    assert :ok = NIF.session_attach(session, :all)
     :ok = run_ops(conn, ops_by_table)
     assert {:ok, changeset} = NIF.session_changeset(session)
     assert :ok = NIF.session_delete(session)

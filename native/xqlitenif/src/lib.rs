@@ -2,6 +2,7 @@
 
 pub(crate) mod atoms {
     rustler::atoms! {
+        all,
         alter_table,
         analyze,
         asc,
@@ -127,6 +128,7 @@ pub(crate) mod atoms {
         invalid_parameter_name,
         invalid_pragma_name,
         invalid_pragma_value,
+        invalid_schema_name,
         invalid_transaction_mode,
         integer_out_of_range,
         invalid_utf8_in_string,
@@ -168,6 +170,8 @@ pub(crate) mod atoms {
         negative_infinity,
         no_action,
         no_such_index,
+        no_such_object,
+        no_such_schema,
         no_such_table,
         no_statement,
         no_value,

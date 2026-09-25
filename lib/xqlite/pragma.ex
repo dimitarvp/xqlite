@@ -703,8 +703,11 @@ defmodule Xqlite.Pragma do
   - `:db_name` - a string, an atom, or `nil` for the database the connection
     opened with. The values `"main"` and `"temp"` are treated specially, as in
     instruct sqlite to use the main (originally opened) database or a temporary DB
-    respectively. Any other value refers to a name of an ATTACH-ed database. This function
-    will fail if there is no ATTACH-ed database with the specified name.
+    respectively. Any other value refers to a name of an ATTACH-ed database. A name
+    SQLite's own lookup does not know answers `{:error, {:no_such_schema, db_name}}`
+    with the name as given. The lookup is a call of its own before the statement,
+    a second hold of the connection lock: a database detached between the two
+    answers SQLite's own error.
 
   `:db_name` is the only key these doors read. Options that are no keyword
   list, a key other than `:db_name`, and a `:db_name` that is neither a
@@ -753,11 +756,13 @@ defmodule Xqlite.Pragma do
   takes a bitmask, `:incremental_vacuum` a page count, `:integrity_check`
   and `:quick_check` the most errors to report, `:wal_checkpoint` the
   checkpoint mode, and the rest the name of a table or an index. For
-  `:table_info`, `:table_xinfo`, `:index_list`, `:index_info`,
-  `:index_xinfo` and `:foreign_key_list`, a name that is not in the database
-  is SQLite's own empty answer, `{:ok, []}`; `:foreign_key_check`,
-  `:integrity_check` and `:quick_check` answer
-  `{:error, {:no_such_table, name}}` instead, and a number handed to
+  `:table_info`, `:table_xinfo`, `:index_list` and `:foreign_key_list`, a
+  name no table or view carries answers `{:error, {:no_such_table, name}}`,
+  and for `:index_info` and `:index_xinfo` one no index carries
+  `{:error, {:no_such_index, name}}`, the name as given; a table without
+  indexes or foreign keys still answers `{:ok, []}`. `:foreign_key_check`,
+  `:integrity_check` and `:quick_check` answer SQLite's own
+  `{:error, {:no_such_table, name}}`, and a number handed to
   `:foreign_key_check`, which reads a table name, is one of those names.
   """
   @spec get(Xqlite.conn(), pragma_key(), term(), pragma_opts()) :: get_result()
@@ -766,10 +771,23 @@ defmodule Xqlite.Pragma do
   def get(db, key, arg_or_opts, opts) do
     with {:ok, name} <- resolve_name(key),
          {:ok, spec} <- known_spec(name),
-         {:ok, options} <- merged_options(name, arg_or_opts, opts) do
+         {:ok, options} <- merged_options(name, arg_or_opts, opts),
+         :ok <- known_schema(db, options[:db_name]) do
       read_pragma(db, name, spec, arg_or_opts, options)
     end
   end
+
+  defp known_schema(_db, nil), do: :ok
+
+  defp known_schema(db, name),
+    do: db |> XqliteNIF.txn_state(to_string(name)) |> schema_answer(name)
+
+  defp schema_answer({:ok, _state}, _name), do: :ok
+
+  defp schema_answer({:error, {:no_such_schema, _text}}, name),
+    do: {:error, {:no_such_schema, name}}
+
+  defp schema_answer(error, _name), do: error
 
   # The third argument is options too when it is a keyword list, so both are
   # judged and merged before the argument position is sorted out.
@@ -901,16 +919,33 @@ defmodule Xqlite.Pragma do
   end
 
   defp query_with_arg(db, key, arg, opts) do
-    with {:ok, rows} <- do_query(db, key, arg, opts) do
+    with {:ok, rows} <- do_query(db, key, arg, opts),
+         :ok <- named_object(db, key, arg, opts, rows) do
       {:ok, process_list_result(key, rows)}
     end
   end
 
+  defp named_object(db, key, arg, opts, [])
+       when key in [:foreign_key_list, :index_list, :table_info] do
+    with {:ok, rows} <- do_query(db, :table_xinfo, arg, opts) do
+      named_object(db, :table_xinfo, arg, opts, rows)
+    end
+  end
+
+  defp named_object(_db, key, arg, _opts, [])
+       when key in [:table_xinfo, :index_info, :index_xinfo],
+       do: {:error, {missing_tag(key), arg}}
+
+  defp named_object(_db, _key, _arg, _opts, _rows), do: :ok
+
+  defp missing_tag(:table_xinfo), do: :no_such_table
+  defp missing_tag(_index_pragma), do: :no_such_index
+
   @doc """
   Returns the list of indexes for the given table.
 
-  A name that is not in the database answers `{:ok, []}`: SQLite answers no
-  rows for a name it cannot find.
+  A table without indexes answers `{:ok, []}`, and a name no table or view
+  carries `{:error, {:no_such_table, name}}`.
   """
   @spec index_list(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_list(db, name, opts \\ []), do: get(db, :index_list, name, opts)
@@ -918,8 +953,7 @@ defmodule Xqlite.Pragma do
   @doc """
   Returns column information for the given index.
 
-  A name that is not in the database answers `{:ok, []}`: SQLite answers no
-  rows for a name it cannot find.
+  A name no index carries answers `{:error, {:no_such_index, name}}`.
   """
   @spec index_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_info(db, name, opts \\ []), do: get(db, :index_info, name, opts)
@@ -928,8 +962,7 @@ defmodule Xqlite.Pragma do
   Returns extended column information for the given index, including key vs
   auxiliary columns.
 
-  A name that is not in the database answers `{:ok, []}`: SQLite answers no
-  rows for a name it cannot find.
+  A name no index carries answers `{:error, {:no_such_index, name}}`.
   """
   @spec index_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def index_xinfo(db, name, opts \\ []), do: get(db, :index_xinfo, name, opts)
@@ -937,8 +970,7 @@ defmodule Xqlite.Pragma do
   @doc """
   Returns column information for the given table.
 
-  A name that is not in the database answers `{:ok, []}`: SQLite answers no
-  rows for a name it cannot find.
+  A name no table or view carries answers `{:error, {:no_such_table, name}}`.
   """
   @spec table_info(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_info(db, name, opts \\ []), do: get(db, :table_info, name, opts)
@@ -947,8 +979,7 @@ defmodule Xqlite.Pragma do
   Returns extended column information for the given table, including hidden
   and generated columns.
 
-  A name that is not in the database answers `{:ok, []}`: SQLite answers no
-  rows for a name it cannot find.
+  A name no table or view carries answers `{:error, {:no_such_table, name}}`.
   """
   @spec table_xinfo(Xqlite.conn(), name(), pragma_opts()) :: list_result()
   def table_xinfo(db, name, opts \\ []), do: get(db, :table_xinfo, name, opts)
@@ -979,8 +1010,9 @@ defmodule Xqlite.Pragma do
       a string nor an atom are refused with
       `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
       reason: :invalid_options}}}`, as in `get/4`. A `:db_name` whose bytes
-      are not UTF-8 is refused the same way with `reason: :invalid_utf8`, also
-      as in `get/4`.
+      are not UTF-8 is rejected the same way with `reason: :invalid_utf8`, and
+      one SQLite does not know with `{:error, {:no_such_schema, db_name}}`,
+      also as in `get/4`.
   """
   @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) ::
           {:ok, term()} | Xqlite.error()
@@ -994,7 +1026,8 @@ defmodule Xqlite.Pragma do
 
   defp do_put(db, key_atom, val, opts) do
     with {:ok, checked} <- check_value(key_atom, val),
-         {:ok, options} <- check_options(key_atom, [], opts) do
+         {:ok, options} <- check_options(key_atom, [], opts),
+         :ok <- known_schema(db, options[:db_name]) do
       put_checked(db, key_atom, checked, options)
     end
   end

@@ -1,9 +1,11 @@
 use crate::atoms;
 use crate::error::XqliteError;
 use crate::util::quote_identifier;
-use rusqlite::Connection;
+use rusqlite::{Connection, ffi};
 use rustler::types::atom::nil;
 use rustler::{Atom, Encoder, Env, NifStruct, OwnedBinary, Term};
+use std::ffi::CString;
+use std::os::raw::c_int;
 
 /// A column default, classified from the verbatim `dflt_value` text
 /// that `PRAGMA table_xinfo` returns.
@@ -553,12 +555,37 @@ pub(crate) fn databases(conn: &Connection) -> Result<Vec<DatabaseInfo>, XqliteEr
     Ok(db_infos)
 }
 
+/// The transaction state of the schema `name` names, found by SQLite's own
+/// lookup, the one every C call that takes a schema name makes: `temp` is known
+/// before its first use and ASCII case is folded. No SQL runs, so no authorizer
+/// can deny it. `""` is rejected first, because SQLite reads it as every
+/// database.
+pub(crate) fn require_schema(conn: &Connection, name: &str) -> Result<c_int, XqliteError> {
+    if name.is_empty() {
+        return Err(XqliteError::EmptySchemaName);
+    }
+    let c_name = CString::new(name).map_err(|_| XqliteError::NulErrorInString)?;
+    // SAFETY: the caller holds the connection Mutex for the whole call, so
+    // `handle()` is the live `sqlite3*` and no other thread is inside a call on
+    // it; `c_name` is NUL-terminated and outlives the call.
+    match unsafe { ffi::sqlite3_txn_state(conn.handle(), c_name.as_ptr()) } {
+        state if state < 0 => Err(XqliteError::NoSuchSchema(name.to_string())),
+        state => Ok(state),
+    }
+}
+
 pub(crate) fn list_objects(
     conn: &Connection,
     schema: Option<&str>,
 ) -> Result<Vec<SchemaObjectInfo>, XqliteError> {
-    let sql = "PRAGMA table_list;";
-    let mut stmt = conn.prepare(sql)?;
+    let sql = match schema {
+        Some(name) => {
+            require_schema(conn, name)?;
+            format!("PRAGMA {}.table_list;", quote_identifier(name))
+        }
+        None => "PRAGMA table_list;".to_string(),
+    };
+    let mut stmt = conn.prepare(&sql)?;
 
     let temp_results: Vec<Result<TempObjectInfo, rusqlite::Error>> = stmt
         .query_map([], |row| {
@@ -578,12 +605,6 @@ pub(crate) fn list_objects(
     for temp_result in temp_results {
         match temp_result {
             Ok(temp_info) => {
-                if let Some(filter_schema) = schema
-                    && temp_info.schema != *filter_schema
-                {
-                    continue;
-                }
-
                 let atom = temp_info.obj_type_atom.map_err(|unexpected_val| {
                     XqliteError::SchemaParsingError {
                         context: format!(
@@ -691,6 +712,14 @@ pub(crate) fn columns(
             }
         }
     }
+    // table_xinfo answers a row for every column, hidden ones too, of every
+    // table and view: no rows means the name names neither.
+    if final_columns.is_empty() {
+        return Err(XqliteError::NoSuchTable {
+            name: table_name.to_string(),
+            message: table_name.to_string(),
+        });
+    }
     Ok(final_columns)
 }
 
@@ -770,6 +799,11 @@ pub(crate) fn foreign_keys(
             }
         }
     }
+    // A table without foreign keys answers no rows too; its columns tell it
+    // apart from a name that names nothing.
+    if final_fks.is_empty() {
+        columns(conn, table_name)?;
+    }
     Ok(final_fks)
 }
 
@@ -824,6 +858,9 @@ pub(crate) fn indexes(
         }
     }
 
+    if final_indexes.is_empty() {
+        columns(conn, table_name)?;
+    }
     Ok(final_indexes)
 }
 
@@ -882,6 +919,14 @@ pub(crate) fn index_columns(
         }
     }
 
+    // index_xinfo answers a row for every column of an index, or of a WITHOUT
+    // ROWID table's key: no rows means the name names neither.
+    if final_cols.is_empty() {
+        return Err(XqliteError::NoSuchIndex {
+            name: index_name.to_string(),
+            message: index_name.to_string(),
+        });
+    }
     Ok(final_cols)
 }
 
@@ -900,7 +945,9 @@ pub(crate) fn create_sql(
 
     match result {
         Ok(sql_string_option) => Ok(sql_string_option),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(XqliteError::NoSuchObject(object_name.to_string()))
+        }
         Err(e) => Err(e.into()),
     }
 }

@@ -5,6 +5,8 @@ defmodule Xqlite.NIF.BackupTest do
 
   alias XqliteNIF, as: NIF
 
+  @no_file_sources ["", ":memory:", "file::memory:", "file:x?mode=memory", "file:x?vfs=memdb"]
+
   for {type_tag, prefix, _opener_mfa} <- connection_openers() do
     describe "backup using #{prefix}" do
       @describetag type_tag
@@ -206,7 +208,8 @@ defmodule Xqlite.NIF.BackupTest do
       end
 
       test "backup with invalid schema returns error", %{conn: conn, backup_path: path} do
-        assert {:error, _} = NIF.backup(conn, "nonexistent_schema", path)
+        assert {:error, {:no_such_schema, "nope"}} = NIF.backup(conn, "nope", path)
+        refute File.exists?(path)
       end
 
       # -------------------------------------------------------------------
@@ -268,9 +271,18 @@ defmodule Xqlite.NIF.BackupTest do
       # restore — error cases
       # -------------------------------------------------------------------
 
-      test "restore from nonexistent file returns error", %{conn: conn} do
-        assert {:error, _} =
-                 NIF.restore(conn, "main", "/no/such/file/backup.db")
+      test "restore from a path with no database file changes nothing", %{
+        conn: conn,
+        backup_path: path
+      } do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE kept (x); INSERT INTO kept VALUES (1)")
+
+        for src <- [path | @no_file_sources] do
+          assert {:error, {:cannot_open_database, ^src, _, _}} = NIF.restore(conn, "main", src)
+          assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT x FROM kept", [])
+        end
+
+        refute File.exists?(path)
       end
 
       test "restore from corrupt file returns error", %{conn: conn} do
