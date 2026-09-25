@@ -73,13 +73,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     Process.sleep(30)
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
 
-    # We should have seen at least one {:xqlite_busy, retries, elapsed_ms}
-    # message before the insert completed.
     assert_receive {:xqlite_busy, first_retries, first_elapsed}, 500
     assert is_integer(first_retries) and first_retries >= 0
     assert is_integer(first_elapsed) and first_elapsed >= 0
 
-    # The insert should have succeeded after the holder released.
     assert {:ok, 1} = Task.await(probe_task, 1_000)
 
     :ok = NIF.close(holder)
@@ -96,7 +93,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert match?({:error, _}, result)
 
-    # At least one busy notification was delivered before we surrendered.
     assert_receive {:xqlite_busy, _, _}, 200
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
@@ -203,7 +199,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
-    # Install, then replace with a narrower one.
     :ok = Xqlite.set_busy_policy(probe, max_retries: 100, sleep_ms: 20)
 
     :ok =
@@ -246,7 +241,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     refute Enum.empty?(get_collected(first))
     refute Enum.empty?(get_collected(second))
 
-    # Unregister the first; only the second keeps receiving.
     :ok = Xqlite.unregister_busy_observer(probe, first_handle)
     first_count = length(get_collected(first))
 
@@ -330,7 +324,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
       :ok = Xqlite.remove_busy_policy(probe)
     end
 
-    # Sanity: the connection is still usable after the churn.
     assert :ok = Xqlite.set_busy_policy(probe, max_retries: 1, sleep_ms: 1)
     assert :ok = Xqlite.remove_busy_policy(probe)
 
@@ -396,7 +389,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert_receive {:xqlite_busy, second_retries, _}, 2_000
     assert second_retries >= 1
 
-    # Release; the still-retrying probe then completes.
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     assert {:ok, 1} = Task.await(probe_task, 5_000)
 
@@ -559,7 +551,12 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.busy_timeout(probe, 2_147_483_647)
     assert {:ok, 2_147_483_647} = NIF.get_pragma(probe, "busy_timeout")
 
-    assert {:error, {:cannot_execute, _}} = Xqlite.busy_timeout(probe, 2_147_483_648)
+    too_long =
+      {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: 2_147_483_648}}}
+
+    assert ^too_long = Xqlite.busy_timeout(probe, 2_147_483_648)
+    assert ^too_long = NIF.set_busy_timeout(probe, 2_147_483_648)
+    assert ^too_long = NIF.set_pragma(probe, "busy_timeout", 2_147_483_648)
     assert {:ok, 2_147_483_647} = NIF.get_pragma(probe, "busy_timeout")
 
     :ok = NIF.close(probe)
@@ -772,10 +769,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     :ok = NIF.close(conn)
   end
-
-  # ---------------------------------------------------------------------------
-  # Helpers
-  # ---------------------------------------------------------------------------
 
   defp open_contended_pair(path) do
     {:ok, holder} = NIF.open(path)

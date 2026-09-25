@@ -36,7 +36,6 @@ defmodule Xqlite.NIF.StreamTest do
         {:ok, conn: conn}
       end
 
-      # --- stream_open/3 Tests ---
       test "stream_open/3 with valid SQL returns a handle and correct columns", %{conn: conn} do
         sql = "SELECT id, name, price FROM stream_items;"
         {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
@@ -111,16 +110,14 @@ defmodule Xqlite.NIF.StreamTest do
       test "stream_open/3 with empty SQL string reports that there is no statement", %{
         conn: conn
       } do
-        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, "", [])
-        assert is_binary(reason)
+        assert {:error, :no_statement} = NIF.stream_open(conn, "", [])
       end
 
       test "stream_open/3 with comments-only SQL reports that there is no statement",
            %{conn: conn} do
         sql = "-- This is just a comment;"
 
-        assert {:error, {:cannot_execute, reason}} = NIF.stream_open(conn, sql, [])
-        assert is_binary(reason)
+        assert {:error, :no_statement} = NIF.stream_open(conn, sql, [])
       end
 
       test "stream_open/3 refuses a second statement instead of streaming the first",
@@ -191,7 +188,6 @@ defmodule Xqlite.NIF.StreamTest do
         assert :ok = NIF.close(conn)
       end
 
-      # --- stream_fetch/2 Tests ---
       test "stream_fetch/2 retrieves all rows in a single large batch", %{conn: conn} do
         sql = "SELECT id, name, price FROM stream_items ORDER BY id;"
         {:ok, stream_handle} = NIF.stream_open(conn, sql, [])
@@ -222,7 +218,6 @@ defmodule Xqlite.NIF.StreamTest do
         assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} ==
                  NIF.stream_fetch(stream_handle, 0)
 
-        # Stream should still be usable with valid batch size
         assert {:ok, %{rows: [[1], [2]]}} == NIF.stream_fetch(stream_handle, 2)
         assert :done == NIF.stream_fetch(stream_handle, 1)
         assert :ok == NIF.stream_close(stream_handle)
@@ -342,7 +337,6 @@ defmodule Xqlite.NIF.StreamTest do
     end
   end
 
-  # --- Edge case: concurrent stream + query on same connection ---
   test "isolated: query completes while stream is open, then stream continues" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE cs_t (id INTEGER, val TEXT)", [])
@@ -364,7 +358,6 @@ defmodule Xqlite.NIF.StreamTest do
     assert :ok = NIF.close(conn)
   end
 
-  # --- Isolated Test Case (Updated for new batch_size contract) ---
   test "isolated: stream_fetch behavior with exhaustion and invalid batch_size" do
     assert {:ok, conn} = NIF.open_in_memory(":memory:")
     assert {:ok, 0} = NIF.execute(conn, "CREATE TABLE iso_items (id INTEGER PRIMARY KEY);", [])
@@ -391,7 +384,6 @@ defmodule Xqlite.NIF.StreamTest do
     assert :ok == NIF.close(conn)
   end
 
-  # --- Edge case: stream after connection close ---
   test "isolated: a fetch after the connection closed is :connection_closed" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE sc_t (id INTEGER)", [])
@@ -400,11 +392,9 @@ defmodule Xqlite.NIF.StreamTest do
     {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM sc_t", [])
     :ok = NIF.close(conn)
 
-    # close/1 drops the connection — stream_fetch returns connection_closed.
     assert {:error, :connection_closed} = NIF.stream_fetch(stream, 10)
   end
 
-  # --- Edge case: multiple streams from same connection ---
   test "isolated: multiple streams from the same connection both work" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE ms_t (id INTEGER, val TEXT)", [])
@@ -425,11 +415,8 @@ defmodule Xqlite.NIF.StreamTest do
     :ok = NIF.close(conn)
   end
 
-  # --- Edge case: non-UTF-8 text via streaming ---
-  # ---------------------------------------------------------------------------
   # A step error ends the batch early: the rows already read are delivered and
   # the error waits for the next fetch.
-  # ---------------------------------------------------------------------------
 
   defp open_partial_stream(good_rows, batch_size) do
     {:ok, conn} = NIF.open_in_memory(":memory:")
@@ -531,7 +518,6 @@ defmodule Xqlite.NIF.StreamTest do
     NIF.close(conn)
   end
 
-  # --- Edge case: empty blob via stream ---
   test "isolated: zero-length blob returns empty binary via stream" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE blob_s (data BLOB)", [])

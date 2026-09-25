@@ -70,9 +70,7 @@ fn reject_no_statement(conn: &Connection, stmt: &Statement<'_>) -> Result<(), Xq
         && stmt.readonly()
         && expansion_absent(conn, stmt)
     {
-        Err(XqliteError::CannotExecute(
-            "SQL contains no statement".to_string(),
-        ))
+        Err(XqliteError::NoStatement)
     } else {
         Ok(())
     }

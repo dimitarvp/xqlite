@@ -250,6 +250,11 @@ pub(crate) enum XqliteError {
         position: usize,
         term_type: TermType,
     },
+    BlobWriteOutOfBounds {
+        offset: usize,
+        byte_size: usize,
+        blob_size: usize,
+    },
     CannotConvertAtomToString(String),
     InvalidParameterCount {
         provided: usize,
@@ -274,9 +279,23 @@ pub(crate) enum XqliteError {
         limit: usize,
     },
     InvalidPragmaName(Vec<u8>),
-    InvalidTransactionMode,
+    InvalidPragmaValue {
+        pragma: Atom,
+        value: u64,
+    },
+    InvalidTransactionMode {
+        mode: Atom,
+    },
+    InvalidCheckpointMode {
+        mode: Atom,
+    },
+    NotInWalMode,
     InvalidAuthorizerAction {
         action: Atom,
+    },
+    InvalidHookOption {
+        key: Atom,
+        value: u32,
     },
     // A limit category naming none of SQLite's thirteen.
     InvalidLimitCategory {
@@ -289,6 +308,7 @@ pub(crate) enum XqliteError {
     NulErrorInString,
     InvalidUtf8InString,
     MultipleStatements,
+    NoStatement,
 
     CannotOpenDatabase {
         path: String,
@@ -556,6 +576,14 @@ impl Display for XqliteError {
                     "Blob parameter at position {position} holds {other:?} instead of a binary"
                 ),
             },
+            XqliteError::BlobWriteOutOfBounds {
+                offset,
+                byte_size,
+                blob_size,
+            } => write!(
+                f,
+                "A write of {byte_size} bytes at offset {offset} runs past the end of a {blob_size}-byte blob"
+            ),
             XqliteError::CannotExecute(reason) => {
                 write!(f, "Cannot execute query/statement: {reason}")
             }
@@ -669,14 +697,25 @@ impl Display for XqliteError {
                     String::from_utf8_lossy(name)
                 )
             }
-            XqliteError::InvalidTransactionMode => {
+            XqliteError::InvalidPragmaValue { pragma: _, value } => {
+                write!(f, "Invalid pragma value {value}")
+            }
+            XqliteError::InvalidTransactionMode { mode: _ } => {
                 write!(
                     f,
                     "Invalid transaction mode. Allowed: :deferred, :immediate, :exclusive"
                 )
             }
+            XqliteError::InvalidCheckpointMode { mode: _ } => write!(
+                f,
+                "Invalid checkpoint mode. Allowed: :passive, :full, :restart, :truncate"
+            ),
+            XqliteError::NotInWalMode => write!(f, "The database is not in WAL mode"),
             XqliteError::InvalidAuthorizerAction { action: _ } => {
                 write!(f, "Invalid authorizer action atom")
+            }
+            XqliteError::InvalidHookOption { key: _, value } => {
+                write!(f, "Invalid hook option value {value}")
             }
             XqliteError::InvalidLimitCategory { category: _ } => {
                 write!(f, "Invalid connection limit category")
@@ -697,6 +736,7 @@ impl Display for XqliteError {
             XqliteError::MultipleStatements => {
                 write!(f, "Provided SQL string contains multiple statements")
             }
+            XqliteError::NoStatement => write!(f, "Provided SQL string contains no statement"),
             XqliteError::InvalidColumnIndex(index) => {
                 write!(f, "Invalid column index: {index}")
             }
@@ -938,6 +978,25 @@ impl Encoder for XqliteError {
                     }
                 }
             }
+            XqliteError::BlobWriteOutOfBounds {
+                offset,
+                byte_size,
+                blob_size,
+            } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::offset(), offset)
+                    .and_then(|map| map.map_put(atoms::byte_size(), byte_size))
+                    .and_then(|map| map.map_put(atoms::blob_size(), blob_size));
+                match map_result {
+                    Ok(map) => (atoms::blob_write_out_of_bounds(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for BlobWriteOutOfBounds".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
             XqliteError::InvalidParameterName(name) => {
                 (atoms::invalid_parameter_name(), name).encode(env)
             }
@@ -974,11 +1033,44 @@ impl Encoder for XqliteError {
                 }
             }
             XqliteError::InvalidPragmaName(name) => encode_pragma_name(env, name),
-            XqliteError::InvalidTransactionMode => {
-                atoms::invalid_transaction_mode().encode(env)
+            XqliteError::InvalidPragmaValue { pragma, value } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::pragma(), *pragma)
+                    .and_then(|map| map.map_put(atoms::value(), value));
+                match map_result {
+                    Ok(map) => (atoms::invalid_pragma_value(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidPragmaValue".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
+            XqliteError::InvalidTransactionMode { mode } => {
+                (atoms::invalid_transaction_mode(), *mode).encode(env)
+            }
+            XqliteError::InvalidCheckpointMode { mode } => {
+                (atoms::invalid_checkpoint_mode(), *mode).encode(env)
+            }
+            XqliteError::NotInWalMode => atoms::not_in_wal_mode().encode(env),
             XqliteError::InvalidAuthorizerAction { action } => {
                 (atoms::invalid_authorizer_action(), *action).encode(env)
+            }
+            XqliteError::InvalidHookOption { key, value } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::key(), *key)
+                    .and_then(|map| map.map_put(atoms::value(), value))
+                    .and_then(|map| map.map_put(atoms::reason(), atoms::invalid_value()));
+                match map_result {
+                    Ok(map) => (atoms::invalid_hook_option(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for InvalidHookOption".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
             XqliteError::InvalidLimitCategory { category } => {
                 (atoms::invalid_limit_category(), *category).encode(env)
@@ -1000,6 +1092,7 @@ impl Encoder for XqliteError {
             XqliteError::NulErrorInString => atoms::null_byte_in_string().encode(env),
             XqliteError::InvalidUtf8InString => atoms::invalid_utf8_in_string().encode(env),
             XqliteError::MultipleStatements => atoms::multiple_statements().encode(env),
+            XqliteError::NoStatement => atoms::no_statement().encode(env),
             XqliteError::InvalidColumnIndex(index) => {
                 (atoms::invalid_column_index(), index).encode(env)
             }

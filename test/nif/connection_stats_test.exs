@@ -16,7 +16,6 @@ defmodule Xqlite.NIF.ConnectionStatsTest do
     :cache_hit,
     :cache_miss,
     :cache_write,
-    :deferred_fks,
     :cache_used_shared,
     :cache_spill,
     :tempbuf_spill
@@ -34,7 +33,7 @@ defmodule Xqlite.NIF.ConnectionStatsTest do
       end
 
       test "returns all documented keys on a fresh connection", %{conn: conn} do
-        assert {:ok, stats} = NIF.connection_stats(conn)
+        assert {:ok, %{deferred_fks?: false} = stats} = NIF.connection_stats(conn)
 
         for key <- @expected_keys do
           assert Map.has_key?(stats, key), "missing key #{inspect(key)}"
@@ -45,9 +44,33 @@ defmodule Xqlite.NIF.ConnectionStatsTest do
       test "all counters are non-negative on a fresh connection", %{conn: conn} do
         assert {:ok, stats} = NIF.connection_stats(conn)
 
-        for {key, value} <- stats do
-          assert value >= 0, "#{inspect(key)} = #{value}, expected non-negative"
+        for key <- @expected_keys do
+          assert Map.fetch!(stats, key) >= 0, "#{inspect(key)} should be non-negative"
         end
+      end
+
+      test "the lookaside counts read the half SQLite defines for them", %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t(a); INSERT INTO t VALUES (1), (2)")
+        {:ok, stmt} = NIF.stmt_prepare(conn, "SELECT a FROM t ORDER BY a DESC")
+        {:row, _} = NIF.stmt_step(stmt)
+
+        assert {:ok, %{lookaside_used: used, lookaside_hit: hit}} = NIF.connection_stats(conn)
+        assert used > 0 and hit > 0
+        assert :ok = NIF.stmt_finalize(stmt)
+      end
+
+      test "deferred_fks? tells whether a deferred key is violated", %{conn: conn} do
+        :ok =
+          NIF.execute_batch(conn, """
+          CREATE TABLE p(id INTEGER PRIMARY KEY);
+          CREATE TABLE c(p REFERENCES p DEFERRABLE INITIALLY DEFERRED);
+          BEGIN;
+          """)
+
+        assert {:ok, %{deferred_fks?: false}} = NIF.connection_stats(conn)
+        {:ok, 3} = NIF.execute(conn, "INSERT INTO c VALUES (1), (2), (3)", [])
+        assert {:ok, %{deferred_fks?: true}} = NIF.connection_stats(conn)
+        assert :ok = NIF.rollback(conn)
       end
 
       test "cache_hit increases after repeated SELECTs", %{conn: conn} do

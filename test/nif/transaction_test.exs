@@ -15,7 +15,6 @@ defmodule Xqlite.NIF.TransactionTest do
   INSERT INTO savepoint_test (id, val) VALUES (1, 'one');
   """
 
-  # --- Helper functions specific to savepoint tests ---
   # Defined at module level as they are used across iterations of the loop
   defp query_savepoint_test_row(conn, id) do
     sql = "SELECT id, val FROM savepoint_test WHERE id = ?1;"
@@ -32,12 +31,10 @@ defmodule Xqlite.NIF.TransactionTest do
     assert expected_result == query_savepoint_test_row(conn, id)
   end
 
-  # --- Shared test code (generated via `for` loop) ---
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix}" do
       @describetag type_tag
 
-      # Top-level setup for the describe block (opens connection)
       setup context do
         {mod, fun, args} = find_opener_mfa!(context)
         assert {:ok, conn} = apply(mod, fun, args)
@@ -45,8 +42,6 @@ defmodule Xqlite.NIF.TransactionTest do
         {:ok, conn: conn}
       end
 
-      # --- Basic Commit/Rollback Tests ---
-      # Setup specific table needed for these tests
       setup %{conn: conn} do
         assert {:ok, 0} = NIF.execute(conn, @simple_tx_table, [])
         :ok
@@ -98,11 +93,8 @@ defmodule Xqlite.NIF.TransactionTest do
         assert :ok = NIF.begin(conn)
         assert {:error, {:sqlite_failure, code, _, msg}} = NIF.begin(conn)
         assert code == 21 or String.contains?(msg || "", "within a transaction")
-        # Clean up outer transaction
         assert :ok = NIF.rollback(conn)
       end
-
-      # --- Transaction Mode Tests ---
 
       test "begin with explicit :deferred mode", %{conn: conn} do
         assert :ok = NIF.begin(conn, :deferred)
@@ -169,10 +161,8 @@ defmodule Xqlite.NIF.TransactionTest do
       end
 
       test "begin with invalid mode returns error", %{conn: conn} do
-        assert {:error, :invalid_transaction_mode} = NIF.begin(conn, :bogus)
+        assert {:error, {:invalid_transaction_mode, :bogus}} = NIF.begin(conn, :bogus)
       end
-
-      # --- Transaction Status Tests ---
 
       test "transaction_status returns false outside transaction", %{conn: conn} do
         assert {:ok, false} = NIF.transaction_status(conn)
@@ -198,8 +188,6 @@ defmodule Xqlite.NIF.TransactionTest do
         assert {:ok, false} = NIF.transaction_status(conn)
       end
 
-      # --- Savepoint Tests ---
-      # Setup specific table needed for these tests
       setup %{conn: conn} do
         assert :ok = NIF.execute_batch(conn, @savepoint_table_setup)
         :ok
@@ -254,17 +242,11 @@ defmodule Xqlite.NIF.TransactionTest do
                  NIF.rollback_to_savepoint(conn, "sp1")
 
         assert code == 21 or String.contains?(msg || "", "no such savepoint")
-        # Clean up main transaction
         assert :ok = NIF.rollback(conn)
       end
     end
-
-    # end describe "using #{prefix}"
   end
 
-  # end `for` loop
-
-  # --- Edge case: savepoint without active transaction ---
   test "isolated: savepoint without active transaction succeeds (implicitly starts one)" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, 0} = NIF.execute(conn, "CREATE TABLE sp_no_tx (id INTEGER)", [])
@@ -279,7 +261,6 @@ defmodule Xqlite.NIF.TransactionTest do
     NIF.close(conn)
   end
 
-  # --- Edge case: special characters in savepoint names ---
   test "isolated: savepoint with apostrophe in name" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.begin(conn)

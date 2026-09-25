@@ -1,3 +1,4 @@
+use crate::atoms;
 use crate::authorizer;
 use crate::connection::XqliteConn;
 use crate::error::XqliteError;
@@ -207,18 +208,15 @@ fn read_busy_timeout(conn: &Connection, flags: &BusySlotFlags) -> Result<u64, Xq
     flags.internal_read.store(false, Ordering::Relaxed);
 
     let ms = read?;
-    u64::try_from(ms)
-        .map_err(|_| XqliteError::CannotExecute(format!("busy_timeout read back as {ms} ms")))
+    u64::try_from(ms).map_err(|_| XqliteError::InternalEncodingError {
+        context: format!("busy_timeout read back as {ms} ms"),
+    })
 }
 
-/// Hand the C slot to SQLite's own timeout handler at `timeout_ms`.
-/// Callers must hold the connection Mutex.
-fn busy_timeout_c_int(timeout_ms: u64) -> Result<c_int, XqliteError> {
-    c_int::try_from(timeout_ms).map_err(|_| {
-        XqliteError::CannotExecute(format!(
-            "busy_timeout {timeout_ms} ms exceeds SQLite's limit of {} ms",
-            c_int::MAX
-        ))
+pub(crate) fn busy_timeout_c_int(timeout_ms: u64) -> Result<c_int, XqliteError> {
+    c_int::try_from(timeout_ms).map_err(|_| XqliteError::InvalidPragmaValue {
+        pragma: atoms::busy_timeout(),
+        value: timeout_ms,
     })
 }
 

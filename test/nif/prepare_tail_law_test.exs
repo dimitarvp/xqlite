@@ -170,7 +170,7 @@ defmodule Xqlite.NIF.PrepareTailLawTest do
     end
 
     test "SQL holding no statement is refused on every path", %{conn: conn} do
-      expected = {:error, :cannot_execute}
+      expected = {:error, :no_statement}
 
       for sql <- ["", "   ", "-- c", "/* c */", ";;"] do
         assert [

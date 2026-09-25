@@ -751,8 +751,8 @@ defmodule Xqlite.Pragma do
   An integer argument is written into the statement as a number and a string
   or an atom as a quoted name, which is what each PRAGMA reads: `:optimize`
   takes a bitmask, `:incremental_vacuum` a page count, `:integrity_check`
-  and `:quick_check` the most errors to report, `:wal_checkpoint` the name
-  of an attached schema, and the rest the name of a table or an index. For
+  and `:quick_check` the most errors to report, `:wal_checkpoint` the
+  checkpoint mode, and the rest the name of a table or an index. For
   `:table_info`, `:table_xinfo`, `:index_list`, `:index_info`,
   `:index_xinfo` and `:foreign_key_list`, a name that is not in the database
   is SQLite's own empty answer, `{:ok, []}`; `:foreign_key_check`,

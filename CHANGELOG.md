@@ -277,6 +277,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SQL holding no statement answers `{:error, :no_statement}`** instead of
+  `{:error, {:cannot_execute, "SQL contains no statement"}}`.
+- **`wal_checkpoint/3` on a named database not in WAL mode answers
+  `{:error, :not_in_wal_mode}`** instead of `-1` page counts, and a checkpoint
+  lock another connection holds answers
+  `{:error, {:database_busy_or_locked, 5, _}}`.
+- **Backup progress messages are
+  `{:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}}`.**
+- **`connection_stats/1` reports the half SQLite defines for each counter.**
+  `lookaside_hit`, `lookaside_miss_size` and `lookaside_miss_full` report
+  SQLite's running totals (they read 0 before); `deferred_fks` is now
+  `deferred_fks?`, a boolean; every counter is read as 64 bits.
+- **Tagged errors carry the rejected term.** `{:invalid_checkpoint_mode, mode}`,
+  `{:invalid_schema_name, term}` (`wal_checkpoint/3`, `txn_state/2`),
+  `{:invalid_transaction_mode, mode}` and `{:invalid_conflict_strategy,
+  strategy}` (were bare atoms), `{:blob_write_out_of_bounds, %{offset,
+  byte_size, blob_size}}`, `{:invalid_hook_option, _}` from the raw
+  progress-hook NIF, and `{:invalid_pragma_value, %{pragma: :busy_timeout,
+  value}}` from `busy_timeout/2` and the raw setters.
+- **`XqliteNIF.set_pragma(conn, "busy_timeout", n)` rejects an integer above
+  2_147_483_647** instead of storing 0.
+- **`busy_timeout/2` answers the rejection for 2^64 and above instead of
+  raising**; `register_progress_hook/3` does for `every_n` above
+  4_294_967_295.
+
 - **A keyword list is taken only on a statement of at most 2 048
   parameters.** Above that, every door that takes a keyword list answers
   `{:error, {:too_many_named_parameters, %{count: n, limit: 2048}}}` before a

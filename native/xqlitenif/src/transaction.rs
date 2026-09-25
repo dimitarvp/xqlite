@@ -20,7 +20,7 @@ impl TransactionMode {
         } else if atom == atoms::exclusive() {
             Ok(Self::Exclusive)
         } else {
-            Err(XqliteError::InvalidTransactionMode)
+            Err(XqliteError::InvalidTransactionMode { mode: atom })
         }
     }
 

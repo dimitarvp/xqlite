@@ -212,9 +212,9 @@ unsafe fn step_query_plan(
     // SAFETY: `stmt_ptr` is live and the Mutex is held (fn contract).
     let col_count = unsafe { ffi::sqlite3_column_count(stmt_ptr) };
     if col_count != QUERY_PLAN_COLUMNS {
-        return Err(XqliteError::CannotExecute(format!(
-            "EXPLAIN QUERY PLAN returned {col_count} columns; expected 4"
-        )));
+        return Err(XqliteError::InternalEncodingError {
+            context: format!("EXPLAIN QUERY PLAN returned {col_count} columns; expected 4"),
+        });
     }
 
     let mut out = Vec::new();

@@ -6,10 +6,6 @@ defmodule Xqlite.NIF.SessionTest do
   alias XqliteNIF, as: NIF
 
   for_each_opener "session" do
-    # -------------------------------------------------------------------
-    # Session lifecycle
-    # -------------------------------------------------------------------
-
     test "create and delete session", %{conn: conn} do
       assert {:ok, session} = NIF.session_new(conn)
       assert :ok = NIF.session_delete(session)
@@ -26,10 +22,6 @@ defmodule Xqlite.NIF.SessionTest do
       assert NIF.session_is_empty(session) == {:ok, true}
       NIF.session_delete(session)
     end
-
-    # -------------------------------------------------------------------
-    # Attach and track changes
-    # -------------------------------------------------------------------
 
     test "attach specific table", %{conn: conn} do
       :ok =
@@ -78,10 +70,6 @@ defmodule Xqlite.NIF.SessionTest do
 
       NIF.session_delete(session)
     end
-
-    # -------------------------------------------------------------------
-    # Changeset capture
-    # -------------------------------------------------------------------
 
     test "changeset captures INSERT", %{conn: conn} do
       :ok =
@@ -154,10 +142,6 @@ defmodule Xqlite.NIF.SessionTest do
       NIF.session_delete(session)
     end
 
-    # -------------------------------------------------------------------
-    # Patchset capture
-    # -------------------------------------------------------------------
-
     test "patchset captures changes", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, "CREATE TABLE sess_ps (id INTEGER PRIMARY KEY, val TEXT);")
@@ -173,10 +157,6 @@ defmodule Xqlite.NIF.SessionTest do
 
       NIF.session_delete(session)
     end
-
-    # -------------------------------------------------------------------
-    # Apply changeset
-    # -------------------------------------------------------------------
 
     test "apply changeset replicates INSERT to another connection", %{conn: conn} do
       :ok =
@@ -267,10 +247,6 @@ defmodule Xqlite.NIF.SessionTest do
       NIF.close(conn2)
     end
 
-    # -------------------------------------------------------------------
-    # Changeset invert
-    # -------------------------------------------------------------------
-
     test "inverted changeset undoes changes", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, "CREATE TABLE sess_inv (id INTEGER PRIMARY KEY, val TEXT);")
@@ -308,7 +284,6 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, inv1} = NIF.changeset_invert(changeset)
       {:ok, inv2} = NIF.changeset_invert(inv1)
 
-      # Double-inverted should be equivalent to original — apply to fresh DB
       {:ok, conn2} = NIF.open_in_memory(":memory:")
 
       :ok =
@@ -324,10 +299,6 @@ defmodule Xqlite.NIF.SessionTest do
 
       NIF.close(conn2)
     end
-
-    # -------------------------------------------------------------------
-    # Changeset concat
-    # -------------------------------------------------------------------
 
     test "concatenated changesets apply as one", %{conn: conn} do
       :ok =
@@ -360,10 +331,6 @@ defmodule Xqlite.NIF.SessionTest do
 
       NIF.close(conn2)
     end
-
-    # -------------------------------------------------------------------
-    # Conflict strategies
-    # -------------------------------------------------------------------
 
     test "conflict :omit skips conflicting rows", %{conn: conn} do
       :ok =
@@ -527,13 +494,9 @@ defmodule Xqlite.NIF.SessionTest do
       {:ok, changeset} = NIF.session_changeset(session)
       NIF.session_delete(session)
 
-      assert {:error, :invalid_conflict_strategy} =
+      assert {:error, {:invalid_conflict_strategy, :invalid}} =
                NIF.changeset_apply(conn, changeset, :invalid)
     end
-
-    # -------------------------------------------------------------------
-    # Multiple operations in one changeset
-    # -------------------------------------------------------------------
 
     test "changeset with INSERT + UPDATE + DELETE", %{conn: conn} do
       :ok =
@@ -571,10 +534,6 @@ defmodule Xqlite.NIF.SessionTest do
       assert rows == [[1, "keep"], [2, "updated"], [4, "new"]]
       NIF.close(conn2)
     end
-
-    # -------------------------------------------------------------------
-    # Edge cases
-    # -------------------------------------------------------------------
 
     test "changeset with NULL values", %{conn: conn} do
       :ok =
@@ -681,10 +640,6 @@ defmodule Xqlite.NIF.SessionTest do
       NIF.close(conn2)
     end
   end
-
-  # -------------------------------------------------------------------
-  # Edge cases outside connection_openers loop
-  # -------------------------------------------------------------------
 
   test "session_new on closed connection returns error" do
     {:ok, conn} = NIF.open_in_memory(":memory:")

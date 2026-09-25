@@ -172,8 +172,7 @@ defmodule Xqlite.NIF.ExplainAnalyzeTest do
       end
 
       test "SQL that holds no statement is refused, not reported as empty", %{conn: conn} do
-        assert {:error, {:cannot_execute, reason}} = NIF.explain_analyze(conn, "   ", [])
-        assert is_binary(reason)
+        assert {:error, :no_statement} = NIF.explain_analyze(conn, "   ", [])
       end
 
       # Profiling runs the statement for real, so a parameter list of the

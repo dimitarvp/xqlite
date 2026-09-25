@@ -24,7 +24,9 @@ defmodule Xqlite.NIF.ProgressHookTest do
       end
 
       test "every_n must be >= 1", %{conn: conn} do
-        assert {:error, _} = NIF.register_progress_hook(conn, self(), 0, nil)
+        assert {:error,
+                {:invalid_hook_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
+                 NIF.register_progress_hook(conn, self(), 0, nil)
       end
 
       test "register multiple subscribers returns distinct handles", %{conn: conn} do
@@ -45,7 +47,6 @@ defmodule Xqlite.NIF.ProgressHookTest do
         assert :ok = NIF.unregister_progress_hook(conn, 999_999)
         {:ok, h} = NIF.register_progress_hook(conn, self(), 100, nil)
         :ok = NIF.unregister_progress_hook(conn, h)
-        # Already unregistered — second call still :ok.
         assert :ok = NIF.unregister_progress_hook(conn, h)
       end
     end
@@ -189,7 +190,6 @@ defmodule Xqlite.NIF.ProgressHookTest do
 
         refute Enum.empty?(msgs_a)
         refute Enum.empty?(msgs_b)
-        # Each listener must only see its own tag.
         assert Enum.all?(msgs_a, fn {tag, _, _} -> tag == :a end)
         assert Enum.all?(msgs_b, fn {tag, _, _} -> tag == :b end)
 
@@ -223,7 +223,6 @@ defmodule Xqlite.NIF.ProgressHookTest do
 
         msgs = get_collected(live)
         refute Enum.empty?(msgs)
-        # Live sibling sees only its own tag.
         assert Enum.all?(msgs, fn {tag, _, _} -> tag == :live_tag end)
 
         :ok = NIF.unregister_progress_hook(conn, h_dead)
@@ -413,6 +412,11 @@ defmodule Xqlite.NIF.ProgressHookTest do
       assert {:error,
               {:invalid_hook_option, %{key: :every_n, value: 0, reason: :invalid_value}}} =
                Xqlite.register_progress_hook(conn, self(), every_n: 0)
+
+      assert {:error,
+              {:invalid_hook_option,
+               %{key: :every_n, value: 4_294_967_296, reason: :invalid_value}}} =
+               Xqlite.register_progress_hook(conn, self(), every_n: 4_294_967_296)
     end
 
     test "the documented values still register", %{conn: conn} do
@@ -431,12 +435,13 @@ defmodule Xqlite.NIF.ProgressHookTest do
     end
   end
 
-  # `:tag` takes an atom, `:every_n` a positive integer; everything else is a
-  # value of the wrong kind in a well-formed option list.
+  # `:tag` takes an atom, `:every_n` an integer from 1 to 2^32 - 1; everything
+  # else is a value of the wrong kind in a well-formed option list.
   defp bad_hook_option do
     StreamData.one_of([
       StreamData.map(non_atom_term(), fn value -> {:tag, value} end),
-      StreamData.map(non_positive_integer_term(), fn value -> {:every_n, value} end)
+      StreamData.map(non_positive_integer_term(), fn value -> {:every_n, value} end),
+      StreamData.map(StreamData.integer(4_294_967_296..(2 ** 64)), &{:every_n, &1})
     ])
   end
 
@@ -464,10 +469,6 @@ defmodule Xqlite.NIF.ProgressHookTest do
       fn size -> min(size, 8) end
     )
   end
-
-  # ---------------------------------------------------------------------------
-  # Helpers
-  # ---------------------------------------------------------------------------
 
   defp run_workload(conn) do
     :ok = NIF.execute_batch(conn, "CREATE TABLE IF NOT EXISTS pw(id INTEGER PRIMARY KEY)")

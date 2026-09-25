@@ -13,10 +13,6 @@ defmodule Xqlite.NIF.StatementTest do
       :ok
     end
 
-    # -------------------------------------------------------------------
-    # Happy lifecycle
-    # -------------------------------------------------------------------
-
     test "prepared INSERT loop then step SELECT to :done", %{conn: conn} do
       {:ok, insert} = Xqlite.prepare(conn, "INSERT INTO items (id, label) VALUES (?1, ?2)")
 
@@ -45,10 +41,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert :done = Xqlite.step(stmt)
       assert :ok = Xqlite.finalize(stmt)
     end
-
-    # -------------------------------------------------------------------
-    # multi_step batching
-    # -------------------------------------------------------------------
 
     test "multi_step batches rows and re-runs after :done", %{conn: conn} do
       seed(conn, 5)
@@ -79,10 +71,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
-    # -------------------------------------------------------------------
-    # Partial consumption and early finalize
-    # -------------------------------------------------------------------
-
     test "partial consumption then early finalize leaves the connection usable",
          %{conn: conn} do
       seed(conn, 5)
@@ -95,10 +83,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:ok, %{rows: [[5]], num_rows: 1}} =
                NIF.query(conn, "SELECT COUNT(*) FROM items", [])
     end
-
-    # -------------------------------------------------------------------
-    # reset / clear_bindings
-    # -------------------------------------------------------------------
 
     test "reset preserves bindings; clear_bindings drops them to NULL", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
@@ -204,10 +188,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
 
-    # -------------------------------------------------------------------
-    # Named parameters
-    # -------------------------------------------------------------------
-
     test "named parameters bind by keyword; unknown name is structured", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT :a + :b")
       :ok = Xqlite.bind(stmt, a: 2, b: 3)
@@ -253,10 +233,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = NIF.stmt_finalize(stmt)
     end
 
-    # -------------------------------------------------------------------
-    # Positional count mismatch
-    # -------------------------------------------------------------------
-
     test "positional bind with the wrong count is a structured error", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1, ?2")
 
@@ -289,21 +265,9 @@ defmodule Xqlite.NIF.StatementTest do
                Xqlite.query(conn, "SELECT label FROM items ORDER BY id", [])
     end
 
-    # -------------------------------------------------------------------
-    # prepare rejections
-    # -------------------------------------------------------------------
-
     test "prepare rejects empty, comment-only, and multi-statement SQL", %{conn: conn} do
-      assert {:error, {:cannot_execute, whitespace_reason}} =
-               Xqlite.prepare(conn, "   \n\t  ")
-
-      assert is_binary(whitespace_reason)
-
-      assert {:error, {:cannot_execute, comment_reason}} =
-               Xqlite.prepare(conn, "-- just a comment")
-
-      assert is_binary(comment_reason)
-
+      assert {:error, :no_statement} = Xqlite.prepare(conn, "   \n\t  ")
+      assert {:error, :no_statement} = Xqlite.prepare(conn, "-- just a comment")
       assert {:error, :multiple_statements} = Xqlite.prepare(conn, "SELECT 1; SELECT 2")
     end
 
@@ -323,10 +287,6 @@ defmodule Xqlite.NIF.StatementTest do
       end
     end
 
-    # -------------------------------------------------------------------
-    # Use-after-finalize
-    # -------------------------------------------------------------------
-
     test "operations after finalize report :statement_finalized; names stay cached",
          %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1 AS only_col")
@@ -341,10 +301,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:ok, ["only_col"]} = Xqlite.column_names(stmt)
       assert :ok = Xqlite.finalize(stmt)
     end
-
-    # -------------------------------------------------------------------
-    # step before bind
-    # -------------------------------------------------------------------
 
     test "stepping before any bind is refused", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
@@ -427,8 +383,7 @@ defmodule Xqlite.NIF.StatementTest do
       assert byte_size(sql) > 30
 
       assert {:ok, %{num_rows: 0}} = Xqlite.query(conn, sql, [])
-      assert {:error, {:cannot_execute, reason}} = Xqlite.query(conn, "-- just a comment", [])
-      assert is_binary(reason)
+      assert {:error, :no_statement} = Xqlite.query(conn, "-- just a comment", [])
     end
 
     test "a lowered length limit does not hide a read-only statement", %{conn: conn} do
@@ -447,19 +402,15 @@ defmodule Xqlite.NIF.StatementTest do
     test "a comment-only text holds no statement at any limit or door", %{conn: conn} do
       long_comment = "-- " <> String.duplicate("c", 60)
 
-      assert {:error, {:cannot_execute, reason}} = Xqlite.query(conn, long_comment, [])
-      assert is_binary(reason)
-      assert {:error, {:cannot_execute, _execute}} = Xqlite.execute(conn, long_comment, [])
-      assert {:error, {:cannot_execute, _prepare}} = Xqlite.prepare(conn, long_comment)
+      assert {:error, :no_statement} = Xqlite.query(conn, long_comment, [])
+      assert {:error, :no_statement} = Xqlite.execute(conn, long_comment, [])
+      assert {:error, :no_statement} = Xqlite.prepare(conn, long_comment)
 
       assert {:ok, _in_force} = Xqlite.put_limit(conn, :length, 30)
 
-      assert {:error, {:cannot_execute, _lowered_query}} = Xqlite.query(conn, long_comment, [])
-
-      assert {:error, {:cannot_execute, _lowered_execute}} =
-               Xqlite.execute(conn, long_comment, [])
-
-      assert {:error, {:cannot_execute, _lowered_prepare}} = Xqlite.prepare(conn, long_comment)
+      assert {:error, :no_statement} = Xqlite.query(conn, long_comment, [])
+      assert {:error, :no_statement} = Xqlite.execute(conn, long_comment, [])
+      assert {:error, :no_statement} = Xqlite.prepare(conn, long_comment)
     end
 
     test "the batch doors judge the batch size before anything else", %{conn: conn} do
@@ -497,10 +448,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:ok, %{rows: [[1]]}} = Xqlite.query(conn, "SELECT 1", [])
     end
 
-    # -------------------------------------------------------------------
-    # GC finalization of an abandoned statement
-    # -------------------------------------------------------------------
-
     test "a statement abandoned by a dead process never wedges the connection",
          %{conn: conn} do
       seed(conn, 3)
@@ -519,10 +466,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:ok, %{rows: [[3]], num_rows: 1}} =
                NIF.query(conn, "SELECT COUNT(*) FROM items", [])
     end
-
-    # -------------------------------------------------------------------
-    # Concurrent stepping (safety, not determinism)
-    # -------------------------------------------------------------------
 
     test "concurrent stepping of one statement is crash-free and drops no rows",
          %{conn: conn} do
@@ -551,10 +494,6 @@ defmodule Xqlite.NIF.StatementTest do
       assert :ok = Xqlite.finalize(stmt)
     end
   end
-
-  # -------------------------------------------------------------------
-  # Edge case unrelated to connection mode
-  # -------------------------------------------------------------------
 
   test "statement ops after connection close: closed error, cached names, finalize :ok" do
     {:ok, conn} = NIF.open_in_memory(":memory:")

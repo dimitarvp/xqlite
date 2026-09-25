@@ -83,7 +83,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Diagnostics & connection state:** `compile_options/1`, `sqlite_version/0`, `connection_stats/1` (per-connection `sqlite3_db_status` counters), `autocommit/1`, `txn_state/2`, structured `wal_checkpoint/3`
 - **Result integration:** `Xqlite.Result` implements `Table.Reader` (works with Explorer, Kino, VegaLite)
 
-Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 75 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
+Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 80 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
 
 ## Focused examples
 
@@ -196,7 +196,7 @@ observation is fan-out, and the telemetry bridge re-emits it as
 ```elixir
 {:ok, token} = XqliteNIF.create_cancel_token()
 :ok = XqliteNIF.backup_with_progress(conn, "main", "/path/to/backup.db", self(), 10, token)
-# receive {:xqlite_backup_progress, remaining, pagecount} messages
+# receive {:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}} messages
 # cancel from any process: XqliteNIF.cancel_operation(token)
 ```
 
@@ -299,7 +299,7 @@ Rusqlite opens connections with `SQLITE_OPEN_NO_MUTEX` (disabling SQLite's own m
 
 Xqlite provides two backup interfaces: one-shot (`backup/2`, `restore/2`) and incremental with progress (`backup_with_progress/6`).
 
-The incremental variant runs the entire backup inside a single NIF call on a dirty I/O scheduler, sending `{:xqlite_backup_progress, remaining, pagecount}` messages after each step. A cancel token -- the same one used for `query_cancellable/4` -- allows another process to abort the backup at any time.
+The incremental variant runs the entire backup inside a single NIF call on a dirty I/O scheduler, sending `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` after each step, `status` being `:busy` when a lock blocked the step. A cancel token -- the same one used for `query_cancellable/4` -- allows another process to abort the backup at any time.
 
 I chose this single-call design over exposing a step-by-step `Backup` resource handle because:
 

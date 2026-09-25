@@ -115,11 +115,8 @@ defmodule XqliteTest do
       end
 
       test "stream/4 refuses SQL that holds no statement", %{conn: conn} do
-        assert {:error, {:cannot_execute, reason}} = Xqlite.stream(conn, "")
-        assert is_binary(reason)
+        assert {:error, :no_statement} = Xqlite.stream(conn, "")
       end
-
-      # --- on_error option: happy-path element shape follows the mode ---
 
       test "on_error: :raise (default) yields raw row maps on the happy path", %{conn: conn} do
         sql = "SELECT id FROM stream_test_users WHERE id <= 2 ORDER BY id;"
@@ -141,8 +138,6 @@ defmodule XqliteTest do
 
         assert Enum.to_list(stream) == [{:ok, %{"id" => 1}}, {:ok, %{"id" => 2}}]
       end
-
-      # --- on_error option: mid-fetch error behavior follows the mode ---
 
       test "on_error: :raise raises Xqlite.StreamError carrying the structured reason", %{
         conn: conn
@@ -320,8 +315,6 @@ defmodule XqliteTest do
         assert {:ok, %{rows: [["User 1", "user1@example.com"]]}} =
                  Xqlite.query(conn, "SELECT name, email FROM stream_test_users WHERE id = 1")
       end
-
-      # --- cancel_tokens option: a cancel is one more error routed by the mode ---
 
       test "cancel_tokens: on_error: :raise raises with :operation_cancelled", %{conn: conn} do
         {:ok, token} = Xqlite.create_cancel_token()

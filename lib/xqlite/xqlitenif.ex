@@ -6,7 +6,7 @@ defmodule XqliteNIF do
   Rust and the `rusqlite` crate. It forms the foundation of the `Xqlite` library.
 
   **Connection lifecycle:**
-  1. Open a database connection using `open/2`, `open_in_memory/1`, or `open_temporary/0`.
+  1. Open a database connection using `open/1`, `open_in_memory/1`, or `open_temporary/0`.
      These return an opaque connection resource (`t:Xqlite.conn/0`).
   2. Perform operations (queries, executes, pragmas, etc.) using this resource.
   3. Conceptually close the connection with `close/1` when done.
@@ -637,9 +637,11 @@ defmodule XqliteNIF do
   autocheckpoint (see `register_wal_hook/2`). Raw-SQL `PRAGMA` statements
   get no such repair.
 
-  This function checks nothing: the value is formatted and handed to SQLite,
-  which parses what it can of it and reports success even when it stored its
-  own fallback instead. `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4`
+  This function checks one value only: an integer `busy_timeout` above
+  `2_147_483_647`, which SQLite would read as `0`, returns
+  `{:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}`.
+  Any other value is formatted and handed to SQLite, which parses what it can
+  of it and reports success even when it stored its own fallback instead. `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4`
   check the value against the PRAGMA's definition first and refuse what it
   cannot take; use one of them unless you mean to reach SQLite unchecked.
   """
@@ -660,7 +662,7 @@ defmodule XqliteNIF do
   Returns `:ok` on success.
   Returns `{:error, reason}` if a transaction cannot be started (e.g., if one
   is already active on this connection, or due to other SQLite errors).
-  Returns `{:error, :invalid_transaction_mode}` for unrecognized mode atoms.
+  Returns `{:error, {:invalid_transaction_mode, mode}}` for any other atom.
   """
   @spec begin(conn :: Xqlite.conn(), mode :: transaction_mode()) :: :ok | Xqlite.error()
   def begin(_conn, _mode \\ :deferred), do: err()
@@ -1084,7 +1086,7 @@ defmodule XqliteNIF do
   `mode` picks the checkpoint strategy:
 
     * `:passive` (default) — checkpoints as many pages as possible
-      without blocking readers or writers. Never returns `busy: true`.
+      without blocking readers or writers.
     * `:full` — waits for any concurrent writers to finish, then
       checkpoints all pages. Will set `busy: true` if readers prevent
       completion.
@@ -1097,13 +1099,19 @@ defmodule XqliteNIF do
 
   Returns `{:ok, %{log_pages: n, checkpointed_pages: n, busy: bool}}`:
 
-    * `log_pages` — size of the WAL log in pages after the checkpoint,
-      or `-1` if WAL mode is not active.
+    * `log_pages` — size of the WAL log in pages after the checkpoint.
     * `checkpointed_pages` — number of pages the checkpoint actually
-      moved from the WAL into the main database, or `-1` if inactive.
+      moved from the WAL into the database.
     * `busy` — `true` if the checkpoint did not complete all of its work
-      because other connections held back progress. `log_pages` /
-      `checkpointed_pages` are still populated with partial data.
+      because other connections held back progress.
+
+  A named `schema` whose database is not in WAL mode as this connection
+  sees it returns `{:error, :not_in_wal_mode}`, and so does a WAL database
+  this connection has not read yet. A checkpoint lock another connection
+  holds returns `{:error, {:database_busy_or_locked, 5, message}}`. With
+  `nil` the counts can read `-1`, which SQLite writes for a database it did
+  not checkpoint. Any other atom as `mode` returns
+  `{:error, {:invalid_checkpoint_mode, mode}}`.
   """
   @spec wal_checkpoint(
           Xqlite.conn(),
@@ -1116,7 +1124,10 @@ defmodule XqliteNIF do
   Returns a structured snapshot of `sqlite3_db_status` counters for the
   connection.
 
-  Returns `{:ok, %{…}}` with the following keys (all non-negative integers):
+  Returns `{:ok, %{…}}` with the following keys. SQLite answers a (current,
+  high-water) pair per counter and defines one half of it; each key reports
+  that half. The three lookaside counts are the high-water half, a running
+  total since the connection opened; every other integer is the current half.
 
     * `:lookaside_used` — lookaside slots in use.
     * `:cache_used` — heap bytes in the pager cache.
@@ -1131,15 +1142,16 @@ defmodule XqliteNIF do
     * `:cache_hit` — pager cache hit count.
     * `:cache_miss` — pager cache miss count.
     * `:cache_write` — count of dirty pages written.
-    * `:deferred_fks` — pending deferred FK violations (only relevant
-      under `PRAGMA defer_foreign_keys = ON`).
+    * `:deferred_fks?` — `true` while a foreign key violation is pending:
+      under `PRAGMA defer_foreign_keys = ON`, and for a key declared
+      `DEFERRABLE INITIALLY DEFERRED` with the PRAGMA off.
     * `:cache_used_shared` — heap bytes in the shared pager cache
       attributable to this connection.
     * `:cache_spill` — count of dirty-cache spills to disk.
-    * `:tempbuf_spill` — count of `tempdb` spill events.
+    * `:tempbuf_spill` — bytes written to temporary files that more memory
+      would have kept in memory.
 
-  All counters are "current" values; high-water marks are not exposed
-  yet. Call repeatedly for time-series monitoring.
+  Call repeatedly for time-series monitoring.
   """
   @spec connection_stats(Xqlite.conn()) :: {:ok, map()} | Xqlite.error()
   def connection_stats(_conn), do: err()
@@ -1251,7 +1263,9 @@ defmodule XqliteNIF do
   while a `busy_timeout` write in SQL is rejected (see
   `set_busy_policy/4`).
 
-  Returns `:ok`.
+  Returns `:ok`. A value above `2_147_483_647`, which SQLite cannot store,
+  returns `{:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value:
+  ms}}}` and changes nothing.
   """
   @spec set_busy_timeout(conn :: Xqlite.conn(), ms :: non_neg_integer()) ::
           :ok | Xqlite.error()
@@ -1338,7 +1352,7 @@ defmodule XqliteNIF do
   The `stream_handle_resource` is an opaque reference.
 
   Compiles exactly ONE SQL statement, by the same rule as `stmt_prepare/2`:
-  SQL holding no statement at all is `{:cannot_execute, _}` and a second
+  SQL holding no statement at all is `:no_statement` and a second
   statement after the first is `:multiple_statements`, so no stream is ever
   opened over half a string. A trailing comment, extra semicolons and
   whitespace are accepted.
@@ -1461,7 +1475,7 @@ defmodule XqliteNIF do
 
   Most users want `Xqlite.prepare/2`. Compiles exactly ONE SQL statement:
   SQL holding no statement at all and a second statement after the first are
-  structured errors (`{:cannot_execute, _}` / `:multiple_statements`), and a
+  structured errors (`:no_statement` / `:multiple_statements`), and a
   syntax error is `{:sql_input_error, %{sql: _, offset: _, code: _, message:
   _}}` carrying the byte offset SQLite reports — no silent partial
   compilation. Text after the first statement counts as a second statement
@@ -1838,7 +1852,8 @@ defmodule XqliteNIF do
   the value returned in `{:ok, handle}` and is what `unregister_progress_hook/2`
   expects.
 
-  `every_n` must be `>= 1`. `tag` is a string (typically
+  `every_n` of `0` returns `{:error, {:invalid_hook_option, %{key: :every_n,
+  value: 0, reason: :invalid_value}}}`. `tag` is a string (typically
   `Atom.to_string(:my_atom)` from the `Xqlite.register_progress_hook/3`
   wrapper) used to disambiguate messages from multiple subscribers
   inside the same listener process; pass `nil` to omit the tag.
@@ -1966,8 +1981,11 @@ defmodule XqliteNIF do
   Backs up a database to a file with progress reporting and cancellation.
 
   Copies `pages_per_step` pages at a time, sending
-  `{:xqlite_backup_progress, remaining, pagecount}` messages to `pid`
-  after each step. Between steps, all of `cancel_tokens` are polled —
+  `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to `pid`
+  after each step: `status` is `:copied`, or `:busy` when a lock blocked the
+  step, which is then retried every 100 ms. A `:busy` message before the first
+  copied step carries `remaining: 0, total: 0`. Between steps, all of
+  `cancel_tokens` are polled —
   if *any* is signalled, returns `{:error, :operation_cancelled}`
   (OR-semantics). Pass an empty list for no-cancellation.
 
@@ -2046,6 +2064,8 @@ defmodule XqliteNIF do
     the entire apply is aborted and rolled back, returning an error. The
     offending change is not silently skipped — that is `:omit`, not `:replace`.
   - `:abort` — abort the entire apply operation
+
+  Any other atom returns `{:error, {:invalid_conflict_strategy, strategy}}`.
   """
   @spec changeset_apply(
           conn :: Xqlite.conn(),
@@ -2102,9 +2122,9 @@ defmodule XqliteNIF do
   A negative `offset` or `length` raises `ArgumentError`: the arguments are
   unsigned on the native side, so the decoding refuses them.
 
-  A write is not a window: `blob_write/3` refuses to write past the end with
-  `{:error, {:cannot_execute, reason}}` rather than writing the part that
-  fits.
+  A write is not a window: `blob_write/3` rejects a write past the end with
+  `{:error, {:blob_write_out_of_bounds, _}}` rather than writing the part
+  that fits.
   """
   @spec blob_read(
           blob :: reference(),
@@ -2119,9 +2139,10 @@ defmodule XqliteNIF do
 
   Cannot change the blob size — the data must fit within the existing
   blob. Use `zeroblob()` in SQL to pre-allocate the desired size. A write that
-  would run past the end is refused with
-  `{:error, {:cannot_execute, reason}}`, where a read of the same range
-  answers the bytes that are there.
+  would run past the end writes nothing and returns `{:error,
+  {:blob_write_out_of_bounds, %{offset: offset, byte_size: byte_size(data),
+  blob_size: size}}}`, where a read of the same range answers the bytes that
+  are there.
   """
   @spec blob_write(blob :: reference(), offset :: non_neg_integer(), data :: binary()) ::
           :ok | Xqlite.error()

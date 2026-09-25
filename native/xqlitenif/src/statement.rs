@@ -45,7 +45,7 @@ pub(crate) unsafe fn prepare_one(
         return Err(unsafe { error::prepare_failure(db, rc, sql) });
     }
 
-    let stmt = NonNull::new(raw_stmt).ok_or_else(no_statement)?;
+    let stmt = NonNull::new(raw_stmt).ok_or(XqliteError::NoStatement)?;
 
     match tail_offset(c_sql.as_ptr(), tail_ptr, len) {
         None => Ok(stmt),
@@ -111,10 +111,6 @@ impl Drop for PreparedStmt {
         // as it is taken.
         unsafe { ffi::sqlite3_finalize(self.ptr) };
     }
-}
-
-fn no_statement() -> XqliteError {
-    XqliteError::CannotExecute("SQL contains no statement".to_string())
 }
 
 fn sql_byte_len(c_sql: &CStr) -> Result<c_int, XqliteError> {

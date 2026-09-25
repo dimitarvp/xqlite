@@ -200,7 +200,11 @@ pub(crate) fn write(
         // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex.
         let size = unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize;
         if data.len().saturating_add(offset) > size {
-            return Err(XqliteError::from(rusqlite::Error::BlobSizeError));
+            return Err(XqliteError::BlobWriteOutOfBounds {
+                offset,
+                byte_size: data.len(),
+                blob_size: size,
+            });
         }
         // Bounds above prove `offset` and `data.len()` each fit in the i32
         // `size`, so both casts are lossless.

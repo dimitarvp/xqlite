@@ -360,18 +360,14 @@ fn wal_checkpoint<'a>(
         _ if mode == atoms::full() => ffi::SQLITE_CHECKPOINT_FULL,
         _ if mode == atoms::restart() => ffi::SQLITE_CHECKPOINT_RESTART,
         _ if mode == atoms::truncate() => ffi::SQLITE_CHECKPOINT_TRUNCATE,
-        _ => {
-            return Err(XqliteError::CannotExecute(format!(
-                "invalid wal_checkpoint mode {mode:?}; expected :passive, :full, :restart, or :truncate"
-            )));
-        }
+        _ => return Err(XqliteError::InvalidCheckpointMode { mode }),
     };
 
     connection::with_conn(&handle, |conn| {
         // SAFETY: with_conn holds the connection Mutex. db handle is
         // valid for the duration of the closure. zDb is either null
-        // (main schema) or a valid NUL-terminated string whose lifetime
-        // spans the FFI call.
+        // or a valid NUL-terminated string whose lifetime spans the FFI
+        // call.
         unsafe {
             let db = conn.handle();
             let c_schema = match schema.as_deref() {
@@ -395,39 +391,25 @@ fn wal_checkpoint<'a>(
                 &mut ckpt_pages,
             );
 
+            // SQLite leaves both counts at -1 for a database whose WAL it did
+            // not checkpoint: one not in WAL mode as this connection sees it
+            // (SQLITE_OK), or one whose checkpoint lock another connection
+            // holds (SQLITE_BUSY). Without a name the counts are the first
+            // database's alone, so only a named call can tell the two apart.
+            let named = schema.as_deref().is_some_and(|s| !s.is_empty());
+            let counts_unwritten = named && log_pages == -1 && ckpt_pages == -1;
+
             match rc {
-                ffi::SQLITE_OK | ffi::SQLITE_BUSY => {
-                    let busy = rc == ffi::SQLITE_BUSY;
-                    let map = map_new(env);
-                    let map = map
-                        .map_put(
-                            atoms::log_pages().encode(env),
-                            (log_pages as i64).encode(env),
-                        )
-                        .map_err(|_| {
-                            XqliteError::CannotExecute(
-                                "wal_checkpoint map_put log_pages failed".into(),
-                            )
-                        })?;
-                    let map = map
-                        .map_put(
-                            atoms::checkpointed_pages().encode(env),
-                            (ckpt_pages as i64).encode(env),
-                        )
-                        .map_err(|_| {
-                            XqliteError::CannotExecute(
-                                "wal_checkpoint map_put checkpointed_pages failed".into(),
-                            )
-                        })?;
-                    let map = map
-                        .map_put(atoms::busy().encode(env), busy.encode(env))
-                        .map_err(|_| {
-                            XqliteError::CannotExecute(
-                                "wal_checkpoint map_put busy failed".into(),
-                            )
-                        })?;
-                    Ok(map)
-                }
+                ffi::SQLITE_OK if counts_unwritten => Err(XqliteError::NotInWalMode),
+                ffi::SQLITE_OK | ffi::SQLITE_BUSY if !counts_unwritten => map_new(env)
+                    .map_put(atoms::log_pages(), log_pages as i64)
+                    .and_then(|map| {
+                        map.map_put(atoms::checkpointed_pages(), ckpt_pages as i64)
+                    })
+                    .and_then(|map| map.map_put(atoms::busy(), rc == ffi::SQLITE_BUSY))
+                    .map_err(|_| XqliteError::InternalEncodingError {
+                        context: "Failed map create for wal_checkpoint".to_string(),
+                    }),
                 _ => {
                     let ffi_err = ffi::Error::new(rc);
                     let err_msg_ptr = ffi::sqlite3_errmsg(db);
@@ -455,8 +437,8 @@ fn connection_stats<'a>(
 ) -> Result<Term<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         // SAFETY: with_conn holds the connection Mutex; db handle valid
-        // for the closure. Each `sqlite3_db_status` call writes into
-        // stack-local ints we own.
+        // for the closure. Each `sqlite3_db_status64` call writes into
+        // stack-local integers we own.
         unsafe {
             let db = conn.handle();
 
@@ -488,23 +470,33 @@ fn connection_stats<'a>(
 
             let mut map = map_new(env);
             for (atom, op) in ops {
-                let mut current: std::os::raw::c_int = 0;
-                let mut highwater: std::os::raw::c_int = 0;
-                let rc = ffi::sqlite3_db_status(db, *op, &mut current, &mut highwater, 0);
+                let mut current: i64 = 0;
+                let mut highwater: i64 = 0;
+                let rc = ffi::sqlite3_db_status64(db, *op, &mut current, &mut highwater, 0);
 
                 if rc != ffi::SQLITE_OK {
-                    return Err(XqliteError::CannotExecute(format!(
-                        "sqlite3_db_status(op={op}) returned {rc}"
-                    )));
+                    return Err(XqliteError::SqliteFailure {
+                        code: rc & 0xFF,
+                        extended_code: rc,
+                        message: None,
+                    });
                 }
 
-                map = map
-                    .map_put(atom.encode(env), (current as i64).encode(env))
-                    .map_err(|_| {
-                        XqliteError::CannotExecute(format!(
-                            "connection_stats map_put for op {op} failed"
-                        ))
-                    })?;
+                // SQLite defines only the high-water half of the three lookaside
+                // counts, reporting current as 0, and DEFERRED_FKS is a 0/1 flag.
+                let value = match *op {
+                    ffi::SQLITE_DBSTATUS_LOOKASIDE_HIT
+                    | ffi::SQLITE_DBSTATUS_LOOKASIDE_MISS_SIZE
+                    | ffi::SQLITE_DBSTATUS_LOOKASIDE_MISS_FULL => highwater.encode(env),
+                    ffi::SQLITE_DBSTATUS_DEFERRED_FKS => (current != 0).encode(env),
+                    _ => current.encode(env),
+                };
+
+                map = map.map_put(atom.encode(env), value).map_err(|_| {
+                    XqliteError::InternalEncodingError {
+                        context: format!("connection_stats map_put for op {op} failed"),
+                    }
+                })?;
             }
 
             Ok(map)
@@ -562,6 +554,13 @@ fn set_pragma<'a>(
     pragma_name: rustler::Binary<'a>,
     value_term: Term<'a>,
 ) -> Result<Term<'a>, XqliteError> {
+    // SQLite reads a busy_timeout past c_int::MAX as 0 and drops the wait.
+    if pragma_name.as_slice().eq_ignore_ascii_case(b"busy_timeout")
+        && let Ok(ms) = value_term.decode::<u64>()
+    {
+        busy_handler::busy_timeout_c_int(ms)?;
+    }
+
     connection::with_conn(&handle, |conn| {
         let result = pragma::set(env, conn, pragma_name.as_slice(), value_term)?;
 
@@ -1461,22 +1460,13 @@ fn sqlite_version() -> Result<String, XqliteError> {
 fn register_log_hook(env: Env<'_>, pid: rustler::LocalPid) -> Term<'_> {
     match crate::log_hook::register(pid) {
         Ok(id) => (ok(), id).encode(env),
-        Err(msg) => {
-            let err = XqliteError::CannotExecute(msg);
-            (error(), err).encode(env)
-        }
+        Err(err) => (error(), err).encode(env),
     }
 }
 
 #[rustler::nif]
 fn unregister_log_hook(env: Env<'_>, id: u64) -> Term<'_> {
-    match crate::log_hook::unregister(id) {
-        Ok(()) => ok().encode(env),
-        Err(msg) => {
-            let err = XqliteError::CannotExecute(msg);
-            (error(), err).encode(env)
-        }
-    }
+    singular_ok_or_error_tuple(env, crate::log_hook::unregister(id))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1588,9 +1578,10 @@ fn register_progress_hook(
     tag: MaybeTextArg,
 ) -> Term<'_> {
     if every_n == 0 {
-        let err = XqliteError::CannotExecute(
-            "register_progress_hook: every_n must be >= 1".to_string(),
-        );
+        let err = XqliteError::InvalidHookOption {
+            key: atoms::every_n(),
+            value: every_n,
+        };
         return (error(), err).encode(env);
     }
 
@@ -1774,19 +1765,23 @@ fn backup_with_progress<'a>(
 
             let step_result = backup.step(pages_per_step)?;
             let progress = backup.progress();
-
-            // SAFETY: enif_send with NULL caller_env is valid from dirty
-            // scheduler threads (OTP 26.1+). All data is copied into msg_env.
-            unsafe {
-                send_backup_progress(&pid, progress.remaining, progress.pagecount);
-            }
+            let send = |status: &[u8]| {
+                // SAFETY: enif_send with NULL caller_env is valid from dirty
+                // scheduler threads (OTP 26.1+). All data is copied into msg_env.
+                unsafe {
+                    send_backup_progress(&pid, progress.remaining, progress.pagecount, status)
+                }
+            };
 
             match step_result {
-                rusqlite::backup::StepResult::Done => return Ok(()),
-                rusqlite::backup::StepResult::More => continue,
+                rusqlite::backup::StepResult::Done => {
+                    send(b"copied");
+                    return Ok(());
+                }
+                rusqlite::backup::StepResult::More => send(b"copied"),
                 rusqlite::backup::StepResult::Busy | rusqlite::backup::StepResult::Locked => {
+                    send(b"busy");
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                    continue;
                 }
                 _ => continue,
             }
@@ -1795,39 +1790,52 @@ fn backup_with_progress<'a>(
     singular_ok_or_error_tuple(env, result)
 }
 
-/// Send `{:xqlite_backup_progress, remaining, pagecount}` to `pid`.
-///
 /// # Safety
 ///
 /// Sends with a NULL `caller_env`, which `hook_util`'s module doc covers.
 unsafe fn send_backup_progress(
     pid: &rustler::types::LocalPid,
     remaining: std::ffi::c_int,
-    pagecount: std::ffi::c_int,
+    total: std::ffi::c_int,
+    status: &[u8],
 ) {
+    use crate::hook_util::make_atom;
     use rustler::sys::{
-        enif_alloc_env, enif_free_env, enif_make_atom_len, enif_make_int64,
-        enif_make_tuple_from_array, enif_send,
+        ERL_NIF_TERM, enif_alloc_env, enif_free_env, enif_make_int64,
+        enif_make_map_from_arrays, enif_make_tuple_from_array, enif_send,
     };
 
     // SAFETY: All enif_* calls operate on a freshly allocated msg_env.
     unsafe {
         let msg_env = enif_alloc_env();
 
-        let tag = enif_make_atom_len(
+        let keys = [
+            make_atom(msg_env, b"remaining"),
+            make_atom(msg_env, b"total"),
+            make_atom(msg_env, b"status"),
+        ];
+        let values = [
+            enif_make_int64(msg_env, remaining as i64),
+            enif_make_int64(msg_env, total as i64),
+            make_atom(msg_env, status),
+        ];
+        let mut map: ERL_NIF_TERM = 0;
+        // Only duplicate keys make the map fail, and these three are distinct.
+        let made = enif_make_map_from_arrays(
             msg_env,
-            b"xqlite_backup_progress".as_ptr().cast(),
-            b"xqlite_backup_progress".len(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            keys.len(),
+            &mut map,
         );
-        let remaining_term = enif_make_int64(msg_env, remaining as i64);
-        let pagecount_term = enif_make_int64(msg_env, pagecount as i64);
 
-        let elements = [tag, remaining_term, pagecount_term];
-        let tuple = enif_make_tuple_from_array(msg_env, elements.as_ptr(), 3);
+        if made != 0 {
+            let elements = [make_atom(msg_env, b"xqlite_backup_progress"), map];
+            let tuple = enif_make_tuple_from_array(msg_env, elements.as_ptr(), 2);
+            let _ = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, tuple);
+        }
 
-        // enif_send never takes ownership of msg_env; free it
-        // unconditionally, like the crate's other four senders.
-        let _ = enif_send(std::ptr::null_mut(), pid.as_c_arg(), msg_env, tuple);
+        // enif_send never takes ownership of msg_env; free it unconditionally.
         enif_free_env(msg_env);
     }
 }
@@ -1955,7 +1963,11 @@ fn changeset_apply<'a>(
     } else if conflict_strategy == atoms::abort() {
         ConflictAction::SQLITE_CHANGESET_ABORT
     } else {
-        return (atoms::error(), atoms::invalid_conflict_strategy()).encode(env);
+        return (
+            atoms::error(),
+            (atoms::invalid_conflict_strategy(), conflict_strategy),
+        )
+            .encode(env);
     };
 
     let result = connection::with_conn(&handle, |conn| {

@@ -6,10 +6,6 @@ defmodule Xqlite.NIF.BlobTest do
   alias XqliteNIF, as: NIF
 
   for_each_opener "blob I/O" do
-    # -------------------------------------------------------------------
-    # Open and close
-    # -------------------------------------------------------------------
-
     test "open and close a blob handle", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, """
@@ -32,10 +28,6 @@ defmodule Xqlite.NIF.BlobTest do
       assert :ok = NIF.blob_close(blob)
       assert :ok = NIF.blob_close(blob)
     end
-
-    # -------------------------------------------------------------------
-    # Size
-    # -------------------------------------------------------------------
 
     test "blob_size returns correct size", %{conn: conn} do
       :ok =
@@ -60,10 +52,6 @@ defmodule Xqlite.NIF.BlobTest do
       assert {:ok, 0} = NIF.blob_size(blob)
       NIF.blob_close(blob)
     end
-
-    # -------------------------------------------------------------------
-    # Read
-    # -------------------------------------------------------------------
 
     test "read entire blob", %{conn: conn} do
       :ok =
@@ -135,7 +123,8 @@ defmodule Xqlite.NIF.BlobTest do
       assert {:ok, ""} = NIF.blob_read(blob, 68, 1)
       assert {:ok, ""} = NIF.blob_read(blob, 0, 0)
 
-      assert {:error, {:cannot_execute, _reason}} = NIF.blob_write(blob, 66, <<1, 2>>)
+      assert {:error, {:blob_write_out_of_bounds, %{offset: 66, byte_size: 2, blob_size: 67}}} =
+               NIF.blob_write(blob, 66, <<1, 2>>)
 
       assert_raise ArgumentError, fn -> NIF.blob_read(blob, 0, -1) end
       assert_raise ArgumentError, fn -> NIF.blob_read(blob, -1, 4) end
@@ -155,10 +144,6 @@ defmodule Xqlite.NIF.BlobTest do
       assert data == :binary.copy(<<0>>, 1024)
       NIF.blob_close(blob)
     end
-
-    # -------------------------------------------------------------------
-    # Write
-    # -------------------------------------------------------------------
 
     test "write and read back", %{conn: conn} do
       :ok =
@@ -264,10 +249,6 @@ defmodule Xqlite.NIF.BlobTest do
       NIF.blob_close(blob)
     end
 
-    # -------------------------------------------------------------------
-    # Reopen — switch to different row
-    # -------------------------------------------------------------------
-
     test "reopen moves to different row", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, """
@@ -318,10 +299,6 @@ defmodule Xqlite.NIF.BlobTest do
       NIF.blob_close(blob)
     end
 
-    # -------------------------------------------------------------------
-    # Large blob — 100KB of zeros, chunked read/write
-    # -------------------------------------------------------------------
-
     test "write and read 100KB blob in chunks", %{conn: conn} do
       blob_size = 100 * 1024
 
@@ -341,7 +318,6 @@ defmodule Xqlite.NIF.BlobTest do
       {:ok, blob} = NIF.blob_open(conn, "main", "bl_100k", "data", 1, false)
       assert {:ok, ^blob_size} = NIF.blob_size(blob)
 
-      # Write in 10KB chunks with a recognizable pattern
       chunk_size = 10 * 1024
 
       for i <- 0..9 do
@@ -351,7 +327,6 @@ defmodule Xqlite.NIF.BlobTest do
         :ok = NIF.blob_write(blob, offset, chunk)
       end
 
-      # Read back and verify each chunk
       for i <- 0..9 do
         offset = i * chunk_size
         pattern_byte = rem(i + 1, 256)
@@ -380,21 +355,15 @@ defmodule Xqlite.NIF.BlobTest do
 
       {:ok, blob} = NIF.blob_open(conn, "main", "bl_100k_r", "data", 1, false)
 
-      # Write a pattern
       pattern = :binary.copy(<<0xAB>>, blob_size)
       :ok = NIF.blob_write(blob, 0, pattern)
 
-      # Read all at once
       assert {:ok, data} = NIF.blob_read(blob, 0, blob_size)
       assert byte_size(data) == blob_size
       assert data == pattern
 
       NIF.blob_close(blob)
     end
-
-    # -------------------------------------------------------------------
-    # Multiple blobs on same connection
-    # -------------------------------------------------------------------
 
     test "multiple blob handles on different rows", %{conn: conn} do
       :ok =
@@ -413,10 +382,6 @@ defmodule Xqlite.NIF.BlobTest do
       NIF.blob_close(b1)
       NIF.blob_close(b2)
     end
-
-    # -------------------------------------------------------------------
-    # Error cases
-    # -------------------------------------------------------------------
 
     test "open blob on nonexistent table returns error", %{conn: conn} do
       assert {:error, _} =
@@ -457,10 +422,6 @@ defmodule Xqlite.NIF.BlobTest do
       assert {:error, :connection_closed} = NIF.blob_reopen(blob, 1)
     end
   end
-
-  # -------------------------------------------------------------------
-  # Edge cases outside connection_openers loop
-  # -------------------------------------------------------------------
 
   test "blob_open on closed connection returns error" do
     {:ok, conn} = NIF.open_in_memory(":memory:")

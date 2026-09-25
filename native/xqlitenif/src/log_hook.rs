@@ -5,6 +5,7 @@
 //! installed thereafter) that walks a `static HookList<LogSubscriber>`
 //! and fans events out to every subscriber.
 
+use crate::error::XqliteError;
 use crate::hook_util::{self, HookList};
 use rusqlite::trace;
 use rustler::sys::{
@@ -87,16 +88,17 @@ unsafe fn send_log_to_pid(pid: &LocalPid, err_code: c_int, msg: &str) {
 
 /// Add a log subscriber. Installs the master callback on first
 /// register; subsequent registers only modify the HookList.
-pub(crate) fn register(pid: LocalPid) -> Result<u64, String> {
-    let _guard = MASTER_LOCK.lock().map_err(|e| format!("lock error: {e}"))?;
+pub(crate) fn register(pid: LocalPid) -> Result<u64, XqliteError> {
+    let _guard = MASTER_LOCK
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
 
     if !MASTER_INSTALLED.load(Ordering::Acquire) {
         // SAFETY: we hold MASTER_LOCK, so no concurrent config_log.
         // The callback never invokes SQLite (it only sends Erlang
         // messages via raw enif_send).
         unsafe {
-            trace::config_log(Some(log_callback))
-                .map_err(|e| format!("sqlite3_config failed: {e}"))?;
+            trace::config_log(Some(log_callback)).map_err(XqliteError::from)?;
         }
         MASTER_INSTALLED.store(true, Ordering::Release);
     }
@@ -107,8 +109,10 @@ pub(crate) fn register(pid: LocalPid) -> Result<u64, String> {
 /// Remove a log subscriber by handle. Idempotent. The master callback
 /// stays installed even when the subscriber list empties — re-registering
 /// later is cheap.
-pub(crate) fn unregister(id: u64) -> Result<(), String> {
-    let _guard = MASTER_LOCK.lock().map_err(|e| format!("lock error: {e}"))?;
+pub(crate) fn unregister(id: u64) -> Result<(), XqliteError> {
+    let _guard = MASTER_LOCK
+        .lock()
+        .map_err(|e| XqliteError::LockError(e.to_string()))?;
     let _ = LOG_SUBSCRIBERS.unregister(id);
     Ok(())
 }

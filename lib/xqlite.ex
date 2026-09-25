@@ -269,10 +269,10 @@ defmodule Xqlite do
           :connection_closed
           | :execute_returned_results
           | :extension_loading_disabled
-          | :invalid_conflict_strategy
-          | :invalid_transaction_mode
           | :invalid_utf8_in_string
           | :multiple_statements
+          | :no_statement
+          | :not_in_wal_mode
           | :null_byte_in_string
           | :operation_cancelled
           | :statement_finalized
@@ -280,6 +280,12 @@ defmodule Xqlite do
           | :stream_consumed
           | :transaction_in_progress
           | {:authorization_denied, integer(), String.t()}
+          | {:blob_write_out_of_bounds,
+             %{
+               offset: non_neg_integer(),
+               byte_size: non_neg_integer(),
+               blob_size: non_neg_integer()
+             }}
           | {:busy_timeout_write_refused, %{policy: boolean(), observers: non_neg_integer()}}
           | {:cannot_convert_atom_to_string, String.t()}
           | {:cannot_execute, String.t()}
@@ -301,9 +307,11 @@ defmodule Xqlite do
           | {:invalid_batch_size, %{provided: term(), minimum: 1}}
           | {:invalid_blob_bytes, %{position: pos_integer(), type: atom()}}
           | {:invalid_cancel_tokens, list_refusal()}
+          | {:invalid_checkpoint_mode, term()}
           | {:invalid_column_index, non_neg_integer()}
           | {:invalid_column_name, String.t()}
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
+          | {:invalid_conflict_strategy, atom()}
           | {:invalid_hook_option,
              %{key: :every_n | :tag, value: term(), reason: :invalid_value}}
           | {:invalid_limit_category, atom()}
@@ -330,7 +338,9 @@ defmodule Xqlite do
              }}
           | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
+          | {:invalid_schema_name, term()}
           | {:invalid_stream_handle, String.t()}
+          | {:invalid_transaction_mode, term()}
           | {:invalid_type_extensions, list_refusal()}
           | {:lock_error, String.t()}
           | {:missing_parameter, %{index: pos_integer(), name: String.t() | nil}}
@@ -858,10 +868,6 @@ defmodule Xqlite do
   `INTEGER PRIMARY KEY` alias returns `{:error, {:rowid_shadowed, table}}`,
   because with every spelling taken the copy cannot name the rowid.
 
-  ## Options
-
-  None currently.
-
   ## Examples
 
       :ok = Xqlite.enable_strict_table(conn, "users")
@@ -1308,7 +1314,8 @@ defmodule Xqlite do
   end
 
   @doc """
-  Disables foreign key constraint enforcement for the given database connection (default behavior).
+  Disables foreign key constraint enforcement for the given database connection;
+  `open/2` turns it on unless told otherwise.
 
   See `enable_foreign_key_enforcement/1` for details.
   """
@@ -1558,7 +1565,7 @@ defmodule Xqlite do
 
   The SQL must hold exactly one statement, the same rule `prepare/2` and
   `query/3` apply: SQL holding no statement at all is
-  `{:error, {:cannot_execute, _}}` rather than a report of zeroes, and a
+  `{:error, :no_statement}` rather than a report of zeroes, and a
   second statement after the first is `{:error, :multiple_statements}`.
 
   The statement runs for real, so parameters follow `query/4`'s rule: a
@@ -1757,7 +1764,7 @@ defmodule Xqlite do
 
   The SQL must hold exactly one statement, the same rule `prepare/2` and
   `query/3` apply: SQL holding no statement at all — empty, whitespace or
-  comments — is `{:error, {:cannot_execute, _}}` rather than a stream with
+  comments — is `{:error, :no_statement}` rather than a stream with
   no rows, and a second statement after the first is
   `{:error, :multiple_statements}` rather than a stream over the first one.
   A trailing comment, extra semicolons and whitespace are accepted.
@@ -1833,7 +1840,7 @@ defmodule Xqlite do
   exist. For one-shot calls, `query/3` and `execute/3` remain simpler.
 
   Exactly ONE statement is compiled: SQL holding no statement at all
-  returns `{:error, {:cannot_execute, reason}}` and a second statement
+  returns `{:error, :no_statement}` and a second statement
   after the first returns `{:error, :multiple_statements}` — nothing is
   silently dropped. Text after the first statement counts as a second
   statement only when it compiles to one, so a trailing comment, extra
@@ -2397,10 +2404,14 @@ defmodule Xqlite do
   `mode` is one of `:passive` (default), `:full`, `:restart`, or `:truncate`.
   `schema` is the attached-database name (default `"main"`).
 
-  Returns `{:ok, %{log_pages, checkpointed_pages, busy?}}` on success.
+  Returns `{:ok, %{log_pages, checkpointed_pages, busy}}` on success. A
+  database that is not in WAL mode as this connection sees it returns
+  `{:error, :not_in_wal_mode}`, and so does a WAL database this connection
+  has not read yet. A checkpoint lock another connection holds returns
+  `{:error, {:database_busy_or_locked, 5, message}}`.
 
-  Any other `mode`, and any `schema` that is not a string, returns
-  `{:error, {:cannot_execute, reason}}` naming the accepted values.
+  Any other `mode` returns `{:error, {:invalid_checkpoint_mode, mode}}` and a
+  `schema` that is not a string `{:error, {:invalid_schema_name, schema}}`.
   """
   @spec wal_checkpoint(conn(), term(), term()) :: {:ok, map()} | error()
   def wal_checkpoint(conn, mode \\ :passive, schema \\ "main")
@@ -2429,15 +2440,10 @@ defmodule Xqlite do
 
   def wal_checkpoint(_conn, mode, _schema)
       when mode not in [:passive, :full, :restart, :truncate] do
-    {:error,
-     {:cannot_execute,
-      "invalid wal_checkpoint mode #{inspect(mode)}; expected :passive, :full, :restart, or :truncate"}}
+    {:error, {:invalid_checkpoint_mode, mode}}
   end
 
-  def wal_checkpoint(_conn, _mode, schema) do
-    {:error,
-     {:cannot_execute, "invalid wal_checkpoint schema #{inspect(schema)}; expected a string"}}
-  end
+  def wal_checkpoint(_conn, _mode, schema), do: {:error, {:invalid_schema_name, schema}}
 
   @doc """
   Reads a PRAGMA value from the connection.
@@ -2688,10 +2694,10 @@ defmodule Xqlite do
 
   `ms` is the timeout in milliseconds. `0` disables the timeout entirely
   (SQLite returns `SQLITE_BUSY` immediately on contention). SQLite stores
-  the timeout as a 32-bit integer, so values above `2_147_483_647` (about
-  24.8 days) are refused with `{:error, {:cannot_execute, reason}}`
-  rather than silently clamped. Anything that is not a non-negative integer
-  is refused the same way, before anything reaches SQLite.
+  the timeout as a 32-bit integer, so anything but an integer from `0` to
+  `2_147_483_647` (about 24.8 days) returns `{:error, {:invalid_pragma_value,
+  %{pragma: :busy_timeout, value: ms}}}` before anything reaches SQLite, the
+  answer `open/2` and `set_pragma/3` give for the same value.
 
   This function always works, slot held or not: it calls
   `sqlite3_busy_timeout` directly and no authorizer is consulted. A raw
@@ -2701,13 +2707,10 @@ defmodule Xqlite do
   SQLite's built-in one and silence the policy and every observer.
   """
   @spec busy_timeout(conn(), non_neg_integer()) :: :ok | error()
-  def busy_timeout(conn, ms) when is_integer(ms) and ms >= 0 do
-    XqliteNIF.set_busy_timeout(conn, ms)
-  end
-
-  def busy_timeout(_conn, ms) do
-    {:error,
-     {:cannot_execute, "invalid busy timeout #{inspect(ms)}; expected a non-negative integer"}}
+  def busy_timeout(conn, ms) do
+    with {:ok, ms} <- Xqlite.Pragma.check_value(:busy_timeout, ms) do
+      XqliteNIF.set_busy_timeout(conn, ms)
+    end
   end
 
   @doc """
@@ -2805,7 +2808,7 @@ defmodule Xqlite do
   @doc """
   Registers a progress-tick subscriber on the connection.
 
-  After every ~64 SQLite VM instructions × `every_n`, sends
+  After every 8 SQLite VM instructions × `every_n`, sends
 
       {:xqlite_progress, count, elapsed_ms}              # tag = nil
       {:xqlite_progress, tag, count, elapsed_ms}         # tag set
@@ -2818,7 +2821,7 @@ defmodule Xqlite do
 
   ## Options
 
-    * `:every_n` (positive integer, default `1000`) — emit every Nth
+    * `:every_n` (integer from `1` to `4_294_967_295`, default `1000`) — emit every Nth
       progress callback fire. The progress callback fires every 8 SQLite
       VM instructions (currently fixed); `every_n` decimates further.
     * `:tag` (atom, default `nil`) — included in each emitted message
@@ -2830,7 +2833,7 @@ defmodule Xqlite do
   `unregister_progress_hook/2`. Returns `{:error, reason}` on failure.
 
   Both options are checked before the connection is touched: a `:tag` that is
-  not an atom and an `:every_n` that is not a positive integer answer
+  not an atom and an `:every_n` outside that range answer
   `{:error, {:invalid_hook_option, %{key: key, value: value,
   reason: :invalid_value}}}`.
   """
@@ -2843,7 +2846,7 @@ defmodule Xqlite do
     end
   end
 
-  defp hook_every_n(every_n) when is_integer(every_n) and every_n >= 1, do: {:ok, every_n}
+  defp hook_every_n(every_n) when every_n in 1..4_294_967_295, do: {:ok, every_n}
   defp hook_every_n(value), do: {:error, invalid_hook_option(:every_n, value)}
 
   defp hook_tag(nil), do: {:ok, nil}
@@ -3258,9 +3261,12 @@ defmodule Xqlite do
   Online backup with progress messages and cancellation. Accepts either a
   single cancel token or a list (OR-semantics).
 
-  Sends `{:xqlite_backup_progress, remaining, pagecount}` to `pid` after
-  each `pages_per_step`-page step. Returns `{:error, :operation_cancelled}`
-  if any token signals between steps.
+  Sends `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to
+  `pid` after each `pages_per_step`-page step: `status` is `:copied` when the
+  step copied pages and `:busy` when a lock blocked it, the step then being
+  retried every 100 ms. A `:busy` message before the first copied step carries
+  `remaining: 0, total: 0`. Returns `{:error, :operation_cancelled}` if any
+  token signals between steps.
 
   `pages_per_step` must be a positive integer. A non-positive value returns
   `{:error, {:invalid_pages_per_step, value}}` — passing `0` would otherwise
@@ -3291,7 +3297,7 @@ defmodule Xqlite do
   `:exclusive`). Emits `[:xqlite, :transaction, :begin]` telemetry.
 
   Any other term in the `mode` position returns
-  `{:error, :invalid_transaction_mode}` and starts nothing.
+  `{:error, {:invalid_transaction_mode, mode}}` and starts nothing.
   """
   @spec begin(conn(), term()) :: :ok | error()
   def begin(conn, mode \\ :deferred)
@@ -3315,7 +3321,7 @@ defmodule Xqlite do
     end
   end
 
-  def begin(_conn, _mode), do: {:error, :invalid_transaction_mode}
+  def begin(_conn, mode), do: {:error, {:invalid_transaction_mode, mode}}
 
   @doc """
   Commits the current transaction. Emits `[:xqlite, :transaction, :commit]`.
@@ -3512,7 +3518,7 @@ defmodule Xqlite do
   lock ladder). No telemetry is emitted.
 
   A `schema` that is neither a string nor `nil` returns
-  `{:error, {:cannot_execute, reason}}`.
+  `{:error, {:invalid_schema_name, schema}}`.
   """
   @spec txn_state(conn(), term()) ::
           {:ok, :none | :read | :write | :unknown} | error()
@@ -3521,10 +3527,7 @@ defmodule Xqlite do
   def txn_state(conn, schema) when is_binary(schema) or is_nil(schema),
     do: XqliteNIF.txn_state(conn, schema)
 
-  def txn_state(_conn, schema) do
-    {:error,
-     {:cannot_execute, "invalid txn_state schema #{inspect(schema)}; expected a string or nil"}}
-  end
+  def txn_state(_conn, schema), do: {:error, {:invalid_schema_name, schema}}
 
   @doc """
   Returns the rowid of the most recent successful `INSERT` on this

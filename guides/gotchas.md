@@ -256,7 +256,7 @@ fetched — like any other setup failure.
 `Xqlite.stream/4` compiles its SQL by the same rule as `Xqlite.prepare/2`
 and `Xqlite.query/4`. SQL that holds no statement at all — an empty
 string, whitespace, only comments — is a setup failure,
-`{:error, {:cannot_execute, "SQL contains no statement"}}`, not a stream
+`{:error, :no_statement}`, not a stream
 that yields nothing. Build the string dynamically and it can come out
 empty, so match the result rather than assuming an enumerable. A second
 statement after the first is `{:error, :multiple_statements}`; a trailing

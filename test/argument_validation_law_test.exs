@@ -9,7 +9,7 @@ defmodule Xqlite.ArgumentValidationLawTest do
   below generates terms of every type outside the accepted set and
   pins the error shape; the plain tests beside them pin the accepted
   values, including the transaction state each `begin/2` mode leaves
-  behind.
+  behind. A raw `XqliteNIF` row generates only terms its decoding takes.
   """
 
   use ExUnit.Case, async: true
@@ -21,6 +21,8 @@ defmodule Xqlite.ArgumentValidationLawTest do
 
   @begin_modes [:deferred, :immediate, :exclusive]
   @checkpoint_modes [:passive, :full, :restart, :truncate]
+  @raw_atoms_taken @begin_modes ++ @checkpoint_modes ++ [:omit, :replace, :abort]
+  @usize_max 2 ** 64 - 1
 
   # Every term type a caller can put in an argument position, kept small
   # so 2000 runs stay in the sub-second range.
@@ -50,7 +52,14 @@ defmodule Xqlite.ArgumentValidationLawTest do
   end
 
   defp non_timeout_term do
-    StreamData.filter(any_term(), fn term -> not (is_integer(term) and term >= 0) end)
+    StreamData.one_of([
+      StreamData.filter(any_term(), fn term -> term not in 0..2_147_483_647 end),
+      StreamData.integer(2_147_483_648..(2 ** 70))
+    ])
+  end
+
+  defp atom_other_than(accepted) do
+    StreamData.filter(StreamData.atom(:alphanumeric), fn atom -> atom not in accepted end)
   end
 
   # The raw stream door takes the connection, the SQL and the parameters, and
@@ -65,8 +74,18 @@ defmodule Xqlite.ArgumentValidationLawTest do
   for_each_opener do
     property "begin/2 refuses every term that is not a transaction mode", %{conn: conn} do
       check all(mode <- term_other_than(@begin_modes), max_runs: 2000) do
-        assert {:error, :invalid_transaction_mode} == Xqlite.begin(conn, mode)
+        assert {:error, {:invalid_transaction_mode, ^mode}} = Xqlite.begin(conn, mode)
         assert {:ok, true} == Xqlite.autocommit(conn)
+      end
+    end
+
+    # The atoms any of the three takes are left out of all three: one atom serves all.
+    property "the raw functions reject every atom that is not a mode or a strategy",
+             %{conn: conn} do
+      check all(a <- atom_other_than(@raw_atoms_taken), max_runs: 2000) do
+        assert {:error, {:invalid_transaction_mode, ^a}} = NIF.begin(conn, a)
+        assert {:error, {:invalid_checkpoint_mode, ^a}} = NIF.wal_checkpoint(conn, a, nil)
+        assert {:error, {:invalid_conflict_strategy, ^a}} = NIF.changeset_apply(conn, <<>>, a)
       end
     end
 
@@ -105,10 +124,8 @@ defmodule Xqlite.ArgumentValidationLawTest do
 
     property "wal_checkpoint/3 refuses every term that is not a mode", %{conn: conn} do
       check all(mode <- term_other_than(@checkpoint_modes), max_runs: 2000) do
-        assert {:error, {:cannot_execute, reason}} =
+        assert {:error, {:invalid_checkpoint_mode, ^mode}} =
                  Xqlite.wal_checkpoint(conn, mode, "main")
-
-        assert is_binary(reason)
       end
     end
 
@@ -117,24 +134,14 @@ defmodule Xqlite.ArgumentValidationLawTest do
               schema <- StreamData.filter(any_term(), &(not is_binary(&1))),
               max_runs: 2000
             ) do
-        assert {:error, {:cannot_execute, reason}} =
+        assert {:error, {:invalid_schema_name, ^schema}} =
                  Xqlite.wal_checkpoint(conn, :passive, schema)
-
-        assert is_binary(reason)
-      end
-    end
-
-    test "wal_checkpoint/3 accepts its four modes", %{conn: conn} do
-      for mode <- @checkpoint_modes do
-        assert {:ok, %{log_pages: _, checkpointed_pages: _, busy: _}} =
-                 Xqlite.wal_checkpoint(conn, mode, "main")
       end
     end
 
     property "txn_state/2 refuses a schema that is neither a string nor nil", %{conn: conn} do
       check all(schema <- non_schema_term(), max_runs: 2000) do
-        assert {:error, {:cannot_execute, reason}} = Xqlite.txn_state(conn, schema)
-        assert is_binary(reason)
+        assert {:error, {:invalid_schema_name, ^schema}} = Xqlite.txn_state(conn, schema)
       end
     end
 
@@ -144,22 +151,51 @@ defmodule Xqlite.ArgumentValidationLawTest do
       assert {:ok, :none} == Xqlite.txn_state(conn)
     end
 
-    test "busy_timeout/2 refuses a negative integer and a string", %{conn: conn} do
-      assert {:error, {:cannot_execute, negative}} = Xqlite.busy_timeout(conn, -1)
-      assert is_binary(negative)
-
-      assert {:error, {:cannot_execute, text}} = Xqlite.busy_timeout(conn, "5")
-      assert is_binary(text)
+    test "busy_timeout/2 refuses a negative integer, a string and 2^64", %{conn: conn} do
+      for ms <- [-1, "5", 2 ** 64] do
+        assert {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ^ms}}} =
+                 Xqlite.busy_timeout(conn, ms)
+      end
     end
 
-    property "busy_timeout/2 refuses every term that is not a non-negative integer",
+    property "busy_timeout/2 refuses every term that is not an integer from 0 to 2^31 - 1",
              %{conn: conn} do
       check all(ms <- non_timeout_term(), max_runs: 2000) do
+        rejected = {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}
         assert {:ok, before} = Xqlite.get_pragma(conn, :busy_timeout)
-        assert {:error, {:cannot_execute, reason}} = Xqlite.busy_timeout(conn, ms)
-        assert is_binary(reason)
+        assert ^rejected = Xqlite.busy_timeout(conn, ms)
         assert {:ok, ^before} = Xqlite.get_pragma(conn, :busy_timeout)
       end
+    end
+
+    property "the raw setters reject a busy timeout past 2^31 - 1 and keep the wait",
+             %{conn: conn} do
+      check all(ms <- StreamData.integer(2_147_483_648..@usize_max), max_runs: 2000) do
+        rejected = {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}
+        assert {:ok, before} = NIF.get_pragma(conn, "busy_timeout")
+        assert ^rejected = NIF.set_busy_timeout(conn, ms)
+        assert ^rejected = NIF.set_pragma(conn, "busy_timeout", ms)
+        assert {:ok, ^before} = NIF.get_pragma(conn, "busy_timeout")
+      end
+    end
+
+    property "blob_write/3 rejects every write that runs past the end and writes nothing",
+             %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE b(d); INSERT INTO b VALUES (zeroblob(67))")
+      {:ok, blob} = NIF.blob_open(conn, "main", "b", "d", 1, false)
+      bytes = StreamData.binary(max_length: 80)
+
+      check all(data <- bytes, past <- StreamData.integer(0..12), max_runs: 2000) do
+        for at <- [max(68 - byte_size(data), 0) + past, @usize_max - past] do
+          bounds = %{offset: at, byte_size: byte_size(data), blob_size: 67}
+
+          assert {:error, {:blob_write_out_of_bounds, ^bounds}} =
+                   NIF.blob_write(blob, at, data)
+        end
+      end
+
+      assert NIF.blob_read(blob, 0, 67) == {:ok, :binary.copy(<<0>>, 67)}
+      assert :ok = NIF.blob_close(blob)
     end
 
     test "busy_timeout/2 accepts zero and a positive integer", %{conn: conn} do
