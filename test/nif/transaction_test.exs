@@ -40,6 +40,13 @@ defmodule Xqlite.NIF.TransactionTest do
     {:ok, stmt}
   end
 
+  # A bare match on the held tuple is dropped by the compiler as one that
+  # cannot fail, and a garbage collection then finalizes the handle mid-test.
+  defp release({:ok, blob}, kind) when kind in [:read_blob, :write_blob],
+    do: NIF.blob_close(blob)
+
+  defp release({:ok, stmt}, _sql), do: NIF.stmt_finalize(stmt)
+
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix}" do
       @describetag type_tag
@@ -124,7 +131,7 @@ defmodule Xqlite.NIF.TransactionTest do
           assert :ok = Xqlite.rollback_to_savepoint(conn, "sp")
           assert :ok = Xqlite.rollback(conn)
           assert {:ok, true} = NIF.autocommit(conn)
-          assert {:ok, _} = holder
+          assert :ok = release(holder, unquote(kind))
         end
       end
 
@@ -133,7 +140,7 @@ defmodule Xqlite.NIF.TransactionTest do
           :ok = NIF.execute_batch(conn, "INSERT INTO tx_test VALUES (1, 'a'); BEGIN")
           holder = hold(conn, unquote(kind))
           assert :ok = Xqlite.commit(conn)
-          assert {:ok, _} = holder
+          assert :ok = release(holder, unquote(kind))
         end
       end
 
