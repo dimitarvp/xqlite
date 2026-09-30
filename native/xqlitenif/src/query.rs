@@ -7,6 +7,8 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, Statement, ToSql};
 use rustler::{Env, Term};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Refuses a positional list holding a value over the connection's length
 /// limit, before rusqlite binds anything.
@@ -35,12 +37,12 @@ fn require_named_within_length(
 
 /// Reject SQL text containing an interior NUL byte before it reaches SQLite.
 ///
-/// rusqlite's `prepare`/`execute_batch` hand SQLite the SQL length-delimited
+/// rusqlite's `prepare` hands SQLite the SQL length-delimited
 /// (`as_ptr` + `len`), and SQLite's tokenizer STOPS at the first NUL — every
 /// byte after it is silently ignored, which can shorten a statement into
 /// something unintended. We refuse with `:null_byte_in_string` instead, so the
-/// contract matches the raw-FFI `prepare`/`stream_open`/`explain_analyze`
-/// paths (which build a `CString` and reject the same way).
+/// contract matches the raw-FFI paths, `execute_batch` among them, which build
+/// a `CString` and reject the same way.
 #[inline]
 fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
     if sql.as_bytes().contains(&0) {
@@ -254,10 +256,10 @@ pub(crate) fn core_execute<'a>(
     let mut stmt = conn.prepare(sql)?;
     reject_no_statement(conn, &stmt)?;
 
-    match walk_params(params_term)? {
+    let mut rows = match walk_params(params_term)? {
         Params::Empty => {
             require_parameter_count(&stmt, 0)?;
-            stmt.execute([])?;
+            stmt.query([])?
         }
         Params::Named(items) => {
             let named_params_vec =
@@ -265,7 +267,7 @@ pub(crate) fn core_execute<'a>(
             let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
             require_named_within_length(conn, &named_params_vec)?;
             bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;
-            stmt.raw_execute()?;
+            stmt.raw_query()
         }
         Params::Positional(items) => {
             let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
@@ -273,18 +275,36 @@ pub(crate) fn core_execute<'a>(
             require_positional_within_length(conn, &positional_values)?;
             let params_slice: Vec<&dyn ToSql> =
                 positional_values.iter().map(|v| v as &dyn ToSql).collect();
-            stmt.execute(params_slice.as_slice())?;
+            stmt.query(params_slice.as_slice())?
         }
-    }
+    };
+
+    while rows.next()?.is_some() {}
 
     Ok(changes_since(conn, before))
 }
 
+/// Runs a batch, and when it fails or is cancelled inside a transaction it
+/// opened itself — autocommit on before the call and off after — rolls that
+/// transaction back before answering. A transaction open before the call stays
+/// the caller's, and a ROLLBACK that fails leaves the transaction open under
+/// the batch's own error.
 pub(crate) fn core_execute_batch(
     conn: &Connection,
     sql_batch: &str,
+    tokens: &[Arc<AtomicBool>],
 ) -> Result<(), XqliteError> {
-    reject_interior_nul(sql_batch)?;
-    conn.execute_batch(sql_batch)?;
-    Ok(())
+    let autocommit_before = conn.is_autocommit();
+    // SAFETY: the caller holds the connection Mutex for the whole call, and
+    // `handle()` is the live `sqlite3*` that Mutex guards.
+    unsafe {
+        let db = conn.handle();
+        let result = statement::execute_batch(db, sql_batch, tokens);
+
+        if result.is_err() && autocommit_before && !conn.is_autocommit() {
+            let _ = statement::execute_batch(db, "ROLLBACK", &[]);
+        }
+
+        result
+    }
 }

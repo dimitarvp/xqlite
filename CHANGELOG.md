@@ -21,6 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`execute_batch/2` and `execute_batch_cancellable/3` take time linear in
+  the batch's length.** Each statement used to be compiled from a copy of
+  the rest of the batch, so the time grew with the square of the length,
+  with the connection locked throughout: 80 000 statements took about
+  10 s, and take about 0.1 s now.
+- **A batch runs each statement to its end.** A statement that works one
+  row at a time, such as `PRAGMA incremental_vacuum`, used to stop after
+  its first row, and a `SELECT` whose second row fails answered `:ok` while
+  the batch went on. A `SELECT` inside a batch now reads and drops all its
+  rows, and a row that fails stops the batch with its error.
+- **`execute_batch_cancellable/3` reads its tokens between statements.** A
+  batch of short statements used to run to its end after a signal; it now
+  stops before the next statement starts.
+- **The next `commit/1` after a failed batch no longer commits the
+  statements that ran before the failure** when the batch opened the
+  transaction itself: the batch now rolls that transaction back.
+- **The query docs say what happens to a `RETURNING` write when one of its
+  rows cannot be read.** SQLite makes every change of the write before it
+  hands back the first row, so `{:error, {:utf8_error, column, message}}`
+  leaves the write in place: committed in autocommit mode, pending inside a
+  transaction, where `rollback/1` undoes it.
+
 - **The foreign-key switch inside a transaction answers
   `{:error, :transaction_in_progress}` instead of `{:ok, nil}`.** SQLite
   ignores a `PRAGMA foreign_keys` write while a transaction or a savepoint
@@ -442,6 +464,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **`:execute_returned_results` is retired: the execute functions run a
+  statement that returns rows to its end, drop the rows and answer the
+  count.** This holds for `XqliteNIF.execute/3`, `execute_cancellable/4`,
+  `Xqlite.execute/4` and `execute_cancellable/5`; `query/4` reads the rows.
+  An `INSERT`, `UPDATE` or `DELETE ... RETURNING` through them answers its
+  count, where it made the write and then answered that error. A `SELECT`
+  answers a count of 0. A PRAGMA that answers a row, `journal_mode = WAL`
+  for one, takes effect and answers 0, where it took effect and then
+  answered the error. `PRAGMA incremental_vacuum` frees every page it is
+  asked to, where it freed one page and answered the error.
+- **A statement that returns rows, through the execute functions or a
+  batch, reads every row, so one that never ends never returns.** Reading
+  a million rows costs about 100 ms. A `SELECT` that never ends, such as a
+  recursive CTE without a limit, used to return after its first row (the
+  execute functions with `:execute_returned_results`, `execute_batch/2`
+  with `:ok`); it now runs until something stops it, and only the
+  cancellable functions (`execute_cancellable` and
+  `execute_batch_cancellable`) can stop it.
+- **The SQL length limit (`:sql_length`) applies to each statement of a
+  batch, a trailing comment included.** A batch longer than a lowered limit
+  used to run nothing even when every statement fit; it now runs, and a
+  trailing comment longer than the limit fails after every statement ran.
+- **A batch that fails or is cancelled inside a transaction it opened
+  itself (`BEGIN` or `SAVEPOINT`) rolls that transaction back, a `COMMIT`
+  that failed as busy included:** run the whole batch again rather than
+  retrying the `COMMIT`. A transaction open before the call stays open
+  with the batch's earlier statements in it, and so does one the batch
+  opens after committing the caller's (`COMMIT; BEGIN; ...`). A `ROLLBACK`
+  that fails leaves the transaction open under the batch's own error, and
+  `autocommit/1` says so.
 
 - **`commit/1` and `rollback/1` answer `{:error, :no_transaction}` when no
   transaction is open**, on `Xqlite` and `XqliteNIF` alike, before any

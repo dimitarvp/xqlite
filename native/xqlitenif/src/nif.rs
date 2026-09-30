@@ -128,8 +128,9 @@ fn execute_batch(
     handle: ResourceArc<XqliteConn>,
     sql_batch: TextArg,
 ) -> Term<'_> {
-    let execution_result =
-        connection::with_conn(&handle, |conn| query::core_execute_batch(conn, &sql_batch));
+    let execution_result = connection::with_conn(&handle, |conn| {
+        query::core_execute_batch(conn, &sql_batch, &[])
+    });
     singular_ok_or_error_tuple(env, execution_result)
 }
 
@@ -222,9 +223,12 @@ fn execute_batch_cancellable<'a>(
     };
     let execution_result = connection::with_conn(&handle, |conn| {
         cancel_if_signalled(&token_bools)?;
-        let _guard =
-            ProgressHandlerGuard::new(&handle.progress_dispatch, null_mut(), token_bools);
-        query::core_execute_batch(conn, &sql_batch)
+        let _guard = ProgressHandlerGuard::new(
+            &handle.progress_dispatch,
+            null_mut(),
+            token_bools.clone(),
+        );
+        query::core_execute_batch(conn, &sql_batch, &token_bools)
     });
     singular_ok_or_error_tuple(env, execution_result)
 }

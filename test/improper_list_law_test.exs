@@ -151,7 +151,7 @@ defmodule Xqlite.ImproperListLawTest do
     conn = fresh_conn()
 
     assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT 1", nil)
-    assert {:error, :execute_returned_results} = NIF.execute(conn, "SELECT 1", nil)
+    assert {:ok, 0} = NIF.execute(conn, "SELECT 1", nil)
     assert {:ok, %{rows: [[1]]}} = NIF.query_with_changes(conn, "SELECT 1", nil)
     assert {:ok, _report} = NIF.explain_analyze(conn, "SELECT 1", nil)
     assert {:ok, _stream} = NIF.stream_open(conn, "SELECT 1", nil)

@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.ExecutionTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
@@ -16,6 +17,18 @@ defmodule Xqlite.NIF.ExecutionTest do
     val_bool INTEGER -- Storing bools as 0/1
   )
   """
+
+  @one_then_nope "INSERT INTO t VALUES (1); INSERT INTO nope VALUES (1);"
+  @tails ["", ";", " ", "\n-- tail", " /* tail */", ";;  -- tail\n"]
+
+  @forty_free_pages """
+  PRAGMA auto_vacuum = INCREMENTAL; VACUUM; CREATE TABLE IF NOT EXISTS big (b BLOB);
+  WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40)
+  INSERT INTO big SELECT randomblob(3000) FROM n; DELETE FROM big;
+  """
+
+  defp one_row(text), do: "INSERT INTO t VALUES ('#{String.replace(text, "'", "''")}');"
+  defp count_t(conn), do: NIF.query(conn, "SELECT count(*) FROM t", [])
 
   # Creates a table with the standard test columns but allows specifying the name.
   defp setup_named_table(conn, table_name \\ "exec_test") do
@@ -396,13 +409,103 @@ defmodule Xqlite.NIF.ExecutionTest do
         assert byte_size(nul_string) == 24
       end
 
-      test "execute/3 returns error when trying to execute non-query with RETURNING via execute",
+      test "every execute function runs a RETURNING write to its end and answers its count",
            %{conn: conn} do
         setup_named_table(conn)
+        sql = "INSERT INTO exec_test (name) VALUES (?1) RETURNING id;"
 
-        sql = "INSERT INTO exec_test (name, val_int) VALUES (?1, ?2) RETURNING id;"
-        params = ["Should Fail", 99]
-        assert {:error, :execute_returned_results} = NIF.execute(conn, sql, params)
+        assert {:ok, 1} = NIF.execute(conn, sql, ["a"])
+        assert {:ok, 1} = NIF.execute_cancellable(conn, sql, ["b"], [])
+        assert {:ok, %Xqlite.Result{changes: 1, rows: []}} = Xqlite.execute(conn, sql, ["c"])
+        assert {:ok, 1} = Xqlite.execute_cancellable(conn, sql, ["d"], [])
+
+        assert {:ok, %{rows: [["a"], ["b"], ["c"], ["d"]]}} =
+                 NIF.query(conn, "SELECT name FROM exec_test ORDER BY id", [])
+      end
+
+      test "a batch and execute run PRAGMA incremental_vacuum until no page is free",
+           %{conn: conn} do
+        for run <- [
+              &NIF.execute_batch(&1, "PRAGMA incremental_vacuum;"),
+              &NIF.execute(&1, "PRAGMA incremental_vacuum", [])
+            ] do
+          assert :ok = NIF.execute_batch(conn, @forty_free_pages)
+          assert {:ok, %{rows: [[40]]}} = NIF.query(conn, "PRAGMA freelist_count", [])
+          assert run.(conn) in [:ok, {:ok, 0}]
+          assert {:ok, %{rows: [[0]]}} = NIF.query(conn, "PRAGMA freelist_count", [])
+        end
+      end
+
+      test "a batch stops at the first failure, in a statement's compile or in any of its rows",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t (x);")
+        rest = " INSERT INTO t VALUESS (3); INSERT INTO t VALUES (4);"
+        batch = "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);" <> rest
+        overflow = "SELECT abs(v) FROM (SELECT 1 AS v UNION ALL SELECT -9223372036854775808);"
+
+        assert {:error, {:sql_input_error, %{sql: ^rest, offset: 15}}} =
+                 NIF.execute_batch(conn, batch)
+
+        assert {:error, {:sqlite_failure, 1, 1, _}} =
+                 NIF.execute_batch(conn, overflow <> " INSERT INTO t VALUES (5);")
+
+        assert {:ok, %{rows: [[1], [2]]}} = NIF.query(conn, "SELECT x FROM t", [])
+      end
+
+      test "a failed batch rolls back the transaction it opened itself and no other",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t (x);")
+
+        for open <- ["BEGIN;", "SAVEPOINT a;"] do
+          assert {:error, {:no_such_table, "nope"}} =
+                   NIF.execute_batch(conn, "#{open} #{@one_then_nope} COMMIT;")
+
+          assert {{:ok, true}, {:ok, %{rows: [[0]]}}} = {NIF.autocommit(conn), count_t(conn)}
+        end
+
+        :ok = NIF.execute_batch(conn, "BEGIN; INSERT INTO t VALUES (0);")
+        assert {:error, {:no_such_table, "nope"}} = NIF.execute_batch(conn, @one_then_nope)
+        assert {{:ok, false}, {:ok, %{rows: [[2]]}}} = {NIF.autocommit(conn), count_t(conn)}
+        assert {:ok, 0} = NIF.execute(conn, "ROLLBACK", [])
+        :ok = NIF.set_authorizer(conn, [:transaction])
+
+        assert {:error, {:no_such_table, "nope"}} =
+                 NIF.execute_batch(conn, "SAVEPOINT a; #{@one_then_nope}")
+
+        assert {:ok, false} = NIF.autocommit(conn)
+      end
+
+      test "the anchor: a batch longer than the SQL length limit runs when each statement fits",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t (x);")
+        assert {:ok, 60} = Xqlite.put_limit(conn, :sql_length, 60)
+        assert :ok = NIF.execute_batch(conn, String.duplicate(one_row("a"), 3))
+        assert {:ok, %{rows: [[3]]}} = count_t(conn)
+      end
+
+      # SQLite checks the SQL length limit against the text it is handed to
+      # compile, so a batch longer than the limit ran one statement at a time.
+      property "every statement of a batch runs, in order, compiled one at a time",
+               %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "PRAGMA journal_mode = MEMORY; PRAGMA synchronous = 0;")
+        :ok = NIF.execute_batch(conn, "CREATE TABLE t (x);")
+
+        text =
+          one_of([string(:printable, max_length: 12), string(~c"';-/*\n ab", max_length: 12)])
+
+        check all(
+                texts <- list_of(text, min_length: 1, max_length: 16),
+                tail <- member_of(@tails),
+                max_runs: 2_000
+              ) do
+          statements = Enum.map(texts, &one_row/1)
+          limit = (statements |> Enum.map(&byte_size/1) |> Enum.max()) + 16
+          assert {:ok, ^limit} = Xqlite.put_limit(conn, :sql_length, limit)
+          answer = NIF.execute_batch(conn, Enum.join(statements, " ") <> tail)
+          assert {:ok, %{rows: rows}} = NIF.query(conn, "SELECT x FROM t ORDER BY rowid", [])
+          assert {:ok, _} = NIF.execute(conn, "DELETE FROM t", [])
+          assert {answer, rows} == {:ok, Enum.map(texts, &[&1])}
+        end
       end
 
       test "INSERT with 120 positional parameters succeeds", %{conn: conn} do

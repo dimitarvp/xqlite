@@ -28,9 +28,12 @@ defmodule XqliteNIF do
   `Xqlite.create_cancel_token/0`); a statement that reaches its end first
   answers its normal result. A cancelled write rolls back the whole
   transaction, an explicit one included, and turns autocommit back on; a
-  cancelled read rolls back nothing. `execute_batch_cancellable/3` keeps what
-  the statements before the cancelled one committed, and rows a `RETURNING`
-  write handed out before the cancel describe changes the cancel took back.
+  cancelled read rolls back nothing. `execute_batch_cancellable/3` also
+  reads its tokens between statements and starts none after a signal; it
+  rolls back a transaction the batch opened itself, while one open before
+  the call stays open with the batch's earlier statements in it. Rows a
+  `RETURNING` write handed out before the cancel describe changes the
+  cancel took back.
 
   **Error handling:**
   Most functions return `{:ok, value}` or `:ok` on success, and
@@ -200,16 +203,20 @@ defmodule XqliteNIF do
   `num_rows` is the count of rows fetched.
 
   If the query is an `INSERT ... RETURNING` statement, the `rows` will contain
-  the returned values. For statements that do not return rows (e.g., a simple `INSERT`
-  without `RETURNING`), this function will likely succeed but return an empty
-  `rows` list and `num_rows: 0`, or potentially an error like `:execute_returned_results`
-  if SQLite's API indicates results were returned unexpectedly for a non-query.
-  It is generally recommended to use `execute/3` for non-row-returning statements.
+  the returned values. A statement that returns no rows, such as a plain
+  `INSERT`, answers an empty `rows` list and `num_rows: 0`.
+
+  SQLite makes every change of a `RETURNING` write before it hands back the
+  first row. A row this library cannot read, TEXT that is not valid UTF-8,
+  answers `{:error, {:utf8_error, column, message}}` with no rows, and the
+  write stays: committed in autocommit mode, pending inside a transaction,
+  where `rollback/1` undoes it.
 
   A string holding a second statement after the first is refused with
   `{:error, :multiple_statements}` and nothing runs. `execute_batch/2` is the
   exception: it exists to run several statements, one at a time, and keeps
-  the ones that ran before a failure.
+  the ones that ran before a failure unless it opened their transaction
+  itself.
 
   Column names are read before anything is bound or run: on a connection
   without an authorizer, one that is not UTF-8 answers
@@ -424,7 +431,7 @@ defmodule XqliteNIF do
   def explain_analyze(_conn, _sql, _params \\ []), do: err()
 
   @doc """
-  Executes a SQL statement that does not return rows (e.g., `INSERT`, `UPDATE`, `DELETE`, DDL).
+  Executes a SQL statement (e.g., `INSERT`, `UPDATE`, `DELETE`, DDL).
 
   `conn` is the database connection resource.
   `sql` is the SQL statement string.
@@ -442,14 +449,15 @@ defmodule XqliteNIF do
   write changed, which `changes/1` keeps reporting. A `DROP TABLE` of a table
   a foreign key references, with `foreign_keys` on, counts the rows of the
   `DELETE` SQLite runs first.
-  Returns `{:error, reason}` on failure. For example, `{:error, :execute_returned_results}`
-  if a statement unexpectedly returns data (e.g., a `SELECT` statement or an
-  `INSERT ... RETURNING` statement was passed).
+  Returns `{:error, reason}` on failure. A statement that returns rows, a
+  `SELECT` or an `INSERT ... RETURNING`, runs to its end with its rows
+  dropped and answers its count; `query/3` reads the rows.
 
   A string holding a second statement after the first is refused with
   `{:error, :multiple_statements}` and nothing runs. `execute_batch/2` is the
   exception: it exists to run several statements, one at a time, and keeps
-  the ones that ran before a failure.
+  the ones that ran before a failure unless it opened their transaction
+  itself.
 
   Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
@@ -473,7 +481,7 @@ defmodule XqliteNIF do
   def execute(_conn, _sql, _params \\ []), do: err()
 
   @doc """
-  Executes a SQL statement that does not return rows, with support for cancellation.
+  Executes a SQL statement, with support for cancellation.
 
   This is a cancellable version of `execute/3`.
   See `execute/3` for details on parameters, return values, and general behavior.
@@ -521,11 +529,19 @@ defmodule XqliteNIF do
 
   `conn` is the database connection resource.
   `sql_batch` is a string containing one or more SQL statements. SQLite runs
-  them one at a time. The first failure stops the batch and returns that
-  error; the statements that already ran stay applied. There is no implicit
-  transaction around a batch — a batch may open and close its own — so wrap
-  the statements in your own `BEGIN` / `COMMIT` when the batch has to be
-  all-or-nothing.
+  them one at a time, each to its end, reading and dropping a `SELECT`'s
+  rows. The SQL length limit (`put_limit/3`, `:sql_length`) applies to each
+  statement's own text, a trailing comment included. The first failure
+  stops the batch and returns that error, a compile error carrying the text
+  from the failing statement on as its SQL.
+
+  The statements that ran before a failure stay applied, unless the batch
+  opened a transaction itself (`BEGIN` or `SAVEPOINT`): that one is rolled
+  back, a `COMMIT` that failed as busy included, so run the whole batch
+  again. A transaction open before the call stays open with the batch's
+  earlier statements in it, and so does one the batch opens after
+  committing the caller's (`COMMIT; BEGIN; ...`). When that `ROLLBACK`
+  itself fails, the transaction stays open and `autocommit/1` says so.
 
   Returns `:ok` if all statements in the batch execute successfully.
   Returns `{:error, reason}` if any statement fails.
@@ -541,7 +557,10 @@ defmodule XqliteNIF do
   See `execute_batch/2` for details on parameters, return values, and general behavior.
 
   `cancel_tokens` is a list of references; any signal cancels (OR-semantics).
-  Empty list = no cancellation.
+  Empty list = no cancellation. The tokens are also read after each statement
+  compiles and before it runs, so a signal stops a batch of short statements
+  between two of them; a cancelled batch rolls back a transaction it opened,
+  as a failed one does.
 
   Returns `:ok` if all statements in the batch execute successfully.
   Returns `{:error, :operation_cancelled}` if any token was cancelled.

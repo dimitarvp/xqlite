@@ -32,6 +32,7 @@ defmodule Xqlite.NIF.CancellationTest do
 
   @batch_cancel_table "cancel_batch_test"
   @batch_cancel_setup "CREATE TABLE #{@batch_cancel_table} (id INTEGER PRIMARY KEY, data TEXT); INSERT INTO #{@batch_cancel_table} (id, data) VALUES (0, 'initial');"
+  @count_batch_rows "SELECT count(*) FROM #{@batch_cancel_table}"
   @await_timeout 5_000
 
   @one_row "CREATE TABLE t (id INTEGER PRIMARY KEY, v); INSERT INTO t VALUES (1, 'a');"
@@ -189,6 +190,24 @@ defmodule Xqlite.NIF.CancellationTest do
         # The 'batch_started' update should have run, but the 'batch_finished' should not have.
         assert {:ok, %{rows: [["batch_started"]]}} =
                  NIF.query(conn, "SELECT data FROM #{@batch_cancel_table} WHERE id = 0;", [])
+      end
+
+      test "a batch of loop-free statements stops between two of them on a signal",
+           %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, @batch_cancel_setup)
+
+        inserts =
+          String.duplicate("INSERT INTO #{@batch_cancel_table} VALUES (NULL, 1);", 20_000)
+
+        own = "BEGIN;#{inserts}COMMIT;"
+
+        assert_cancellation(conn, &NIF.execute_batch_cancellable(&1, own, [&2]))
+        assert {:ok, true} = NIF.autocommit(conn)
+        assert {:ok, %{rows: [[1]]}} = NIF.query(conn, @count_batch_rows, [])
+
+        assert_cancellation(conn, &NIF.execute_batch_cancellable(&1, inserts, [&2]))
+        assert {:ok, %{rows: [[rows]]}} = NIF.query(conn, @count_batch_rows, [])
+        assert rows < 20_001
       end
 
       test "execute_batch_cancellable/3 completes normally if token is not cancelled",

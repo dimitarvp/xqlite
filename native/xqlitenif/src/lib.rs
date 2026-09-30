@@ -91,7 +91,6 @@ pub(crate) mod atoms {
         estimated_rows,
         explain,
         exclusive,
-        execute_returned_results,
         expected,
         extension_loading_disabled,
         expected_keyword_list,

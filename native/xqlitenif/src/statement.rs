@@ -1,3 +1,4 @@
+use crate::cancel::cancel_if_signalled;
 use crate::connection::{self, XqliteConn};
 use crate::error::{self, XqliteError};
 use crate::stream::take_and_finalize_raw;
@@ -65,6 +66,62 @@ pub(crate) unsafe fn prepare_one(
                 Err(e)
             }
         },
+    }
+}
+
+/// Runs every statement of a batch in turn and answers the first failure.
+///
+/// Each statement is compiled from the rest of the text in place: the text is
+/// NUL-terminated and handed over with length -1, so SQLite copies nothing and
+/// the batch costs time linear in its length. The tokens are read once a
+/// statement is compiled and before its first step, so a signal stops the
+/// batch before the next statement and text after the last one is never
+/// answered as cancelled.
+///
+/// # Safety
+/// The caller holds the connection Mutex for the whole call, and `db` is that
+/// connection's live handle.
+pub(crate) unsafe fn execute_batch(
+    db: *mut ffi::sqlite3,
+    sql: &str,
+    tokens: &[Arc<AtomicBool>],
+) -> Result<(), XqliteError> {
+    let c_sql = CString::new(sql).map_err(|_| XqliteError::NulErrorInString)?;
+    let mut tail: *const c_char = c_sql.as_ptr();
+
+    loop {
+        let rest = sql
+            .get((tail as usize).wrapping_sub(c_sql.as_ptr() as usize)..)
+            .unwrap_or(sql);
+        let mut raw_stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+
+        // SAFETY: `db` is live and its Mutex is held (fn contract). `tail`
+        // points into `c_sql`, NUL-terminated and alive for the whole loop, and
+        // SQLite writes it back pointing into the same buffer.
+        let rc = unsafe { ffi::sqlite3_prepare_v2(db, tail, -1, &mut raw_stmt, &mut tail) };
+
+        let stmt = match (rc, NonNull::new(raw_stmt)) {
+            (ffi::SQLITE_OK, Some(stmt)) => PreparedStmt::new(stmt),
+            (ffi::SQLITE_OK, None) => return Ok(()),
+            // SAFETY: `db` is live and its Mutex is held (fn contract).
+            (rc, _) => return Err(unsafe { error::prepare_failure(db, rc, rest) }),
+        };
+
+        cancel_if_signalled(tokens)?;
+
+        let rc = loop {
+            // SAFETY: `stmt` is a live statement of `db`, whose Mutex is held.
+            let rc = unsafe { ffi::sqlite3_step(stmt.as_ptr()) };
+            if rc != ffi::SQLITE_ROW {
+                break rc;
+            }
+        };
+
+        if rc != ffi::SQLITE_DONE {
+            // SAFETY: `db` is live and its Mutex is held (fn contract); the
+            // message is read before `stmt` drops and finalizes.
+            return Err(unsafe { error::prepare_failure(db, rc, rest) });
+        }
     }
 }
 
@@ -378,6 +435,48 @@ impl Drop for XqliteStatement {
             let _ = writeln!(
                 std::io::stderr(),
                 "[xqlite] Error finalizing SQLite statement during statement resource drop: {e:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::raw::c_void;
+
+    /// # Safety
+    /// `token` points to an `AtomicBool` that outlives the connection.
+    unsafe extern "C" fn signal(token: *mut c_void) -> c_int {
+        // SAFETY: the fn contract.
+        unsafe { (*(token as *const AtomicBool)).store(true, Ordering::Release) };
+        0
+    }
+
+    #[test]
+    fn the_tokens_are_read_between_statements_and_never_after_the_last() {
+        for (batch, cancelled) in [
+            ("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);", true),
+            ("INSERT INTO t VALUES (1); -- tail", false),
+        ] {
+            let token = Arc::new(AtomicBool::new(false));
+            let conn =
+                rusqlite::Connection::open_in_memory().expect("an in-memory connection");
+            conn.execute_batch("CREATE TABLE t (x)").expect("a table");
+            // SAFETY: this thread owns the connection, and `token` outlives it.
+            let answer = unsafe {
+                let flag = Arc::as_ptr(&token) as *mut c_void;
+                ffi::sqlite3_progress_handler(conn.handle(), 1, Some(signal), flag);
+                execute_batch(conn.handle(), batch, std::slice::from_ref(&token))
+            };
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+                .expect("a count");
+
+            assert!(token.load(Ordering::Acquire));
+            assert_eq!(
+                (matches!(answer, Err(XqliteError::OperationCancelled)), rows),
+                (cancelled, 1)
             );
         }
     }

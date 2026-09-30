@@ -290,7 +290,6 @@ defmodule Xqlite do
   """
   @type error_reason ::
           :connection_closed
-          | :execute_returned_results
           | :extension_loading_disabled
           | :invalid_utf8_in_string
           | :multiple_statements
@@ -1380,6 +1379,12 @@ defmodule Xqlite do
   atomically inside the connection lock. For zero-overhead access without the
   changes field, use `XqliteNIF.query/3` directly.
 
+  SQLite makes every change of a `RETURNING` write before it hands back the
+  first row, so a row that cannot be read (TEXT that is not valid UTF-8,
+  `{:error, {:utf8_error, column, message}}`) leaves the write in place:
+  committed in autocommit mode, pending inside a transaction, where
+  `rollback/1` undoes it.
+
   Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
@@ -1477,9 +1482,11 @@ defmodule Xqlite do
   end
 
   @doc """
-  Executes a non-returning SQL statement and returns a `%Xqlite.Result{}`.
+  Executes a SQL statement and returns a `%Xqlite.Result{}`.
 
-  For DML statements, `changes` contains the number of affected rows.
+  For DML statements, `changes` contains the number of affected rows. A
+  statement that returns rows runs to its end with its rows dropped, so an
+  `INSERT ... RETURNING` answers its count here; `query/4` reads the rows.
 
   Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
@@ -1587,11 +1594,19 @@ defmodule Xqlite do
   Wraps `XqliteNIF.execute_batch/2` and emits `[:xqlite, :execute_batch, :*]`
   telemetry. No parameter binding inside the batch.
 
-  SQLite runs the statements one at a time. The first failure stops the batch
-  and returns that error; the statements that already ran stay applied. There
-  is no implicit transaction around a batch — a batch may open and close its
-  own — so wrap the statements in your own `BEGIN` / `COMMIT` when the batch
-  has to be all-or-nothing.
+  SQLite runs the statements one at a time, each to its end, reading and
+  dropping a `SELECT`'s rows. The SQL length limit (`put_limit/3`,
+  `:sql_length`) applies to each statement's own text, a trailing comment
+  included. The first failure stops the batch and returns that error, a
+  compile error carrying the text from the failing statement on as its SQL.
+
+  The statements that ran before a failure stay applied, unless the batch
+  opened a transaction itself (`BEGIN` or `SAVEPOINT`): that one is rolled
+  back, a `COMMIT` that failed as busy included, so run the whole batch
+  again. A transaction open before the call stays open with the batch's
+  earlier statements in it, and so does one the batch opens after
+  committing the caller's (`COMMIT; BEGIN; ...`). When that `ROLLBACK`
+  itself fails, the transaction stays open and `autocommit/1` says so.
   """
   @spec execute_batch(conn(), String.t()) :: :ok | error()
   def execute_batch(conn, sql_batch) when is_binary(sql_batch) do
@@ -3292,6 +3307,11 @@ defmodule Xqlite do
 
   @doc """
   Cancellable `execute_batch/2`. Accepts either a single cancel token or a list.
+
+  The tokens are read after each statement compiles and before it runs, as
+  well as at SQLite's progress checks, so a signal stops a batch of short
+  statements between two of them; a cancelled batch rolls back a
+  transaction it opened, as a failed one does.
   """
   @spec execute_batch_cancellable(conn(), String.t(), term()) ::
           :ok | error()

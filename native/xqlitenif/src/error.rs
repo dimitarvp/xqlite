@@ -333,7 +333,6 @@ pub(crate) enum XqliteError {
         sql: String,
         offset: i32,
     },
-    ExecuteReturnedResults,
     CannotExecute(String),
     CannotExecutePragma {
         pragma: String,
@@ -781,9 +780,6 @@ impl Display for XqliteError {
                 f,
                 "Invalid column type at index {index} (name: '{name}'): cannot convert SQLite type '{sqlite_type:?}'"
             ),
-            XqliteError::ExecuteReturnedResults => {
-                write!(f, "Execute returned results, expected no rows")
-            }
             XqliteError::Utf8Error { column, reason } => {
                 write!(f, "UTF-8 decoding error at column {column}: {reason}")
             }
@@ -1184,9 +1180,6 @@ impl Encoder for XqliteError {
                 name,
                 sqlite_type,
             } => (atoms::invalid_column_type(), index, name, *sqlite_type).encode(env),
-            XqliteError::ExecuteReturnedResults => {
-                atoms::execute_returned_results().encode(env)
-            }
             XqliteError::Utf8Error { column, reason } => {
                 (atoms::utf8_error(), column, reason).encode(env)
             }
@@ -1315,11 +1308,14 @@ pub(crate) fn is_misuse(error: &XqliteError) -> bool {
 
 /// Classify a failed `sqlite3_prepare_v2` the way rusqlite's own `prepare`
 /// does, so the raw-FFI prepare sites and `query`/`execute` agree on one SQL
-/// string.
+/// string. A failed `sqlite3_step` classifies here too: SQLite clears the error
+/// offset when a step fails, so the answer is the one rusqlite's `step` gives,
+/// except a step whose re-prepare fails, which answers the compile error with
+/// its offset.
 ///
 /// # Safety
 /// The caller must hold the connection Mutex, and `db` must be the live handle
-/// the failing `sqlite3_prepare_v2` ran on.
+/// the failing `sqlite3_prepare_v2` or `sqlite3_step` ran on.
 pub(crate) unsafe fn prepare_failure(
     db: *mut ffi::sqlite3,
     rc: c_int,
@@ -1463,7 +1459,6 @@ impl From<RusqliteError> for XqliteError {
                 }
             }
 
-            RusqliteError::ExecuteReturnedResults => XqliteError::ExecuteReturnedResults,
             RusqliteError::InvalidParameterCount(p, e) => XqliteError::InvalidParameterCount {
                 provided: p,
                 expected: e,

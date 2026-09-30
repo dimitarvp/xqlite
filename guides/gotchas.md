@@ -345,10 +345,14 @@ turns autocommit back on: every statement you run afterwards commits on its
 own, and a later `Xqlite.commit/1` or `Xqlite.rollback/1` answers
 `{:error, :no_transaction}`. `Xqlite.autocommit/1` tells you whether the
 transaction survived. A cancelled read rolls back nothing.
-`Xqlite.execute_batch_cancellable/3` keeps what the statements before the
-cancelled one committed. Rows that a `RETURNING` write handed out before the
-cancel, through `Xqlite.multi_step_cancellable/3` or a stream, describe
-changes the cancel took back.
+`Xqlite.execute_batch_cancellable/3` also reads its tokens between
+statements, so a signal stops a batch of short statements before the next
+one starts. SQLite rolls back nothing there: the statements before it stay
+committed in autocommit mode, the library rolls back a transaction the batch
+opened itself, and a transaction you opened before the call stays open. Rows
+that a `RETURNING` write handed out before the cancel, through
+`Xqlite.multi_step_cancellable/3` or a stream, describe changes the cancel
+took back.
 
 ### A failed commit leaves the transaction open
 
