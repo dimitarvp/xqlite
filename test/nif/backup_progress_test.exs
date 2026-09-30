@@ -104,7 +104,6 @@ defmodule Xqlite.NIF.BackupProgressTest do
         messages = drain_progress_messages()
         pagecounts = messages |> Enum.map(fn {_, pc} -> pc end) |> Enum.uniq()
 
-        # Pagecount should be the same throughout (source not modified during backup)
         assert length(pagecounts) == 1
       end
 
@@ -177,35 +176,18 @@ defmodule Xqlite.NIF.BackupProgressTest do
 
         assert {:error, :operation_cancelled} =
                  NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
+
+        refute File.exists?(path)
       end
 
       test "cancellation mid-backup via async cancel", %{conn: conn, backup_path: path} do
-        :ok =
-          NIF.execute_batch(
-            conn,
-            "CREATE TABLE bkp_async (id INTEGER PRIMARY KEY, data TEXT);"
-          )
-
-        for i <- 1..1000 do
-          {:ok, 1} =
-            NIF.execute(conn, "INSERT INTO bkp_async VALUES (?1, ?2)", [
-              i,
-              String.duplicate("d", 2000)
-            ])
-        end
-
+        :ok = NIF.execute_batch(conn, "CREATE TABLE bkp_async AS SELECT zeroblob(12e6) AS v;")
         {:ok, token} = NIF.create_cancel_token()
-
-        task =
-          Task.async(fn ->
-            NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
-          end)
-
-        Process.sleep(10)
+        task = Task.async(NIF, :backup_with_progress, [conn, "main", path, self(), 1, [token]])
+        assert_receive {:xqlite_backup_progress, %{status: :copied}}
         :ok = NIF.cancel_operation(token)
-
-        result = Task.await(task, 5000)
-        assert result == {:error, :operation_cancelled} or result == :ok
+        assert {:error, :operation_cancelled} = Task.await(task, 5000)
+        assert {:error, :no_pages} = NIF.restore(conn, "main", path)
       end
 
       test "a blocked step says :busy and answers what backup/3 answers",
@@ -240,6 +222,16 @@ defmodule Xqlite.NIF.BackupProgressTest do
         assert_receive {:xqlite_backup_progress, %{status: :busy, remaining: n, total: total}}
         assert is_integer(n) and n > 0 and total > n
         Enum.each([holder, src], &NIF.close/1)
+      end
+
+      test "an extended lock code says :busy", %{conn: conn, backup_path: path} do
+        dest = "file:#{path}?cache=shared"
+        {:ok, writer} = NIF.open(dest)
+        :ok = NIF.execute_batch(writer, "BEGIN IMMEDIATE")
+        answer = NIF.backup_with_progress(conn, "main", dest, self(), 1, [])
+        assert {:error, {:database_busy_or_locked, 262, _}} = answer
+        assert_received {:xqlite_backup_progress, %{status: :busy, remaining: nil, total: nil}}
+        NIF.close(writer)
       end
 
       property "step counts outside 1..2^31-1 are rejected", %{conn: conn, backup_path: path} do
@@ -292,7 +284,6 @@ defmodule Xqlite.NIF.BackupProgressTest do
         :ok = NIF.backup_with_progress(conn, "main", path, self(), 1000, [token])
 
         messages = drain_progress_messages()
-        # Large step size on small DB → very few messages (likely 1)
         assert length(messages) >= 1
         assert length(messages) <= 3
       end

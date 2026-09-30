@@ -345,6 +345,7 @@ pub(crate) enum XqliteError {
         message: String,
     },
     OperationCancelled,
+    CannotRestoreReadOnly,
 
     NoSuchTable {
         name: String,
@@ -613,6 +614,9 @@ impl Display for XqliteError {
             }
             XqliteError::OperationCancelled => {
                 write!(f, "Database operation was cancelled")
+            }
+            XqliteError::CannotRestoreReadOnly => {
+                write!(f, "A read-only connection cannot be restored into")
             }
             XqliteError::NoSuchTable { name: _, message } => {
                 write!(f, "No such table: {message}")
@@ -891,6 +895,9 @@ impl Encoder for XqliteError {
                 message,
             } => (atoms::database_busy_or_locked(), extended_code, message).encode(env),
             XqliteError::OperationCancelled => atoms::operation_cancelled().encode(env),
+            XqliteError::CannotRestoreReadOnly => {
+                (atoms::cannot_restore(), atoms::read_only_connection()).encode(env)
+            }
             XqliteError::NoSuchTable { name, message: _ } => {
                 (atoms::no_such_table(), name).encode(env)
             }

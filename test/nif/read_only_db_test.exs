@@ -145,9 +145,8 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
 
   test "open_in_memory_readonly returns a working read-only connection" do
     {:ok, ro_conn} = NIF.open_in_memory_readonly(":memory:")
-    # Can read pragmas
     assert {:ok, _} = NIF.get_pragma(ro_conn, "encoding")
-    # Cannot create tables
+
     assert {:error, {:read_only_database, _, _}} =
              NIF.execute(ro_conn, "CREATE TABLE t (id INTEGER);", [])
 
@@ -166,6 +165,9 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
       assert {:error, {:read_only_database, 8, _}} = NIF.execute(ro, sql, [])
     end
 
+    source = tmp_db_path("ro_restore")
+    File.write!(source, "")
+    assert {:error, {:cannot_restore, :read_only_connection}} = NIF.restore(ro, "main", source)
     assert {:ok, %{rows: [[1], [2], [3]]}} = NIF.query(rw, "SELECT id FROM s ORDER BY id", [])
     Enum.each([ro, rw], &NIF.close/1)
   end

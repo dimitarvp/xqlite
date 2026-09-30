@@ -2052,7 +2052,9 @@ defmodule XqliteNIF do
   Backs up the named schema to a file at `dest_path`.
 
   The destination file is created or overwritten. The source database
-  remains readable during the backup.
+  remains readable during the backup. `Xqlite.backup/3` says which locks
+  answer at once, which destinations are rejected and what a failed copy
+  leaves.
 
   Use `Xqlite.backup/2` for a defaulted `"main"` schema.
   """
@@ -2069,7 +2071,9 @@ defmodule XqliteNIF do
   The connection's existing data in that schema is overwritten. A statement
   or stream still running on any schema of the connection, or a blob open on
   one, answers `{:error, {:database_busy_or_locked, 5, _}}` and copies
-  nothing, as `Xqlite.restore/3` describes.
+  nothing; a source with no pages answers `{:error, :no_pages}` and a
+  read-only connection `{:error, {:cannot_restore, :read_only_connection}}`,
+  both changing nothing (see `Xqlite.restore/3`).
 
   Use `Xqlite.restore/2` for a defaulted `"main"` schema.
   """
@@ -2088,8 +2092,8 @@ defmodule XqliteNIF do
   after each step: `status` is `:copied`, or `:busy` when a lock blocked the
   step, which then ends the call with the error `backup/3` answers for the
   same lock (see `Xqlite.backup_with_progress/6`). A `:busy` message before
-  any step copied pages carries `remaining: nil, total: nil`. Between steps, all of
-  `cancel_tokens` are polled —
+  any step copied pages carries `remaining: nil, total: nil`. Before the
+  destination is opened and between steps, all of `cancel_tokens` are polled —
   if *any* is signalled, returns `{:error, :operation_cancelled}`
   (OR-semantics). Pass an empty list for no-cancellation.
 

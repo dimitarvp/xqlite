@@ -116,9 +116,7 @@ defmodule XqlitePragmaTest do
         end
       end
 
-      # Test for a readable PRAGMA that takes one argument.
       test "read pragma: foreign_key_check with table name", %{db: db} do
-        # Setup: Create tables but keep foreign keys OFF initially.
         assert {:ok, _} = P.put(db, :foreign_keys, false)
 
         assert :ok =
@@ -136,7 +134,6 @@ defmodule XqlitePragmaTest do
         assert {:ok, 1} =
                  NIF.execute(db, "INSERT INTO children (id, parent_id) VALUES (20, 99);", [])
 
-        # Now, run the check. It should find the pre-existing violation.
         # The rowid of the new row is 2.
         assert {:ok, [["children", 2, "parents", 0]]} =
                  P.get(db, :foreign_key_check, "children")
@@ -181,7 +178,6 @@ defmodule XqlitePragmaTest do
       for {name, values_to_test, verify_fun} <- Enum.map(@write_test_cases, &write_case/1) do
         verify_fun = Macro.escape(verify_fun || (&default_verify_values/4))
 
-        # Generate a test for each value to be set for a given PRAGMA
         for {set_val, expected_val} <- normalize_test_values(values_to_test) do
           test_name_string = "write pragma: #{name} = #{inspect(set_val)}"
 
@@ -195,7 +191,6 @@ defmodule XqlitePragmaTest do
             # We need a clean DB for some PRAGMAs like page_size
             db = if unquote(name) == :page_size, do: clean_db(), else: db
 
-            # The core of the test: put, then get and verify
             assert {:ok, _} = P.put(db, unquote(name), set_val)
 
             case P.get(db, unquote(name)) do
@@ -240,7 +235,6 @@ defmodule XqlitePragmaTest do
       assert {:ok, _} = P.put(db, :cache_size, {:pages, 3000}, db_name: "aux")
       assert {:ok, {:pages, 3000}} = P.get(db, :cache_size, [], db_name: "aux")
 
-      # main schema should be unaffected
       {:ok, main_cache} = P.get(db, :cache_size)
       refute main_cache == {:pages, 3000}
     end
@@ -1182,13 +1176,13 @@ defmodule XqlitePragmaTest do
     end
 
     test "an option past what SQLite stores is refused at open" do
-      assert {:error, {:invalid_pragma_value, %{pragma: :busy_timeout}}} =
+      assert {:error, {:invalid_option, %{key: :busy_timeout, reason: :invalid_value}}} =
                Xqlite.open_in_memory(busy_timeout: 3_000_000_000)
 
-      assert {:error, {:invalid_pragma_value, %{pragma: :cache_size}}} =
+      assert {:error, {:invalid_option, %{key: :cache_size, reason: :invalid_value}}} =
                Xqlite.open_in_memory(cache_size: {:kib, 10_000_000_000})
 
-      assert {:error, {:invalid_pragma_value, %{pragma: :wal_autocheckpoint}}} =
+      assert {:error, {:invalid_option, %{key: :wal_autocheckpoint, reason: :invalid_value}}} =
                Xqlite.open_in_memory(wal_autocheckpoint: 3_000_000_000)
     end
   end

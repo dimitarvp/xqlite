@@ -295,6 +295,57 @@ defmodule Xqlite.NIF.BackupTest do
         assert {:error, _} = result
       end
 
+      test "a source with no pages is rejected", %{conn: conn, backup_path: path} do
+        :ok = NIF.execute_batch(conn, "CREATE TABLE kept (x); INSERT INTO kept VALUES (1)")
+        File.write!(path, "")
+        assert {:error, :no_pages} = NIF.restore(conn, "main", path)
+        assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT x FROM kept", [])
+        :ok = NIF.backup(conn, "temp", path)
+        assert :ok = NIF.restore(conn, "main", path)
+        assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT name FROM sqlite_schema", [])
+      end
+
+      test "a blocked restore answers what a blocked backup answers", %{backup_path: path} do
+        own_path = tmp_db_path("own")
+        {:ok, own} = Xqlite.open(own_path, journal_mode: :delete, busy_timeout: 0)
+        :ok = NIF.backup(own, "main", path)
+        {:ok, holder} = NIF.open(own_path)
+        :ok = NIF.execute_batch(holder, "BEGIN EXCLUSIVE")
+        blocked = NIF.backup(own, "main", tmp_db_path("blocked"))
+        {micros, answer} = :timer.tc(fn -> NIF.restore(own, "main", path) end)
+        assert {:error, {:database_busy_or_locked, 5, _}} = answer
+        assert answer == blocked
+        assert micros < 150_000
+        Enum.each([holder, own], &NIF.close/1)
+      end
+
+      test "the files the library opens wait for no lock", %{conn: conn, backup_path: path} do
+        {:ok, holder} = NIF.open(path)
+        :ok = NIF.execute_batch(holder, "CREATE TABLE h (x); BEGIN EXCLUSIVE")
+        progress = &NIF.backup_with_progress(conn, "main", &1, self(), 1, [])
+        restore = &NIF.restore(conn, "main", &1)
+
+        for call <- [&NIF.backup(conn, "main", &1), progress, restore] do
+          {micros, answer} = :timer.tc(call, [path])
+          assert {:error, {:database_busy_or_locked, 5, _}} = answer
+          assert micros < 2_000_000
+        end
+
+        NIF.close(holder)
+      end
+
+      test "a destination SQLite gives no file for is rejected", %{conn: conn} do
+        for dest <- @no_file_sources do
+          assert {:error, {:cannot_open_database, ^dest, 14, _}} =
+                   NIF.backup(conn, "main", dest)
+
+          assert {:error, {:cannot_open_database, ^dest, 14, _}} =
+                   NIF.backup_with_progress(conn, "main", dest, self(), 1, [])
+        end
+
+        refute Enum.any?(@no_file_sources, &File.exists?/1)
+      end
+
       # -------------------------------------------------------------------
       # round-trip: backup then restore preserves integrity
       # -------------------------------------------------------------------

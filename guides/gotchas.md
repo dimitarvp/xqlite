@@ -510,6 +510,22 @@ handles). If you genuinely must share a handle, treat *every* call on it —
 including the cheap readers — as something that can block for as long as the
 longest operation currently running on that connection.
 
+### A backup or restore right after a busy answer does not wait
+
+`Xqlite.backup/3`, `Xqlite.backup_with_progress/6` and `Xqlite.restore/3` wait
+on a lock only through SQLite's busy handler, and SQLite restarts the handler's
+retry count only when a statement is prepared or run on the connection. After a
+call gave up on a lock, the next backup or restore on the same connection
+answers `{:error, {:database_busy_or_locked, 5, _}}` at once, whatever
+`busy_timeout` or the busy policy says, until a statement runs on that
+connection. To wait again, run any statement first, such as
+`Xqlite.query(conn, "SELECT 1")`: the count restarts even when that statement
+itself answers busy.
+
+On a shared cache, a lock another connection of the cache holds is answered at
+once as well: code 262 for a restore, 5 for a backup of this connection's
+database.
+
 ## Memory and binaries
 
 ### `query` materializes the whole result; `stream` bounds the peak

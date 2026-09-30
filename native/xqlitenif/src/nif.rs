@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 #[rustler::nif(schedule = "DirtyIo")]
 fn open(path: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let result = Connection::open(path.as_str());
-    connection::handle_open_result(result, path.into_string())
+    connection::handle_open_result(result, path.into_string(), false)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -44,7 +44,7 @@ fn open_in_memory(uri: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> 
         _ => rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_MEMORY,
     };
     let result = Connection::open_with_flags(uri.as_str(), flags);
-    connection::handle_open_result(result, uri.into_string())
+    connection::handle_open_result(result, uri.into_string(), false)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -53,7 +53,7 @@ fn open_readonly(path: TextArg) -> Result<ResourceArc<XqliteConn>, XqliteError> 
         | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
     let result = Connection::open_with_flags(path.as_str(), flags).and_then(keep_read_only);
-    connection::handle_open_result(result, path.into_string())
+    connection::handle_open_result(result, path.into_string(), true)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -63,7 +63,7 @@ fn open_in_memory_readonly(uri: TextArg) -> Result<ResourceArc<XqliteConn>, Xqli
         | rusqlite::OpenFlags::SQLITE_OPEN_MEMORY
         | rusqlite::OpenFlags::SQLITE_OPEN_URI;
     let result = Connection::open_with_flags(uri.as_str(), flags).and_then(keep_read_only);
-    connection::handle_open_result(result, uri.into_string())
+    connection::handle_open_result(result, uri.into_string(), true)
 }
 
 /// Sets `query_only` on a read-only open whose main database SQLite still
@@ -80,7 +80,7 @@ fn keep_read_only(conn: Connection) -> rusqlite::Result<Connection> {
 #[rustler::nif(schedule = "DirtyIo")]
 fn open_temporary() -> Result<ResourceArc<XqliteConn>, XqliteError> {
     let result = Connection::open("");
-    connection::handle_open_result(result, "".to_string())
+    connection::handle_open_result(result, "".to_string(), false)
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1614,7 +1614,7 @@ fn deserialize<'a>(
 /// A load and a restore end with SQLite dropping every cached schema of the
 /// connection, whose table definitions a running statement's program may read
 /// on every row: none may be mid-run.
-fn require_idle(conn: &Connection) -> Result<(), XqliteError> {
+pub(crate) fn require_idle(conn: &Connection) -> Result<(), XqliteError> {
     // SAFETY: both callers hold the connection Mutex through `with_conn_mut`.
     if unsafe { crate::progress_dispatch::any_mid_run(conn) } {
         Err(rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_BUSY), None).into())
@@ -1762,8 +1762,7 @@ fn backup<'a>(
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
-        conn.backup(schema.as_str(), dest_path.as_str(), None)?;
-        Ok(())
+        crate::backup::backup_to(conn, &schema, &dest_path, 100, &[], |_, _| ())
     });
     singular_ok_or_error_tuple(env, result)
 }
@@ -1777,61 +1776,9 @@ fn restore<'a>(
 ) -> Term<'a> {
     let result = connection::with_conn_mut(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
-        restore_from(conn, &schema, &src_path)
+        crate::backup::restore_from(conn, &schema, &src_path, handle.read_only)
     });
     singular_ok_or_error_tuple(env, result)
-}
-
-/// Copies the main database of the file at `src_path` over `schema`. The file
-/// is opened read-only and never created, and a source SQLite reports no file
-/// name for — `""`, `:memory:` or another in-memory name, which it opens as a
-/// new empty database — is rejected like a missing file, before anything is
-/// copied, and so is a copy while any statement, stream or blob of the
-/// connection is mid-run, since the copy's end drops every cached schema. A
-/// busy step is retried twice, 100 ms apart, and a locked one is an error, as
-/// rusqlite's own restore does.
-fn restore_from(
-    conn: &mut Connection,
-    schema: &str,
-    src_path: &str,
-) -> Result<(), XqliteError> {
-    use rusqlite::backup::{Backup, StepResult};
-
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-    let src = Connection::open_with_flags(src_path, flags).map_err(|err| match err {
-        rusqlite::Error::SqliteFailure(ffi_err, message) => XqliteError::CannotOpenDatabase {
-            path: src_path.to_string(),
-            code: ffi_err.extended_code,
-            message: message.unwrap_or_else(|| ffi_err.to_string()),
-        },
-        other => XqliteError::from(other),
-    })?;
-    if src.path().is_none_or(str::is_empty) {
-        return Err(XqliteError::CannotOpenDatabase {
-            path: src_path.to_string(),
-            code: ffi::SQLITE_CANTOPEN,
-            message: format!("no database file at {src_path:?}"),
-        });
-    }
-    require_idle(conn)?;
-    let restore = Backup::new_with_names(&src, "main", conn, schema)?;
-    let mut busy_steps = 0;
-    loop {
-        let code = match restore.step(100)? {
-            StepResult::Done => return Ok(()),
-            StepResult::More => continue,
-            StepResult::Busy if busy_steps < 2 => {
-                busy_steps += 1;
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                continue;
-            }
-            StepResult::Busy => ffi::SQLITE_BUSY,
-            _locked => ffi::SQLITE_LOCKED,
-        };
-        return Err(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None).into());
-    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1863,67 +1810,21 @@ fn backup_with_progress<'a>(
 
     let result = connection::with_conn(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
-        let mut dst = rusqlite::Connection::open(dest_path.as_str())?;
-        let backup =
-            rusqlite::backup::Backup::new_with_names(conn, schema.as_str(), &mut dst, "main")?;
-        let mut counts = None;
-
-        loop {
-            let cancelled = cancel_flags.iter().any(|t| t.load(Ordering::Acquire));
-            if cancelled {
-                return Err(XqliteError::OperationCancelled);
-            }
-
-            let step_result = backup.step(pages_per_step)?;
-            if matches!(
-                step_result,
-                rusqlite::backup::StepResult::Done | rusqlite::backup::StepResult::More
-            ) {
-                let progress = backup.progress();
-                counts = Some((progress.remaining, progress.pagecount));
-            }
-            let send = |status: &[u8]| {
-                // SAFETY: enif_send with NULL caller_env is valid from dirty
-                // scheduler threads (OTP 26.1+). All data is copied into msg_env.
-                unsafe { send_backup_progress(&pid, counts, status) }
-            };
-
-            match step_result {
-                rusqlite::backup::StepResult::Done => {
-                    send(b"copied");
-                    return Ok(());
-                }
-                rusqlite::backup::StepResult::More => send(b"copied"),
-                rusqlite::backup::StepResult::Busy => {
-                    send(b"busy");
-                    return Err(rejected_step(ffi::SQLITE_BUSY));
-                }
-                rusqlite::backup::StepResult::Locked => {
-                    send(b"busy");
-                    return Err(rejected_step(ffi::SQLITE_LOCKED));
-                }
-                _ => continue,
-            }
-        }
+        let send = |counts, status: &[u8]| {
+            // SAFETY: enif_send with NULL caller_env is valid from dirty
+            // scheduler threads (OTP 26.1+). All data is copied into msg_env.
+            unsafe { send_backup_progress(&pid, counts, status) }
+        };
+        crate::backup::backup_to(
+            conn,
+            &schema,
+            &dest_path,
+            pages_per_step,
+            &cancel_flags,
+            send,
+        )
     });
     singular_ok_or_error_tuple(env, result)
-}
-
-/// The error `Connection::backup` answers for a step SQLite rejected with `code`.
-fn rejected_step(code: std::ffi::c_int) -> XqliteError {
-    // SAFETY: sqlite3_errstr reads no connection; it answers a pointer to a
-    // static string, or NULL for a code it has no text for.
-    let text = unsafe { ffi::sqlite3_errstr(code) };
-    let message = (!text.is_null()).then(|| {
-        // SAFETY: a non-NULL answer points to a static NUL-terminated string.
-        unsafe { std::ffi::CStr::from_ptr(text) }
-            .to_string_lossy()
-            .into_owned()
-    });
-    XqliteError::from(rusqlite::Error::SqliteFailure(
-        ffi::Error::new(code),
-        message,
-    ))
 }
 
 /// `counts` are the last copied step's `(remaining, total)`, `None` before a

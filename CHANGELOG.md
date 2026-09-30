@@ -21,6 +21,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`backup/3`, `backup_with_progress/6` and `restore/3` no longer wait on a
+  lock the caller did not ask to wait on.** A lock another connection holds
+  on the file the library opens itself (a backup's destination, the file a
+  restore reads) answers `{:error, {:database_busy_or_locked, 5, message}}`
+  at once, where it waited rusqlite's 5 000 ms busy timeout first. A lock on
+  the caller's own database still waits as the connection's `busy_timeout`
+  or busy policy says, except in the two cases the gotchas guide describes.
+  `restore/3` no longer sleeps 200 ms on a blocked step, and its busy answer
+  carries SQLite's own text for the code, as the backup functions' does (it
+  read "Error code 5: …"). `backup_with_progress/6` now also sends its
+  `:busy` message for a lock SQLite reports with an extended code, such as
+  262 when another connection of a shared cache uses the destination; it
+  answered the same error with no message.
+- **`backup/3` and `backup_with_progress/6` reject a destination SQLite
+  gives no file for** — `""`, `":memory:"`, `"file::memory:"`, a
+  `mode=memory` or `vfs=memdb` URI — with `{:error, {:cannot_open_database,
+  dest_path, 14, message}}`; they answered `:ok` and wrote nothing.
+- **`backup_with_progress/6` reads its cancel tokens before the destination
+  is opened**: a token signalled before the call creates no file (it left
+  an empty one).
+- **`restore/3` rejects a source with no pages** — a zero-byte file, such as
+  the empty file a failed copy to a new path leaves — with
+  `{:error, :no_pages}`; it answered `:ok` and emptied the schema.
+- **`restore/3` rejects a connection `open_readonly/1` or
+  `open_in_memory_readonly/1` opened** with
+  `{:error, {:cannot_restore, :read_only_connection}}`, on every schema,
+  `temp` included. On a shared cache another connection opened read-write,
+  `query_only` does not stop the backup API, so the restore overwrote the
+  shared database. `@type error_reason` gains that reason.
+- **`open/2` and `open_in_memory/1` judge every option value before the file
+  is opened.** A value outside what SQLite stores (`busy_timeout`,
+  `cache_size`, `wal_autocheckpoint`, `mmap_size`) is rejected with nothing
+  opened or created; it was rejected after the file was created and, for an
+  existing file, after `journal_mode = WAL` had switched it for good.
+
 - **`deserialize/4` rejects the `temp` schema by name.** `"temp"`, in any
   ASCII case, answers `{:error, {:invalid_schema_name, name}}` with the name
   as given, before the image is judged, on `Xqlite.deserialize/4` and
@@ -180,12 +215,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `open_readonly/1` or `open_in_memory_readonly/1` connection that joined a
   shared cache another connection opened read-write, and of any URI with
   `mode=memory`, so the connection wrote. Those connections now get `PRAGMA
-  query_only = 1` at open; `restore/3`, `PRAGMA query_only = 0` and a
-  `journal_mode` change still pass it (see the openers' docs). A private
-  read-only connection still creates TEMP tables. Such an open now returns
-  `{:error, {:cannot_open_database, uri, 262, _}}` while the shared cache's
-  writer holds an uncommitted schema change, because `query_only` cannot be
-  set then; it opens once the writer commits.
+  query_only = 1` at open; `PRAGMA query_only = 0` and a `journal_mode`
+  change still pass it; `restore/3` answers
+  `{:error, {:cannot_restore, :read_only_connection}}` (see the openers'
+  docs). A private read-only connection still creates TEMP tables. Such an
+  open now returns `{:error, {:cannot_open_database, uri, 262, _}}` while
+  the shared cache's writer holds an uncommitted schema change, because
+  `query_only` cannot be set then; it opens once the writer commits.
 - **The execute functions report the statement's own count.**
   `XqliteNIF.execute/3`, `execute_cancellable/4`, `Xqlite.execute/4` and
   `execute_cancellable/5` answered SQLite's sticky `sqlite3_changes()`, so
@@ -478,6 +514,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **`open/2` and `open_in_memory/1` answer `{:error, {:invalid_option,
+  %{key: key, value: value, reason: :invalid_value}}}` for an option value
+  outside what SQLite stores**, with the value as given: the shape an option
+  already answers when its value has the wrong type. They answered
+  `{:error, {:invalid_pragma_value, %{pragma: key, value: value}}}`.
+  `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4` keep
+  `:invalid_pragma_value`.
+- **`backup/3` and `backup_with_progress/6` answer
+  `{:error, {:cannot_open_database, dest_path, code, message}}` for a
+  destination SQLite cannot open**, such as a path in a missing directory,
+  as `restore/3` does for its source. They answered
+  `{:error, {:sqlite_failure, 14, 14, message}}`.
 
 - **`XqliteNIF.stream_close/1` raises `ArgumentError` for a term that is no
   stream handle**, like `stream_fetch/2`, `stmt_finalize/1`, `blob_close/1`

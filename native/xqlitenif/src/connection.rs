@@ -87,6 +87,8 @@ pub(crate) struct XqliteConn {
 
     pub(crate) extensions_enabled: AtomicBool,
 
+    pub(crate) read_only: bool,
+
     // The busy slot: a single-slot retry POLICY (a policy cannot
     // compose) plus any number of observer subscribers, one C callback
     // serving both halves. Installed lazily, removed when both empty.
@@ -240,6 +242,7 @@ impl Encoder for XqliteQueryResult<'_> {
 pub(crate) fn handle_open_result(
     open_result: Result<Connection, RusqliteError>,
     path: String,
+    read_only: bool,
 ) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     match open_result {
         Ok(conn) => {
@@ -251,6 +254,7 @@ pub(crate) fn handle_open_result(
                 conn: Mutex::new(Some(conn)),
                 children: Mutex::new(HashMap::new()),
                 extensions_enabled: AtomicBool::new(false),
+                read_only,
                 busy_handler: AtomicPtr::new(std::ptr::null_mut()),
                 busy_flags: Arc::new(BusySlotFlags::default()),
                 denied_actions: Mutex::new(None),

@@ -33,6 +33,7 @@ pub(crate) mod atoms {
         cannot_execute,
         cannot_execute_pragma,
         cannot_open_database,
+        cannot_restore,
         cascade,
         category,
         code,
@@ -208,6 +209,7 @@ pub(crate) mod atoms {
         primary_key_constraint,
         provided,
         query_plan,
+        read_only_connection,
         read_only_database,
         read_only_image,
         read,
@@ -291,6 +293,7 @@ pub(crate) mod atoms {
 }
 
 mod authorizer;
+mod backup;
 mod blob;
 mod busy_handler;
 mod cancel;

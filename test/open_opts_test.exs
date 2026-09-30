@@ -1,9 +1,18 @@
 defmodule Xqlite.OpenOptsTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.TestUtil, only: [tmp_db_path: 1]
 
   alias XqliteNIF, as: NIF
+
+  @ranges [
+    {:busy_timeout, nil, 0, 0x7FFFFFFF},
+    {:cache_size, :pages, 0, 0x7FFFFFFF},
+    {:cache_size, :kib, 1, 0x80000000},
+    {:wal_autocheckpoint, nil, 1, 0x7FFFFFFF},
+    {:mmap_size, nil, 0, 0x7FFF0000}
+  ]
 
   # ---------------------------------------------------------------------------
   # Option validation
@@ -79,6 +88,31 @@ defmodule Xqlite.OpenOptsTest do
         assert {:error, {:invalid_option, %{key: ^key, reason: :invalid_value, value: ^bare}}} =
                  Xqlite.open_in_memory([{key, bare}])
       end
+    end
+
+    property "a value outside its range is rejected before the file is opened" do
+      check all(
+              {key, tag, low, high} <- member_of(@ranges),
+              step <- map(integer(0..300), &(2 ** &1)),
+              edge <- member_of([low - step, high + step]),
+              max_runs: 2000
+            ) do
+        value = if tag, do: {tag, edge}, else: edge
+        path = tmp_db_path("open_law")
+        error = {:error, {:invalid_option, %{key: key, value: value, reason: :invalid_value}}}
+        assert Xqlite.open(path, [{key, value}]) == error
+        refute File.exists?(path)
+      end
+    end
+
+    test "a rejected value leaves an existing file's journal mode alone" do
+      path = tmp_db_path("open_anchor")
+      File.write!(path, "")
+      answer = Xqlite.open(path, cache_size: {:kib, 0})
+      {:ok, reader} = NIF.open(path)
+      assert {:ok, "delete"} = NIF.get_pragma(reader, "journal_mode")
+      assert {:error, {:invalid_option, %{key: :cache_size, value: {:kib, 0}}}} = answer
+      NIF.close(reader)
     end
   end
 

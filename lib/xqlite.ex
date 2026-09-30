@@ -315,6 +315,7 @@ defmodule Xqlite do
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
           | {:cannot_open_database, String.t(), integer(), String.t()}
+          | {:cannot_restore, :read_only_connection}
           | {:column_name_not_utf8, %{column: non_neg_integer(), name: binary()}}
           | {:columns_changed, %{expected: [String.t()], live: [String.t()]}}
           | {:constraint_violation, constraint_kind(), constraint_details()}
@@ -446,6 +447,11 @@ defmodule Xqlite do
   All PRAGMAs are applied on the same connection immediately after opening,
   with no window for another process to observe an unconfigured state.
 
+  Every option value is judged before the file is opened: a value outside
+  what SQLite stores answers
+  `{:error, {:invalid_option, %{key: key, value: value, reason: :invalid_value}}}`
+  with the value as given, and no file is opened or created.
+
   `path` names a file: `""` and `":memory:"` answer `{:error, {:invalid_path,
   %{path: path}}}` (`open_temporary/0` and `open_in_memory/1` open those), and
   a `file:` URI is handed to SQLite as written.
@@ -538,8 +544,8 @@ defmodule Xqlite do
   SQLite drops the read-only flag for a `cache=shared` URI whose cache another
   connection opened read-write, and for a URI with `mode=memory`. There the
   connection is kept read-only by `PRAGMA query_only = 1`, set at open: SQL on
-  the connection can turn it off, and `restore/3` and a `journal_mode` change
-  pass it, so keep untrusted SQL out with `set_authorizer/2`. While the shared
+  the connection can turn it off, and a `journal_mode` change
+  passes it, so keep untrusted SQL out with `set_authorizer/2`. While the shared
   cache's writer holds an uncommitted schema change, `query_only` cannot be set:
   the open returns `{:error, {:cannot_open_database, path, 262, _}}` until the writer commits.
   Otherwise no PRAGMAs are applied, and TEMP tables can still be created.
@@ -650,12 +656,24 @@ defmodule Xqlite do
   defp validate_open_opts(opts) do
     with :ok <- judge_options(opts, Keyword.keys(@open_opts_schema.schema)) do
       case NimbleOptions.validate(opts, @open_opts_schema) do
-        {:ok, _validated} = ok ->
-          ok
+        {:ok, validated} ->
+          check_open_values(validated, [])
 
         {:error, %NimbleOptions.ValidationError{key: key, value: value}} ->
           invalid_option(key, value, :invalid_value)
       end
+    end
+  end
+
+  defp check_open_values([], checked), do: {:ok, checked}
+
+  defp check_open_values([{:busy_timeout, :infinity} | rest], checked),
+    do: check_open_values(rest, [{:busy_timeout, 2_147_483_647} | checked])
+
+  defp check_open_values([{key, value} | rest], checked) do
+    case Xqlite.Pragma.check_value(key, value) do
+      {:ok, sqlite_value} -> check_open_values(rest, [{key, sqlite_value} | checked])
+      {:error, _reason} -> invalid_option(key, value, :invalid_value)
     end
   end
 
@@ -688,21 +706,11 @@ defmodule Xqlite do
     Enum.reduce_while(@pragma_order, :ok, fn key, :ok ->
       value = Keyword.fetch!(validated, key)
 
-      case set_pragma_value(conn, key, value) do
+      case XqliteNIF.set_pragma(conn, Atom.to_string(key), value) do
         {:ok, _} -> {:cont, :ok}
         {:error, _} = err -> {:halt, err}
       end
     end)
-  end
-
-  defp set_pragma_value(conn, :busy_timeout, :infinity),
-    do: set_pragma_value(conn, :busy_timeout, 2_147_483_647)
-
-  defp set_pragma_value(conn, key, value) do
-    case Xqlite.Pragma.check_value(key, value) do
-      {:ok, checked} -> XqliteNIF.set_pragma(conn, Atom.to_string(key), checked)
-      {:error, _reason} = err -> err
-    end
   end
 
   @doc """
@@ -2430,6 +2438,20 @@ defmodule Xqlite do
   Copies the named schema (default `"main"`) to the file at `dest_path`. The
   destination is created or overwritten. The source remains readable during
   the backup.
+
+  A lock another connection holds on this connection's database waits as
+  this connection's `busy_timeout` or busy policy says. A lock on the
+  destination file, or a write transaction open on this connection, answers
+  `{:error, {:database_busy_or_locked, code, message}}` at once. A
+  destination SQLite cannot open, or a name it gives no file for — `""`,
+  `":memory:"` or another in-memory name — answers
+  `{:error, {:cannot_open_database, dest_path, code, message}}` and writes
+  nothing.
+
+  A copy that answers an error leaves an existing destination as it was and
+  a new one as an empty file, which `restore/3` rejects with `:no_pages`. A
+  process killed mid-copy leaves a partial file and its journal; the next
+  read-write open rolls the file back, to empty for a new destination.
   """
   @spec backup(conn(), String.t(), String.t()) :: :ok | error()
   def backup(conn, dest_path, schema \\ "main")
@@ -2478,6 +2500,15 @@ defmodule Xqlite do
   table definition on every row, so a statement or stream still running on
   any schema, or a blob open on one, answers
   `{:error, {:database_busy_or_locked, 5, message}}` and copies nothing.
+
+  A source with no pages, such as the empty file a failed `backup/3` leaves,
+  answers `{:error, :no_pages}`, and a connection `open_readonly/1` or
+  `open_in_memory_readonly/1` opened answers
+  `{:error, {:cannot_restore, :read_only_connection}}` on every schema, temp
+  included; neither changes anything. A lock another connection holds on this
+  connection's database waits as this connection's `busy_timeout` or busy
+  policy says; a lock on the source file answers
+  `{:error, {:database_busy_or_locked, code, message}}` at once.
   """
   @spec restore(conn(), String.t(), String.t()) :: :ok | error()
   def restore(conn, src_path, schema \\ "main")
@@ -3451,12 +3482,13 @@ defmodule Xqlite do
   Sends `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to
   `pid` after each `pages_per_step`-page step: `status` is `:copied` when the
   step copied pages and `:busy` when a lock blocked it, which ends the call
-  with the error `backup/3` gives: at once for a source in its own write
-  transaction, after rusqlite's 5000 ms busy timeout for a destination another
-  connection holds. In a `:busy` message sent before any step copied pages,
+  with the error `backup/3` gives, after the wait `backup/3` describes. In a
+  `:busy` message sent before any step copied pages,
   `remaining` and `total` are `nil`; after one, they are the last copied
   step's counts. Returns `{:error, :operation_cancelled}` if any token
-  signals between steps.
+  signals before the destination is opened, which then creates no file, or
+  between steps. The destinations `backup/3` rejects are rejected here too,
+  and a failed copy leaves what `backup/3` says.
 
   `pages_per_step` is an integer from 1 to 2_147_483_647, the count SQLite
   takes. Any other term returns `{:error, {:invalid_pages_per_step, value}}`
