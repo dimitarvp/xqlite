@@ -1598,7 +1598,7 @@ fn deserialize<'a>(
         let bytes = data.as_slice();
         judge_image(bytes, read_only)?;
         judge_image_encoding(conn, &handle.busy_flags, &schema, bytes)?;
-        require_idle(conn)?;
+        crate::progress_dispatch::require_idle(conn)?;
         let image = rollback_image(bytes);
         conn.deserialize_read_exact(schema.as_str(), image, bytes.len(), read_only)?;
         // RESET makes SQLite re-read every schema, rebinding TEMP triggers to the loaded tables;
@@ -1609,18 +1609,6 @@ fn deserialize<'a>(
         authorizer::sync(conn, &handle)
     });
     singular_ok_or_error_tuple(env, result)
-}
-
-/// A load and a restore end with SQLite dropping every cached schema of the
-/// connection, whose table definitions a running statement's program may read
-/// on every row: none may be mid-run.
-pub(crate) fn require_idle(conn: &Connection) -> Result<(), XqliteError> {
-    // SAFETY: both callers hold the connection Mutex through `with_conn_mut`.
-    if unsafe { crate::progress_dispatch::any_mid_run(conn) } {
-        Err(rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_BUSY), None).into())
-    } else {
-        Ok(())
-    }
 }
 
 /// Rejects an image before it replaces anything: bytes without SQLite's

@@ -48,7 +48,7 @@ pub(crate) fn restore_from(
     if pages == 0 {
         return Err(XqliteError::NoPages);
     }
-    crate::nif::require_idle(conn)?;
+    crate::progress_dispatch::require_idle(conn)?;
     let restore = Backup::new_with_names(&src, "main", conn, schema)?;
     run(&restore, 100, &[], |_, _| ())
 }
