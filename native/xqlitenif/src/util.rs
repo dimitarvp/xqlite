@@ -512,8 +512,11 @@ pub(crate) fn is_keyword<'a>(list_term: Term<'a>) -> bool {
 }
 
 #[inline]
-pub(crate) fn quote_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+pub(crate) fn quote_identifier(name: &str) -> Result<String, XqliteError> {
+    match name.contains('\0') {
+        true => Err(XqliteError::NulErrorInString),
+        false => Ok(format!("\"{}\"", name.replace('"', "\"\""))),
+    }
 }
 
 /// Extracts column values from a stepped statement and encodes them as Rustler Terms.

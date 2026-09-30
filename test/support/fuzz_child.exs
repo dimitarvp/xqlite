@@ -22,6 +22,10 @@ defmodule Xqlite.FuzzChild do
                Xqlite.TypeExtension.decode_value/2)
   @steps [{Xqlite, :step, 1}, {XqliteNIF, :stmt_step, 1}]
   @fetches [{XqliteNIF, :stream_fetch, 2}, {XqliteNIF, :stream_fetch_cancellable, 3}]
+  {:ok, types} = Code.Typespec.fetch_types(Xqlite)
+  [union] = for {:type, {:error_reason, {:type, _, :union, union}, []}} <- types, do: union
+  @reasons for {:atom, _, reason} <- union, do: reason
+  @tags for {:type, _, :tuple, [{:atom, _, tag} | _]} <- union, do: tag
 
   def surface do
     for mod <- [Xqlite, XqliteNIF, Xqlite.Pragma, Xqlite.TypeExtension],
@@ -154,7 +158,7 @@ defmodule Xqlite.FuzzChild do
       {_, {:raised, class}} -> class in [ArgumentError, FunctionClauseError]
       {_, {:value, :ok}} -> true
       {_, {:value, {:ok, _}}} -> true
-      {_, {:value, {:error, reason}}} when is_atom(reason) -> true
+      {_, {:value, {:error, reason}}} when is_atom(reason) -> reason in @reasons
       {_, {:value, {:error, reason}}} when is_tuple(reason) -> tagged?(reason)
       {{_, _, 0}, {:value, value}} -> not match?({:error, _}, value)
       {{Xqlite, :stream, _}, {:value, enum}} -> is_function(enum, 2)
@@ -166,7 +170,7 @@ defmodule Xqlite.FuzzChild do
     end
   end
 
-  defp tagged?(tuple), do: match?([tag | _] when is_atom(tag), Tuple.to_list(tuple))
+  defp tagged?(tuple), do: match?([tag | _] when tag in @tags, Tuple.to_list(tuple))
 end
 
 [seed, runs | only] = System.argv()

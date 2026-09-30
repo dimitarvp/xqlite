@@ -356,7 +356,7 @@ pub(crate) enum XqliteError {
     },
     NoSuchObject(String),
     NoSuchSchema(String),
-    EmptySchemaName,
+    InvalidSchemaName(String),
     NoPages,
     TableExists {
         name: String,
@@ -439,10 +439,6 @@ pub(crate) enum XqliteError {
     SchemaParsingError {
         context: String,
         unexpected_value: String,
-    },
-
-    InvalidStreamHandle {
-        reason: String,
     },
 
     ConnectionClosed,
@@ -626,9 +622,7 @@ impl Display for XqliteError {
             }
             XqliteError::NoSuchObject(name) => write!(f, "No such object: {name}"),
             XqliteError::NoSuchSchema(name) => write!(f, "No such schema: {name}"),
-            XqliteError::EmptySchemaName => {
-                write!(f, "An empty schema name reads as every database")
-            }
+            XqliteError::InvalidSchemaName(name) => write!(f, "Invalid schema name: '{name}'"),
             XqliteError::NoPages => write!(f, "The schema has no page to copy"),
             XqliteError::TableExists { name: _, message } => {
                 write!(f, "Table already exists: {message}")
@@ -678,9 +672,6 @@ impl Display for XqliteError {
             }
             XqliteError::LockError(reason) => {
                 write!(f, "Failed to lock connection mutex: {reason}")
-            }
-            XqliteError::InvalidStreamHandle { reason } => {
-                write!(f, "Invalid stream handle: {reason}")
             }
             XqliteError::ConnectionClosed => {
                 write!(f, "Connection is closed")
@@ -908,7 +899,9 @@ impl Encoder for XqliteError {
             }
             XqliteError::NoSuchObject(name) => (atoms::no_such_object(), name).encode(env),
             XqliteError::NoSuchSchema(name) => (atoms::no_such_schema(), name).encode(env),
-            XqliteError::EmptySchemaName => (atoms::invalid_schema_name(), "").encode(env),
+            XqliteError::InvalidSchemaName(name) => {
+                (atoms::invalid_schema_name(), name).encode(env)
+            }
             XqliteError::NoPages => atoms::no_pages().encode(env),
             XqliteError::TableExists { name, message: _ } => {
                 (atoms::table_exists(), name).encode(env)
@@ -956,9 +949,6 @@ impl Encoder for XqliteError {
                 (atoms::cannot_convert_atom_to_string(), reason).encode(env)
             }
             XqliteError::LockError(reason) => (atoms::lock_error(), reason).encode(env),
-            XqliteError::InvalidStreamHandle { reason } => {
-                (atoms::invalid_stream_handle(), reason).encode(env)
-            }
             XqliteError::ConnectionClosed => atoms::connection_closed().encode(env),
             XqliteError::StatementFinalized => atoms::statement_finalized().encode(env),
             XqliteError::StatementMidRun => atoms::statement_mid_run().encode(env),

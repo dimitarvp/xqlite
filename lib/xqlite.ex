@@ -369,7 +369,6 @@ defmodule Xqlite do
           | {:invalid_pragma_name, term()}
           | {:invalid_pragma_value, %{pragma: atom(), value: term()}}
           | {:invalid_schema_name, term()}
-          | {:invalid_stream_handle, String.t()}
           | {:invalid_transaction_mode, term()}
           | {:invalid_type_extensions, list_refusal()}
           | {:lock_error, String.t()}
@@ -2400,6 +2399,8 @@ defmodule Xqlite do
   nothing.
 
   `schema` identifies which attached database to replace (default `"main"`).
+  SQLite cannot load an image into `"temp"`: that name, in any ASCII case,
+  returns `{:error, {:invalid_schema_name, schema}}` before the image is judged.
   `read_only` marks the deserialized image as read-only (default `false`).
   """
   @spec deserialize(conn(), binary(), String.t(), boolean()) :: :ok | error()

@@ -70,8 +70,11 @@ defmodule XqliteNIF do
   ASCII case is folded, and no SQL runs, so no authorizer can deny it. A
   name that is not attached answers `{:error, {:no_such_schema, name}}` before
   anything is changed or any file is opened, and `""`, which SQLite reads as
-  every database, `{:error, {:invalid_schema_name, ""}}`. `txn_state/2` and
-  `schema_list_objects/2` take `:all` for every attached database.
+  every database, `{:error, {:invalid_schema_name, ""}}`. `deserialize/4`
+  answers `{:error, {:invalid_schema_name, name}}` for `temp` in any ASCII
+  case too, the one schema SQLite cannot load an image into; every other
+  function takes it. `txn_state/2` and `schema_list_objects/2` take `:all`
+  for every attached database.
 
   **Usage note:**
   These are low-level functions. For more idiomatic Elixir usage, consider
@@ -1540,8 +1543,8 @@ defmodule XqliteNIF do
 
   `stream_handle` is the opaque resource returned by `stream_open/3`.
 
-  Returns `:ok` if successful, or `{:error, reason}` if the handle is invalid
-  or an error occurs during finalization (rare).
+  Returns `:ok` if successful, or `{:error, reason}` if an error occurs during
+  finalization (rare). A term that is no stream handle raises `ArgumentError`.
   """
   @spec stream_close(stream_handle :: reference()) :: :ok | Xqlite.error()
   def stream_close(_stream_handle), do: err()

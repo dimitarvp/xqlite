@@ -1110,19 +1110,8 @@ fn stream_get_columns(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn stream_close<'a>(env: Env<'a>, stream_handle_term: Term<'a>) -> Term<'a> {
-    match stream_handle_term.decode::<ResourceArc<XqliteStream>>() {
-        Ok(stream_arc) => {
-            let finalization_result = stream_arc.take_and_finalize_atomic_stmt();
-            singular_ok_or_error_tuple(env, finalization_result)
-        }
-        Err(decode_err) => {
-            let xql_err = XqliteError::InvalidStreamHandle {
-                reason: format!("Expected a valid stream handle resource: {decode_err:?}"),
-            };
-            (error(), xql_err).encode(env)
-        }
-    }
+fn stream_close(env: Env<'_>, stream_handle: ResourceArc<XqliteStream>) -> Term<'_> {
+    singular_ok_or_error_tuple(env, stream_handle.take_and_finalize_atomic_stmt())
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1603,6 +1592,9 @@ fn deserialize<'a>(
 ) -> Term<'a> {
     let result = connection::with_conn_mut(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
+        if schema.eq_ignore_ascii_case("temp") {
+            return Err(XqliteError::InvalidSchemaName(schema.to_string()));
+        }
         let bytes = data.as_slice();
         judge_image(bytes, read_only)?;
         judge_image_encoding(conn, &handle.busy_flags, &schema, bytes)?;

@@ -26,12 +26,9 @@ defmodule Xqlite.SchemaIntrospectionTest do
   ATTACH ':memory:' AS aux; CREATE TABLE aux.at(y); CREATE INDEX aux.aix ON at(y);
   """
 
-  # --- Helper Functions ---
   defp sort_by_name(list), do: Enum.sort_by(list, & &1.name)
   defp sort_by_id_seq(list), do: Enum.sort_by(list, &{&1.id, &1.column_sequence})
-  # Removed unused sort_by_seq
 
-  # --- Shared test code ---
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix}" do
       @describetag type_tag
@@ -47,10 +44,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         {:ok, conn: conn}
       end
 
-      # --- Shared test cases ---
-
       test "schema_list_objects lists user tables and views", %{conn: conn} do
-        # Expectation unchanged, was correct
         expected_objects =
           [
             %Schema.SchemaObjectInfo{
@@ -120,7 +114,6 @@ defmodule Xqlite.SchemaIntrospectionTest do
       end
 
       test "schema_columns returns info for 'users' table", %{conn: conn} do
-        # Expectation unchanged, was correct
         expected_columns = [
           %Schema.ColumnInfo{
             column_id: 0,
@@ -251,10 +244,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
           }
         ]
 
-        # Already sorted by {id, seq} because we define it that way
-
         assert {:ok, actual_fks} = NIF.schema_foreign_keys(conn, "user_items")
-        # Sort actual results and compare to the pre-sorted expected list
         assert sort_by_id_seq(actual_fks) == expected_fks
       end
 
@@ -391,19 +381,15 @@ defmodule Xqlite.SchemaIntrospectionTest do
       end
 
       test "get_create_sql returns original SQL for various objects", %{conn: conn} do
-        # Table
         assert {:ok, sql_users} = NIF.get_create_sql(conn, "users")
         assert is_binary(sql_users) and String.starts_with?(sql_users, "CREATE TABLE users")
-        # Index
         assert {:ok, sql_idx} = NIF.get_create_sql(conn, "idx_users_email_desc")
 
         assert is_binary(sql_idx) and
                  String.contains?(sql_idx, "CREATE INDEX idx_users_email_desc")
 
-        # View
         assert {:ok, sql_view} = NIF.get_create_sql(conn, "person_view")
         assert is_binary(sql_view) and String.starts_with?(sql_view, "CREATE VIEW")
-        # Trigger
         assert {:ok, sql_trigger} = NIF.get_create_sql(conn, "item_value_trigger")
         assert is_binary(sql_trigger) and String.starts_with?(sql_trigger, "CREATE TRIGGER")
       end
@@ -455,6 +441,20 @@ defmodule Xqlite.SchemaIntrospectionTest do
         answers = schema_answers(conn, "") ++ unattached_answers(conn, "", path)
         assert Enum.uniq(answers) == [{:error, {:invalid_schema_name, ""}}]
         refute File.exists?(path)
+      end
+
+      property "a name holding a NUL is rejected before it is quoted into SQL", %{conn: conn} do
+        assert {:error, :null_byte_in_string} = NIF.schema_columns(conn, "t\0x")
+        part = string([?", ?', ?a..?z, ?é, ?日], max_length: 6)
+        readers = ~w(schema_columns schema_foreign_keys schema_indexes schema_index_columns)a
+        savepoints = ~w(savepoint release_savepoint rollback_to_savepoint)a
+
+        check all(left <- part, right <- part, max_runs: 2000) do
+          name = left <> "\0" <> right
+          answers = for fun <- readers ++ savepoints, do: apply(NIF, fun, [conn, name])
+          assert Enum.uniq(answers) == [{:error, :null_byte_in_string}]
+          assert {:ok, true} = NIF.autocommit(conn)
+        end
       end
 
       test "the listing takes :all or any case of a name; nil is no name", %{conn: conn} do
@@ -529,13 +529,7 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert funky_col.type_affinity == :numeric
       end
     end
-
-    # end describe "using #{prefix}"
   end
-
-  # end `for` loop
-
-  # --- DB type-specific or other tests (outside the `for` loop) ---
 
   describe "get_create_sql/2 isolated" do
     setup do

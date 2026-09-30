@@ -413,6 +413,22 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:error, :no_statement} = Xqlite.prepare(conn, long_comment)
     end
 
+    test "SQL past the SQL length limit is :too_big on both compile paths", %{conn: conn} do
+      assert {:ok, 100} = Xqlite.put_limit(conn, :sql_length, 100)
+      sql = "SELECT '#{String.duplicate("x", 92)}'"
+
+      for answer <- [
+            NIF.execute(conn, sql, []),
+            NIF.query(conn, sql),
+            NIF.execute_batch(conn, sql),
+            NIF.stmt_prepare(conn, sql),
+            NIF.stream_open(conn, sql, []),
+            NIF.explain_analyze(conn, sql)
+          ] do
+        assert {:error, {:too_big, 18, _message}} = answer
+      end
+    end
+
     test "the batch doors judge the batch size before anything else", %{conn: conn} do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
       {:ok, token} = Xqlite.create_cancel_token()

@@ -6,7 +6,8 @@ defmodule Xqlite.FuzzLawTest do
 
   The law: the virtual machine survives every call, every call returns, and
   every answer has a documented shape: `:ok`, `{:ok, _}`, `{:error, reason}`
-  whose reason is an atom or a tuple tagged with one, a raise of
+  whose reason is an atom `t:Xqlite.error_reason/0` lists or a tuple tagged
+  with one it lists, the set read from the compiled type, a raise of
   `ArgumentError` or `FunctionClauseError`, or the bare answer a few functions
   document.
 

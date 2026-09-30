@@ -29,8 +29,9 @@ pub(crate) unsafe fn prepare_one(
     db: *mut ffi::sqlite3,
     sql: &str,
 ) -> Result<NonNull<ffi::sqlite3_stmt>, XqliteError> {
+    crate::query::reject_interior_nul(sql)?;
+    let len = sql_byte_len(sql.len())?;
     let c_sql = CString::new(sql).map_err(|_| XqliteError::NulErrorInString)?;
-    let len = sql_byte_len(&c_sql)?;
     let mut raw_stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
     let mut tail_ptr: *const c_char = std::ptr::null();
 
@@ -207,9 +208,12 @@ fn utf8_column_name(bytes: &[u8], index: c_int) -> Result<String, XqliteError> {
         })
 }
 
-fn sql_byte_len(c_sql: &CStr) -> Result<c_int, XqliteError> {
-    c_int::try_from(c_sql.to_bytes().len()).map_err(|_| {
-        XqliteError::CannotExecute("SQL string length exceeds c_int range".to_string())
+fn sql_byte_len(len: usize) -> Result<c_int, XqliteError> {
+    c_int::try_from(len).map_err(|_| {
+        XqliteError::from(rusqlite::Error::SqliteFailure(
+            ffi::Error::new(ffi::SQLITE_TOOBIG),
+            None,
+        ))
     })
 }
 
@@ -479,5 +483,17 @@ mod tests {
                 (cancelled, 1)
             );
         }
+    }
+
+    #[test]
+    fn sql_past_c_int_answers_the_rusqlite_paths_too_big_error() {
+        assert!(matches!(
+            sql_byte_len(2_147_483_648),
+            Err(XqliteError::TooBig {
+                extended_code: 18,
+                ..
+            })
+        ));
+        assert_eq!(sql_byte_len(2_147_483_647).ok(), Some(c_int::MAX));
     }
 }

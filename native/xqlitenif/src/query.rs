@@ -40,11 +40,11 @@ fn require_named_within_length(
 /// rusqlite's `prepare` hands SQLite the SQL length-delimited
 /// (`as_ptr` + `len`), and SQLite's tokenizer STOPS at the first NUL — every
 /// byte after it is silently ignored, which can shorten a statement into
-/// something unintended. We refuse with `:null_byte_in_string` instead, so the
-/// contract matches the raw-FFI paths, `execute_batch` among them, which build
-/// a `CString` and reject the same way.
+/// something unintended. We reject it with `:null_byte_in_string` instead.
+/// `statement.rs:prepare_one` calls this first too, so both compile paths
+/// answer a NUL the same way whatever the text's length.
 #[inline]
-fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
+pub(crate) fn reject_interior_nul(sql: &str) -> Result<(), XqliteError> {
     if sql.as_bytes().contains(&0) {
         Err(XqliteError::NulErrorInString)
     } else {

@@ -135,7 +135,6 @@ pub(crate) mod atoms {
         invalid_transaction_mode,
         integer_out_of_range,
         invalid_utf8_in_string,
-        invalid_stream_handle,
         invalid_value,
         key,
         list,

@@ -547,6 +547,17 @@ defmodule Xqlite.NIF.SerializeTest do
       assert :ok = Xqlite.restore(conn, path)
       assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT a FROM main.t", [])
     end
+
+    test "temp in any ASCII case is rejected by name before the image is judged", %{conn: conn} do
+      {:ok, image} = NIF.serialize(conn, "main")
+      names = for t <- ~w(t T), e <- ~w(e E), m <- ~w(m M), p <- ~w(p P), do: t <> e <> m <> p
+
+      for name <- names, bytes <- [image, "no image"] do
+        assert {:error, {:invalid_schema_name, ^name}} = Xqlite.deserialize(conn, bytes, name)
+      end
+
+      assert :ok = NIF.deserialize(conn, "main", image, false)
+    end
   end
 
   defp temp_audit_trigger(conn) do

@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`deserialize/4` rejects the `temp` schema by name.** `"temp"`, in any
+  ASCII case, answers `{:error, {:invalid_schema_name, name}}` with the name
+  as given, before the image is judged, on `Xqlite.deserialize/4` and
+  `XqliteNIF.deserialize/4`. SQLite cannot load an image into the temp
+  database, and the call answered its bare
+  `{:error, {:sqlite_failure, 1, 1, "SQL logic error"}}`.
+- **A table, index or savepoint name holding a NUL byte answers
+  `{:error, :null_byte_in_string}`** on `schema_columns/2`,
+  `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`,
+  `savepoint/2`, `release_savepoint/2` and `rollback_to_savepoint/2`, in
+  `Xqlite` and `XqliteNIF` alike, before any SQL is built. They answered a
+  `{:sql_input_error, _}` about the library's own statement, because
+  SQLite's tokenizer stopped at the NUL.
+
 - **`execute_batch/2` and `execute_batch_cancellable/3` take time linear in
   the batch's length.** Each statement used to be compiled from a copy of
   the rest of the batch, so the time grew with the square of the length,
@@ -465,6 +479,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`XqliteNIF.stream_close/1` raises `ArgumentError` for a term that is no
+  stream handle**, like `stream_fetch/2`, `stmt_finalize/1`, `blob_close/1`
+  and the other handle functions. It used to answer
+  `{:error, {:invalid_stream_handle, text}}`; that shape is gone from
+  `Xqlite.error_reason/0`.
+- **SQL text longer than 2 147 483 647 bytes answers
+  `{:error, {:too_big, 18, message}}` on every function that compiles one
+  statement** (the query, execute, prepare, stream and `explain_analyze`
+  functions). `stmt_prepare/2`, `stream_open/3`, `explain_analyze/3` and
+  the `Xqlite` functions built on them answered
+  `{:error, {:cannot_execute, "SQL string length exceeds c_int range"}}`
+  after copying the whole text; they now judge the length before any copy
+  and answer what the others answer. SQL over the connection's SQL length
+  limit (`:sql_length`, at most 1 000 000 000 bytes) answers the same tag,
+  as it did. A text holding a NUL byte answers
+  `{:error, :null_byte_in_string}` first, whatever its length.
+
 - **`:execute_returned_results` is retired: the execute functions run a
   statement that returns rows to its end, drop the rows and answer the
   count.** This holds for `XqliteNIF.execute/3`, `execute_cancellable/4`,
@@ -514,10 +545,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use.** `query/3`, `query_cancellable/4`, `query_with_changes/3` and
   `query_with_changes_cancellable/4` no longer iterate rows through
   rusqlite: mixed rows read 11-12 % faster. An unreadable value or a failed
-  step still answers the error with no rows. SQL longer than 2 147 483 647
-  bytes now answers `{:cannot_execute, _}`, as `prepare/2` does. A BLOB
-  larger than 64 bytes now comes back as a resource binary from step,
-  multi_step and stream too, as it did from query; the bytes are unchanged.
+  step still answers the error with no rows. A BLOB larger than 64 bytes
+  now comes back as a resource binary from step, multi_step and stream
+  too, as it did from query; the bytes are unchanged.
 
 - **A `:busy` backup progress message sent before any step copied pages
   carries `remaining: nil, total: nil`** (was `0` and `0`); a `:busy` after

@@ -105,8 +105,10 @@ defmodule Xqlite.BadInputAnswersTest do
       assert_raise ArgumentError, fn -> P.get(:not_a_connection, :user_version) end
     end
 
-    test "a raw NIF stub raises on a term it cannot decode" do
+    test "a raw NIF stub raises on a term it cannot decode", %{conn: conn} do
       assert_raise ArgumentError, fn -> XqliteNIF.cancel_operation(make_ref()) end
+      assert_raise ArgumentError, fn -> XqliteNIF.stream_close(:bad) end
+      assert_raise ArgumentError, fn -> XqliteNIF.stream_close(conn) end
     end
   end
 end

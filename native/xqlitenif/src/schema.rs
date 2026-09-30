@@ -562,7 +562,7 @@ pub(crate) fn databases(conn: &Connection) -> Result<Vec<DatabaseInfo>, XqliteEr
 /// database.
 pub(crate) fn require_schema(conn: &Connection, name: &str) -> Result<c_int, XqliteError> {
     if name.is_empty() {
-        return Err(XqliteError::EmptySchemaName);
+        return Err(XqliteError::InvalidSchemaName(name.to_string()));
     }
     let c_name = CString::new(name).map_err(|_| XqliteError::NulErrorInString)?;
     // SAFETY: the caller holds the connection Mutex for the whole call, so
@@ -581,7 +581,7 @@ pub(crate) fn list_objects(
     let sql = match schema {
         Some(name) => {
             require_schema(conn, name)?;
-            format!("PRAGMA {}.table_list;", quote_identifier(name))
+            format!("PRAGMA {}.table_list;", quote_identifier(name)?)
         }
         None => "PRAGMA table_list;".to_string(),
     };
@@ -639,7 +639,7 @@ pub(crate) fn columns(
     conn: &Connection,
     table_name: &str,
 ) -> Result<Vec<ColumnInfo>, XqliteError> {
-    let quoted_table_name = quote_identifier(table_name);
+    let quoted_table_name = quote_identifier(table_name)?;
     let sql = format!("PRAGMA table_xinfo({quoted_table_name});");
     let mut stmt = conn.prepare(&sql)?;
 
@@ -727,7 +727,7 @@ pub(crate) fn foreign_keys(
     conn: &Connection,
     table_name: &str,
 ) -> Result<Vec<ForeignKeyInfo>, XqliteError> {
-    let quoted_table_name = quote_identifier(table_name);
+    let quoted_table_name = quote_identifier(table_name)?;
     let sql = format!("PRAGMA foreign_key_list({quoted_table_name});");
     let mut stmt = conn.prepare(&sql)?;
 
@@ -811,7 +811,7 @@ pub(crate) fn indexes(
     conn: &Connection,
     table_name: &str,
 ) -> Result<Vec<IndexInfo>, XqliteError> {
-    let quoted_table_name = quote_identifier(table_name);
+    let quoted_table_name = quote_identifier(table_name)?;
     let sql = format!("PRAGMA index_list({quoted_table_name});");
     let mut stmt = conn.prepare(&sql)?;
 
@@ -868,7 +868,7 @@ pub(crate) fn index_columns(
     conn: &Connection,
     index_name: &str,
 ) -> Result<Vec<IndexColumnInfo>, XqliteError> {
-    let quoted_index_name = quote_identifier(index_name);
+    let quoted_index_name = quote_identifier(index_name)?;
     let sql = format!("PRAGMA index_xinfo({quoted_index_name});");
     let mut stmt = conn.prepare(&sql)?;
 
