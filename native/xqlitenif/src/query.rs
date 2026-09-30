@@ -1,8 +1,8 @@
 use crate::connection::XqliteQueryResult;
 use crate::error::XqliteError;
-use crate::util::{
-    Params, decode_exec_keyword_params, decode_plain_list_params, process_rows, walk_params,
-};
+use crate::statement::{self, PreparedStmt};
+use crate::stream;
+use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params, walk_params};
 use rusqlite::types::Value;
 use rusqlite::{Connection, Statement, ToSql};
 use rustler::{Env, Term};
@@ -187,50 +187,37 @@ fn bind_named_by_index(
         })
 }
 
+/// Runs one statement and answers all of its rows. The names are judged
+/// before the bind and the first step, because a write with `RETURNING` runs
+/// whole in that step.
 pub(crate) fn core_query<'a>(
     env: Env<'a>,
     conn: &Connection,
     sql: &str,
     params_term: Term<'a>,
 ) -> Result<XqliteQueryResult<'a>, XqliteError> {
-    reject_interior_nul(sql)?;
-    let mut stmt = conn.prepare(sql)?;
-    reject_no_statement(conn, &stmt)?;
-    let column_names: Vec<String> =
-        stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let column_count = column_names.len();
+    // SAFETY: the caller holds the connection Mutex for the whole call, so
+    // `handle()` is the live `sqlite3*` it guards, and the holder finalizes
+    // the statement on every way out of this block.
+    unsafe {
+        let db = conn.handle();
+        let held = PreparedStmt::new(statement::prepare_one(db, sql)?);
+        let columns = statement::column_names(held.as_ptr())?;
+        stream::bind_params(env, held.as_ptr(), db, params_term)?;
 
-    let rows = match walk_params(params_term)? {
-        Params::Empty => {
-            require_parameter_count(&stmt, 0)?;
-            stmt.query([])?
+        let mut rows = Vec::new();
+        while let Some(row) =
+            stream::step_under_names(env, held.as_ptr(), db, &columns, rows.is_empty())?
+        {
+            rows.push(row);
         }
-        Params::Named(items) => {
-            let named_params_vec =
-                decode_exec_keyword_params(env, &items, stmt.parameter_count())?;
-            let indices = require_named_parameters_covered(&stmt, &named_params_vec)?;
-            require_named_within_length(conn, &named_params_vec)?;
-            bind_named_by_index(&mut stmt, &named_params_vec, &indices)?;
-            stmt.raw_query()
-        }
-        Params::Positional(items) => {
-            let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
-            require_parameter_count(&stmt, positional_values.len())?;
-            require_positional_within_length(conn, &positional_values)?;
-            let params_slice: Vec<&dyn ToSql> =
-                positional_values.iter().map(|v| v as &dyn ToSql).collect();
-            stmt.query(params_slice.as_slice())?
-        }
-    };
 
-    let results_vec = process_rows(env, rows, column_count)?;
-    let num_rows = results_vec.len();
-
-    Ok(XqliteQueryResult {
-        columns: column_names,
-        rows: results_vec,
-        num_rows,
-    })
+        Ok(XqliteQueryResult {
+            num_rows: rows.len(),
+            columns,
+            rows,
+        })
+    }
 }
 
 /// Runs a query and reports how many rows this statement changed.

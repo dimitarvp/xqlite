@@ -1,6 +1,9 @@
 use crate::connection::{ChildHandle, XqliteConn};
 use crate::error::XqliteError;
-use crate::util::sqlite_row_to_elixir_terms;
+use crate::util::{
+    Params, decode_exec_keyword_params, decode_plain_list_params, sqlite_row_to_elixir_terms,
+    walk_params,
+};
 use rusqlite::ffi;
 use rusqlite::types::Value;
 use rustler::{Env, Resource, ResourceArc, Term};
@@ -208,6 +211,43 @@ pub(crate) unsafe fn process_single_step<'a>(
     }
 }
 
+/// Steps a statement whose column names were read before it ran. SQLite
+/// re-prepares a statement whose schema changed when it next steps, which can
+/// change its columns, so after a `first` step that re-prepared it the live
+/// names must still be `names`: a difference answers `ColumnsChanged`, never
+/// a row whose values sit under other names. SQLite counts every re-prepare
+/// in `SQLITE_STMTSTATUS_REPREPARE`, so a count of 0 skips the name read.
+///
+/// # Safety
+///
+/// As `process_single_step`.
+#[inline]
+pub(crate) unsafe fn step_under_names<'a>(
+    env: Env<'a>,
+    stmt_ptr: *mut ffi::sqlite3_stmt,
+    db_handle: *mut ffi::sqlite3,
+    names: &[String],
+    first: bool,
+) -> Result<Option<Vec<Term<'a>>>, XqliteError> {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe {
+        let row = process_single_step(env, stmt_ptr, db_handle)?;
+        let reprepared = first
+            && ffi::sqlite3_stmt_status(stmt_ptr, ffi::SQLITE_STMTSTATUS_REPREPARE, 0) > 0;
+
+        match reprepared {
+            false => Ok(row),
+            true => match crate::statement::column_names(stmt_ptr)? {
+                live if live == names => Ok(row),
+                live => Err(XqliteError::ColumnsChanged {
+                    expected: names.to_vec(),
+                    live,
+                }),
+            },
+        }
+    }
+}
+
 /// Binds one value at one index.
 ///
 /// # Safety
@@ -278,11 +318,11 @@ unsafe fn bind_value_to_raw_stmt(
 /// SQLite itself refuses neither shape: a parameter nothing was bound to
 /// reads as NULL, so a short list silently writes NULLs, and a long one only
 /// fails at the first index past the last parameter. Every raw-FFI door goes
-/// through here. The three doors that bind through rusqlite count the list
-/// first as well, through `query.rs:require_parameter_count`, so `provided`
-/// is the list's own length everywhere and rusqlite's own check — which stops
-/// at the first index the statement lacks and reports THAT index — is only
-/// the second line behind them.
+/// through here. The execute functions bind through rusqlite and count the
+/// list first as well, through `query.rs:require_parameter_count`, so
+/// `provided` is the list's own length everywhere and rusqlite's own check —
+/// which stops at the first index the statement lacks and reports THAT index
+/// — is only the second line behind them.
 ///
 /// # Safety
 ///
@@ -516,4 +556,38 @@ pub(crate) unsafe fn bind_named_params_ffi(
             .map_err(|error| bind_failure(position, error))?;
     }
     Ok(())
+}
+
+/// Binds a caller's parameter term onto a statement that is already prepared.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex for the whole call, `stmt_ptr` is a
+/// live prepared statement of that connection and `db_handle` is the
+/// `sqlite3*` that owns it.
+pub(crate) unsafe fn bind_params<'a>(
+    env: Env<'a>,
+    stmt_ptr: *mut ffi::sqlite3_stmt,
+    db_handle: *mut ffi::sqlite3,
+    params_term: Term<'a>,
+) -> Result<(), XqliteError> {
+    match walk_params(params_term)? {
+        // SAFETY: forwarded from this function's own contract.
+        Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
+        Params::Named(items) => {
+            // SAFETY: forwarded from this function's own contract.
+            let count = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) };
+            let named_params_vec =
+                decode_exec_keyword_params(env, &items, count.max(0) as usize)?;
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
+                .map_err(BindFailure::into_error)
+        }
+        Params::Positional(items) => {
+            let positional_params_vec = decode_plain_list_params(env, &items)?;
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { bind_positional_params_ffi(stmt_ptr, &positional_params_vec, db_handle) }
+                .map_err(BindFailure::into_error)
+        }
+    }
 }

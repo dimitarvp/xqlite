@@ -272,6 +272,21 @@ defmodule Xqlite do
   carries the first name that repeats, in SQLite's own order, and is answered
   at open, before a row is read. Give each column an alias, or use `query/4`,
   whose rows are lists.
+
+  `:column_name_not_utf8` is a result column whose name SQLite hands back as
+  bytes that are not UTF-8: `:column` is its zero-based place and `:name`
+  those bytes. On a connection without an authorizer, every function that
+  reads result column names answers it for the first such column before
+  anything is bound or stepped; with one (`set_authorizer/2`, a busy policy
+  or a busy observer), rusqlite's authorizer wrapper cannot read the name and
+  the prepare answers `{:authorization_denied, 23, message}` first.
+  `:columns_changed` is a statement whose result columns changed between the
+  read of its names and its first step, because a schema change — by another
+  connection, or for a stream by its own between the open and the first
+  fetch — made SQLite prepare it again. `query/4` and `stream/4` answer it
+  with both lists, or `:column_name_not_utf8` when a new name is not UTF-8,
+  rather than put a value under another column's name; a write in the
+  statement has run by then.
   """
   @type error_reason ::
           :connection_closed
@@ -300,6 +315,8 @@ defmodule Xqlite do
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
           | {:cannot_open_database, String.t(), integer(), String.t()}
+          | {:column_name_not_utf8, %{column: non_neg_integer(), name: binary()}}
+          | {:columns_changed, %{expected: [String.t()], live: [String.t()]}}
           | {:constraint_violation, constraint_kind(), constraint_details()}
           | {:database_busy_or_locked, integer(), String.t()}
           | {:duplicate_column_name, String.t()}
@@ -590,9 +607,11 @@ defmodule Xqlite do
   statements, streams and blobs opened on it, which close takes first, so the
   connection stays open, stays usable, and every later close repeats the same
   error. Neither is reachable today — this library's own Rust has no
-  `unwrap`, `expect`, `panic!` or indexing outside its unit tests — and a
-  broken lock is never repaired, because after a panic SQLite's own state may
-  be half written and must not be touched.
+  `unwrap`, `expect`, `panic!` or indexing outside its unit tests, and
+  rusqlite, whose authorizer and update-hook wrappers do panic on a name that
+  is not UTF-8, catches that panic inside its own callback, so none unwinds
+  through a held lock — and a broken lock is never repaired, because after a
+  panic SQLite's own state may be half written and must not be touched.
 
   Emits `[:xqlite, :close, :start | :stop]` telemetry.
   """
@@ -1374,6 +1393,19 @@ defmodule Xqlite do
   named, read from the statement. A statement of more than 2 048 parameters
   refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
+  Column names are read before anything is bound or run. A name that is not
+  UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` for the
+  first such column; a CTE column list renames columns by position,
+  `WITH s(a, b) AS (SELECT * FROM t) SELECT * FROM s`. On a connection with
+  an authorizer (`set_authorizer/2`, a busy policy or a busy observer), a
+  statement that reads such a column, that CTE included, answers
+  `{:error, {:authorization_denied, 23, message}}` at prepare instead. When
+  another connection changes the table between the read and the first step,
+  the answer comes after that step, a write in the statement having run:
+  `{:error, {:columns_changed, %{expected: names, live: names}}}` when the
+  names differ, the name error when a new name is not UTF-8.
+
   ## Options
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules.
@@ -1764,6 +1796,15 @@ defmodule Xqlite do
   text that produced it, so `SELECT 1, 1` and `SELECT ?, ?` repeat too.
   `query/4` and the raw stream doors answer lists and take any names.
 
+  The names are read at open: one that is not UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` there,
+  before the check for repeats. A schema change between the open and the
+  first fetch, by any connection, the stream's own included, makes that fetch
+  answer `{:columns_changed, %{expected: names, live: names}}` through
+  `:on_error` when the names differ, or `{:column_name_not_utf8, _}` when a
+  new name is not UTF-8, never a row under the wrong names; a write in the
+  statement has run by then.
+
   Returns an `Enumerable.t()` on success or `{:error, reason}` on setup failure.
   Callers must pattern-match the result before piping — this is intentional,
   as returning a stream that silently errors on first consume would hide
@@ -1872,6 +1913,10 @@ defmodule Xqlite do
   `{:error, {:sql_input_error, %{sql: _, offset: _, code: _, message: _}}}`,
   carrying the byte offset SQLite reports — the same shape `query/3`
   returns for the same SQL.
+
+  A result column name that is not UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` and
+  leaves nothing prepared; see `query/4`.
 
   Closing the connection finalizes any statement still outstanding on it, so
   the SQLite handle is freed either way; an abandoned statement is finalized
@@ -2224,7 +2269,11 @@ defmodule Xqlite do
 
   Live statements reflect SQLite's auto-reprepare after schema changes
   (e.g. `SELECT *` re-expansion); finalized statements answer with the
-  prepare-time snapshot.
+  prepare-time snapshot. A live name that is not UTF-8, which such a
+  re-prepare can bring in, answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` on every
+  call while the statement stays usable; the snapshot was read at prepare
+  and is always UTF-8.
   """
   @spec column_names(stmt()) :: {:ok, [String.t()]} | error()
   def column_names(stmt), do: XqliteNIF.stmt_column_names(stmt)

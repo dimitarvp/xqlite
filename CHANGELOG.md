@@ -21,6 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A result column name that is not UTF-8 answers an error.** A table
+  whose stored CREATE text names a column with bytes that are not UTF-8 made
+  the query functions panic inside rusqlite with the connection lock held,
+  so the connection could no longer be used or closed; `prepare/2`,
+  `column_names/1` and `stream_open/3` replaced the bad bytes with U+FFFD,
+  so two different names could come back equal. Every function that reads
+  result column names now answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` for the
+  first such column, before anything is bound or run, and leaves nothing
+  prepared; a live `column_names/1` answers it on every call and the
+  statement stays usable. A CTE column list renames such columns:
+  `WITH s(a, b) AS (SELECT * FROM t) SELECT * FROM s`.
+- **A schema change between reading the names and the first step answers
+  `{:error, {:columns_changed, %{expected: names, live: names}}}`.** When
+  another connection changed a table after `stream/4` opened, the rows came
+  back under the old names (`DROP COLUMN b` gave `%{"a" => 1, "b" => 3}`);
+  the query functions answered `{:invalid_column_index, _}` in the same
+  window. The stream's first fetch and the query's first step now answer the
+  new error; a write in the statement has run by then.
+
 - **A statement prepared before `deserialize/4` no longer crashes the VM.**
   `Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` now expire every
   prepared statement of the connection after a load, so SQLite prepares
@@ -396,6 +416,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **The query functions read rows through the code statements and streams
+  use.** `query/3`, `query_cancellable/4`, `query_with_changes/3` and
+  `query_with_changes_cancellable/4` no longer iterate rows through
+  rusqlite: mixed rows read 11-12 % faster. An unreadable value or a failed
+  step still answers the error with no rows. SQL longer than 2 147 483 647
+  bytes now answers `{:cannot_execute, _}`, as `prepare/2` does. A BLOB
+  larger than 64 bytes now comes back as a resource binary from step,
+  multi_step and stream too, as it did from query; the bytes are unchanged.
 
 - **A `:busy` backup progress message sent before any step copied pages
   carries `remaining: nil, total: nil`** (was `0` and `0`); a `:busy` after

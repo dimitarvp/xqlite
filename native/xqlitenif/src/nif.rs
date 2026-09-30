@@ -12,8 +12,8 @@ use crate::schema::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, SchemaObjectInfo,
 };
 use crate::session::{self, XqliteSession};
-use crate::statement::{self, XqliteStatement};
-use crate::stream::{XqliteStream, finalize_stream_stmt_locked};
+use crate::statement::{self, PreparedStmt, XqliteStatement};
+use crate::stream::{self, XqliteStream, finalize_stream_stmt_locked};
 use crate::transaction;
 use crate::util::{MaybeTextArg, NameOrAll, TextArg, singular_ok_or_error_tuple};
 use rusqlite::Connection;
@@ -748,42 +748,19 @@ fn stmt_prepare(
 
     connection::with_conn(&conn_handle, |conn| {
         // SAFETY: with_conn holds the connection mutex for the duration of
-        // this closure. The raw statement is transferred into the
-        // XqliteStatement's AtomicPtr on success, or finalized on every
-        // error path before returning.
+        // this closure. The statement is owned by a holder that finalizes it
+        // on every path out of this closure, until the XqliteStatement takes
+        // it over.
         unsafe {
             let db_handle = conn.handle();
-            let non_null_raw_stmt = statement::prepare_one(db_handle, &sql)?;
+            let held = PreparedStmt::new(statement::prepare_one(db_handle, &sql)?);
+            let parameter_count =
+                ffi::sqlite3_bind_parameter_count(held.as_ptr()).max(0) as usize;
+            let column_names = statement::column_names(held.as_ptr())?;
 
-            let column_count =
-                ffi::sqlite3_column_count(non_null_raw_stmt.as_ptr()) as usize;
-            let parameter_count = ffi::sqlite3_bind_parameter_count(non_null_raw_stmt.as_ptr())
-                .max(0) as usize;
-            let mut column_names = Vec::with_capacity(column_count);
-            for i in 0..column_count {
-                let name_ptr = ffi::sqlite3_column_name(
-                    non_null_raw_stmt.as_ptr(),
-                    i as std::os::raw::c_int,
-                );
-                if name_ptr.is_null() {
-                    ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
-                    return Err(XqliteError::InternalEncodingError {
-                        context: format!(
-                            "SQLite returned null column name for index {i} during statement prepare"
-                        ),
-                    });
-                }
-                let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
-                column_names.push(name_c_str.to_string_lossy().into_owned());
-            }
-
-            let cell = Arc::new(AtomicPtr::new(non_null_raw_stmt.as_ptr()));
-            let registration =
-                conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)));
-            if let Err(e) = registration {
-                ffi::sqlite3_finalize(non_null_raw_stmt.as_ptr());
-                return Err(e);
-            }
+            let cell = Arc::new(AtomicPtr::new(held.as_ptr()));
+            conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)))?;
+            held.release();
 
             Ok(XqliteStatement::new(
                 cell,
@@ -1070,34 +1047,12 @@ fn stmt_column_names(
 ) -> Result<Vec<String>, XqliteError> {
     let live = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
         // SAFETY: with_live_stmt holds the connection mutex and proved
-        // stmt_ptr live. Live reads reflect v2 auto-reprepare after schema
-        // changes (e.g. SELECT * re-expansion), which the prepare-time
-        // snapshot cannot.
-        unsafe {
-            let count = ffi::sqlite3_column_count(stmt_ptr) as usize;
-            let mut names = Vec::with_capacity(count);
-            for i in 0..count {
-                let name_ptr = ffi::sqlite3_column_name(stmt_ptr, i as std::os::raw::c_int);
-                if name_ptr.is_null() {
-                    return Err(XqliteError::InternalEncodingError {
-                        context: format!("SQLite returned null column name for index {i}"),
-                    });
-                }
-                names.push(
-                    std::ffi::CStr::from_ptr(name_ptr)
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            Ok(names)
-        }
+        // stmt_ptr live.
+        unsafe { statement::column_names(stmt_ptr) }
     });
 
     match live {
         Ok(names) => Ok(names),
-        // When live reading is impossible for lifecycle reasons — statement
-        // finalized or connection closed — callers still get the
-        // prepare-time snapshot.
         Err(XqliteError::StatementFinalized) | Err(XqliteError::ConnectionClosed) => {
             Ok(stmt_handle.column_names.clone())
         }
@@ -1110,45 +1065,6 @@ fn stmt_finalize(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
     singular_ok_or_error_tuple(env, stmt_handle.take_and_finalize())
 }
 
-/// Binds a stream's parameters onto a statement that is already prepared.
-///
-/// # Safety
-///
-/// The caller holds the connection Mutex for the whole call, `stmt_ptr` is a
-/// live prepared statement of that connection and `db_handle` is the
-/// `sqlite3*` that owns it.
-unsafe fn bind_stream_params<'a>(
-    env: Env<'a>,
-    stmt_ptr: *mut ffi::sqlite3_stmt,
-    db_handle: *mut ffi::sqlite3,
-    params_term: Term<'a>,
-) -> Result<(), XqliteError> {
-    use crate::stream::{
-        bind_named_params_ffi, bind_positional_params_ffi, require_parameter_count,
-    };
-    use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params};
-
-    match crate::util::walk_params(params_term)? {
-        // SAFETY: forwarded from this function's own contract.
-        Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
-        Params::Named(items) => {
-            // SAFETY: forwarded from this function's own contract.
-            let count = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) };
-            let named_params_vec =
-                decode_exec_keyword_params(env, &items, count.max(0) as usize)?;
-            // SAFETY: forwarded from this function's own contract.
-            unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
-                .map_err(crate::stream::BindFailure::into_error)
-        }
-        Params::Positional(items) => {
-            let positional_params_vec = decode_plain_list_params(env, &items)?;
-            // SAFETY: forwarded from this function's own contract.
-            unsafe { bind_positional_params_ffi(stmt_ptr, &positional_params_vec, db_handle) }
-                .map_err(crate::stream::BindFailure::into_error)
-        }
-    }
-}
-
 #[rustler::nif(schedule = "DirtyIo")]
 fn stream_open<'a>(
     env: Env<'a>,
@@ -1156,8 +1072,6 @@ fn stream_open<'a>(
     sql: TextArg,
     params_term: Term<'a>,
 ) -> Result<ResourceArc<XqliteStream>, XqliteError> {
-    use crate::statement::PreparedStmt;
-
     let conn_resource_arc_clone = conn_handle.clone();
 
     connection::with_conn(&conn_handle, |conn| {
@@ -1169,25 +1083,8 @@ fn stream_open<'a>(
         unsafe {
             let db_handle = conn.handle();
             let held = PreparedStmt::new(statement::prepare_one(db_handle, &sql)?);
-
-            bind_stream_params(env, held.as_ptr(), db_handle, params_term)?;
-
-            let column_count = ffi::sqlite3_column_count(held.as_ptr()) as usize;
-            let mut column_names = Vec::with_capacity(column_count);
-
-            for i in 0..column_count {
-                let name_ptr =
-                    ffi::sqlite3_column_name(held.as_ptr(), i as std::os::raw::c_int);
-                if name_ptr.is_null() {
-                    return Err(XqliteError::InternalEncodingError {
-                        context: format!(
-                            "SQLite returned null column name for index {i} during stream open"
-                        ),
-                    });
-                }
-                let name_c_str = std::ffi::CStr::from_ptr(name_ptr);
-                column_names.push(name_c_str.to_string_lossy().into_owned());
-            }
+            let column_names = statement::column_names(held.as_ptr())?;
+            stream::bind_params(env, held.as_ptr(), db_handle, params_term)?;
 
             let cell = Arc::new(AtomicPtr::new(held.as_ptr()));
             conn_resource_arc_clone.register_child(ChildHandle::Stmt(Arc::clone(&cell)))?;
@@ -1254,7 +1151,7 @@ fn stream_fetch_impl<'a>(
     batch_size_term: Term<'a>,
     token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Term<'a> {
-    use crate::stream::process_single_step;
+    use crate::stream::step_under_names;
 
     let create_and_encode_error = |env_closure: Env<'a>,
                                    final_provided_term: Term<'a>|
@@ -1377,7 +1274,13 @@ fn stream_fetch_impl<'a>(
                 // above. conn_lock_guard is held, so the db_handle is valid for
                 // error reporting.
                 match unsafe {
-                    process_single_step(env, current_stmt_ptr, db_handle_for_errors)
+                    step_under_names(
+                        env,
+                        current_stmt_ptr,
+                        db_handle_for_errors,
+                        &stream_handle.column_names,
+                        fresh && fetched_rows.is_empty(),
+                    )
                 } {
                     Ok(Some(row_terms)) => {
                         fetched_rows.push(row_terms);
@@ -1396,8 +1299,7 @@ fn stream_fetch_impl<'a>(
                     // with, and the rows already read still belong to the
                     // caller. A cancellation is the exception below — it is
                     // answered at once and its batch's rows go with it.
-                    Err(failure) => {
-                        let e = XqliteError::from(failure);
+                    Err(e) => {
                         stream_definitively_exhausted = true;
                         // SAFETY: conn_lock_guard is held for the whole loop. The
                         // registry result is dropped in favour of the step error.

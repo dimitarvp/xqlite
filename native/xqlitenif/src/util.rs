@@ -1,7 +1,7 @@
 use crate::atoms;
 use crate::error::XqliteError;
 use rusqlite::ffi;
-use rusqlite::{Rows, types::Value};
+use rusqlite::types::Value;
 use rustler::{
     Atom, Binary, Decoder, Encoder, Env, Error as RustlerError, Resource, ResourceArc, Term,
     TermType, resource_impl,
@@ -134,13 +134,13 @@ pub(crate) fn encode_val(
 /// cheaply on the process heap.
 const HEAP_BINARY_THRESHOLD: usize = 64;
 
-/// Encodes a BLOB value on the query/execute path, which OWNS the bytes as a
+/// Encodes a BLOB value on the PRAGMA path, which OWNS the bytes as a
 /// `Vec<u8>` (rusqlite already copied them out of SQLite). Size-adaptive so each
 /// regime uses its leaner backing:
 ///
 /// * `> HEAP_BINARY_THRESHOLD`: wrap the owned `Vec` in a `BlobResource` and hand
 ///   back a ZERO-copy resource binary — avoids re-copying large payloads. The
-///   stream path, working from a transient SQLite pointer, cannot do this.
+///   row paths, working from a transient SQLite pointer, copy instead.
 /// * otherwise: copy into an `OwnedBinary` so the value lands as a cheap
 ///   process-heap binary instead of an off-heap resource binary with per-object
 ///   overhead — matching the stream path's backing for small blobs and removing
@@ -222,40 +222,6 @@ pub(crate) fn singular_ok_or_error_tuple<'a>(
         Ok(()) => ok().encode(env),
         Err(err) => (error(), err).encode(env),
     }
-}
-
-/// Converts rusqlite Rows to Vec<Vec<Term>> using the safe rusqlite API.
-/// Used by core_query/core_execute (single NIF call, Statement lifetime tied to Connection).
-/// Streaming uses sqlite_row_to_elixir_terms instead (raw FFI) because the statement
-/// outlives the Connection borrow via AtomicPtr — rusqlite's lifetime-bound Rows can't
-/// express that.
-pub(crate) fn process_rows<'a, 'rows>(
-    env: Env<'a>,
-    mut rows: Rows<'rows>,
-    column_count: usize,
-) -> Result<Vec<Vec<Term<'a>>>, XqliteError> {
-    let mut results: Vec<Vec<Term<'a>>> = Vec::new();
-
-    loop {
-        let row_option_result = rows.next();
-
-        match row_option_result {
-            Ok(Some(row)) => {
-                let mut row_values: Vec<Term<'a>> = Vec::with_capacity(column_count);
-                for i in 0..column_count {
-                    let val = row.get::<usize, Value>(i)?;
-                    let term = encode_val(env, val)?;
-                    row_values.push(term);
-                }
-                results.push(row_values);
-            }
-            Ok(None) => {
-                break;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(results)
 }
 
 /// The `bytes` field of an `%Xqlite.Blob{}`, or `None` for any other map.

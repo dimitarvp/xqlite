@@ -189,11 +189,7 @@ defmodule Xqlite.NIF.BlobTest do
                NIF.query(conn, "SELECT data FROM bl_wrp WHERE id = 1", [])
     end
 
-    # The query/execute path encodes BLOB column values size-adaptively — blobs
-    # <= 64 B copy into a cheap process-heap binary, larger ones zero-copy-wrap a
-    # resource binary. Both branches AND the 64/65 boundary must round-trip
-    # byte-exact. Each payload leads with a UTF-8 continuation byte so it binds as
-    # a BLOB (not TEXT), exercising encode_val's blob arm.
+    # Each payload leads with a UTF-8 continuation byte, so it binds as a BLOB, not TEXT.
     test "query round-trips BLOB values byte-exact across the heap/resource threshold",
          %{conn: conn} do
       :ok =

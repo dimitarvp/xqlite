@@ -113,6 +113,43 @@ impl Drop for PreparedStmt {
     }
 }
 
+/// A live statement answers the names of its current program, which SQLite's
+/// automatic re-prepare after a schema change can replace (a `SELECT *`
+/// expands anew).
+///
+/// # Safety
+/// The caller holds the connection Mutex for the whole call and `stmt` is a
+/// live prepared statement of that connection.
+pub(crate) unsafe fn column_names(
+    stmt: *mut ffi::sqlite3_stmt,
+) -> Result<Vec<String>, XqliteError> {
+    // SAFETY: forwarded from this function's own contract; every index is below
+    // the count, and a name stays valid until the next call on the statement,
+    // after its copy. Null means SQLite could not allocate the name.
+    unsafe {
+        (0..ffi::sqlite3_column_count(stmt))
+            .map(|index| {
+                let name = ffi::sqlite3_column_name(stmt, index);
+                match name.is_null() {
+                    true => Err(XqliteError::InternalEncodingError {
+                        context: format!("SQLite returned null column name for index {index}"),
+                    }),
+                    false => utf8_column_name(CStr::from_ptr(name).to_bytes(), index),
+                }
+            })
+            .collect()
+    }
+}
+
+fn utf8_column_name(bytes: &[u8], index: c_int) -> Result<String, XqliteError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_string)
+        .map_err(|_not_utf8| XqliteError::ColumnNameNotUtf8 {
+            column: index as usize,
+            name: bytes.to_vec(),
+        })
+}
+
 fn sql_byte_len(c_sql: &CStr) -> Result<c_int, XqliteError> {
     c_int::try_from(c_sql.to_bytes().len()).map_err(|_| {
         XqliteError::CannotExecute("SQL string length exceeds c_int range".to_string())

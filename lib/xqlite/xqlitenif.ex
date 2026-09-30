@@ -211,6 +211,13 @@ defmodule XqliteNIF do
   exception: it exists to run several statements, one at a time, and keeps
   the ones that ran before a failure.
 
+  Column names are read before anything is bound or run: on a connection
+  without an authorizer, one that is not UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}`, and a
+  table another connection changed before the first step answers
+  `{:error, {:columns_changed, %{expected: names, live: names}}}` after that
+  step; see `Xqlite.query/4`.
+
   Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
@@ -1398,6 +1405,10 @@ defmodule XqliteNIF do
   every parameter of the statement exactly once — see `query/3` for the three
   refusals, the 2 048 cap and for how a key names a parameter — and no stream is opened for
   any of them either.
+
+  A column name that is not UTF-8 answers
+  `{:column_name_not_utf8, %{column: index, name: bytes}}` before the
+  parameters are bound, and no stream is opened.
   """
   @spec stream_open(
           conn :: Xqlite.conn(),
@@ -1449,6 +1460,12 @@ defmodule XqliteNIF do
       without changing that, and `stream_get_columns/1` answers the names
       captured at open. `stream_close/1` drops a held-back error, so a fetch
       after the close answers `:done`.
+    - `{:error, {:columns_changed, %{expected: names, live: names}}}` or
+      `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` from
+      the first fetch, when a schema change by any connection, this one
+      included, made SQLite prepare the statement again with other names than
+      `stream_get_columns/1` reports, or with one that is not UTF-8; a write
+      in the statement has run by then, and the statement is finalized.
 
   `Xqlite.stream/4` drives all of this; use it unless you are stepping the
   stream by hand.
@@ -1522,6 +1539,10 @@ defmodule XqliteNIF do
   `explain_analyze/3` apply the same rule. The returned handle must
   eventually be finalized via `stmt_finalize/1` (garbage collection also
   finalizes abandoned handles).
+
+  A result column name that is not UTF-8 answers
+  `{:column_name_not_utf8, %{column: index, name: bytes}}` and the statement
+  is finalized.
   """
   @spec stmt_prepare(conn :: Xqlite.conn(), sql :: String.t()) ::
           {:ok, Xqlite.stmt()} | Xqlite.error()
@@ -1675,7 +1696,9 @@ defmodule XqliteNIF do
   Most users want `Xqlite.column_names/1`. Live statements read the names
   directly, so SQLite's auto-reprepare after schema changes (e.g. `SELECT *`
   re-expansion) is reflected; finalized statements answer with the
-  prepare-time snapshot.
+  prepare-time snapshot. A live name that is not UTF-8 answers
+  `{:column_name_not_utf8, %{column: index, name: bytes}}` on every call, and
+  the statement stays usable.
   """
   @spec stmt_column_names(stmt :: Xqlite.stmt()) :: {:ok, [String.t()]} | Xqlite.error()
   def stmt_column_names(_stmt), do: err()

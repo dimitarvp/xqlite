@@ -396,6 +396,14 @@ pub(crate) enum XqliteError {
 
     InvalidColumnIndex(usize),
     InvalidColumnName(String),
+    ColumnNameNotUtf8 {
+        column: usize,
+        name: Vec<u8>,
+    },
+    ColumnsChanged {
+        expected: Vec<String>,
+        live: Vec<String>,
+    },
     InvalidColumnType {
         index: usize,
         name: String,
@@ -757,6 +765,13 @@ impl Display for XqliteError {
                 write!(f, "Invalid column index: {index}")
             }
             XqliteError::InvalidColumnName(name) => write!(f, "Invalid column name: '{name}'"),
+            XqliteError::ColumnNameNotUtf8 { column, name: _ } => {
+                write!(f, "The name of result column {column} is not UTF-8")
+            }
+            XqliteError::ColumnsChanged { expected, live } => write!(
+                f,
+                "The statement's columns changed from {expected:?} to {live:?} before its first step"
+            ),
             XqliteError::InvalidColumnType {
                 index,
                 name,
@@ -1132,6 +1147,34 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidColumnName(name) => {
                 (atoms::invalid_column_name(), name).encode(env)
+            }
+            XqliteError::ColumnNameNotUtf8 { column, name } => {
+                let map_result = crate::util::encode_text(env, name).and_then(|name| {
+                    map_new(env)
+                        .map_put(atoms::column(), column)
+                        .and_then(|map| map.map_put(atoms::name(), name))
+                        .map_err(|_| XqliteError::InternalEncodingError {
+                            context: "Failed map create for ColumnNameNotUtf8".to_string(),
+                        })
+                });
+                match map_result {
+                    Ok(map) => (atoms::column_name_not_utf8(), map).encode(env),
+                    Err(err) => err.encode(env),
+                }
+            }
+            XqliteError::ColumnsChanged { expected, live } => {
+                let map_result = map_new(env)
+                    .map_put(atoms::expected(), expected)
+                    .and_then(|map| map.map_put(atoms::live(), live));
+                match map_result {
+                    Ok(map) => (atoms::columns_changed(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for ColumnsChanged".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
             }
             XqliteError::InvalidColumnType {
                 index,

@@ -297,6 +297,13 @@ defmodule Xqlite.NIF.QueryTest do
 
         assert {:ok, %{rows: [[<<>>]]}} = NIF.query(conn, "SELECT data FROM blob_q", [])
       end
+
+      test "query/3 answers a bad value or a failed step alone, no rows", %{conn: conn} do
+        unreadable = "SELECT column1 FROM (VALUES ('a'), ('b'), (CAST(x'FF' AS TEXT)))"
+        assert {:error, {:utf8_error, 0, _reason}} = NIF.query(conn, unreadable, [])
+        overflow = "SELECT abs(column1) FROM (VALUES (1), (-9223372036854775808))"
+        assert {:error, {:sqlite_failure, 1, 1, _message}} = NIF.query(conn, overflow, [])
+      end
     end
   end
 end

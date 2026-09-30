@@ -498,25 +498,16 @@ need it all at once, stream it and process each batch, don't `query` it.**
 There is no memory leak on either path — once you drop the result (or the
 consuming process dies), all of it is reclaimed at the next GC.
 
-### BLOB values are backed differently by `query` vs `stream` (large blobs only)
+### BLOB values are copied once on every row path
 
 A subtlety only worth knowing if you are profiling memory for a blob-heavy
-workload. A `BLOB` column value crosses the NIF boundary as one of two kinds of
-binary, chosen by size so each stays on its leaner backing:
-
-- a blob **larger than 64 bytes** returned through `query` /
-  `query_with_changes` is handed back as a *reference-counted resource
-  binary* that wraps SQLite's already-copied bytes with no further copy
-  — leanest for large blobs. The `stream` / prepared `step` / `blob_read` paths
-  instead *copy* it into a fresh reference-counted binary (they work from a
-  transient SQLite pointer and so cannot wrap it in place);
-- a blob **64 bytes or smaller** is, on every path, copied into a cheap
-  process-heap binary — no off-heap object and no asymmetry.
-
-They are byte-for-byte identical values; only the backing of *large* blobs
-differs between the paths, and there the `query` path is the leaner one (it skips
-the copy). The difference is never a correctness issue and, for typical
-workloads, negligible.
+workload. `query`, `query_with_changes`, `stream`, a prepared statement's
+`step` and `multi_step`, and `blob_read` all copy a `BLOB` value once out of
+SQLite into a fresh binary: one of **64 bytes or fewer** lands on the process
+heap, a larger one in an ordinary reference-counted binary, which
+`:erlang.memory(:binary)` counts. The one exception is a value a PRAGMA
+answers: over 64 bytes it comes back as a resource binary that wraps the
+copy rusqlite already made, so its bytes sit outside that count.
 
 ## Deployment and releases
 
