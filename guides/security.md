@@ -163,6 +163,12 @@ statement for SQLite to refuse:
   `sqlite_schema`, so it obeys the `:read` and `:select` actions instead —
   deny either of those to stop it.
 
+`Xqlite.serialize/2` and `Xqlite.deserialize/4` answer under a `:pragma`
+deny too. The PRAGMAs they run on their own, `page_count` in one and
+`encoding` and `writable_schema = RESET` in the other, pass the authorizer
+while the call holds the connection; the same PRAGMAs in your own SQL stay
+denied.
+
 The authorizer restricts *what* untrusted SQL
 may do; it is not a substitute for parameterizing *values* — use both. See
 [SQLite — Compile-time Authorization](https://www.sqlite.org/c3ref/set_authorizer.html).

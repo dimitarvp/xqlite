@@ -168,6 +168,26 @@ impl ProgressDispatch {
     }
 }
 
+/// Whether any statement of the connection is mid-run, a blob handle's
+/// SQL-less statement included.
+///
+/// # Safety
+///
+/// The caller holds the connection Mutex, which every step and compile on
+/// the connection runs under.
+pub(crate) unsafe fn any_mid_run(conn: &rusqlite::Connection) -> bool {
+    // SAFETY: this function's own contract keeps the connection open and
+    // its statement list unchanged while the list is walked.
+    unsafe {
+        let db = conn.handle();
+        let mut stmt = ffi::sqlite3_next_stmt(db, std::ptr::null_mut());
+        while !stmt.is_null() && ffi::sqlite3_stmt_busy(stmt) == 0 {
+            stmt = ffi::sqlite3_next_stmt(db, stmt);
+        }
+        !stmt.is_null()
+    }
+}
+
 /// Register the dispatch callback on a freshly opened SQLite connection.
 ///
 /// The callback stays installed for the lifetime of the connection;

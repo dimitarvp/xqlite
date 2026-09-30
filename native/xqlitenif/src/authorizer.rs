@@ -183,13 +183,29 @@ fn busy_timeout_action(action: &AuthAction<'_>) -> Option<BusyTimeout> {
     }
 }
 
-/// `PRAGMA encoding` without a value: the read `deserialize` runs on its target.
-fn encoding_read(action: &AuthAction<'_>) -> bool {
-    matches!(
-        action,
-        AuthAction::Pragma { pragma_name, pragma_value: None, .. }
-            if pragma_name.eq_ignore_ascii_case("encoding")
-    )
+/// The PRAGMAs the image functions run on their target: `encoding` without a
+/// value and `writable_schema = RESET` in `deserialize`, and `page_count`
+/// without a value in `serialize`, by xqlite and again by `sqlite3_serialize`.
+fn image_pragma(action: &AuthAction<'_>) -> bool {
+    match action {
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value: None,
+            ..
+        } => {
+            pragma_name.eq_ignore_ascii_case("encoding")
+                || pragma_name.eq_ignore_ascii_case("page_count")
+        }
+        AuthAction::Pragma {
+            pragma_name,
+            pragma_value: Some(value),
+            ..
+        } => {
+            pragma_name.eq_ignore_ascii_case("writable_schema")
+                && value.eq_ignore_ascii_case("reset")
+        }
+        _ => false,
+    }
 }
 
 /// The answer for one action: xqlite's own reads and the busy slot's rules
@@ -205,7 +221,7 @@ fn decide(
             flags.note_write_refused();
             Authorization::Deny
         }
-        None if flags.reading_own_pragma() && encoding_read(action) => Authorization::Allow,
+        None if flags.reading_own_pragma() && image_pragma(action) => Authorization::Allow,
         _ => user_decision(action, denied),
     }
 }

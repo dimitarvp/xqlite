@@ -1648,7 +1648,17 @@ fn serialize<'a>(
 ) -> Result<rustler::Binary<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
-        let data = conn.serialize(schema.as_str())?;
+        // Only the unused temp schema has no B-tree yet; the page_count read would create it.
+        conn.is_readonly(schema.as_str())
+            .map_err(|_no_btree| XqliteError::NoPages)?;
+        let data = handle.busy_flags.own_read(|| {
+            let pages: i64 =
+                conn.pragma_query_value(Some(schema.as_str()), "page_count", |row| {
+                    row.get(0)
+                })?;
+            conn.serialize(schema.as_str())
+                .map_err(|out_of_memory| serialize_failure(conn, out_of_memory, pages))
+        })?;
         let bytes: &[u8] = &data;
         let mut binary = rustler::OwnedBinary::new(bytes.len()).ok_or_else(|| {
             XqliteError::InternalEncodingError {
@@ -1658,6 +1668,25 @@ fn serialize<'a>(
         binary.as_mut_slice().copy_from_slice(bytes);
         Ok(binary.release(env))
     })
+}
+
+/// What a NULL from `sqlite3_serialize` means. rusqlite reports every NULL as
+/// out of memory; SQLite's own code, fresh after xqlite's `page_count` read,
+/// names the cause SQLite recorded, and no code with no pages is a schema with
+/// none to copy, such as an empty database whose first page SQLite cannot write.
+fn serialize_failure(
+    conn: &Connection,
+    out_of_memory: rusqlite::Error,
+    pages: i64,
+) -> XqliteError {
+    // SAFETY: the caller holds the connection Mutex, so `handle()` is the live
+    // `sqlite3*` and no other call runs on it.
+    let code = unsafe { ffi::sqlite3_extended_errcode(conn.handle()) };
+    match (code, pages) {
+        (ffi::SQLITE_OK, 0) => XqliteError::NoPages,
+        (ffi::SQLITE_OK, _) => XqliteError::from(out_of_memory),
+        (code, _) => busy_handler::ffi_rc_to_error(conn, "sqlite3_serialize", code),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -1671,20 +1700,40 @@ fn deserialize<'a>(
     let result = connection::with_conn_mut(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
         let bytes = data.as_slice();
-        judge_image(bytes)?;
+        judge_image(bytes, read_only)?;
         judge_image_encoding(conn, &handle.busy_flags, &schema, bytes)?;
+        require_idle(conn)?;
         let image = rollback_image(bytes);
         conn.deserialize_read_exact(schema.as_str(), image, bytes.len(), read_only)?;
-        Ok(())
+        // RESET makes SQLite re-read every schema, rebinding TEMP triggers to the loaded tables;
+        // the authorizer re-install then expires every prepared statement.
+        handle
+            .busy_flags
+            .own_read(|| conn.execute_batch("PRAGMA writable_schema = RESET"))?;
+        authorizer::sync(conn, &handle)
     });
     singular_ok_or_error_tuple(env, result)
 }
 
+/// A load and a restore end with SQLite dropping every cached schema of the
+/// connection, whose table definitions a running statement's program may read
+/// on every row: none may be mid-run.
+fn require_idle(conn: &Connection) -> Result<(), XqliteError> {
+    // SAFETY: both callers hold the connection Mutex through `with_conn_mut`.
+    if unsafe { crate::progress_dispatch::any_mid_run(conn) } {
+        Err(rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_BUSY), None).into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Rejects an image before it replaces anything: bytes without SQLite's
-/// 16-byte header, the empty binary included, and an image whose header and
-/// schema SQLite cannot read on a scratch in-memory connection. Running out of
-/// memory there says nothing about the image and keeps its own error.
-fn judge_image(bytes: &[u8]) -> Result<(), XqliteError> {
+/// 16-byte header, the empty binary included, an image whose header and
+/// schema SQLite cannot read on a scratch in-memory connection, and, for a
+/// writable load, a write version (header byte 18) above 2, which SQLite opens
+/// only read-only. Running out of memory in the scratch read says nothing
+/// about the image and keeps its own error.
+fn judge_image(bytes: &[u8], read_only: bool) -> Result<(), XqliteError> {
     if !bytes.starts_with(b"SQLite format 3\0") {
         return Err(XqliteError::InvalidImage {
             reason: atoms::not_a_database(),
@@ -1708,7 +1757,14 @@ fn judge_image(bytes: &[u8]) -> Result<(), XqliteError> {
                 }
             }
             other => XqliteError::from(other),
-        })
+        })?;
+    match bytes.get(18) {
+        Some(&version) if version > 2 && !read_only => Err(XqliteError::InvalidImage {
+            reason: atoms::read_only_image(),
+            code: ffi::SQLITE_READONLY,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Rejects an image whose text encoding, header bytes 56 to 59, is not the
@@ -1834,8 +1890,10 @@ fn restore<'a>(
 /// is opened read-only and never created, and a source SQLite reports no file
 /// name for — `""`, `:memory:` or another in-memory name, which it opens as a
 /// new empty database — is rejected like a missing file, before anything is
-/// copied. A busy step is retried twice, 100 ms apart, and a locked one is an
-/// error, as rusqlite's own restore does.
+/// copied, and so is a copy while any statement, stream or blob of the
+/// connection is mid-run, since the copy's end drops every cached schema. A
+/// busy step is retried twice, 100 ms apart, and a locked one is an error, as
+/// rusqlite's own restore does.
 fn restore_from(
     conn: &mut Connection,
     schema: &str,
@@ -1861,6 +1919,7 @@ fn restore_from(
             message: format!("no database file at {src_path:?}"),
         });
     }
+    require_idle(conn)?;
     let restore = Backup::new_with_names(&src, "main", conn, schema)?;
     let mut busy_steps = 0;
     loop {

@@ -1930,7 +1930,9 @@ defmodule XqliteNIF do
   Atomic, point-in-time snapshot. Use `Xqlite.serialize/1` for a default
   `"main"` schema.
 
-  Returns `{:ok, binary}` on success or `{:error, reason}` on failure.
+  Returns `{:ok, binary}` on success or `{:error, reason}` on failure, as
+  `Xqlite.serialize/2` describes: `:no_pages` for an empty schema whose first
+  page SQLite cannot write, and for the unused temp schema.
   """
   @spec serialize(conn :: Xqlite.conn(), schema :: String.t()) ::
           {:ok, binary()} | Xqlite.error()
@@ -1939,14 +1941,18 @@ defmodule XqliteNIF do
   @doc """
   Deserializes a binary into the named schema, replacing its contents.
 
-  The binary is what `serialize/2` returns or a database file's bytes, judged
-  as `Xqlite.deserialize/4` describes. A rejected image replaces nothing and returns
+  The binary is what `serialize/2` returns, judged as `Xqlite.deserialize/4`
+  describes, which also says when a database file's bytes are one. A rejected
+  image replaces nothing and returns
   `{:error, {:invalid_image, %{reason: reason, code: code}}}`, `reason` being
-  `:not_a_database`, `:malformed` or `:encoding_mismatch`. An attached schema
+  `:not_a_database`, `:malformed`, `:read_only_image` or `:encoding_mismatch`. An attached schema
   takes only the connection's text encoding, and `"main"` only UTF-8 on a UTF-8
   connection: load a UTF-16 image into an attached schema of a connection with
   the same encoding, or open its file directly. A deserialized connection operates on the
-  new database entirely in memory.
+  new database entirely in memory, and statements and streams prepared before
+  the load run against it; a statement or stream still running on any schema
+  of the connection, or a blob open on one, makes the load answer
+  `{:error, {:database_busy_or_locked, 5, _}}` and replace nothing.
 
   When `read_only` is `true`, write operations on the schema fail with
   `{:error, {:read_only_database, _, _}}`. When `false` it is writable and
@@ -2009,7 +2015,10 @@ defmodule XqliteNIF do
   @doc """
   Restores the named schema from a file at `src_path`.
 
-  The connection's existing data in that schema is overwritten.
+  The connection's existing data in that schema is overwritten. A statement
+  or stream still running on any schema of the connection, or a blob open on
+  one, answers `{:error, {:database_busy_or_locked, 5, _}}` and copies
+  nothing, as `Xqlite.restore/3` describes.
 
   Use `Xqlite.restore/2` for a defaulted `"main"` schema.
   """

@@ -252,7 +252,8 @@ pub(crate) enum XqliteError {
     },
     // An image deserialize rejected before loading it. `code` is SQLite's:
     // SQLITE_NOTADB for bytes without its header, the scratch read's answer,
-    // or SQLITE_ERROR for a text encoding the target does not use.
+    // SQLITE_READONLY for an image SQLite opens only read-only, loaded as
+    // writable, or SQLITE_ERROR for a text encoding the target does not use.
     InvalidImage {
         reason: Atom,
         code: c_int,
@@ -355,6 +356,7 @@ pub(crate) enum XqliteError {
     NoSuchObject(String),
     NoSuchSchema(String),
     EmptySchemaName,
+    NoPages,
     TableExists {
         name: String,
         message: String,
@@ -364,7 +366,6 @@ pub(crate) enum XqliteError {
         message: String,
     },
     SchemaChanged {
-        // SQLITE_SCHEMA
         extended_code: i32,
         message: String,
     },
@@ -383,7 +384,6 @@ pub(crate) enum XqliteError {
         message: String,
     },
     AuthorizationDenied {
-        // SQLITE_AUTH — statement rejected by an installed authorizer
         extended_code: i32,
         message: String,
     },
@@ -620,6 +620,7 @@ impl Display for XqliteError {
             XqliteError::EmptySchemaName => {
                 write!(f, "An empty schema name reads as every database")
             }
+            XqliteError::NoPages => write!(f, "The schema has no page to copy"),
             XqliteError::TableExists { name: _, message } => {
                 write!(f, "Table already exists: {message}")
             }
@@ -896,6 +897,7 @@ impl Encoder for XqliteError {
             XqliteError::NoSuchObject(name) => (atoms::no_such_object(), name).encode(env),
             XqliteError::NoSuchSchema(name) => (atoms::no_such_schema(), name).encode(env),
             XqliteError::EmptySchemaName => (atoms::invalid_schema_name(), "").encode(env),
+            XqliteError::NoPages => atoms::no_pages().encode(env),
             XqliteError::TableExists { name, message: _ } => {
                 (atoms::table_exists(), name).encode(env)
             }

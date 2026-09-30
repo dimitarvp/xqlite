@@ -7,10 +7,6 @@ defmodule Xqlite.NIF.SerializeTest do
   alias XqliteNIF, as: NIF
 
   for_each_opener "serialize/deserialize" do
-    # -------------------------------------------------------------------
-    # Serialize basics
-    # -------------------------------------------------------------------
-
     test "serialize empty database returns valid binary", %{conn: conn} do
       assert {:ok, binary} = NIF.serialize(conn, "main")
       assert is_binary(binary)
@@ -37,7 +33,6 @@ defmodule Xqlite.NIF.SerializeTest do
       {:ok, binary} = NIF.serialize(conn, "main")
       assert byte_size(binary) > 0
 
-      # Deserialize into a fresh connection and verify data survived
       {:ok, conn2} = NIF.open_in_memory(":memory:")
       :ok = NIF.deserialize(conn2, "main", binary, false)
 
@@ -76,11 +71,9 @@ defmodule Xqlite.NIF.SerializeTest do
 
       {:ok, snapshot} = NIF.serialize(conn, "main")
 
-      # Insert more rows after snapshot
       {:ok, 1} = NIF.execute(conn, "INSERT INTO s_snap (id) VALUES (?1)", [2])
       {:ok, 1} = NIF.execute(conn, "INSERT INTO s_snap (id) VALUES (?1)", [3])
 
-      # Snapshot should only have the first row
       {:ok, conn2} = NIF.open_in_memory(":memory:")
       :ok = NIF.deserialize(conn2, "main", snapshot, false)
 
@@ -90,29 +83,21 @@ defmodule Xqlite.NIF.SerializeTest do
       NIF.close(conn2)
     end
 
-    # -------------------------------------------------------------------
-    # Deserialize basics
-    # -------------------------------------------------------------------
-
     test "deserialize replaces existing database content", %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE old_t (x INTEGER);")
       {:ok, 1} = NIF.execute(conn, "INSERT INTO old_t (x) VALUES (?1)", [999])
 
-      # Create a different database in a second connection
       {:ok, conn2} = NIF.open_in_memory(":memory:")
       :ok = NIF.execute_batch(conn2, "CREATE TABLE new_t (y TEXT);")
       {:ok, 1} = NIF.execute(conn2, "INSERT INTO new_t (y) VALUES (?1)", ["fresh"])
       {:ok, binary} = NIF.serialize(conn2, "main")
       NIF.close(conn2)
 
-      # Deserialize into the original connection
       :ok = NIF.deserialize(conn, "main", binary, false)
 
-      # Old table should be gone
       assert {:error, {:no_such_table, _}} =
                NIF.query(conn, "SELECT x FROM old_t", [])
 
-      # New table should be present
       assert {:ok, %{rows: [["fresh"]], num_rows: 1}} =
                NIF.query(conn, "SELECT y FROM new_t", [])
     end
@@ -126,11 +111,9 @@ defmodule Xqlite.NIF.SerializeTest do
 
       :ok = NIF.deserialize(conn, "main", binary, true)
 
-      # Reads should work
       assert {:ok, %{rows: [[1]], num_rows: 1}} =
                NIF.query(conn, "SELECT id FROM ro_t", [])
 
-      # Writes should fail
       assert {:error, {:read_only_database, _, _}} =
                NIF.execute(conn, "INSERT INTO ro_t (id) VALUES (?1)", [2])
     end
@@ -143,16 +126,11 @@ defmodule Xqlite.NIF.SerializeTest do
 
       :ok = NIF.deserialize(conn, "main", binary, false)
 
-      # Should be able to write
       assert {:ok, 1} = NIF.execute(conn, "INSERT INTO rw_t (id) VALUES (?1)", [1])
 
       assert {:ok, %{rows: [[1]], num_rows: 1}} =
                NIF.query(conn, "SELECT id FROM rw_t", [])
     end
-
-    # -------------------------------------------------------------------
-    # Round-trip integrity
-    # -------------------------------------------------------------------
 
     test "round-trip preserves multiple tables and data types", %{conn: conn} do
       :ok =
@@ -230,10 +208,6 @@ defmodule Xqlite.NIF.SerializeTest do
       NIF.close(conn2)
     end
 
-    # -------------------------------------------------------------------
-    # Serialize after modifications
-    # -------------------------------------------------------------------
-
     test "serialize after transaction commit captures committed data", %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE s_tx (id INTEGER PRIMARY KEY);")
       :ok = NIF.begin(conn, :immediate)
@@ -263,10 +237,6 @@ defmodule Xqlite.NIF.SerializeTest do
       assert {:ok, %{rows: [[1]], num_rows: 1}} = NIF.query(conn2, "SELECT id FROM s_rb", [])
       NIF.close(conn2)
     end
-
-    # -------------------------------------------------------------------
-    # Deserialize then modify
-    # -------------------------------------------------------------------
 
     test "writable deserialized database supports transactions", %{conn: conn} do
       {:ok, conn_src} = NIF.open_in_memory(":memory:")
@@ -303,10 +273,6 @@ defmodule Xqlite.NIF.SerializeTest do
       NIF.close(conn3)
     end
 
-    # -------------------------------------------------------------------
-    # Large data
-    # -------------------------------------------------------------------
-
     test "round-trip with many rows", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, "CREATE TABLE s_large (id INTEGER PRIMARY KEY, data TEXT);")
@@ -331,10 +297,6 @@ defmodule Xqlite.NIF.SerializeTest do
 
       NIF.close(conn2)
     end
-
-    # -------------------------------------------------------------------
-    # Stream integration
-    # -------------------------------------------------------------------
 
     test "stream works on deserialized database", %{conn: conn} do
       {:ok, conn_src} = NIF.open_in_memory(":memory:")
@@ -362,8 +324,10 @@ defmodule Xqlite.NIF.SerializeTest do
              ]
     end
 
-    property "no binary without SQLite's header replaces the contents", %{conn: conn} do
+    property "no binary without SQLite's header, and no read-only image loaded writable, replaces the contents",
+             %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE kept (x); INSERT INTO kept VALUES (1);")
+      <<head::binary-size(18), _, tail::binary>> = image_of("CREATE TABLE t (v);")
 
       for bytes <- ["not a database, just text", :binary.copy(<<0>>, 4096), <<>>] do
         assert {:error, {:invalid_image, %{reason: :not_a_database}}} =
@@ -375,16 +339,24 @@ defmodule Xqlite.NIF.SerializeTest do
                  NIF.deserialize(conn, "main", bytes, false)
       end
 
+      check all(version <- integer(3..255), max_runs: 2000) do
+        assert {:error, {:invalid_image, %{reason: :read_only_image, code: 8}}} =
+                 NIF.deserialize(conn, "main", <<head::binary, version, tail::binary>>, false)
+      end
+
       assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT x FROM kept", [])
+      assert :ok = Xqlite.deserialize(conn, <<head::binary, 3, tail::binary>>, "main", true)
+      assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT v FROM t", [])
     end
 
-    test "a WAL database's image loads, from serialize/2 or from its file", %{conn: conn} do
+    test "a WAL database's image loads, from serialize/2 or from the closed database's file",
+         %{conn: conn} do
       path = Xqlite.TestUtil.tmp_db_path("wal_image")
       {:ok, src} = Xqlite.open(path)
       :ok = NIF.execute_batch(src, "CREATE TABLE t (v); INSERT INTO t VALUES (1), (2);")
       {:ok, <<_::binary-size(18), 2, 2, _::binary>> = image} = Xqlite.serialize(src)
-      {:ok, _} = Xqlite.wal_checkpoint(src, :truncate)
       :ok = NIF.close(src)
+      refute File.exists?(path <> "-wal")
 
       for bytes <- [image, File.read!(path)] do
         assert :ok = Xqlite.deserialize(conn, bytes)
@@ -406,7 +378,7 @@ defmodule Xqlite.NIF.SerializeTest do
       assert {:ok, 0} = NIF.execute(conn, "DETACH aux", [])
     end
 
-    test "an image in a text encoding the target cannot take is rejected, with :pragma denied",
+    test "an image in a text encoding the target cannot take is rejected, and serialize/2 answers, with :pragma denied",
          %{conn: conn} do
       {:ok, src} = NIF.open_in_memory(":memory:")
       :ok = NIF.execute_batch(src, "PRAGMA encoding = 'UTF-16le'; CREATE TABLE u (v);")
@@ -423,6 +395,12 @@ defmodule Xqlite.NIF.SerializeTest do
       assert Xqlite.deserialize(conn, utf16) == mismatch
       assert Xqlite.deserialize(fresh, utf16) == mismatch
       assert Xqlite.deserialize(src, utf8) == mismatch
+      assert {:ok, ^utf8} = Xqlite.serialize(conn)
+      assert :ok = Xqlite.deserialize(conn, utf8)
+
+      assert {:error, {:authorization_denied, 23, _}} =
+               NIF.query(conn, "PRAGMA page_count", [])
+
       assert {:ok, %{rows: [[0]]}} = NIF.query(conn, "SELECT count(*) FROM main.kept", [])
       assert {:ok, 0} = NIF.execute(conn, "DETACH aux", [])
       assert {:ok, %{rows: [["UTF-16le"]]}} = NIF.query(src, "PRAGMA encoding", [])
@@ -438,6 +416,152 @@ defmodule Xqlite.NIF.SerializeTest do
       assert {:ok, ^image} = Xqlite.serialize(conn)
       NIF.close(src)
     end
+
+    test "a write prepared before a load runs against the loaded schema, under the caller's deny list",
+         %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT);")
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1, 'one')", [])
+      {:ok, image} = NIF.serialize(conn, "main")
+      :ok = Xqlite.set_authorizer(conn, [:delete])
+      {:ok, insert} = NIF.stmt_prepare(conn, "INSERT INTO t VALUES (?1, ?2)")
+      :ok = NIF.stmt_bind(insert, [2, "two"])
+
+      assert :ok = Xqlite.deserialize(conn, image)
+      assert :done = NIF.stmt_step(insert)
+      assert {:ok, %{rows: [[1, "one"], [2, "two"]]}} = NIF.query(conn, "SELECT * FROM t", [])
+      assert {:error, {:authorization_denied, 23, _}} = NIF.execute(conn, "DELETE FROM t", [])
+      :ok = NIF.stmt_finalize(insert)
+    end
+
+    test "a query prepared before a load reads the loaded table, not the page it read before",
+         %{conn: conn} do
+      image =
+        image_of("""
+        CREATE TABLE t (a, b); CREATE TABLE pad (p, q);
+        INSERT INTO t VALUES ('image-t', 1); INSERT INTO pad VALUES ('image-pad', 2);
+        """)
+
+      :ok = NIF.execute_batch(conn, "CREATE TABLE pad (p, q); CREATE TABLE t (a, b);")
+      {:ok, select} = NIF.stmt_prepare(conn, "SELECT a, b FROM t")
+
+      assert :ok = Xqlite.deserialize(conn, image)
+      assert {:ok, %{rows: [["image-t", 1]]}} = NIF.stmt_multi_step(select, 10)
+      :ok = NIF.stmt_finalize(select)
+    end
+
+    test "serialize/2 of a schema another connection holds locked answers busy", %{conn: conn} do
+      path = Xqlite.TestUtil.tmp_db_path("locked")
+      {:ok, holder} = Xqlite.open(path, journal_mode: :delete)
+      :ok = NIF.execute_batch(holder, "CREATE TABLE t (a);")
+      {:ok, 0} = NIF.execute(conn, "ATTACH '#{path}' AS held", [])
+      {:ok, _} = NIF.set_pragma(conn, "busy_timeout", 0)
+
+      :ok =
+        NIF.execute_batch(holder, "PRAGMA locking_mode = EXCLUSIVE; INSERT INTO t VALUES (1);")
+
+      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.serialize(conn, "held")
+      :ok = NIF.close(holder)
+    end
+
+    test "an empty schema SQLite cannot write a first page to answers :no_pages, and so does the unused temp schema, writing nothing",
+         %{conn: conn} do
+      path = Xqlite.TestUtil.tmp_db_path("zero_bytes")
+      File.write!(path, "")
+      {:ok, fresh} = NIF.open(path)
+      assert {:error, :no_pages} = Xqlite.serialize(fresh, "temp")
+      assert File.stat!(path).size == 0
+      {:ok, zero} = Xqlite.open_readonly(path)
+      {:ok, 0} = NIF.execute(conn, "ATTACH ':memory:' AS empty", [])
+      :ok = Xqlite.set_authorizer(conn, [:transaction])
+
+      for {c, schema} <- [{conn, "empty"}, {zero, "main"}] do
+        {:error, {:no_such_table, "nosuch"}} = NIF.query(c, "SELECT * FROM nosuch", [])
+        assert {:error, :no_pages} = Xqlite.serialize(c, schema)
+      end
+
+      Enum.each([zero, fresh], &NIF.close/1)
+    end
+
+    test "a failure inside SQLite's own copy answers its classified error", %{conn: conn} do
+      {:ok, 23} = Xqlite.put_limit(conn, :sql_length, 23)
+      assert {:ok, %{rows: [[_pages]]}} = NIF.query(conn, "PRAGMA main.page_count", [])
+      assert {:error, {:too_big, 18, _}} = Xqlite.serialize(conn)
+    end
+
+    test "a TEMP trigger on a loaded table fires after every load", %{conn: conn} do
+      :ok = temp_audit_trigger(conn)
+      image = image_of("CREATE TABLE t (a);")
+
+      for i <- 1..20 do
+        :ok = Xqlite.deserialize(conn, image)
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (?1)", [i])
+      end
+
+      assert {:ok, %{rows: [[20]]}} = NIF.query(conn, "SELECT count(*) FROM temp.audit", [])
+    end
+
+    test "DROP TRIGGER on a TEMP trigger over a loaded table answers :ok", %{conn: conn} do
+      :ok = temp_audit_trigger(conn)
+      :ok = Xqlite.deserialize(conn, image_of("CREATE TABLE t (a);"))
+      assert {:ok, 0} = NIF.execute(conn, "DROP TRIGGER temp.trg", [])
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (1)", [])
+      assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT x FROM temp.audit", [])
+    end
+
+    test "a TEMP trigger over a table the image lacks waits for a load that has it",
+         %{conn: conn} do
+      :ok = temp_audit_trigger(conn)
+      assert :ok = Xqlite.deserialize(conn, image_of("CREATE TABLE u (a);"))
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO u VALUES (1)", [])
+      assert :ok = Xqlite.deserialize(conn, image_of("CREATE TABLE t (a);"))
+      {:ok, 1} = NIF.execute(conn, "INSERT INTO t VALUES (2)", [])
+      assert {:ok, %{rows: [[2]]}} = NIF.query(conn, "SELECT x FROM temp.audit", [])
+    end
+
+    test "a load or a restore while a statement runs on another schema answers busy, and the statement finishes with its types",
+         %{conn: conn} do
+      path = Xqlite.TestUtil.tmp_db_path("restore_src")
+      {:ok, src} = Xqlite.open(path, journal_mode: :delete)
+      :ok = NIF.execute_batch(src, "CREATE TABLE t (a); INSERT INTO t VALUES (1);")
+      :ok = NIF.close(src)
+
+      :ok =
+        NIF.execute_batch(conn, """
+        ATTACH ':memory:' AS aux;
+        CREATE TABLE aux.st (a INTEGER, v INTEGER AS (a * 2) VIRTUAL) STRICT;
+        WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 200)
+        INSERT INTO aux.st (a) SELECT i FROM s;
+        """)
+
+      {:ok, select} = NIF.stmt_prepare(conn, "SELECT a, v FROM aux.st")
+      assert {:row, [1, 2]} = NIF.stmt_step(select)
+
+      assert {:error, {:database_busy_or_locked, 5, _}} =
+               Xqlite.deserialize(conn, image_of("CREATE TABLE t (a);"))
+
+      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.restore(conn, path)
+      assert {:ok, %{rows: rows}} = NIF.stmt_multi_step(select, 1000)
+      assert rows == Enum.map(2..200, &[&1, &1 * 2])
+      :ok = NIF.stmt_finalize(select)
+      assert {:error, {:no_such_table, _}} = NIF.query(conn, "SELECT a FROM main.t", [])
+      assert :ok = Xqlite.restore(conn, path)
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT a FROM main.t", [])
+    end
+  end
+
+  defp temp_audit_trigger(conn) do
+    NIF.execute_batch(conn, """
+    CREATE TABLE t (a); CREATE TEMP TABLE audit (x);
+    CREATE TEMP TRIGGER trg AFTER INSERT ON main.t BEGIN INSERT INTO audit VALUES (new.a); END;
+    """)
+  end
+
+  defp image_of(sql) do
+    {:ok, src} = NIF.open_in_memory(":memory:")
+    :ok = NIF.execute_batch(src, sql)
+    {:ok, image} = NIF.serialize(src, "main")
+    :ok = NIF.close(src)
+    image
   end
 
   # -------------------------------------------------------------------
@@ -484,7 +608,6 @@ defmodule Xqlite.NIF.SerializeTest do
     {:ok, snap3} = NIF.serialize(conn, "main")
     NIF.close(conn)
 
-    # Each snapshot has a different number of rows
     {:ok, c1} = NIF.open_in_memory(":memory:")
     :ok = NIF.deserialize(c1, "main", snap1, false)
     assert {:ok, %{num_rows: 1}} = NIF.query(c1, "SELECT id FROM seq_s", [])

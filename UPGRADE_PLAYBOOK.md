@@ -80,6 +80,11 @@ here is optional on a bump that changes the bundled SQLite version.
    - pragma semantics for everything `Xqlite.Pragma` types,
    - JSON function behavior (json_extract/json_each — the adapter's
      array type and path translation),
+   - `sqlite3_set_authorizer` expiring every prepared statement, which
+     SQLite's docs do not promise, and `sqlite3_deserialize` leaving TEMP
+     triggers bound to the schema it frees, which `PRAGMA writable_schema =
+     RESET` repairs: `deserialize/4` relies on both, and the stale-statement
+     and TEMP-trigger tests in `test/nif/serialize_test.exs` guard them,
    - `sqlite3_changes`/`total_changes` stickiness (the
      `query_with_changes` contract).
 6. **`cargo fmt` + `cargo clippy -- -D warnings`** from the crate

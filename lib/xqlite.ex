@@ -279,6 +279,7 @@ defmodule Xqlite do
           | :extension_loading_disabled
           | :invalid_utf8_in_string
           | :multiple_statements
+          | :no_pages
           | :no_statement
           | :not_in_wal_mode
           | :null_byte_in_string
@@ -321,7 +322,10 @@ defmodule Xqlite do
           | {:invalid_column_type, non_neg_integer(), String.t(), atom()}
           | {:invalid_conflict_strategy, atom()}
           | {:invalid_image,
-             %{reason: :not_a_database | :malformed | :encoding_mismatch, code: integer()}}
+             %{
+               reason: :not_a_database | :malformed | :read_only_image | :encoding_mismatch,
+               code: integer()
+             }}
           | {:invalid_limit_category, atom()}
           | {:invalid_limit_value, %{category: atom(), value: integer()}}
           | {:invalid_on_error, term()}
@@ -2245,10 +2249,24 @@ defmodule Xqlite do
   copy of every page the connection reads, taken inside one read transaction:
   a WAL database's image holds what its WAL file holds, and an image taken
   inside the connection's own write transaction holds its uncommitted changes.
+  A schema `deserialize/4` loaded answers its last committed state instead,
+  whatever transaction is open: SQLite copies that memory directly, and the
+  binary can run past the last page when a write transaction spilled pages.
 
   `schema` identifies which attached database to serialize. Defaults to
   `"main"`. Use `"temp"` for the temp database or the name of an attached
   database.
+
+  An empty schema answers the image of an empty database: SQLite writes its
+  first page in a write transaction over every attached database. Where that
+  write cannot happen, the answer is `{:error, :no_pages}`: a zero-byte file
+  opened read-only, a `:transaction` deny, or a write lock another connection
+  holds on any attached database, after twice the busy timeout. The unused
+  temp schema, and an empty schema attached through SQLite's `memdb` VFS,
+  answer `{:error, :no_pages}` and write nothing. For a schema with pages, a
+  lock another connection holds answers `{:error, {:database_busy_or_locked,
+  code, message}}` once the busy timeout runs out. A `:pragma` deny does not
+  stop the call: the `PRAGMA page_count` it runs is its own.
   """
   @spec serialize(conn(), String.t()) :: {:ok, binary()} | error()
   def serialize(conn, schema \\ "main") when is_binary(schema) do
@@ -2278,9 +2296,12 @@ defmodule Xqlite do
   @doc """
   Deserializes a binary into a database, replacing its current contents.
 
-  The binary is a database image: what `serialize/2` returns, or the bytes of
-  a database file. The connection then works on it in memory, in rollback-journal
-  mode: a WAL image loads with header bytes 18 and 19 set from 2 to 1 in the
+  The binary is a database image: what `serialize/2` returns. A database
+  file's bytes are one only while no connection has the database open and no
+  `-wal` or `-journal` file lies beside it: a copy read beside a writer can
+  hold a state no commit produced, and loading does not catch it. The
+  connection then works on the image in memory, in rollback-journal mode: a
+  WAL image loads with header bytes 18 and 19 set from 2 to 1 in the
   library's copy, as SQLite documents, since memory holds no WAL file.
 
   The image is judged after the connection and `schema`, before anything is
@@ -2289,11 +2310,26 @@ defmodule Xqlite do
   header, the empty binary included. `:malformed` (a corrupt image) or
   `:not_a_database`, with SQLite's code: a scratch in-memory connection, which
   costs a second copy of the image, cannot read its header and schema (running
-  out of memory there returns that error). `:encoding_mismatch` (code 1): an
+  out of memory there returns that error). `:read_only_image` (code 8):
+  `read_only` is `false` and header byte 18, the write version, is above 2,
+  so SQLite would open the image read-only. `:encoding_mismatch` (code 1): an
   attached schema takes only the connection's text encoding, and `"main"` only
   UTF-8 on a UTF-8 connection: load a UTF-16 image into an attached schema of a
-  connection with the same encoding, or open its file directly. An image damaged
-  only past its schema loads, and fails when those pages are read.
+  connection with the same encoding, or open its file directly. The scratch
+  read judges the header and the schema only: an image damaged past them
+  loads, then reads fewer rows than it holds or fails at the damaged pages;
+  `PRAGMA quick_check` judges the rest.
+
+  Statements and streams prepared before a load run against the loaded schema:
+  SQLite prepares each again at its next step. The connection reads its
+  schemas again, so a TEMP trigger on a table of the target fires on the
+  loaded table, and one whose table the image lacks stays idle until a load
+  brings that table back; `PRAGMA writable_schema` is off afterwards. That
+  re-read drops every cached schema of the connection, and a running
+  statement may read a table definition on every row, so a statement or
+  stream still running on any schema, or a blob open on one, makes the load
+  answer `{:error, {:database_busy_or_locked, 5, message}}` and replace
+  nothing.
 
   `schema` identifies which attached database to replace (default `"main"`).
   `read_only` marks the deserialized image as read-only (default `false`).
@@ -2368,7 +2404,11 @@ defmodule Xqlite do
   database file — a missing one, `""`, `":memory:"` or another in-memory
   name — answers `{:error, {:cannot_open_database, src_path, code, message}}`
   and changes nothing. A WAL-mode source keeps the `-wal` and `-shm` files
-  the read-only open creates beside it.
+  the read-only open creates beside it. The copy ends with SQLite dropping
+  every cached schema of the connection, and a running statement may read a
+  table definition on every row, so a statement or stream still running on
+  any schema, or a blob open on one, answers
+  `{:error, {:database_busy_or_locked, 5, message}}` and copies nothing.
   """
   @spec restore(conn(), String.t(), String.t()) :: :ok | error()
   def restore(conn, src_path, schema \\ "main")

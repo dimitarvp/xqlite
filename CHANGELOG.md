@@ -21,6 +21,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A statement prepared before `deserialize/4` no longer crashes the VM.**
+  `Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` now expire every
+  prepared statement of the connection after a load, so SQLite prepares
+  each again at its next step, against the loaded schema. A write prepared
+  before loading an image with the same schema cookie used to step into
+  freed memory and take the VM down, and a query read whatever table sat
+  at its old root page. A statement or stream still running on any schema
+  of the connection, or an open blob, now makes the load answer
+  `{:error, {:database_busy_or_locked, 5, _}}` and replace nothing, where
+  before only one on the target did: the load drops every cached schema,
+  and a running statement may read a table definition on every row.
+- **A TEMP trigger on a loaded table works after `deserialize/4`.** After a
+  load, a TEMP trigger on a table of the replaced schema stopped firing,
+  and `DROP TRIGGER` on it could take the VM down: SQLite's reload left the
+  trigger bound to the freed schema. The connection now re-reads its
+  schemas after every load, so the trigger fires on the loaded table; one
+  whose table the image lacks stays idle until a load brings the table
+  back. A load now turns `PRAGMA writable_schema` off.
+- **`restore/3` answers busy while a statement runs.** SQLite's backup drops
+  every cached schema of the connection when the copy finishes, and a
+  statement running on another schema whose program reads a table
+  definition on every row (a STRICT table's VIRTUAL generated column) took
+  the VM down. `Xqlite.restore/3` and `XqliteNIF.restore/3` now answer
+  `{:error, {:database_busy_or_locked, 5, _}}` while any statement, stream
+  or blob of the connection is mid-run, and copy nothing.
+- **`serialize/2` answers what stopped it.** `Xqlite.serialize/2` and
+  `XqliteNIF.serialize/2` answered `{:error, {:sqlite_failure, 7, 7, "out of
+  memory"}}` for every failure. A lock another connection holds on a schema
+  with pages now answers `{:error, {:database_busy_or_locked, 5, _}}` after
+  one busy timeout where it waited two, and any other cause SQLite records
+  answers its own classified error. An empty schema whose first page SQLite
+  cannot write (a zero-byte file opened read-only, a `:transaction` deny, a
+  write lock on any attached database) and the unused temp schema answer
+  `{:error, :no_pages}`; the unused temp schema no longer writes anything.
+  A `:pragma` deny no longer stops it.
+- **A writable load of a read-only image is rejected.** An image whose
+  header byte 18, the write version, is above 2 loaded read-only even with
+  `read_only: false`. `deserialize/4` now answers
+  `{:error, {:invalid_image, %{reason: :read_only_image, code: 8}}}` and
+  replaces nothing; with `read_only: true` it loads.
+- **The image docs promise less.** `deserialize/4` no longer offers the
+  bytes of a database in use as an image: a database file's bytes are one
+  only while no connection has it open and no `-wal` or `-journal` file lies
+  beside it, and loading does not catch a torn copy. `serialize/2` says a
+  schema `deserialize/4` loaded answers its last committed state, whatever
+  transaction is open.
+
 - **`Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` judge an image
   before it replaces anything.** A rejected image answers
   `{:error, {:invalid_image, %{reason: reason, code: code}}}` and leaves the
@@ -42,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image; running out of memory for it still answers the out-of-memory
   error. Deserialize's own encoding read passes a `:pragma` deny list.
 - **An image of a WAL database now loads.** `serialize/2` of a WAL database,
-  and a WAL database file's bytes, carry header bytes 18 and 19 set to 2,
+  and the file of a closed WAL database, carry header bytes 18 and 19 set to 2,
   which SQLite's memory storage cannot open (code 14 on every later
   statement). `deserialize/4` now sets them to 1 in its own copy, as SQLite
   documents.

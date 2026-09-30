@@ -494,7 +494,7 @@ fn give_slot_back(conn: &Connection, handle: &XqliteConn) {
     let _ = authorizer::sync(conn, handle);
 }
 
-fn ffi_rc_to_error(conn: &Connection, what: &str, rc: c_int) -> XqliteError {
+pub(crate) fn ffi_rc_to_error(conn: &Connection, what: &str, rc: c_int) -> XqliteError {
     // SAFETY: callers already hold the connection Mutex (public functions
     // document this); `conn.handle()` is valid for the duration of this read.
     let msg = unsafe {
