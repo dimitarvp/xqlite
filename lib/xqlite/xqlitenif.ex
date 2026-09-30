@@ -680,9 +680,11 @@ defmodule XqliteNIF do
   autocheckpoint (see `register_wal_hook/2`). Raw-SQL `PRAGMA` statements
   get no such repair.
 
-  This function checks one value only: an integer `busy_timeout` above
+  This function checks two things only. An integer `busy_timeout` above
   `2_147_483_647`, which SQLite would read as `0`, returns
-  `{:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}`.
+  `{:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}`,
+  and `foreign_keys` written inside a transaction, which SQLite would
+  ignore, returns `{:error, :transaction_in_progress}`.
   Any other value is formatted and handed to SQLite, which parses what it can
   of it and reports success even when it stored its own fallback instead. `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4`
   check the value against the PRAGMA's definition first and refuse what it
@@ -718,10 +720,11 @@ defmodule XqliteNIF do
 
   `conn` is the database connection resource.
 
-  Returns `:ok` on success.
-  Returns `{:error, reason}` if the transaction cannot be committed (e.g., if
-  no transaction is active, or due to other SQLite errors like deferred constraint
-  violations).
+  Returns `:ok` on success, `{:error, :no_transaction}` when no transaction
+  is open and `{:error, :statement_mid_run}` while a write of this
+  connection is mid-run. That answer, a deferred foreign key and a lock
+  leave the transaction open for a repair and another commit, or for
+  `rollback/1`.
   """
   @spec commit(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def commit(_conn), do: err()
@@ -730,14 +733,12 @@ defmodule XqliteNIF do
   Rolls back the current database transaction.
 
   Equivalent to executing the SQL statement `ROLLBACK;` or `ROLLBACK TRANSACTION;`.
-  All changes made within the transaction since the last `COMMIT` or `SAVEPOINT`
-  are discarded.
+  Every change the transaction made is discarded, whatever savepoints it holds.
 
   `conn` is the database connection resource.
 
-  Returns `:ok` on success.
-  Returns `{:error, reason}` if the transaction cannot be rolled back (e.g., if
-  no transaction is active, or due to other SQLite errors).
+  Returns `:ok` on success and `{:error, :no_transaction}` when no
+  transaction is open; a statement mid-run does not stop it.
   """
   @spec rollback(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
   def rollback(_conn), do: err()
@@ -746,15 +747,14 @@ defmodule XqliteNIF do
   Creates a new savepoint within the current transaction.
 
   Equivalent to executing `SAVEPOINT 'name';`. Savepoints allow partial rollbacks
-  of a transaction. If the current transaction is not a `DEFERRED` transaction,
-  a `SAVEPOINT` command will implicitly start one.
+  of a transaction. With no transaction open, `SAVEPOINT` starts one.
 
   `conn` is the database connection resource.
   `name` is a string identifier for the savepoint. Savepoint names can be reused,
   and a new savepoint with an existing name will hide the older one.
 
-  Returns `:ok` on success.
-  Returns `{:error, reason}` on failure (e.g., if SQLite cannot create the savepoint).
+  Returns `:ok` on success, `{:error, :statement_mid_run}` while a write of
+  this connection is mid-run, and `{:error, reason}` on any other failure.
   """
   @spec savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
           :ok | Xqlite.error()
@@ -784,12 +784,14 @@ defmodule XqliteNIF do
   Equivalent to executing `RELEASE SAVEPOINT 'name';` or simply `RELEASE 'name';`.
   This removes the specified savepoint and all savepoints established after it.
   The changes made since the savepoint was established are incorporated into the
-  current transaction (i.e., they are not rolled back). The transaction remains active.
+  current transaction (i.e., they are not rolled back). Releasing the savepoint
+  that started the transaction commits it.
 
   `conn` is the database connection resource.
   `name` is the string identifier of an existing savepoint.
 
-  Returns `:ok` on success.
+  Returns `:ok` on success, `{:error, :statement_mid_run}` while a write of
+  this connection is mid-run.
   Returns `{:error, reason}` on failure (e.g., if the named savepoint does not
   exist, or other SQLite errors).
   """
@@ -1874,11 +1876,15 @@ defmodule XqliteNIF do
   Registers a PID to receive rollback events on the connection.
   Multi-subscriber.
 
-  After each rollback (whether user-initiated or forced by a constraint
-  / deferred-FK failure at commit), every registered subscriber
+  After each rollback, `rollback/1` or one SQLite performs itself
+  (`INSERT OR ROLLBACK`, a cancelled write), every registered subscriber
   receives
 
       {:xqlite_rollback}
+
+  A commit that fails on a deferred foreign key or a lock, and a constraint
+  error under `ABORT`, roll nothing back and send nothing; neither does
+  `close/1` when it rolls an open transaction back.
 
   Note: SQLite does not invoke this callback for `ROLLBACK TO
   SAVEPOINT` operations — only for outer-transaction rollbacks.

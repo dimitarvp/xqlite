@@ -24,8 +24,7 @@ fn invalid_name(name: &[u8]) -> XqliteError {
 
 // A PRAGMA runs SQL, so an installed authorizer can veto it with SQLITE_AUTH.
 // That denial carries its own structured variant; surface it instead of
-// flattening it into the generic `CannotExecutePragma` wrapper. Every other
-// failure keeps the pragma wrapper (and its exact `reason` text) unchanged.
+// flattening it into the generic `CannotExecutePragma` wrapper.
 fn pragma_exec_error(pragma: String, err: RusqliteError) -> XqliteError {
     if error::is_sqlite_auth(&err) {
         XqliteError::from(err)
@@ -59,6 +58,10 @@ pub(crate) fn set<'a>(
 ) -> Result<Term<'a>, XqliteError> {
     let pragma_name = validate_name(pragma_name)?;
     let value_literal = format_term_for_pragma(env, value_term)?;
+    // SQLite drops a foreign_keys write while autocommit is off, and still answers success.
+    if pragma_name.eq_ignore_ascii_case("foreign_keys") && !conn.is_autocommit() {
+        return Err(XqliteError::TransactionInProgress);
+    }
     let write_sql = format!("PRAGMA {pragma_name} = {value_literal};");
     let mut write_stmt = conn
         .prepare(&write_sql)

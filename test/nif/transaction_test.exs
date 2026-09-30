@@ -31,6 +31,15 @@ defmodule Xqlite.NIF.TransactionTest do
     assert expected_result == query_savepoint_test_row(conn, id)
   end
 
+  defp hold(conn, :read_blob), do: NIF.blob_open(conn, "main", "tx_test", "name", 1, true)
+  defp hold(conn, :write_blob), do: NIF.blob_open(conn, "main", "tx_test", "name", 1, false)
+
+  defp hold(conn, sql) do
+    {:ok, stmt} = NIF.stmt_prepare(conn, sql)
+    {:row, _} = NIF.stmt_step(stmt)
+    {:ok, stmt}
+  end
+
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix}" do
       @describetag type_tag
@@ -79,21 +88,53 @@ defmodule Xqlite.NIF.TransactionTest do
                  NIF.query(conn, "SELECT * FROM tx_test where id = 101;", [])
       end
 
-      test "commit without begin fails", %{conn: conn} do
-        assert {:error, {:sqlite_failure, code, _, msg}} = NIF.commit(conn)
-        assert code == 21 or String.contains?(msg || "", "no transaction is active")
-      end
+      test "commit and rollback with no transaction open answer :no_transaction", %{conn: conn} do
+        for close <- [&NIF.commit/1, &NIF.rollback/1, &Xqlite.commit/1, &Xqlite.rollback/1],
+            do: assert({:error, :no_transaction} = close.(conn))
 
-      test "rollback without begin fails", %{conn: conn} do
-        assert {:error, {:sqlite_failure, code, _, msg}} = NIF.rollback(conn)
-        assert code == 21 or String.contains?(msg || "", "no transaction is active")
+        sql = "BEGIN; INSERT OR ROLLBACK INTO tx_test VALUES (1, 'a'), (1, 'b')"
+        assert {:error, {:constraint_violation, _, _}} = NIF.execute_batch(conn, sql)
+        assert {:error, :no_transaction} = Xqlite.commit(conn)
       end
 
       test "begin within begin fails", %{conn: conn} do
         assert :ok = NIF.begin(conn)
-        assert {:error, {:sqlite_failure, code, _, msg}} = NIF.begin(conn)
-        assert code == 21 or String.contains?(msg || "", "within a transaction")
+        assert {:error, {:sqlite_failure, 1, 1, _}} = NIF.begin(conn)
         assert :ok = NIF.rollback(conn)
+      end
+
+      test "a commit a deferred key fails leaves the transaction open", %{conn: conn} do
+        {:ok, _} = NIF.register_rollback_hook(conn, self())
+        ddl = "CREATE TABLE ch(p REFERENCES tx_test DEFERRABLE INITIALLY DEFERRED)"
+        :ok = NIF.execute_batch(conn, ddl <> "; BEGIN; INSERT INTO ch VALUES (7)")
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = NIF.commit(conn)
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO tx_test VALUES (7, 'p')", [])
+        assert :ok = NIF.commit(conn)
+        assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT count(*) FROM ch", [])
+        refute_receive {:xqlite_rollback}, 100
+      end
+
+      for kind <- ["UPDATE tx_test SET id = 2 RETURNING 1", :write_blob] do
+        test "a #{kind} mid-run is answered :statement_mid_run", %{conn: conn} do
+          :ok = NIF.execute_batch(conn, "INSERT INTO tx_test VALUES (1, 'a'); SAVEPOINT sp")
+          holder = hold(conn, unquote(kind))
+          assert {:error, :statement_mid_run} = Xqlite.commit(conn)
+          assert {:error, :statement_mid_run} = Xqlite.release_savepoint(conn, "sp")
+          assert {:error, :statement_mid_run} = Xqlite.savepoint(conn, "next")
+          assert :ok = Xqlite.rollback_to_savepoint(conn, "sp")
+          assert :ok = Xqlite.rollback(conn)
+          assert {:ok, true} = NIF.autocommit(conn)
+          assert {:ok, _} = holder
+        end
+      end
+
+      for kind <- ["SELECT id FROM tx_test", :read_blob] do
+        test "a #{kind} mid-run lets commit run", %{conn: conn} do
+          :ok = NIF.execute_batch(conn, "INSERT INTO tx_test VALUES (1, 'a'); BEGIN")
+          holder = hold(conn, unquote(kind))
+          assert :ok = Xqlite.commit(conn)
+          assert {:ok, _} = holder
+        end
       end
 
       test "begin with explicit :deferred mode", %{conn: conn} do
@@ -237,11 +278,7 @@ defmodule Xqlite.NIF.TransactionTest do
         assert :ok = NIF.begin(conn)
         assert :ok = NIF.savepoint(conn, "sp1")
         assert :ok = NIF.release_savepoint(conn, "sp1")
-
-        assert {:error, {:sqlite_failure, code, _, msg}} =
-                 NIF.rollback_to_savepoint(conn, "sp1")
-
-        assert code == 21 or String.contains?(msg || "", "no such savepoint")
+        assert {:error, {:sqlite_failure, 1, 1, _}} = NIF.rollback_to_savepoint(conn, "sp1")
         assert :ok = NIF.rollback(conn)
       end
     end

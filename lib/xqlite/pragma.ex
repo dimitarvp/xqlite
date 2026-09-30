@@ -1039,6 +1039,10 @@ defmodule Xqlite.Pragma do
   `{:error, {:read_only_pragma, name}}`. What SQLite is given is the form
   `check_value/2` answered, never the caller's spelling.
 
+  `:foreign_keys` is one switch for the whole connection: it is written the
+  same way whatever the `:db_name`, and inside a transaction answers
+  `{:error, :transaction_in_progress}`.
+
   ## Options
 
     * `:db_name` (a string, an atom, or `nil`) - Target a specific attached
@@ -1072,7 +1076,7 @@ defmodule Xqlite.Pragma do
 
   defp put_checked(db, key_atom, val, opts) do
     case Keyword.get(opts, :db_name) do
-      nil ->
+      schema when is_nil(schema) or key_atom == :foreign_keys ->
         name = Atom.to_string(key_atom)
         with {:ok, echo} <- XqliteNIF.set_pragma(db, name, val), do: {:ok, reading(name, echo)}
 

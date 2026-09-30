@@ -21,6 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The foreign-key switch inside a transaction answers
+  `{:error, :transaction_in_progress}` instead of `{:ok, nil}`.** SQLite
+  ignores a `PRAGMA foreign_keys` write while a transaction or a savepoint
+  is open, and still reports success. `XqliteNIF.set_pragma/3` now rejects
+  that write before it runs, whatever the letter case of the name, so
+  `Xqlite.set_pragma/3`, `Xqlite.Pragma.put/3,4` (with or without
+  `:db_name`), `Xqlite.enable_foreign_key_enforcement/1` and
+  `Xqlite.disable_foreign_key_enforcement/1` answer alike and never report
+  a change SQLite did not make. Every other PRAGMA is written as before, and
+  a `PRAGMA foreign_keys` statement sent as SQL still reaches SQLite
+  unchanged.
+- **The docs say what a failed commit leaves behind.** A `COMMIT` that fails
+  on a deferred foreign key, on another connection's lock or on a write of
+  the same connection still running keeps the transaction open: repair and
+  call `commit/1` again, or call `rollback/1`; `autocommit/1` tells whether
+  a transaction is open. A constraint error under the default `ABORT` undoes
+  only its own statement. None of these sends `{:xqlite_rollback}`, and
+  neither does `close/1` when it rolls an open transaction back. The docs of
+  `Xqlite.rollback/1` and `XqliteNIF.register_rollback_hook/2` said a
+  constraint error or a failed commit was rolled back and sent that message,
+  and the 0.7.0 entry's "after each rollback" left `close/1` out.
+  `XqliteNIF.rollback/1`, `savepoint/2` and `release_savepoint/2` no longer
+  state wrong rules: a rollback discards the whole transaction, a savepoint
+  with no transaction open starts one, and releasing the savepoint that
+  started a transaction commits it.
+
 - **A result column name that is not UTF-8 answers an error.** A table
   whose stored CREATE text names a column with bytes that are not UTF-8 made
   the query functions panic inside rusqlite with the connection lock held,
@@ -416,6 +442,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **`commit/1` and `rollback/1` answer `{:error, :no_transaction}` when no
+  transaction is open**, on `Xqlite` and `XqliteNIF` alike, before any
+  statement runs. They answered `{:error, {:sqlite_failure, 1, 1, message}}`
+  before. `@type error_reason` gains `:no_transaction`.
+- **`commit/1`, `savepoint/2` and `release_savepoint/2` answer
+  `{:error, :statement_mid_run}` while a write of the same connection is
+  mid-run**, on both modules: a write stepped but not yet run to its end or
+  reset, or a blob open for writing. SQLite rejects them with `SQLITE_BUSY`
+  then, which came back as `{:database_busy_or_locked, 5, _}`, the answer a
+  lock held by another connection gives, so code that retries on busy
+  retried against its own statement. A lock still answers
+  `{:database_busy_or_locked, 5, _}`; `rollback/1` and
+  `rollback_to_savepoint/2` run whatever is mid-run.
 
 - **The query functions read rows through the code statements and streams
   use.** `query/3`, `query_cancellable/4`, `query_with_changes/3` and

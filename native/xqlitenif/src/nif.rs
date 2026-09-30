@@ -579,9 +579,7 @@ fn set_pragma<'a>(
         // autocheckpoint wal_hook, evicting our master callback from
         // the shared slot. Take the slot back and mirror the threshold
         // SQLite reports, so our callback both notifies subscribers and
-        // emulates the autocheckpoint the caller just configured. Raw
-        // SQL (`query`/`execute_batch` "PRAGMA ...") bypasses this
-        // repair — documented limitation.
+        // emulates the autocheckpoint the caller just configured.
         if pragma_name
             .as_slice()
             .eq_ignore_ascii_case(b"wal_autocheckpoint")

@@ -142,6 +142,35 @@ defmodule XqlitePragmaTest do
                  P.get(db, :foreign_key_check, "children")
       end
 
+      test "the anchor: FOREIGN_KEYS is rejected inside BEGIN", %{db: db} do
+        :ok = NIF.begin(db)
+        assert {:error, :transaction_in_progress} = NIF.set_pragma(db, "FOREIGN_KEYS", 0)
+        assert {:ok, _} = NIF.set_pragma(db, "defer_foreign_keys", 1)
+        assert {:ok, 1} = NIF.get_pragma(db, "defer_foreign_keys")
+      end
+
+      property "every function rejects the foreign-key switch inside a transaction", %{db: db} do
+        check all(
+                via <- member_of([:raw, :set_pragma, :put, :put_main, :switch]),
+                name <- spelling_of(:foreign_keys),
+                on <- member_of([0, 1]),
+                open <- member_of(["BEGIN", "SAVEPOINT s"]),
+                max_runs: 2000
+              ) do
+          :ok = NIF.execute_batch(db, open)
+          assert {:error, :transaction_in_progress} = write_fk(via, db, name, on)
+          :ok = NIF.rollback(db)
+        end
+      end
+
+      property "every other writable PRAGMA is written inside a transaction", %{db: db} do
+        check all({name, value} <- accepted_pair(), name != :foreign_keys, max_runs: 2000) do
+          :ok = NIF.begin(db)
+          refute Xqlite.set_pragma(db, name, value) == {:error, :transaction_in_progress}
+          :ok = NIF.rollback(db)
+        end
+      end
+
       # All of the readable PRAGMAs with one arg are actually instructions that change the DB.
       # We are not going to test those.
 
@@ -866,6 +895,13 @@ defmodule XqlitePragmaTest do
 
   defp recased_char({char, index}) when rem(index, 2) == 0, do: String.upcase(char)
   defp recased_char({char, _index}), do: String.downcase(char)
+
+  defp write_fk(:raw, db, name, on), do: NIF.set_pragma(db, to_string(name), on)
+  defp write_fk(:set_pragma, db, name, on), do: Xqlite.set_pragma(db, name, on)
+  defp write_fk(:put, db, name, on), do: P.put(db, name, on)
+  defp write_fk(:put_main, db, name, on), do: P.put(db, name, on, db_name: "main")
+  defp write_fk(:switch, db, _name, 1), do: Xqlite.enable_foreign_key_enforcement(db)
+  defp write_fk(:switch, db, _name, 0), do: Xqlite.disable_foreign_key_enforcement(db)
 
   # Every door, on a connection of its own, with a value no PRAGMA accepts so
   # that nothing is written and the answers depend on the name alone.

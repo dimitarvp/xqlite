@@ -342,13 +342,39 @@ statement runs.
 A signal that stops a write while it runs undoes more than that statement.
 SQLite rolls back the whole transaction, a `BEGIN` you issued included, and
 turns autocommit back on: every statement you run afterwards commits on its
-own, and a later `COMMIT` or `ROLLBACK` answers an error because no
-transaction is open. `Xqlite.autocommit/1` tells you whether the transaction
-survived. A cancelled read rolls back nothing.
+own, and a later `Xqlite.commit/1` or `Xqlite.rollback/1` answers
+`{:error, :no_transaction}`. `Xqlite.autocommit/1` tells you whether the
+transaction survived. A cancelled read rolls back nothing.
 `Xqlite.execute_batch_cancellable/3` keeps what the statements before the
 cancelled one committed. Rows that a `RETURNING` write handed out before the
 cancel, through `Xqlite.multi_step_cancellable/3` or a stream, describe
 changes the cancel took back.
+
+### A failed commit leaves the transaction open
+
+SQLite keeps the transaction open when a `COMMIT` fails on a deferred
+foreign key that is still broken, on a lock another connection holds, or on
+a write of the same connection that is still mid-run. `Xqlite.commit/1`
+answers the error — `{:constraint_violation, :constraint_foreign_key, _}`,
+`{:database_busy_or_locked, 5, _}` or `:statement_mid_run` — and rolls
+nothing back: the writes and the locks stay, and no `{:xqlite_rollback}`
+message is sent. Repair and commit again, or call `Xqlite.rollback/1`.
+`Xqlite.autocommit/1` answers `{:ok, false}` while the transaction is open.
+
+```elixir
+# child.parent_id is a DEFERRABLE INITIALLY DEFERRED foreign key to parent.id
+:ok = Xqlite.begin(conn)
+{:ok, %Xqlite.Result{changes: 1}} = Xqlite.execute(conn, "INSERT INTO child (parent_id) VALUES (7)")
+{:error, {:constraint_violation, :constraint_foreign_key, _}} = Xqlite.commit(conn)
+{:ok, %Xqlite.Result{changes: 1}} = Xqlite.execute(conn, "INSERT INTO parent (id) VALUES (7)")
+:ok = Xqlite.commit(conn)
+```
+
+`:statement_mid_run` is no lock, so a retry answers it again until the
+statement is run to its end, reset or finalized, or the blob is closed. A
+constraint error inside the transaction, under the default `ABORT`, undoes
+only its own statement. `Xqlite.close/1` rolls an open transaction back and
+sends no message.
 
 ### Delete sessions before the connection
 

@@ -83,7 +83,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **Diagnostics & connection state:** `compile_options/1`, `sqlite_version/0`, `connection_stats/1` (per-connection `sqlite3_db_status` counters), `autocommit/1`, `txn_state/2`, structured `wal_checkpoint/3`
 - **Result integration:** `Xqlite.Result` implements `Table.Reader` (works with Explorer, Kino, VegaLite)
 
-Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 86 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
+Errors are structured tuples: `{:error, {:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}}`, `{:error, {:read_only_database, code, message}}`, etc. 87 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback.
 
 ## Focused examples
 
@@ -138,7 +138,7 @@ affects the others.
 
 ```elixir
 {:ok, c_h} = XqliteNIF.register_commit_hook(conn, self())     # {:xqlite_commit} before each commit
-{:ok, r_h} = XqliteNIF.register_rollback_hook(conn, self())   # {:xqlite_rollback} after each rollback
+{:ok, r_h} = XqliteNIF.register_rollback_hook(conn, self())   # {:xqlite_rollback} after each rollback, except close/1's
 {:ok, w_h} = XqliteNIF.register_wal_hook(conn, self())        # {:xqlite_wal, db_name, pages} after WAL commits
 # ...later, unregister specific subscribers by their handles:
 :ok = XqliteNIF.unregister_commit_hook(conn, c_h)

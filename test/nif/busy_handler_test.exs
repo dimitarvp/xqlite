@@ -285,6 +285,19 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert {:error, :connection_closed} = Xqlite.unregister_busy_observer(conn, 0)
   end
 
+  test "a commit another connection's reader blocks keeps the lock answer", %{path: path} do
+    {:ok, writer} = Xqlite.open(path, journal_mode: :delete, busy_timeout: 0)
+    {:ok, reader} = NIF.open(path)
+    :ok = NIF.execute_batch(reader, "BEGIN; SELECT * FROM sqlite_master")
+    :ok = NIF.execute_batch(writer, "BEGIN; CREATE TABLE t(id); INSERT INTO t VALUES (1), (2)")
+    {:ok, read} = NIF.stmt_prepare(writer, "SELECT id FROM t")
+    {:row, _} = NIF.stmt_step(read)
+    {:ok, idle_write} = NIF.stmt_prepare(writer, "UPDATE t SET id = id")
+    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.commit(writer)
+    assert [{:row, _}, :ok] = [NIF.stmt_step(read), NIF.stmt_finalize(idle_write)]
+    :ok = NIF.close(reader)
+  end
+
   test "GenServer-like process forwards busy events", %{path: path} do
     test_pid = self()
 

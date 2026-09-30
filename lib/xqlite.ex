@@ -296,6 +296,7 @@ defmodule Xqlite do
           | :multiple_statements
           | :no_pages
           | :no_statement
+          | :no_transaction
           | :not_in_wal_mode
           | :null_byte_in_string
           | :operation_cancelled
@@ -1346,6 +1347,9 @@ defmodule Xqlite do
 
   By default, SQLite parses foreign key constraints but does not enforce them.
   This function turns on enforcement.
+
+  Inside a transaction, where SQLite ignores the switch, it answers
+  `{:error, :transaction_in_progress}` and changes nothing.
 
   See: [SQLite PRAGMA foreign_keys](https://www.sqlite.org/pragma.html#pragma_foreign_keys)
   """
@@ -2633,7 +2637,8 @@ defmodule Xqlite do
   nothing is sent to SQLite; a PRAGMA that can only be read is refused with
   `{:error, {:read_only_pragma, name}}`. Without the check SQLite would
   parse what it could of the word and answer `{:ok, nil}` while leaving the
-  setting at its fallback.
+  setting at its fallback. `:foreign_keys` written inside a transaction,
+  where SQLite ignores it, answers `{:error, :transaction_in_progress}`.
 
   A PRAGMA `Xqlite.Pragma` does not model keeps the raw path: its value
   reaches SQLite as written, and SQLite decides. A key that is neither an
@@ -3490,6 +3495,13 @@ defmodule Xqlite do
 
   @doc """
   Commits the current transaction. Emits `[:xqlite, :transaction, :commit]`.
+
+  With no transaction open it answers `{:error, :no_transaction}`, and while
+  a write of this connection is mid-run (a write stepped but not yet run to
+  its end or reset, a blob open for writing) `{:error, :statement_mid_run}`.
+  That answer, a deferred foreign key still broken and another connection's
+  lock all leave the transaction open: repair and commit again, or call
+  `rollback/1`. `autocommit/1` tells whether a transaction is open.
   """
   @spec commit(conn()) :: :ok | error()
   def commit(conn) do
@@ -3514,10 +3526,13 @@ defmodule Xqlite do
   Rolls back the current transaction. Emits
   `[:xqlite, :transaction, :rollback]` with `reason: :user_initiated`.
 
-  SQLite-internal rollbacks (constraint violations, deferred-FK failures
-  at commit time) surface as errors from `commit/1` rather than passing
-  through here — those events come from the `register_rollback_hook/2`
-  fan-out instead.
+  With no transaction open it answers `{:error, :no_transaction}`; a
+  statement mid-run does not stop it. A `commit/1` that fails on a deferred
+  foreign key or a lock, and a constraint error under the default `ABORT`,
+  roll nothing back, so neither sends `{:xqlite_rollback}` to
+  `XqliteNIF.register_rollback_hook/2` subscribers; a rollback SQLite
+  performs itself (`INSERT OR ROLLBACK`, a cancelled write) sends it without
+  passing through here.
   """
   @spec rollback(conn()) :: :ok | error()
   def rollback(conn) do
@@ -3541,7 +3556,8 @@ defmodule Xqlite do
 
   @doc """
   Creates a savepoint with the given name. Emits
-  `[:xqlite, :savepoint, :create]`.
+  `[:xqlite, :savepoint, :create]`. Answers `{:error, :statement_mid_run}`
+  while a write of this connection is mid-run, as `commit/1` does.
   """
   @spec savepoint(conn(), String.t()) :: :ok | error()
   def savepoint(conn, name) when is_binary(name) do
@@ -3565,6 +3581,8 @@ defmodule Xqlite do
 
   @doc """
   Releases a savepoint. Emits `[:xqlite, :savepoint, :release]`.
+  Answers `{:error, :statement_mid_run}` while a write of this connection is
+  mid-run, as `commit/1` does.
   """
   @spec release_savepoint(conn(), String.t()) :: :ok | error()
   def release_savepoint(conn, name) when is_binary(name) do

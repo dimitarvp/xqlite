@@ -298,6 +298,8 @@ pub(crate) enum XqliteError {
         mode: Atom,
     },
     NotInWalMode,
+    NoTransaction,
+    TransactionInProgress,
     InvalidAuthorizerAction {
         action: Atom,
     },
@@ -688,10 +690,7 @@ impl Display for XqliteError {
                 write!(f, "Statement is already finalized")
             }
             XqliteError::StatementMidRun => {
-                write!(
-                    f,
-                    "Statement is mid-run: reset it before binding or clearing its parameters"
-                )
+                write!(f, "Statement is mid-run: reset or finalize it first")
             }
             XqliteError::InternalEncodingError { context } => {
                 write!(f, "Internal error during result encoding: {context}")
@@ -735,6 +734,8 @@ impl Display for XqliteError {
                 "Invalid checkpoint mode. Allowed: :passive, :full, :restart, :truncate"
             ),
             XqliteError::NotInWalMode => write!(f, "The database is not in WAL mode"),
+            XqliteError::NoTransaction => write!(f, "No transaction is open"),
+            XqliteError::TransactionInProgress => write!(f, "A transaction is open"),
             XqliteError::InvalidAuthorizerAction { action: _ } => {
                 write!(f, "Invalid authorizer action atom")
             }
@@ -1103,6 +1104,8 @@ impl Encoder for XqliteError {
                 (atoms::invalid_checkpoint_mode(), *mode).encode(env)
             }
             XqliteError::NotInWalMode => atoms::not_in_wal_mode().encode(env),
+            XqliteError::NoTransaction => atoms::no_transaction().encode(env),
+            XqliteError::TransactionInProgress => atoms::transaction_in_progress().encode(env),
             XqliteError::InvalidAuthorizerAction { action } => {
                 (atoms::invalid_authorizer_action(), *action).encode(env)
             }
