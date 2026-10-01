@@ -409,7 +409,7 @@ defmodule Xqlite.NIF.StatementTest do
       assert {:error, :no_statement} = Xqlite.prepare(conn, long_comment)
     end
 
-    test "SQL past the SQL length limit is :too_big on both compile paths", %{conn: conn} do
+    test "SQL past the SQL length limit is :too_big on every compile path", %{conn: conn} do
       assert {:ok, 100} = Xqlite.put_limit(conn, :sql_length, 100)
       sql = "SELECT '#{String.duplicate("x", 92)}'"
 

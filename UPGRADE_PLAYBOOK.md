@@ -36,20 +36,7 @@ here is optional on a bump that changes the bundled SQLite version.
    sound only while `Session<'conn>` holds `PhantomData<&'conn
    Connection>` plus a raw pointer and never a live reference — a
    rusqlite that stores `&'conn Connection` turns that leak path into
-   undefined behaviour. Re-measure how rusqlite maps a parameter name to
-   an index too. A keyword list's keys are resolved through
-   `query.rs:parameter_indices_by_name`, which builds a map with
-   rusqlite's `Statement::parameter_name`. That function converts the
-   name with an `expect` on UTF-8 — the `expect` is rusqlite's own, not
-   this crate's — and it stays unreachable because every SQL text this
-   crate prepares was judged UTF-8 at the door, so the parameter names
-   SQLite hands back are UTF-8 too; a bump re-checks that
-   `parameter_name` still takes that path. A key the map does not hold
-   answers `{:invalid_parameter_name, name}`. A rusqlite that starts
-   answering a name differently —
-   raising on a name that is no UTF-8, reporting an I/O failure rather
-   than absence, or numbering the names from something other than one —
-   changes which keys are refused.
+   undefined behaviour.
 4. **Re-check the compile-option contract.** Tests and docs depend on
    exact build flags; run a connection and read
    `PRAGMA compile_options`, then confirm:

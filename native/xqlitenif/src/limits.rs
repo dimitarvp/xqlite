@@ -101,32 +101,6 @@ pub(crate) unsafe fn length_limit(db_handle: *mut ffi::sqlite3) -> usize {
     limit.max(0) as usize
 }
 
-/// Runs `read` with the connection's length limit lifted to SQLite's own
-/// ceiling, and puts the caller's limit back before it answers.
-///
-/// `sqlite3_expanded_sql` builds its answer under that limit and hands back
-/// nothing when the expansion does not fit — the same answer it gives for a
-/// statement that is not there at all. Lifting the limit for the read tells
-/// the two apart whatever the caller set.
-///
-/// # Safety
-///
-/// The caller holds the connection Mutex for the whole call and `db_handle`
-/// is the live `sqlite3*` that Mutex guards.
-pub(crate) unsafe fn with_length_limit_lifted<T>(
-    db_handle: *mut ffi::sqlite3,
-    read: impl FnOnce() -> T,
-) -> T {
-    // SAFETY: forwarded from this function's own contract.
-    let previous =
-        unsafe { ffi::sqlite3_limit(db_handle, ffi::SQLITE_LIMIT_LENGTH, c_int::MAX) };
-    let answer = read();
-    // SAFETY: forwarded from this function's own contract.
-    unsafe { ffi::sqlite3_limit(db_handle, ffi::SQLITE_LIMIT_LENGTH, previous) };
-
-    answer
-}
-
 /// Refuses a name a door binds as a parameter by the limit every bound value
 /// is judged against, before the bind, so the refusal leaves the statement
 /// untouched. Its one caller is `schema.rs:create_sql`, behind

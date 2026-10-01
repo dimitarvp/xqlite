@@ -114,6 +114,13 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:ok, 0} = NIF.get_pragma(conn, "user_version")
       end
 
+      test "set_pragma/3 writes an atom value as one quoted string", %{conn: conn} do
+        second = :"0; PRAGMA recursive_triggers = 1"
+        assert {:ok, nil} = NIF.set_pragma(conn, "foreign_keys", second)
+        assert {:ok, 0} = NIF.get_pragma(conn, "recursive_triggers")
+        assert {:error, :null_byte_in_string} = NIF.set_pragma(conn, "foreign_keys", :"0\0x")
+      end
+
       property "a bit size that is no whole byte is refused by its kind", %{conn: conn} do
         check all(bits <- partial_byte_bitstring(), max_runs: 2000) do
           assert {:error, {:unsupported_data_type, :bitstring}} =

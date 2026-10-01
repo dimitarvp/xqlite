@@ -220,19 +220,10 @@ defmodule XqliteNIF do
   where `rollback/1` undoes it.
 
   A string holding a second statement after the first is rejected with
-  `{:error, :multiple_statements}`, and neither statement runs.
+  `{:error, :multiple_statements}`, and nothing in it runs and no setting changes.
   `execute_batch/2` is the exception: it exists to run several statements,
   one at a time, and keeps the ones that ran before a failure unless it
   opened their transaction itself.
-
-  To tell a second statement from a trailing comment, the library compiles
-  the text after the first one, and SQLite applies some PRAGMAs while it
-  compiles them, `foreign_keys` and `query_only` among them, in either
-  statement. Such a PRAGMA takes effect in a rejected string too:
-  `"SELECT 1; PRAGMA foreign_keys = OFF"` answers
-  `{:error, :multiple_statements}` and turns foreign-key enforcement off.
-  Pass one statement per call; the Known limitations guide says what to do
-  with SQL text from an untrusted source.
 
   Column names are read before anything is bound or run: on a connection
   without an authorizer, one that is not UTF-8 answers
@@ -481,19 +472,10 @@ defmodule XqliteNIF do
   dropped and answers its count; `query/3` reads the rows.
 
   A string holding a second statement after the first is rejected with
-  `{:error, :multiple_statements}`, and neither statement runs.
+  `{:error, :multiple_statements}`, and nothing in it runs and no setting changes.
   `execute_batch/2` is the exception: it exists to run several statements,
   one at a time, and keeps the ones that ran before a failure unless it
   opened their transaction itself.
-
-  To tell a second statement from a trailing comment, the library compiles
-  the text after the first one, and SQLite applies some PRAGMAs while it
-  compiles them, `foreign_keys` and `query_only` among them, in either
-  statement. Such a PRAGMA takes effect in a rejected string too:
-  `"SELECT 1; PRAGMA foreign_keys = OFF"` answers
-  `{:error, :multiple_statements}` and turns foreign-key enforcement off.
-  Pass one statement per call; the Known limitations guide says what to do
-  with SQL text from an untrusted source.
 
   Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
@@ -711,6 +693,8 @@ defmodule XqliteNIF do
     - Booleans (`true` typically maps to `ON` or `1`, `false` to `OFF` or `0`)
     - Atoms that SQLite can interpret (e.g., `:on`, `:off`, `:wal`, `:delete`).
       Refer to SQLite documentation for valid values for specific PRAGMAs.
+      An atom other than `true`, `false` and `nil` is written as a quoted string, which
+      SQLite reads as the bare word; a NUL byte in it returns `{:error, :null_byte_in_string}`.
 
   The NIF attempts to format the Elixir `value` into a string literal suitable
   for the `PRAGMA name = value_literal;` SQL statement.
@@ -1460,7 +1444,7 @@ defmodule XqliteNIF do
   Returns `{:ok, stream_handle_resource}` or `{:error, reason}`.
   The `stream_handle_resource` is an opaque reference.
 
-  Streams exactly ONE SQL statement, by the same rule as `stmt_prepare/2`:
+  Compiles exactly ONE SQL statement, by the same rule as `stmt_prepare/2`:
   SQL holding no statement at all is `:no_statement` and a second
   statement after the first is `:multiple_statements`, so no stream is ever
   opened over half a string. A trailing comment, extra semicolons and
@@ -1596,13 +1580,14 @@ defmodule XqliteNIF do
   Prepares a manually managed statement (raw NIF).
 
   Most users want `Xqlite.prepare/2`.
-  The handle holds exactly ONE SQL statement:
+  Compiles exactly ONE SQL statement:
   SQL holding no statement at all and a second statement after the first are
   structured errors (`:no_statement` / `:multiple_statements`), and a
   syntax error is `{:sql_input_error, %{sql: _, offset: _, code: _, message:
   _}}` carrying the byte offset SQLite reports — no silent partial
   compilation. Text after the first statement counts as a second statement
-  only when it compiles to one, so a trailing comment, extra semicolons and
+  when it holds anything but whitespace, comments and semicolons, and is
+  never compiled, so a trailing comment, extra semicolons and
   whitespace are accepted; `query/3`, `execute/3`, `stream_open/3` and
   `explain_analyze/3` apply the same rule. The returned handle must
   eventually be finalized via `stmt_finalize/1` (garbage collection also

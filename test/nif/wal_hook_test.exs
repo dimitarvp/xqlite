@@ -253,6 +253,15 @@ defmodule Xqlite.NIF.WalHookTest do
     :ok = NIF.unregister_wal_hook(conn, h)
   end
 
+  test "a rejected wal_autocheckpoint write keeps the subscribers", %{conn: conn} do
+    {:ok, h} = NIF.register_wal_hook(conn, self())
+    off = "SELECT 1; PRAGMA wal_autocheckpoint = 0"
+    assert {:error, :multiple_statements} = NIF.query(conn, off, [])
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+    :ok = NIF.unregister_wal_hook(conn, h)
+  end
+
   test "a raw wal_autocheckpoint statement silences subscribers until set_pragma writes it",
        %{conn: conn} do
     {:ok, h} = NIF.register_wal_hook(conn, self())

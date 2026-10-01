@@ -89,30 +89,28 @@ of its own.
 **What to do.** Open a read-only connection with `Xqlite.open_readonly/1`,
 not with a `mode=ro` URI.
 
-## A rejected second statement can still change a setting
+## A PRAGMA stays applied when a syntax error follows it
 
-**What happens.** Every function that runs a single statement —
-`Xqlite.query/4`, `Xqlite.execute/4`, `Xqlite.prepare/2`, `Xqlite.stream/4`,
-`Xqlite.explain_analyze/4` and the `XqliteNIF` functions they call —
-rejects a string holding a second statement with
-`{:error, :multiple_statements}`, and neither statement runs. A PRAGMA in
-the string can take effect all the same:
-`"SELECT 1; PRAGMA foreign_keys = OFF"` is rejected and turns foreign-key
-enforcement off. On a read-only connection that xqlite keeps read-only
-with `query_only` (above), `"SELECT 1; PRAGMA query_only = 0"` is rejected
-and the next write succeeds.
+**What happens.** A PRAGMA that SQLite applies while compiling
+(`foreign_keys`, `query_only` and the other flag PRAGMAs, `busy_timeout`,
+`cache_size`, `temp_store`) stays applied when the same statement then
+fails with a syntax error, as in `PRAGMA foreign_keys = OFF garbage`: the
+call answers `{:error, {:sql_input_error, _}}` and foreign-key enforcement
+is off. Two such PRAGMAs do more than change a setting: a `temp_store` change
+drops every TEMP table, and a `wal_autocheckpoint` write takes the WAL hook
+from the library, so `XqliteNIF.register_wal_hook/2` subscribers hear no
+more commits while `XqliteNIF.get_pragma/2` still reads the library's
+threshold.
 
-**Why.** To tell a second statement from a trailing comment, the library
-compiles the text after the first one, and SQLite applies some PRAGMAs
-while it compiles them, `foreign_keys` and `query_only` among them, in
-either statement. A PRAGMA that acts when its statement runs, such as
-`user_version`, does not take effect.
+**Why.** It is SQLite's own order: its parser applies the PRAGMA before it
+reaches the word that does not fit. A string holding a second statement
+is another case: it is rejected with `{:error, :multiple_statements}` and
+changes no setting.
 
-**What to do.** Pass one statement per call, and keep SQL text from an
-untrusted source away from these functions. Where you must run SQL you did
-not write, deny `:pragma` with `Xqlite.set_authorizer/2`: SQLite asks the
-authorizer before it applies a PRAGMA, so the string answers
-`{:error, {:authorization_denied, 23, _}}` and changes nothing.
+**What to do.** Where you must run SQL you did not write, deny `:pragma`
+with `Xqlite.set_authorizer/2`: SQLite asks the authorizer before it
+applies a PRAGMA, so the setting stays as it was and the statement still
+answers its syntax error.
 
 ## Backup and restore
 

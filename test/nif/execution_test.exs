@@ -420,6 +420,12 @@ defmodule Xqlite.NIF.ExecutionTest do
 
         assert {:ok, %{rows: [["a"], ["b"], ["c"]]}} =
                  NIF.query(conn, "SELECT name FROM exec_test ORDER BY id", [])
+
+        unreadable = "INSERT INTO exec_test (name) VALUES (CAST(x'ff' AS TEXT)) RETURNING name"
+        assert {:ok, 1} = NIF.execute(conn, unreadable, [])
+        assert {:ok, 1} = NIF.execute_cancellable(conn, unreadable, [], [])
+        assert {:ok, %Xqlite.Result{changes: 1}} = Xqlite.execute(conn, unreadable)
+        assert {:error, {:utf8_error, 0, _}} = NIF.query(conn, unreadable, [])
       end
 
       test "a batch and execute run PRAGMA incremental_vacuum until no page is free",

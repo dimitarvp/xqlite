@@ -14,13 +14,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// Compiles exactly one SQL statement and hands the raw statement to the
 /// caller, who owns it and must finalize it.
 ///
-/// Every entry point that compiles SQL itself goes through here, so they all
-/// classify one input the same way. The rule is rusqlite's
-/// (`rusqlite::Connection::prepare_with_flags`): input that holds no statement
-/// at all — empty, whitespace, comments, bare semicolons — is refused, and
-/// text after the first statement is refused only when re-compiling it yields
-/// a statement of its own. Trailing whitespace, comments and extra semicolons
-/// therefore pass.
+/// Every function that runs one statement goes through here, so they all
+/// classify one input alike: no statement at all is rejected, and so is a tail
+/// holding more than `blank_len` passes over. SQLite applies PRAGMAs while
+/// compiling, so the tail is never compiled and a leading PRAGMA is judged first.
 ///
 /// # Safety
 /// The caller holds the connection Mutex for the whole call, and `db` is that
@@ -31,6 +28,9 @@ pub(crate) unsafe fn prepare_one(
 ) -> Result<NonNull<ffi::sqlite3_stmt>, XqliteError> {
     crate::query::reject_interior_nul(sql)?;
     let len = sql_byte_len(sql.len())?;
+    if leading_pragma_holds_more(sql.as_bytes()) {
+        return Err(XqliteError::MultipleStatements);
+    }
     let c_sql = CString::new(sql).map_err(|_| XqliteError::NulErrorInString)?;
     let mut raw_stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
     let mut tail_ptr: *const c_char = std::ptr::null();
@@ -48,25 +48,83 @@ pub(crate) unsafe fn prepare_one(
     }
 
     let stmt = NonNull::new(raw_stmt).ok_or(XqliteError::NoStatement)?;
+    let tail_blank = tail_offset(c_sql.as_ptr(), tail_ptr, len)
+        .is_none_or(|start| blank_end(sql.as_bytes(), start) == sql.len());
 
-    match tail_offset(c_sql.as_ptr(), tail_ptr, len) {
-        None => Ok(stmt),
-        // SAFETY: `db` is live and its Mutex is held (fn contract); `start` is
-        // a byte offset strictly inside `c_sql`, which outlives the call.
-        Some(start) => match unsafe { tail_holds_statement(db, &c_sql, start, len, sql) } {
-            Ok(false) => Ok(stmt),
-            Ok(true) => {
-                // SAFETY: `stmt` came from the prepare above, is owned here,
-                // and is finalized exactly once on this path.
-                unsafe { ffi::sqlite3_finalize(stmt.as_ptr()) };
-                Err(XqliteError::MultipleStatements)
+    match tail_blank {
+        true => Ok(stmt),
+        false => {
+            // SAFETY: `stmt` came from the prepare above, is owned here, and
+            // is finalized exactly once, on this path.
+            unsafe { ffi::sqlite3_finalize(stmt.as_ptr()) };
+            Err(XqliteError::MultipleStatements)
+        }
+    }
+}
+
+/// Whether a first statement that is a PRAGMA, `EXPLAIN [QUERY PLAN]` in front
+/// or not, is followed by anything after its first semicolon outside quotes and
+/// comments, where a PRAGMA ends. A keyword ends where SQLite's words end.
+fn leading_pragma_holds_more(sql: &[u8]) -> bool {
+    let word_end = |at: usize, word: &[u8]| {
+        let end = at + word.len();
+        let id_char = |c: &u8| c.is_ascii_alphanumeric() || b"_$".contains(c) || *c > 127;
+        let spelled = sql.get(at..end)?.eq_ignore_ascii_case(word);
+        (spelled && !sql.get(end).is_some_and(id_char)).then_some(end)
+    };
+    let lead = blank_end(sql, 0);
+    let explain = word_end(lead, b"EXPLAIN").map(|end| blank_end(sql, end));
+    let plan = explain
+        .and_then(|at| word_end(at, b"QUERY"))
+        .and_then(|end| word_end(blank_end(sql, end), b"PLAN"))
+        .map(|end| blank_end(sql, end));
+    word_end(plan.or(explain).unwrap_or(lead), b"PRAGMA")
+        .and_then(|end| semicolon_end(sql, end))
+        .is_some_and(|after| blank_end(sql, after) < sql.len())
+}
+
+/// The byte after the first semicolon from `from` on outside a comment and a
+/// quoted string or name (`'…'`, `"…"`, `` `…` ``, `[…]`).
+fn semicolon_end(sql: &[u8], from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(rest) = sql.get(at..).filter(|rest| !rest.is_empty()) {
+        at += match rest {
+            [b';', ..] => return Some(at + 1),
+            [open, body @ ..] if b"'\"`[".contains(open) => {
+                let close = if *open == b'[' { b']' } else { *open };
+                let closed = body.iter().position(|c| *c == close);
+                closed.map_or(rest.len(), |i| i + 2)
             }
-            Err(e) => {
-                // SAFETY: as above — the only other path that drops `stmt`.
-                unsafe { ffi::sqlite3_finalize(stmt.as_ptr()) };
-                Err(e)
-            }
-        },
+            _ => blank_len(rest).unwrap_or(1),
+        };
+    }
+    None
+}
+
+/// Where the text from `from` on stops being what `blank_len` passes over.
+fn blank_end(sql: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while let Some(len) = sql.get(at..).and_then(blank_len) {
+        at += len;
+    }
+    at
+}
+
+/// How many bytes at the start of `rest` SQLite passes over without starting a
+/// statement (`sqlite3GetToken`): `;`, a `--` or `/*` comment (`/*` needs a
+/// byte after it), a UTF-8 byte order mark, or a whitespace run, which `\v` only continues.
+fn blank_len(rest: &[u8]) -> Option<usize> {
+    let space = |c: &&u8| c.is_ascii_whitespace() || **c == 0x0b;
+    match rest {
+        [b';', ..] => Some(1),
+        [0xEF, 0xBB, 0xBF, ..] => Some(3),
+        [b'-', b'-', ..] => Some(rest.iter().take_while(|c| **c != b'\n').count()),
+        [b'/', b'*', body @ ..] if !body.is_empty() => {
+            let closed = body.windows(2).position(|pair| pair == b"*/");
+            Some(closed.map_or(rest.len(), |i| i + 4))
+        }
+        [c, ..] if c.is_ascii_whitespace() => Some(rest.iter().take_while(space).count()),
+        _token_or_end => None,
     }
 }
 
@@ -218,9 +276,8 @@ fn sql_byte_len(len: usize) -> Result<c_int, XqliteError> {
 }
 
 /// Where the text SQLite did not compile starts, as a byte offset into the
-/// buffer. `None` when SQLite reported no tail or consumed everything —
-/// rusqlite's own bounds, so the two agree on what counts as a tail.
-fn tail_offset(start: *const c_char, tail: *const c_char, len: c_int) -> Option<c_int> {
+/// buffer. `None` when SQLite reported no tail or consumed everything.
+fn tail_offset(start: *const c_char, tail: *const c_char, len: c_int) -> Option<usize> {
     if tail.is_null() {
         None
     } else {
@@ -228,56 +285,7 @@ fn tail_offset(start: *const c_char, tail: *const c_char, len: c_int) -> Option<
         if n <= 0 || n >= len as isize {
             None
         } else {
-            c_int::try_from(n).ok()
-        }
-    }
-}
-
-/// Re-compiles the tail to decide whether it is a second statement or only
-/// whitespace, comments and semicolons. A syntax error in the tail is the
-/// caller's error, exactly as it is for `query`.
-///
-/// # Safety
-/// The caller holds the connection Mutex, `db` is that connection's live
-/// handle, and `start` is a byte offset strictly inside `c_sql`.
-unsafe fn tail_holds_statement(
-    db: *mut ffi::sqlite3,
-    c_sql: &CStr,
-    start: c_int,
-    len: c_int,
-    sql: &str,
-) -> Result<bool, XqliteError> {
-    let mut raw_stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
-    // SAFETY: `start` is a byte offset strictly inside `c_sql` (fn contract),
-    // so the offset pointer stays within that same allocation.
-    let tail_ptr = unsafe { c_sql.as_ptr().offset(start as isize) };
-
-    // SAFETY: `db` is live and its Mutex is held (fn contract). `c_sql` owns
-    // the buffer `tail_ptr` points into and outlives the call; a null tail
-    // out-param tells SQLite we do not want the tail back.
-    let rc = unsafe {
-        ffi::sqlite3_prepare_v2(
-            db,
-            tail_ptr,
-            len - start,
-            &mut raw_stmt,
-            std::ptr::null_mut(),
-        )
-    };
-
-    if rc != ffi::SQLITE_OK {
-        let tail_sql = sql.get(start as usize..).unwrap_or(sql);
-        // SAFETY: `db` is live and its Mutex is held (fn contract).
-        return Err(unsafe { error::prepare_failure(db, rc, tail_sql) });
-    }
-
-    match NonNull::new(raw_stmt) {
-        None => Ok(false),
-        Some(trial) => {
-            // SAFETY: `trial` came from the prepare above, is owned here, and
-            // is finalized exactly once — the tail statement never escapes.
-            unsafe { ffi::sqlite3_finalize(trial.as_ptr()) };
-            Ok(true)
+            usize::try_from(n).ok()
         }
     }
 }
@@ -486,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn sql_past_c_int_answers_the_rusqlite_paths_too_big_error() {
+    fn sql_past_c_int_answers_too_big() {
         assert!(matches!(
             sql_byte_len(2_147_483_648),
             Err(XqliteError::TooBig {

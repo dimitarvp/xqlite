@@ -28,16 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A rejected second statement can still change a setting.** The
-  functions that run one statement reject a string holding a second one
-  with `{:error, :multiple_statements}`, but they compile both statements
-  to find it, and SQLite applies some PRAGMAs while it compiles them,
-  `foreign_keys` and `query_only` among them, so such a PRAGMA takes
-  effect even in a rejected string. The `XqliteNIF.query/3` and
-  `execute/3` docs, which said nothing runs, and the Known limitations
-  guide now say what happens and what to do; the `prepare/2`,
-  `stmt_prepare/2` and `stream_open/3` docs no longer say only one
-  statement is compiled.
+- **A string rejected for holding a second statement changes nothing.**
+  The functions that run one statement answer such a string with
+  `{:error, :multiple_statements}`, but to find the second statement they
+  compiled the text after the first, and `XqliteNIF.execute/3`,
+  `execute_cancellable/4` and `Xqlite.execute/4` compiled every statement
+  in the string. SQLite applies many PRAGMAs while it compiles them,
+  `foreign_keys`, `query_only`, `defer_foreign_keys`, `temp_store`,
+  `busy_timeout` and `wal_autocheckpoint` among them, so a rejected string
+  could turn foreign-key enforcement off, let a connection kept read-only
+  write, let a row that breaks a foreign key be committed, drop every TEMP
+  table, or take the WAL hook from the library. The text after the first
+  statement is now read without compiling it, and a string whose first
+  statement is a PRAGMA is judged before anything is compiled. The docs
+  say again that nothing in such a string runs and no setting changes,
+  and the Known limitations guide keeps the one case SQLite itself
+  causes: a PRAGMA stays applied when a syntax error follows it in the
+  same statement.
+- **`execute/3` no longer crashes the VM on a string of many statements.**
+  `XqliteNIF.execute/3`, `execute_cancellable/4` and `Xqlite.execute/4`
+  handed the string to rusqlite, which compiles each remaining statement
+  by calling itself once per statement, so a long enough run of short
+  statements overflowed its thread's stack and took the whole VM down.
+  They now compile the way `query/3` does, reading the first statement
+  only, and answer `{:error, :multiple_statements}`.
+- **`XqliteNIF.set_pragma/3` writes an atom value as a quoted string.** An
+  atom other than `true`, `false` and `nil` went into the statement as
+  written, so an atom could end the PRAGMA and add a second statement, and
+  an atom holding a NUL byte answered `{:ok, nil}` with the value cut at
+  the NUL; it now answers `{:error, :null_byte_in_string}`. SQLite strips
+  the quotes before it reads the value, so an atom such as `:wal` sets
+  what it set before, and an atom such as `:"0 garbage"` is read as that
+  text in quotes, where it answered a syntax error.
+
 - **The docs say what the code answers.** `stream/4` states that a stream
   over a `RETURNING` write keeps the whole write when it ends before its
   last row (an early stop, a value that is not UTF-8, a decode rejection),
@@ -437,10 +460,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the statement as it was.
 - **`SAVEPOINT`, `RELEASE`, `ROLLBACK TO` and a read-only statement with a
   long comment read as "SQL contains no statement" under a lowered
-  `:length`.** The check that tells an empty text from a statement reads
-  SQLite's expansion of the statement, which SQLite withholds above the
-  connection's length limit; the read now lifts the limit and puts it back,
-  so the check is exact at any limit.
+  `:length`.** The check that tells an empty text from a statement now
+  reads SQLite's own null statement, which no length limit hides, so the
+  check is exact at any limit.
 - **`XqliteNIF.get_create_sql/2` judges its name against the length limit**
   like every door that binds a value, answering
   `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` where it used to
@@ -620,6 +642,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **Text after the first statement answers
+  `{:error, :multiple_statements}` whenever it holds anything but
+  whitespace, comments and semicolons.** Such text answered its own
+  compile error when it was no valid statement or did not compile, as in
+  `"SELECT 1; garbage"`, `"SELECT 1; SELECT * FROM missing"`, or a lone
+  vertical tab or `/*` after the first statement.
+- **The authorizer is not asked about a string's second statement.** A
+  string holding a second statement the authorizer denies, and under a
+  `:pragma` deny a string whose first statement is a PRAGMA and that holds
+  a second, answered `{:error, {:authorization_denied, 23, _}}`. The
+  statement the authorizer would deny is no longer compiled, so such a
+  string answers `{:error, :multiple_statements}`.
+- **With a busy policy or observer installed, a string holding a
+  `busy_timeout` write and a second statement answers
+  `{:error, :multiple_statements}`.** It answered the error a
+  `busy_timeout` write gets while a busy policy or observer is installed,
+  whichever statement held the write. A `busy_timeout` write on its own
+  still gets that error.
+- **A string whose first statement is a PRAGMA is judged before SQLite
+  reads it.** Three answers change to `{:error, :multiple_statements}`,
+  with nothing changed: such a string that holds more and is longer than
+  the connection's SQL length limit, which answered
+  `{:error, {:too_big, 18, _}}`; `"PRAGMA foreign_keys = OFF $a(;x)"`,
+  whose semicolon SQLite reads inside a variable, which answered a syntax
+  error with foreign-key enforcement turned off; and
+  `"EXPLAIN ; PRAGMA foreign_keys = OFF; SELECT 1"`, which answered a
+  syntax error.
 
 - **One vocabulary in the docs.** The README, the guides and the module
   docs say "reject" and "rejection" where they said "refuse" and

@@ -317,12 +317,8 @@ unsafe fn bind_value_to_raw_stmt(
 ///
 /// SQLite itself refuses neither shape: a parameter nothing was bound to
 /// reads as NULL, so a short list silently writes NULLs, and a long one only
-/// fails at the first index past the last parameter. Every raw-FFI door goes
-/// through here. The execute functions bind through rusqlite and count the
-/// list first as well, through `query.rs:require_parameter_count`, so
-/// `provided` is the list's own length everywhere and rusqlite's own check —
-/// which stops at the first index the statement lacks and reports THAT index
-/// — is only the second line behind them.
+/// fails at the first index past the last parameter. Every function that binds
+/// a list goes through here, so `provided` is the list's own length everywhere.
 ///
 /// # Safety
 ///
@@ -349,9 +345,6 @@ pub(crate) unsafe fn require_parameter_count(
 /// that name the same parameter, and a parameter no key named. The last is
 /// why the walk exists — SQLite reads a parameter nothing was bound to as
 /// NULL, so a list that forgets one writes NULL over that column.
-///
-/// The twin for the doors that bind through rusqlite is
-/// `query.rs:require_named_parameters_covered`.
 ///
 /// # Safety
 ///

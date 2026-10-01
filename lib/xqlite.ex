@@ -1989,11 +1989,12 @@ defmodule Xqlite do
   SQL parsing/planning on every iteration — the reason prepared statements
   exist. For one-shot calls, `query/3` and `execute/3` remain simpler.
 
-  The handle holds exactly ONE statement: SQL holding no statement at all
+  Exactly ONE statement is compiled: SQL holding no statement at all
   returns `{:error, :no_statement}` and a second statement
   after the first returns `{:error, :multiple_statements}` — nothing is
   silently dropped. Text after the first statement counts as a second
-  statement only when it compiles to one, so a trailing comment, extra
+  statement when it holds anything but whitespace, comments and semicolons,
+  and is never compiled, so a trailing comment, extra
   semicolons and whitespace are accepted. A syntax error returns
   `{:error, {:sql_input_error, %{sql: _, offset: _, code: _, message: _}}}`,
   carrying the byte offset SQLite reports — the same shape `query/3`

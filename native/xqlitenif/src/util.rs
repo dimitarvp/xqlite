@@ -465,6 +465,7 @@ pub(crate) fn format_term_for_pragma<'a>(
             } else {
                 term.atom_to_string()
                     .map_err(|e| XqliteError::CannotConvertAtomToString(format!("{e:?}")))
+                    .and_then(|text| pragma_text(&text))
             }
         }
         // One value, no list around it, so there is no position to report.
@@ -476,20 +477,21 @@ pub(crate) fn format_term_for_pragma<'a>(
             .decode::<f64>()
             .map(|f| f.to_string())
             .map_err(|_not_a_float| XqliteError::UnsupportedDataType { term_type }),
-        TermType::Binary => pragma_text(term),
+        TermType::Binary => term
+            .decode::<String>()
+            .map_err(|_not_text| non_text_pragma_value(term))
+            .and_then(|text| pragma_text(&text)),
         _ => Err(XqliteError::UnsupportedDataType { term_type }),
     }
 }
 
-/// A PRAGMA value is written into the statement, so it has to be text. Three
-/// ways a term of the BEAM's one binary type is not: a bit size that is no
-/// whole number of bytes, bytes that are no UTF-8, and a NUL byte, where
-/// SQLite's tokenizer would stop and read a shorter statement than we built.
-fn pragma_text(term: Term<'_>) -> Result<String, XqliteError> {
-    match term.decode::<String>() {
-        Ok(text) if text.contains('\0') => Err(XqliteError::NulErrorInString),
-        Ok(text) => Ok(format!("'{}'", text.replace('\'', "''"))),
-        Err(_not_text) => Err(non_text_pragma_value(term)),
+/// A PRAGMA value is written into the statement as one quoted string, which
+/// SQLite reads as the bare word, so no value can end the statement; a NUL
+/// byte, where SQLite's tokenizer would stop, is rejected.
+fn pragma_text(text: &str) -> Result<String, XqliteError> {
+    match text.contains('\0') {
+        true => Err(XqliteError::NulErrorInString),
+        false => Ok(format!("'{}'", text.replace('\'', "''"))),
     }
 }
 
