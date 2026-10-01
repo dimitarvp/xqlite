@@ -79,8 +79,8 @@ defmodule Xqlite do
 
   @pragma_order [
     :busy_timeout,
-    :journal_mode,
     :auto_vacuum,
+    :journal_mode,
     :foreign_keys,
     :synchronous,
     :cache_size,
@@ -198,6 +198,10 @@ defmodule Xqlite do
 
   `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
   never the statement built around it — and why it could not run.
+  `:pragma_not_applied` is a PRAGMA write SQLite answered with another value,
+  `in_force` in the form `Xqlite.Pragma.get/2` reads; `:unexpected_value` a
+  number no mode of a mode PRAGMA names, and `:strict_violations` what
+  `check_strict_violations/2` reports.
 
   Two of them are about a binary handed in where text was meant, one byte
   apart. `:invalid_utf8_in_string` is a binary whose bytes are not UTF-8 —
@@ -380,6 +384,7 @@ defmodule Xqlite do
           | {:no_such_table, String.t() | atom() | integer()}
           | {:not_a_plain_table, %{table: String.t(), type: Xqlite.Schema.Types.object_type()}}
           | {:parameters_unbound, %{expected: non_neg_integer()}}
+          | {:pragma_not_applied, %{pragma: atom(), asked: term(), in_force: term()}}
           | {:read_only_database, integer(), String.t()}
           | {:read_only_pragma, atom()}
           | {:rowid_shadowed, String.t()}
@@ -387,6 +392,7 @@ defmodule Xqlite do
           | {:schema_parsing_error, String.t(), {:unexpected_value, String.t()}}
           | {:sql_input_error, sql_input_error()}
           | {:sqlite_failure, integer(), integer(), String.t() | nil}
+          | {:strict_violations, [map()]}
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
           | {:too_big, integer(), String.t()}
@@ -394,6 +400,7 @@ defmodule Xqlite do
           | {:type_extension_refused,
              %{position: pos_integer(), extension: module(), reason: term()}
              | %{column: pos_integer(), extension: module(), reason: term()}}
+          | {:unexpected_value, integer()}
           | {:unknown_pragma, atom() | String.t()}
           | {:unsupported_atom, String.t()}
           | {:unsupported_data_type, atom()}
@@ -700,6 +707,15 @@ defmodule Xqlite do
   @spec invalid_option(term(), term(), atom(), map()) :: error()
   def invalid_option(key, value, reason, details \\ %{}) do
     {:error, {:invalid_option, Map.merge(details, %{key: key, value: value, reason: reason})}}
+  end
+
+  defp option_value(opts, key, default, valid?) do
+    value = Keyword.get(opts, key, default)
+
+    case Keyword.has_key?(opts, key) and not valid?.(value) do
+      true -> invalid_option(key, value, :invalid_value)
+      false -> {:ok, value}
+    end
   end
 
   defp apply_pragmas(conn, validated) do
@@ -1011,9 +1027,9 @@ defmodule Xqlite do
   defp tmp_table_name(table), do: table <> "_xqlite_strict_rebuild"
 
   defp reject_open_transaction(conn) do
-    case transaction_status(conn) do
-      {:ok, false} -> :ok
-      {:ok, true} -> {:error, :transaction_in_progress}
+    case autocommit(conn) do
+      {:ok, true} -> :ok
+      {:ok, false} -> {:error, :transaction_in_progress}
       {:error, _} = err -> err
     end
   end
@@ -1359,9 +1375,9 @@ defmodule Xqlite do
 
   See: [SQLite PRAGMA foreign_keys](https://www.sqlite.org/pragma.html#pragma_foreign_keys)
   """
-  @spec enable_foreign_key_enforcement(conn()) :: {:ok, term()} | error()
+  @spec enable_foreign_key_enforcement(conn()) :: :ok | error()
   def enable_foreign_key_enforcement(conn) do
-    XqliteNIF.set_pragma(conn, "foreign_keys", :on)
+    with {:ok, _row} <- XqliteNIF.set_pragma(conn, "foreign_keys", :on), do: :ok
   end
 
   @doc """
@@ -1370,9 +1386,9 @@ defmodule Xqlite do
 
   See `enable_foreign_key_enforcement/1` for details.
   """
-  @spec disable_foreign_key_enforcement(conn()) :: {:ok, term()} | error()
+  @spec disable_foreign_key_enforcement(conn()) :: :ok | error()
   def disable_foreign_key_enforcement(conn) do
-    XqliteNIF.set_pragma(conn, "foreign_keys", :off)
+    with {:ok, _row} <- XqliteNIF.set_pragma(conn, "foreign_keys", :off), do: :ok
   end
 
   @doc """
@@ -1382,7 +1398,7 @@ defmodule Xqlite do
   is 0. For DML (INSERT/UPDATE/DELETE), `num_rows` is 0 (no result rows)
   and `changes` is the number of affected rows.
 
-  Uses `XqliteNIF.query_with_changes/3` which captures the affected row count
+  Uses `XqliteNIF.query_with_changes_cancellable/4` which captures the affected row count
   atomically inside the connection lock. For zero-overhead access without the
   changes field, use `XqliteNIF.query/3` directly.
 
@@ -1438,34 +1454,42 @@ defmodule Xqlite do
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
+    * `:cancel_tokens` — a token from `create_cancel_token/0` or a list of
+      them, default `[]`. Signalling any one of them ends the call with
+      `{:error, :operation_cancelled}`, and a cancelled write rolls back the
+      whole transaction, as `create_cancel_token/0` describes. A value that
+      is no live token, or a list holding one, returns
+      `{:error, {:invalid_cancel_tokens, _}}` before the statement runs.
   """
   @spec query(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def query(conn, sql, params \\ [], opts \\ []) do
-    case type_extensions(opts) do
-      {:ok, extensions} -> query_span(conn, sql, params, extensions)
-      {:error, _reason} = error -> error
-    end
+    with {:ok, extensions} <- type_extensions(opts, [:cancel_tokens, :type_extensions]),
+         do: query_span(conn, sql, params, extensions, Keyword.get(opts, :cancel_tokens, []))
   end
 
-  defp query_span(conn, sql, params, extensions) do
+  defp query_span(conn, sql, params, extensions, tokens) do
     start_md = %{
       conn: conn,
       sql: sql,
       params_count: params_count(params),
-      cancellable?: false
+      cancellable?: List.wrap(tokens) != []
     }
 
     span_with_stop_metadata [:xqlite, :query], start_md do
-      case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
-        {:ok, bound_params} -> run_query(conn, sql, bound_params, extensions, start_md)
+      with :ok <- validate_cancel_tokens(tokens),
+           {:ok, bound_params} <-
+             Xqlite.TypeExtension.encode_params_checked(params, extensions) do
+        run_query(conn, sql, bound_params, extensions, List.wrap(tokens), start_md)
+      else
         {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
       end
     end
   end
 
-  defp run_query(conn, sql, bound_params, extensions, start_md) do
-    with {:ok, map} <- XqliteNIF.query_with_changes(conn, sql, bound_params),
+  defp run_query(conn, sql, bound_params, extensions, tokens, start_md) do
+    with {:ok, map} <-
+           XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens),
          {:ok, result} <- decode_result_rows(map, extensions) do
       {{:ok, result},
        Map.merge(start_md, %{
@@ -1475,7 +1499,12 @@ defmodule Xqlite do
          changes: result.changes
        })}
     else
-      {:error, reason} = err -> {err, query_error_metadata(start_md, reason)}
+      {:error, :operation_cancelled} = err ->
+        emit_cancel_honored(conn, :query, tokens)
+        {err, query_error_metadata(start_md, :operation_cancelled)}
+
+      {:error, reason} = err ->
+        {err, query_error_metadata(start_md, reason)}
     end
   end
 
@@ -1523,34 +1552,36 @@ defmodule Xqlite do
       for none; anything else returns
       `{:error, {:invalid_type_extensions, refusal}}` before anything
       runs, as in `stream/4`.
+    * `:cancel_tokens` — as in `query/4`.
   """
   @spec execute(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
   def execute(conn, sql, params \\ [], opts \\ []) do
-    case type_extensions(opts) do
-      {:ok, extensions} -> execute_span(conn, sql, params, extensions)
-      {:error, _reason} = error -> error
-    end
+    with {:ok, extensions} <- type_extensions(opts, [:cancel_tokens, :type_extensions]),
+         do: execute_span(conn, sql, params, extensions, Keyword.get(opts, :cancel_tokens, []))
   end
 
-  defp execute_span(conn, sql, params, extensions) do
+  defp execute_span(conn, sql, params, extensions, tokens) do
     start_md = %{
       conn: conn,
       sql: sql,
       params_count: params_count(params),
-      cancellable?: false
+      cancellable?: List.wrap(tokens) != []
     }
 
     span_with_stop_metadata [:xqlite, :execute], start_md do
-      case Xqlite.TypeExtension.encode_params_checked(params, extensions) do
-        {:ok, bound_params} -> run_execute(conn, sql, bound_params, start_md)
+      with :ok <- validate_cancel_tokens(tokens),
+           {:ok, bound_params} <-
+             Xqlite.TypeExtension.encode_params_checked(params, extensions) do
+        run_execute(conn, sql, bound_params, List.wrap(tokens), start_md)
+      else
         {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
       end
     end
   end
 
-  defp run_execute(conn, sql, bound_params, start_md) do
-    case XqliteNIF.execute(conn, sql, bound_params) do
+  defp run_execute(conn, sql, bound_params, tokens, start_md) do
+    case XqliteNIF.execute_cancellable(conn, sql, bound_params, tokens) do
       {:ok, affected} ->
         result = %Xqlite.Result{
           columns: [],
@@ -1565,6 +1596,10 @@ defmodule Xqlite do
            error_reason: nil,
            affected_rows: affected
          })}
+
+      {:error, :operation_cancelled} = err ->
+        emit_cancel_honored(conn, :execute, tokens)
+        {err, execute_error_metadata(start_md, :operation_cancelled)}
 
       {:error, reason} = err ->
         {err, execute_error_metadata(start_md, reason)}
@@ -1584,8 +1619,6 @@ defmodule Xqlite do
          do: {:ok, Xqlite.Result.from_map(decoded)}
   end
 
-  # The cancellable forms answer a plain map, not a struct: the rows are
-  # rewritten in place so the term keeps its shape.
   defp decode_map_rows(map, []), do: {:ok, map}
 
   defp decode_map_rows(%{rows: rows} = map, extensions) do
@@ -1593,12 +1626,10 @@ defmodule Xqlite do
          do: {:ok, %{map | rows: decoded}}
   end
 
-  defp decode_map_rows(map, _extensions), do: {:ok, map}
-
   @doc """
   Executes a SQL batch (multiple statements separated by semicolons).
 
-  Wraps `XqliteNIF.execute_batch/2` and emits `[:xqlite, :execute_batch, :*]`
+  Wraps `XqliteNIF.execute_batch_cancellable/3` and emits `[:xqlite, :execute_batch, :*]`
   telemetry. No parameter binding inside the batch.
 
   SQLite runs the statements one at a time, each to its end, reading and
@@ -1614,24 +1645,19 @@ defmodule Xqlite do
   earlier statements in it, and so does one the batch opens after
   committing the caller's (`COMMIT; BEGIN; ...`). When that `ROLLBACK`
   itself fails, the transaction stays open and `autocommit/1` says so.
+
+  ## Options
+
+    * `:cancel_tokens` — as in `query/4`. The tokens are read after each
+      statement compiles and before it runs, as well as at SQLite's progress
+      checks, so a signal stops a batch of short statements between two of
+      them; a cancelled batch rolls back a transaction it opened, as a failed
+      one does.
   """
-  @spec execute_batch(conn(), String.t()) :: :ok | error()
-  def execute_batch(conn, sql_batch) when is_binary(sql_batch) do
-    start_md = %{
-      conn: conn,
-      sql_batch_size_bytes: byte_size(sql_batch),
-      cancellable?: false
-    }
-
-    span_with_stop_metadata [:xqlite, :execute_batch], start_md do
-      case XqliteNIF.execute_batch(conn, sql_batch) do
-        :ok = ok ->
-          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
-
-        {:error, reason} = err ->
-          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
-      end
-    end
+  @spec execute_batch(conn(), String.t(), keyword()) :: :ok | error()
+  def execute_batch(conn, sql_batch, opts \\ []) when is_binary(sql_batch) do
+    with :ok <- judge_options(opts, [:cancel_tokens]),
+         do: execute_batch_span(conn, sql_batch, Keyword.get(opts, :cancel_tokens, []))
   end
 
   @doc """
@@ -1950,11 +1976,9 @@ defmodule Xqlite do
   on such a statement returns `{:error, :connection_closed}` and
   `finalize/1` returns `:ok`.
 
-  `step/1` and `multi_step/2` are not cancellable. The cancellable forms
-  are `multi_step_cancellable/3` for a prepared statement,
-  `query_cancellable/4` and friends for one-shot SQL, and `stream/4` with
-  its `:cancel_tokens` option for a stream. No telemetry is emitted for
-  statement-lifecycle operations.
+  `step/1` is not cancellable; `multi_step/3` is, through its
+  `:cancel_tokens` option, as are `query/4` and `stream/4` for one-shot SQL
+  and a stream. No telemetry is emitted for statement-lifecycle operations.
 
   ## Examples
 
@@ -2052,10 +2076,10 @@ defmodule Xqlite do
   bytes that are not valid UTF-8 — is reported as
   `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
   stepped past, so that row is never delivered. `step/1` reports it at once;
-  `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
+  `multi_step/2` and its `:cancel_tokens` form deliver the rows they read
   before it in the same batch first, with `done: false`, and hold the error
   back. The next call that reads a row answers it — `step/1`,
-  `multi_step/2` or `multi_step_cancellable/3`, whichever door the caller
+  `multi_step/2` or its `:cancel_tokens` form, whichever the caller
   uses — and every door then carries on at the row after the bad one:
   `:done`, or `done: true` with no rows, when the bad row was the last.
   `reset/1` drops a held-back error, a reset run being a new run, and
@@ -2124,10 +2148,10 @@ defmodule Xqlite do
   bytes that are not valid UTF-8 — is reported as
   `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
   stepped past, so that row is never delivered. `step/1` reports it at once;
-  `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
+  `multi_step/2` and its `:cancel_tokens` form deliver the rows they read
   before it in the same batch first, with `done: false`, and hold the error
   back. The next call that reads a row answers it — `step/1`,
-  `multi_step/2` or `multi_step_cancellable/3`, whichever door the caller
+  `multi_step/2` or its `:cancel_tokens` form, whichever the caller
   uses — and every door then carries on at the row after the bad one:
   `:done`, or `done: true` with no rows, when the bad row was the last.
   `reset/1` drops a held-back error, a reset run being a new run, and
@@ -2169,89 +2193,20 @@ defmodule Xqlite do
   The rows come back exactly as SQLite stored them: no type extension runs
   on them. Pass them through `Xqlite.TypeExtension.decode_rows/2`, which
   answers `{:ok, rows}`, for the decoded form.
+
+  ## Options
+
+    * `:cancel_tokens` — as in `query/4`. After a cancellation, `reset/1` the
+      statement before stepping it again; a cancellation discards the rows
+      its batch had already read, as any failed step does.
   """
-  @spec multi_step(stmt(), pos_integer()) ::
+  @spec multi_step(stmt(), pos_integer(), keyword()) ::
           {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
-  def multi_step(stmt, batch_size) when is_integer(batch_size) do
-    XqliteNIF.stmt_multi_step(stmt, batch_size)
-  end
-
-  @doc """
-  Like `multi_step/2` but cancellable.
-
-  Accepts a single cancel token or a list (OR-semantics — any signalled
-  token aborts with `{:error, :operation_cancelled}`). Cancellation rides
-  the connection's progress handler, exactly like `query_cancellable/4`.
-  After a cancellation, `reset/1` the statement before stepping it again; a
-  cancellation discards the rows its batch had already read, as any failed
-  step does.
-
-  `batch_size` is a guarded argument here, so a term that is no integer
-  raises `FunctionClauseError` and one outside SQLite's signed 64-bit range
-  raises `ArgumentError` from the NIF — the documented kinds for a wrong
-  argument at a guarded `Xqlite` function. `stream/4` answers a structured
-  `{:error, {:invalid_batch_size, _}}` for the same values, because there
-  the number is an option rather than an argument.
-
-  A value SQLite hands back that cannot be read — a TEXT column holding
-  bytes that are not valid UTF-8 — is reported as
-  `{:error, {:utf8_error, column, detail}}` for a row SQLite has already
-  stepped past, so that row is never delivered. `step/1` reports it at once;
-  `multi_step/2` and `multi_step_cancellable/3` deliver the rows they read
-  before it in the same batch first, with `done: false`, and hold the error
-  back. The next call that reads a row answers it — `step/1`,
-  `multi_step/2` or `multi_step_cancellable/3`, whichever door the caller
-  uses — and every door then carries on at the row after the bad one:
-  `:done`, or `done: true` with no rows, when the bad row was the last.
-  `reset/1` drops a held-back error, a reset run being a new run, and
-  `finalize/1` drops it and answers its own result; a caller that finalizes
-  after `done: false` chose to stop, and that is the one way a held-back
-  error is never seen. A stream (`stream/4`) delivers the rows before the
-  bad one, reports the error on the next fetch, and is finished after that.
-
-  A `sqlite3_step` that fails outright is a different thing: a locked
-  database, an I/O error, a runtime error in the SQL such as
-  `abs(-9223372036854775808)` (`{:error, {:sqlite_failure, _, _, _}}`), or a
-  trigger's `RAISE` (`{:error, {:constraint_violation, :constraint_trigger,
-  _}}`). No row was stepped past, so nothing is held back: the error is
-  answered at once and `multi_step/2` discards the rows of the batch it
-  lands in, exactly as a cancellation does. A result set that fails part-way
-  therefore hands back no rows at all through `multi_step/2`, while `step/1`
-  and `stream/4` deliver the rows read before the failure. The statement is
-  left where SQLite left it and the run is over: the next step is SQLite's
-  own rerun from the top, which meets the same failure, and `reset/1`
-  changes nothing. What that rerun answers depends on the failure — the
-  `abs()` overflow hands back the rows before the bad one and then the error
-  again, a trigger's `RAISE` answers the error and never a row — so a caller
-  stops on such an error rather than stepping on. The exception is a step
-  refused as busy while taking or committing its lock: SQLite keeps that run
-  for a retry, so the statement stays mid-run and the next step carries on.
-
-  A statement that takes parameters is refused until something sets them:
-  before a successful `bind/3` the answer is
-  `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
-  parameters the statement takes. A bind the library refused binds nothing at
-  all, so it leaves that answer as it found it and an earlier successful bind
-  stays in force; a bind SQLite itself refused after it had taken values is
-  the other way round, and leaves the statement unrunnable until a bind
-  succeeds or `clear_bindings/1` runs. SQLite's own rule is the opposite — it
-  reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
-  a caller asks for that on purpose. `reset/1` keeps the bindings, so a
-  statement stays runnable across one.
-
-  The rows come back exactly as SQLite stored them: no type extension runs
-  on them. Pass them through `Xqlite.TypeExtension.decode_rows/2`, which
-  answers `{:ok, rows}`, for the decoded form.
-  """
-  @spec multi_step_cancellable(stmt(), pos_integer(), term()) ::
-          {:ok, %{rows: [[sqlite_value()]], done: boolean()}} | error()
-  def multi_step_cancellable(stmt, batch_size, token_or_tokens) when is_integer(batch_size) do
-    tokens = List.wrap(token_or_tokens)
-
-    case validate_cancel_tokens(token_or_tokens) do
-      :ok -> XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, tokens)
-      {:error, _reason} = error -> error
-    end
+  def multi_step(stmt, batch_size, opts \\ []) when is_integer(batch_size) do
+    with :ok <- judge_options(opts, [:cancel_tokens]),
+         tokens = Keyword.get(opts, :cancel_tokens, []),
+         :ok <- validate_cancel_tokens(tokens),
+         do: XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, List.wrap(tokens))
   end
 
   @doc """
@@ -2386,7 +2341,7 @@ defmodule Xqlite do
   `:not_a_database`, with SQLite's code: a scratch in-memory connection, which
   costs a second copy of the image, cannot read its header and schema (running
   out of memory there returns that error). `:read_only_image` (code 8):
-  `read_only` is `false` and header byte 18, the write version, is above 2,
+  `:read_only` is `false` and header byte 18, the write version, is above 2,
   so SQLite would open the image read-only. `:encoding_mismatch` (code 1): an
   attached schema takes only the connection's text encoding, and `"main"` only
   UTF-8 on a UTF-8 connection: load a UTF-16 image into an attached schema of a
@@ -2409,11 +2364,22 @@ defmodule Xqlite do
   `schema` identifies which attached database to replace (default `"main"`).
   SQLite cannot load an image into `"temp"`: that name, in any ASCII case,
   returns `{:error, {:invalid_schema_name, schema}}` before the image is judged.
-  `read_only` marks the deserialized image as read-only (default `false`).
+  The `:read_only` option (default `false`) marks the deserialized image as read-only.
+  Options given in `schema`'s place load the image into `"main"`.
   """
-  @spec deserialize(conn(), binary(), String.t(), boolean()) :: :ok | error()
-  def deserialize(conn, data, schema \\ "main", read_only \\ false)
-      when is_binary(data) and is_binary(schema) and is_boolean(read_only) do
+  @spec deserialize(conn(), binary(), String.t() | keyword(), keyword()) :: :ok | error()
+  def deserialize(conn, data, schema \\ "main", opts \\ [])
+
+  def deserialize(conn, data, opts, []) when is_list(opts),
+    do: deserialize(conn, data, "main", opts)
+
+  def deserialize(conn, data, schema, opts) when is_binary(data) and is_binary(schema) do
+    with :ok <- judge_options(opts, [:read_only]),
+         {:ok, read_only} <- option_value(opts, :read_only, false, &is_boolean/1),
+         do: deserialize_span(conn, data, schema, read_only)
+  end
+
+  defp deserialize_span(conn, data, schema, read_only) do
     start_md = %{
       conn: conn,
       schema: schema,
@@ -2529,47 +2495,70 @@ defmodule Xqlite do
   @doc """
   Loads a SQLite extension from the shared library at `path`.
 
-  `entry_point` is the extension's init function name; pass `nil` (default)
+  The `:entry_point` option names the extension's init function; leave it out
   to let SQLite auto-detect. Extension loading must be enabled first via
-  `enable_load_extension/2`.
+  `enable_load_extension/1`.
   """
-  @spec load_extension(conn(), String.t(), String.t() | nil) :: :ok | error()
-  def load_extension(conn, path, entry_point \\ nil)
-      when is_binary(path) and (is_binary(entry_point) or is_nil(entry_point)) do
-    start_md = %{conn: conn, path: path, entry_point: entry_point}
+  @spec load_extension(conn(), String.t(), keyword()) :: :ok | error()
+  def load_extension(conn, path, opts \\ []) when is_binary(path) do
+    with :ok <- judge_options(opts, [:entry_point]),
+         {:ok, entry_point} <- option_value(opts, :entry_point, nil, &is_binary/1) do
+      start_md = %{conn: conn, path: path, entry_point: entry_point}
 
-    span_with_stop_metadata [:xqlite, :extension, :load], start_md do
-      case XqliteNIF.load_extension(conn, path, entry_point) do
-        :ok = ok ->
-          {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
+      span_with_stop_metadata [:xqlite, :extension, :load], start_md do
+        case XqliteNIF.load_extension(conn, path, entry_point) do
+          :ok = ok ->
+            {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
-        {:error, reason} = err ->
-          {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+          {:error, reason} = err ->
+            {err, Map.merge(start_md, %{result_class: :error, error_reason: reason})}
+        end
       end
     end
   end
 
   @doc """
-  Enables or disables extension loading on the connection.
-
-  Defaults to `true`. Wraps `XqliteNIF.enable_load_extension/2` and emits
-  `[:xqlite, :extension, :enable]` telemetry.
+  Enables extension loading on the connection. Wraps
+  `XqliteNIF.enable_load_extension/2` and emits `[:xqlite, :extension, :enable]`
+  telemetry.
 
   > #### Warning — enabling has no automatic undo {: .warning}
   >
   > There is no automatic disable. Once enabled, the SQL-level
   > `load_extension()` function stays callable for the rest of the
   > connection's life — including from SQL you did not write — until
-  > you call this function with `false` yourself.
+  > you call `disable_load_extension/1` yourself.
   """
-  @spec enable_load_extension(conn(), boolean()) :: :ok | error()
-  def enable_load_extension(conn, enabled \\ true) when is_boolean(enabled) do
-    case XqliteNIF.enable_load_extension(conn, enabled) do
+  @spec enable_load_extension(conn()) :: :ok | error()
+  def enable_load_extension(conn) do
+    case XqliteNIF.enable_load_extension(conn, true) do
       :ok = ok ->
         emit(
           [:xqlite, :extension, :enable],
           %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
-          %{conn: conn, enabled: enabled}
+          %{conn: conn}
+        )
+
+        ok
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  Disables extension loading on the connection, after which `load_extension/3`
+  answers `{:error, :extension_loading_disabled}`. Emits
+  `[:xqlite, :extension, :disable]` telemetry.
+  """
+  @spec disable_load_extension(conn()) :: :ok | error()
+  def disable_load_extension(conn) do
+    case XqliteNIF.enable_load_extension(conn, false) do
+      :ok = ok ->
+        emit(
+          [:xqlite, :extension, :disable],
+          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
+          %{conn: conn}
         )
 
         ok
@@ -2629,117 +2618,19 @@ defmodule Xqlite do
   def wal_checkpoint(_conn, _mode, schema), do: {:error, {:invalid_schema_name, schema}}
 
   @doc """
-  Reads a PRAGMA value from the connection.
-
-  The answer is the first row's first column. A PRAGMA that answers several
-  rows is therefore cut down to its first one: `compile_options` read here
-  gives the first compile option, not the whole list. `Xqlite.Pragma.get/2,3`
-  knows which PRAGMAs answer a list and returns all of it, and it is also the
-  door that takes a PRAGMA argument, as `table_info` and `index_list` need;
-  `query/3` with the PRAGMA as its SQL gives the rows unchanged.
-
-  A name outside the typed schema of `Xqlite.Pragma` is handed to SQLite as
-  written and reads back whatever SQLite answers, which is `{:ok, :no_value}`
-  for a word SQLite parses and ignores. A key that is neither an atom nor a
-  string is refused with
-  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged, and so
-  is `nil`: it is an atom, but `to_string(nil)` is the empty string, which is
-  no PRAGMA name. `true` and `false` stay names SQLite parses and ignores.
-
-  A number that codes a mode reads as `Xqlite.Pragma` types it.
-
-  Wraps `XqliteNIF.get_pragma/2` and emits `[:xqlite, :pragma, :get]`.
+  Runs `PRAGMA optimize`, which lets SQLite analyze the tables whose statistics
+  the planner would use, answering `:ok`; `query/4` runs it with a mask. A
+  `:pragma` deny answers `{:error, {:authorization_denied, code, message}}`.
   """
-  @spec get_pragma(conn(), String.t() | atom()) :: {:ok, term()} | error()
-  def get_pragma(_conn, nil), do: {:error, {:invalid_pragma_name, nil}}
-
-  def get_pragma(conn, name) when is_atom(name) or is_binary(name) do
-    name_str = pragma_name_string(name)
-
-    case XqliteNIF.get_pragma(conn, name_str) do
-      {:ok, value} ->
-        emit(
-          [:xqlite, :pragma, :get],
-          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
-          %{conn: conn, name: name_str}
-        )
-
-        {:ok, Xqlite.Pragma.reading(name_str, value)}
-
-      err ->
-        err
-    end
-  end
-
-  def get_pragma(_conn, name), do: {:error, {:invalid_pragma_name, name}}
+  @spec optimize(conn()) :: :ok | error()
+  def optimize(conn), do: exec(conn, "PRAGMA optimize")
 
   @doc """
-  Sets a PRAGMA value on the connection.
-
-  The value is checked against the PRAGMA's definition first, through
-  `Xqlite.Pragma.check_value/2` — the same check `Xqlite.Pragma.put/4` and
-  the connection options of `open/2` apply. A value the PRAGMA cannot take
-  is refused with
-  `{:error, {:invalid_pragma_value, %{pragma: name, value: value}}}` and
-  nothing is sent to SQLite; a PRAGMA that can only be read is refused with
-  `{:error, {:read_only_pragma, name}}`. Without the check SQLite would
-  parse what it could of the word and answer `{:ok, nil}` while leaving the
-  setting at its fallback. `:foreign_keys` written inside a transaction,
-  where SQLite ignores it, answers `{:error, :transaction_in_progress}`.
-
-  A PRAGMA `Xqlite.Pragma` does not model keeps the raw path: its value
-  reaches SQLite as written, and SQLite decides. A key that is neither an
-  atom nor a string never reaches that path: it is refused with
-  `{:error, {:invalid_pragma_name, key}}`, carrying the key unchanged. `nil`
-  is refused the same way, being no name however it is written.
-
-  Wraps `XqliteNIF.set_pragma/3` and emits `[:xqlite, :pragma, :set]` after
-  a successful write, with the caller's own value in the metadata.
+  Runs `PRAGMA shrink_memory`, which frees the cache memory the connection
+  can give back, and answers `:ok`, or the errors `optimize/1` answers.
   """
-  @spec set_pragma(conn(), String.t() | atom(), term()) :: {:ok, term()} | error()
-  def set_pragma(_conn, nil, _value), do: {:error, {:invalid_pragma_name, nil}}
-
-  def set_pragma(conn, name, value) when is_atom(name) or is_binary(name) do
-    name_str = pragma_name_string(name)
-
-    case Xqlite.Pragma.check_value(name, value) do
-      {:ok, checked} -> write_pragma(conn, name_str, checked, value)
-      {:error, reason} -> unmodelled_or_refusal(conn, name_str, value, reason)
-    end
-  end
-
-  def set_pragma(_conn, name, _value), do: {:error, {:invalid_pragma_name, name}}
-
-  # A name the typed schema knows goes to SQLite the way the schema spells it,
-  # whatever case the caller wrote, so every door's answer names it the same.
-  # A name outside the schema goes as written; there is no other spelling.
-  defp pragma_name_string(name) do
-    case Xqlite.Pragma.canonical_name(name) do
-      {:ok, canonical} -> Atom.to_string(canonical)
-      {:error, _reason} -> to_string(name)
-    end
-  end
-
-  defp unmodelled_or_refusal(conn, name_str, value, {:unknown_pragma, _name}),
-    do: write_pragma(conn, name_str, value, value)
-
-  defp unmodelled_or_refusal(_conn, _name_str, _value, reason), do: {:error, reason}
-
-  defp write_pragma(conn, name_str, sent, reported) do
-    case XqliteNIF.set_pragma(conn, name_str, sent) do
-      {:ok, echo} ->
-        emit(
-          [:xqlite, :pragma, :set],
-          %{monotonic_time: Xqlite.Telemetry.monotonic_time()},
-          %{conn: conn, name: name_str, value: reported}
-        )
-
-        {:ok, Xqlite.Pragma.reading(name_str, echo)}
-
-      err ->
-        err
-    end
-  end
+  @spec shrink_memory(conn()) :: :ok | error()
+  def shrink_memory(conn), do: exec(conn, "PRAGMA shrink_memory")
 
   @u64 0..18_446_744_073_709_551_615
 
@@ -2782,7 +2673,7 @@ defmodule Xqlite do
   > While a policy or at least one observer is installed, a statement
   > that writes `busy_timeout` — `PRAGMA busy_timeout = N` in any
   > spelling, `XqliteNIF.set_pragma(conn, "busy_timeout", ms)`, or
-  > `set_pragma(conn, :busy_timeout, ms)` — fails as it is *prepared*
+  > `Xqlite.Pragma.put(conn, :busy_timeout, ms)` — fails as it is *prepared*
   > with `{:error, {:busy_timeout_write_refused, %{policy: boolean,
   > observers: count}}}`. It would otherwise replace our C callback with
   > SQLite's built-in one and silence the policy and every observer.
@@ -2887,7 +2778,7 @@ defmodule Xqlite do
   the timeout as a 32-bit integer, so anything but an integer from `0` to
   `2_147_483_647` (about 24.8 days) returns `{:error, {:invalid_pragma_value,
   %{pragma: :busy_timeout, value: ms}}}` before anything reaches SQLite, the
-  answer `open/2` and `set_pragma/3` give for the same value.
+  answer `open/2` and `Xqlite.Pragma.put/3` give for the same value.
 
   This function always works, slot held or not, and no authorizer is
   consulted. A raw
@@ -2905,12 +2796,12 @@ defmodule Xqlite do
 
   @doc """
   Reads the busy timeout the connection keeps, in milliseconds, also while a
-  retry policy or an observer holds the busy slot, as `get_pragma/2` and
-  `Xqlite.Pragma.get/2` do. `PRAGMA busy_timeout` read in SQL (`query/4`,
+  retry policy or an observer holds the busy slot, as
+  `Xqlite.Pragma.get/2` does. `PRAGMA busy_timeout` read in SQL (`query/4`,
   `stream/4`, a prepared statement) answers `0` while the slot is held.
   """
   @spec get_busy_timeout(conn()) :: {:ok, non_neg_integer()} | error()
-  def get_busy_timeout(conn), do: get_pragma(conn, :busy_timeout)
+  def get_busy_timeout(conn), do: Xqlite.Pragma.get(conn, :busy_timeout)
 
   @doc """
   Installs a deny-list authorizer on the connection.
@@ -2954,16 +2845,19 @@ defmodule Xqlite do
       `IGNORE` disposition (silently treat the access as a NULL/no-op) is not
       exposed.
 
-  ## Caveat — denying `:pragma` disables `get_pragma`/`set_pragma`
+  ## Caveat — denying `:pragma` disables the PRAGMA functions
 
-  `XqliteNIF.get_pragma/2` and `set_pragma/3` run `PRAGMA` statements, which
+  `Xqlite.Pragma.get/2`, `Xqlite.Pragma.put/3`, `optimize/1`, `shrink_memory/1`
+  and the raw `XqliteNIF.get_pragma/2` and `set_pragma/3` run `PRAGMA` statements, which
   SQLite authorizes as the `:pragma` action; the schema-introspection helpers
   lean on PRAGMAs too. Denying `:pragma` therefore makes all of them fail with
   `{:error, {:authorization_denied, _, _}}`. Deny it only when you intend to lock
   those paths out as well.
 
-  Two reads slip past that deny, because neither runs a `PRAGMA` statement for
-  SQLite to refuse: `get_pragma(conn, :wal_autocheckpoint)`, whose value comes
+  Three reads slip past that deny, because none runs a `PRAGMA` statement for
+  SQLite to deny: `Xqlite.Pragma.get(conn, :busy_timeout)` while a busy policy or
+  observer holds the busy slot, which answers the timeout the slot keeps,
+  `Xqlite.Pragma.get(conn, :wal_autocheckpoint)`, whose value comes
   from xqlite's own WAL callback rather than from SQLite (writing it is still
   denied), and `get_create_sql/2`, a `SELECT` over `sqlite_schema` that obeys
   the `:read` and `:select` actions instead.
@@ -3073,7 +2967,7 @@ defmodule Xqlite do
   Creates a cancellation token. Emits `[:xqlite, :cancel, :token_created]`.
 
   The token is an opaque reference passed into cancellable operations
-  (`query_cancellable/4`, `execute_cancellable/4`, etc.). Signalling it via
+  (the `:cancel_tokens` option of `query/4` and its siblings). Signalling it via
   `cancel_operation/1` from any process interrupts in-flight cancellable
   operations holding the same token.
 
@@ -3155,205 +3049,13 @@ defmodule Xqlite do
     end
   end
 
-  @doc """
-  Cancellable `query/3`. Accepts either a single cancel token or a list of
-  tokens; OR-semantics — any signalled token interrupts the query.
-
-  See `XqliteNIF.query_cancellable/4` for the raw NIF (list form only).
-
-  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
-  …) and its length must be the statement's own parameter count, otherwise
-  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
-  value is bound — `[]` and `nil` count as zero. A keyword list is named and
-  must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
-  a bare `?`, and a statement holding `?` or `?3` takes a positional list
-  only. A key starting with `:`, `@` or `$` names that parameter as written;
-  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
-  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
-  `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement. A statement of more than 2 048 parameters
-  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
-
-  ## Options
-
-    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
-      parameters are encoded through the chain before binding and the
-      result's rows are decoded through it, as in `query/4`. The result
-      stays a plain map — only its `:rows` are rewritten. A parameter an
-      extension refuses returns `{:error, {:type_extension_refused, _}}`; so
-      does a value it refuses to decode, after the statement ran: its changes stand.
-      Default: `[]`.
-      The option itself must be a proper list of extension modules, or `nil`
-      for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
-      runs, as in `stream/4`.
-  """
-  @spec query_cancellable(
-          conn(),
-          String.t(),
-          list() | keyword(),
-          term()
-        ) :: {:ok, query_result()} | error()
-  @spec query_cancellable(
-          conn(),
-          String.t(),
-          list() | keyword() | nil,
-          term(),
-          keyword()
-        ) :: {:ok, query_result()} | error()
-  def query_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
-    case type_extensions(opts) do
-      {:ok, extensions} ->
-        query_cancellable_span(conn, sql, params, token_or_tokens, extensions)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp query_cancellable_span(conn, sql, params, token_or_tokens, extensions) do
-    tokens = List.wrap(token_or_tokens)
-    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
-
-    span_with_stop_metadata [:xqlite, :query], start_md do
-      with :ok <- validate_cancel_tokens(token_or_tokens),
-           {:ok, bound} <- Xqlite.TypeExtension.encode_params_checked(params, extensions) do
-        run_query_cancellable(conn, sql, bound, tokens, extensions, start_md)
-      else
-        {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
-      end
-    end
-  end
-
-  defp run_query_cancellable(conn, sql, bound_params, tokens, extensions, start_md) do
-    with {:ok, result} <- XqliteNIF.query_cancellable(conn, sql, bound_params, tokens),
-         {:ok, decoded} <- decode_map_rows(result, extensions) do
-      {{:ok, decoded},
-       Map.merge(start_md, %{
-         result_class: :ok,
-         error_reason: nil,
-         num_rows: Map.get(decoded, :num_rows, 0),
-         changes: nil
-       })}
-    else
-      {:error, :operation_cancelled} = err ->
-        emit_cancel_honored(conn, :query, tokens)
-        {err, query_error_metadata(start_md, :operation_cancelled)}
-
-      {:error, reason} = err ->
-        {err, query_error_metadata(start_md, reason)}
-    end
-  end
-
-  @doc """
-  Cancellable `execute/3`. Accepts either a single cancel token or a list.
-
-  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
-  …) and its length must be the statement's own parameter count, otherwise
-  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
-  value is bound — `[]` and `nil` count as zero. A keyword list is named and
-  must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
-  a bare `?`, and a statement holding `?` or `?3` takes a positional list
-  only. A key starting with `:`, `@` or `$` names that parameter as written;
-  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
-  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
-  `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement. A statement of more than 2 048 parameters
-  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
-
-  ## Options
-
-    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
-      parameters are encoded through the chain before binding, as in
-      `query/4` (there are no result rows to decode). A parameter an
-      extension refuses returns `{:error, {:type_extension_refused, _}}`.
-      Default: `[]`.
-      The option itself must be a proper list of extension modules, or `nil`
-      for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
-      runs, as in `stream/4`.
-  """
-  @spec execute_cancellable(
-          conn(),
-          String.t(),
-          list(),
-          term()
-        ) :: {:ok, non_neg_integer()} | error()
-  @spec execute_cancellable(
-          conn(),
-          String.t(),
-          list() | keyword() | nil,
-          term(),
-          keyword()
-        ) :: {:ok, non_neg_integer()} | error()
-  def execute_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
-    case type_extensions(opts) do
-      {:ok, extensions} ->
-        execute_cancellable_span(conn, sql, params, token_or_tokens, extensions)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp execute_cancellable_span(conn, sql, params, token_or_tokens, extensions) do
-    tokens = List.wrap(token_or_tokens)
-    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
-
-    span_with_stop_metadata [:xqlite, :execute], start_md do
-      with :ok <- validate_cancel_tokens(token_or_tokens),
-           {:ok, bound} <- Xqlite.TypeExtension.encode_params_checked(params, extensions) do
-        run_execute_cancellable(conn, sql, bound, tokens, start_md)
-      else
-        {:error, reason} -> {{:error, reason}, execute_error_metadata(start_md, reason)}
-      end
-    end
-  end
-
-  defp run_execute_cancellable(conn, sql, bound_params, tokens, start_md) do
-    case XqliteNIF.execute_cancellable(conn, sql, bound_params, tokens) do
-      {:ok, affected} = ok ->
-        {ok,
-         Map.merge(start_md, %{
-           result_class: :ok,
-           error_reason: nil,
-           affected_rows: affected
-         })}
-
-      {:error, :operation_cancelled} = err ->
-        emit_cancel_honored(conn, :execute, tokens)
-        {err, execute_error_metadata(start_md, :operation_cancelled)}
-
-      {:error, reason} = err ->
-        {err, execute_error_metadata(start_md, reason)}
-    end
-  end
-
-  @doc """
-  Cancellable `execute_batch/2`. Accepts either a single cancel token or a list.
-
-  The tokens are read after each statement compiles and before it runs, as
-  well as at SQLite's progress checks, so a signal stops a batch of short
-  statements between two of them; a cancelled batch rolls back a
-  transaction it opened, as a failed one does.
-  """
-  @spec execute_batch_cancellable(conn(), String.t(), term()) ::
-          :ok | error()
-  def execute_batch_cancellable(conn, sql_batch, token_or_tokens) do
+  defp execute_batch_span(conn, sql_batch, token_or_tokens) do
     tokens = List.wrap(token_or_tokens)
 
     start_md = %{
       conn: conn,
       sql_batch_size_bytes: byte_size(sql_batch),
-      cancellable?: true
+      cancellable?: tokens != []
     }
 
     span_with_stop_metadata [:xqlite, :execute_batch], start_md do
@@ -3384,100 +3086,8 @@ defmodule Xqlite do
   end
 
   @doc """
-  Cancellable `query_with_changes/3`. Accepts either a single cancel token or a list.
-
-  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
-  …) and its length must be the statement's own parameter count, otherwise
-  `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
-  value is bound — `[]` and `nil` count as zero. A keyword list is named and
-  must name every parameter once: a key the statement lacks is
-  `{:error, {:invalid_parameter_name, name}}`, two keys on one parameter are
-  `{:error, {:duplicate_parameter_name, name}}`, and a parameter no key named
-  is `{:error, {:missing_parameter, %{index: _, name: _}}}` — `nil` there for
-  a bare `?`, and a statement holding `?` or `?3` takes a positional list
-  only. A key starting with `:`, `@` or `$` names that parameter as written;
-  every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
-  key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
-  `:missing_parameter` carries SQLite's own spelling of the parameter no key
-  named, read from the statement. A statement of more than 2 048 parameters
-  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
-
-  ## Options
-
-    * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
-      parameters are encoded through the chain before binding and the
-      result's rows are decoded through it, as in `query/4`. The result
-      stays a plain map — only its `:rows` are rewritten. A parameter an
-      extension refuses returns `{:error, {:type_extension_refused, _}}`; so
-      does a value it refuses to decode, after the statement ran: its changes stand.
-      Default: `[]`.
-      The option itself must be a proper list of extension modules, or `nil`
-      for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
-      runs, as in `stream/4`.
-  """
-  @spec query_with_changes_cancellable(
-          conn(),
-          String.t(),
-          list() | keyword(),
-          term()
-        ) :: {:ok, map()} | error()
-  @spec query_with_changes_cancellable(
-          conn(),
-          String.t(),
-          list() | keyword() | nil,
-          term(),
-          keyword()
-        ) :: {:ok, map()} | error()
-  def query_with_changes_cancellable(conn, sql, params, token_or_tokens, opts \\ []) do
-    case type_extensions(opts) do
-      {:ok, extensions} ->
-        changes_cancellable_span(conn, sql, params, token_or_tokens, extensions)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp changes_cancellable_span(conn, sql, params, token_or_tokens, extensions) do
-    tokens = List.wrap(token_or_tokens)
-    start_md = %{conn: conn, sql: sql, params_count: params_count(params), cancellable?: true}
-
-    span_with_stop_metadata [:xqlite, :query_with_changes], start_md do
-      with :ok <- validate_cancel_tokens(token_or_tokens),
-           {:ok, bound} <- Xqlite.TypeExtension.encode_params_checked(params, extensions) do
-        run_changes_cancellable(conn, sql, bound, tokens, extensions, start_md)
-      else
-        {:error, reason} -> {{:error, reason}, query_error_metadata(start_md, reason)}
-      end
-    end
-  end
-
-  defp run_changes_cancellable(conn, sql, bound_params, tokens, extensions, start_md) do
-    with {:ok, map} <-
-           XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens),
-         {:ok, decoded} <- decode_map_rows(map, extensions) do
-      {{:ok, decoded},
-       Map.merge(start_md, %{
-         result_class: :ok,
-         error_reason: nil,
-         num_rows: Map.get(decoded, :num_rows, 0),
-         changes: Map.get(decoded, :changes, 0)
-       })}
-    else
-      {:error, :operation_cancelled} = err ->
-        emit_cancel_honored(conn, :query_with_changes, tokens)
-        {err, query_error_metadata(start_md, :operation_cancelled)}
-
-      {:error, reason} = err ->
-        {err, query_error_metadata(start_md, reason)}
-    end
-  end
-
-  @doc """
-  Online backup with progress messages and cancellation. Accepts either a
-  single cancel token or a list (OR-semantics).
+  Online backup to the file at `dest_path`, with progress messages and
+  cancellation through the `:cancel_tokens` option, as in `query/4`.
 
   Sends `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to
   `pid` after each `pages_per_step`-page step: `status` is `:copied` when the
@@ -3490,28 +3100,28 @@ defmodule Xqlite do
   between steps. The destinations `backup/3` rejects are rejected here too,
   and a failed copy leaves what `backup/3` says.
 
-  `pages_per_step` is an integer from 1 to 2_147_483_647, the count SQLite
+  The `:schema` option (default `"main"`) names the schema to copy, as in
+  `backup/3`, and `:pages_per_step` (default 100, as in `backup/3`) is an
+  integer from 1 to 2_147_483_647, the count SQLite
   takes. Any other term returns `{:error, {:invalid_pages_per_step, value}}`
   once the tokens are judged, before any file is created — `0` would make
   SQLite copy no pages while reporting "more", forever.
   """
-  @spec backup_with_progress(
-          conn(),
-          String.t(),
-          String.t(),
-          pid(),
-          pos_integer(),
-          term()
-        ) :: :ok | error()
-  def backup_with_progress(conn, schema, dest_path, pid, pages_per_step, token_or_tokens) do
-    tokens = List.wrap(token_or_tokens)
+  @spec backup_with_progress(conn(), String.t(), pid(), keyword()) :: :ok | error()
+  def backup_with_progress(conn, dest_path, pid, opts \\ []) do
+    with :ok <- judge_options(opts, [:cancel_tokens, :pages_per_step, :schema]),
+         tokens = Keyword.get(opts, :cancel_tokens, []),
+         :ok <- validate_cancel_tokens(tokens),
+         {:ok, pages} <- pages_per_step(opts),
+         {:ok, schema} <- option_value(opts, :schema, "main", &is_binary/1) do
+      XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages, List.wrap(tokens))
+    end
+  end
 
-    with :ok <- validate_cancel_tokens(token_or_tokens),
-         true <- pages_per_step in 1..2_147_483_647 do
-      XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages_per_step, tokens)
-    else
-      false -> {:error, {:invalid_pages_per_step, pages_per_step}}
-      {:error, _reason} = error -> error
+  defp pages_per_step(opts) do
+    case Keyword.get(opts, :pages_per_step, 100) do
+      pages when pages in 1..2_147_483_647 -> {:ok, pages}
+      pages -> {:error, {:invalid_pages_per_step, pages}}
     end
   end
 
@@ -3687,22 +3297,11 @@ defmodule Xqlite do
   end
 
   @doc """
-  Returns whether the connection is currently inside a transaction.
-
-  `{:ok, true}` after `begin/2` and before `commit/1` or
-  `rollback/1`, `{:ok, false}` in autocommit mode. Wraps
-  `XqliteNIF.transaction_status/1`. No telemetry is emitted.
-  """
-  @spec transaction_status(conn()) :: {:ok, boolean()} | error()
-  def transaction_status(conn), do: XqliteNIF.transaction_status(conn)
-
-  @doc """
   Returns `{:ok, true}` when the connection is in auto-commit mode
   (no active transaction), `{:ok, false}` otherwise.
 
-  The inverse view of `transaction_status/1`, matching SQLite's
-  `sqlite3_get_autocommit`. Wraps `XqliteNIF.autocommit/1`. No
-  telemetry is emitted.
+  Matches SQLite's `sqlite3_get_autocommit`. Wraps `XqliteNIF.autocommit/1`.
+  No telemetry is emitted.
   """
   @spec autocommit(conn()) :: {:ok, boolean()} | error()
   def autocommit(conn), do: XqliteNIF.autocommit(conn)

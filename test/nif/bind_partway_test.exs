@@ -20,7 +20,7 @@ defmodule Xqlite.BindPartwayTest do
 
   for_each_opener "a bind SQLite rejects part-way" do
     setup %{conn: conn} do
-      assert {:ok, @heap_limit} = Xqlite.Pragma.put(conn, :hard_heap_limit, @heap_limit)
+      assert :ok = Xqlite.Pragma.put(conn, :hard_heap_limit, @heap_limit)
       assert :ok = Xqlite.execute_batch(conn, @seed)
       assert {:ok, stmt} = Xqlite.prepare(conn, "UPDATE t SET v = :a, w = :b, x = :c")
       assert :ok = Xqlite.bind(stmt, ["P", "Q", "R"])

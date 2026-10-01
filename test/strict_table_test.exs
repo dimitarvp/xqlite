@@ -791,11 +791,11 @@ defmodule Xqlite.StrictTableTest do
     test "the rebuild leaves the connection out of any transaction", %{conn: conn} do
       assert :ok = NIF.execute_batch(conn, "CREATE TABLE settled (id INTEGER);")
       assert {:ok, 1} = NIF.execute(conn, "INSERT INTO settled VALUES (?)", [1])
-      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert {:ok, true} = Xqlite.autocommit(conn)
 
       assert :ok = Xqlite.enable_strict_table(conn, "settled")
 
-      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert {:ok, true} = Xqlite.autocommit(conn)
       assert strict?(conn, "settled")
     end
 
@@ -1045,7 +1045,7 @@ defmodule Xqlite.StrictTableTest do
 
       assert {:error, :transaction_in_progress} = Xqlite.enable_strict_table(conn, "t")
 
-      assert {:ok, true} = Xqlite.transaction_status(conn)
+      assert {:ok, false} = Xqlite.autocommit(conn)
       assert row_count(conn, "keep") == 1
       assert {:ok, _} = NIF.execute(conn, "COMMIT", [])
       assert row_count(conn, "keep") == 1
@@ -1063,7 +1063,7 @@ defmodule Xqlite.StrictTableTest do
                Xqlite.enable_strict_table(conn, "t")
 
       refute strict?(conn, "t")
-      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert {:ok, true} = Xqlite.autocommit(conn)
     end
 
     test "a table declaring rowid, _rowid_ and oid is refused", %{conn: conn} do
@@ -1156,7 +1156,7 @@ defmodule Xqlite.StrictTableTest do
       refute strict?(conn, "g")
       assert pragma_flag(conn, "foreign_keys") == 1
       assert pragma_flag(conn, "legacy_alter_table") == 0
-      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert {:ok, true} = Xqlite.autocommit(conn)
       assert tables(conn) == ["g"]
     end
 
@@ -1182,7 +1182,7 @@ defmodule Xqlite.StrictTableTest do
       assert {:ok, %{rows: [[1, 1], [2, 2]]}} =
                NIF.query(conn, "SELECT rowid, c FROM t ORDER BY 1", [])
 
-      assert {:ok, false} = Xqlite.transaction_status(conn)
+      assert {:ok, true} = Xqlite.autocommit(conn)
       assert pragma_flag(conn, "foreign_keys") == 1
       assert pragma_flag(conn, "legacy_alter_table") == 0
     end
@@ -1707,7 +1707,7 @@ defmodule Xqlite.StrictTableTest do
     assert law_view_rows(conn, layout) == view_before
     assert pragma_flag(conn, "foreign_keys") == law_flag(layout.foreign_keys)
     assert pragma_flag(conn, "legacy_alter_table") == law_flag(layout.legacy_alter_table)
-    assert {:ok, false} = Xqlite.transaction_status(conn)
+    assert {:ok, true} = Xqlite.autocommit(conn)
     assert_trigger_fires(conn, layout)
   end
 
@@ -1955,7 +1955,7 @@ defmodule Xqlite.StrictTableTest do
     assert snapshot(conn) == before
     assert pragma_flag(conn, "foreign_keys") == law_flag(refusal.foreign_keys)
     assert pragma_flag(conn, "legacy_alter_table") == law_flag(refusal.legacy_alter_table)
-    assert {:ok, false} = Xqlite.transaction_status(conn)
+    assert {:ok, true} = Xqlite.autocommit(conn)
   end
 
   defp refused?({:strict_violations, [_ | _]}, :violations), do: true

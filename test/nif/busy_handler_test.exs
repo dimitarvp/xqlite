@@ -701,8 +701,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(conn)
   end
 
-  test "prepare and the typed set_pragma are rejected while the slot is held",
-       %{path: path} do
+  test "prepare and the typed put are rejected while the slot is held", %{path: path} do
     {:ok, conn} = NIF.open(path)
 
     :ok = Xqlite.put_busy_timeout(conn, 300)
@@ -712,10 +711,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
              Xqlite.prepare(conn, "PRAGMA busy_timeout = 1500")
 
     assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-             Xqlite.set_pragma(conn, :busy_timeout, 1500)
+             Xqlite.Pragma.put(conn, :busy_timeout, 1500)
 
     :ok = Xqlite.unregister_busy_observer(conn, handle)
-    assert {:ok, 1500} = Xqlite.set_pragma(conn, :busy_timeout, 1500)
+    assert :ok = Xqlite.Pragma.put(conn, :busy_timeout, 1500)
 
     :ok = NIF.close(conn)
   end

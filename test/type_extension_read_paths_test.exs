@@ -4,7 +4,7 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
   both read paths.
 
   `query/4` decodes its rows with the chain. A prepared statement does not:
-  `step/1`, `multi_step/2` and `multi_step_cancellable/3` hand back what
+  `step/1` and `multi_step/3` hand back what
   SQLite stored, and `Xqlite.TypeExtension.decode_rows/2` is where the caller
   decodes them. The law below drives one generator per built-in extension
   through both paths, asserts the two answers are equal, and pins the raw row
@@ -79,11 +79,6 @@ defmodule Xqlite.TypeExtensionReadPathsTest do
 
       assert :ok = Xqlite.reset(stmt)
       assert {:ok, %{rows: [^row]}} = Xqlite.multi_step(stmt, 10)
-      assert {:ok, [[^decoded]]} = TypeExtension.decode_rows([row], [extension])
-
-      assert :ok = Xqlite.reset(stmt)
-      assert {:ok, token} = Xqlite.create_cancel_token()
-      assert {:ok, %{rows: [^row]}} = Xqlite.multi_step_cancellable(stmt, 10, token)
       assert {:ok, [[^decoded]]} = TypeExtension.decode_rows([row], [extension])
 
       assert :ok = Xqlite.finalize(stmt)

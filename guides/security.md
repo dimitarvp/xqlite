@@ -93,16 +93,16 @@ This is the single most consequential capability in the library.
 
 Because of that, extension loading is off by default and gated twice: the
 SQLite build has the capability compiled in, but it stays disabled until
-you explicitly turn it on with `Xqlite.enable_load_extension/2`, and the
+you explicitly turn it on with `Xqlite.enable_load_extension/1`, and the
 recommended pattern is to disable it again immediately after loading (the
 path below is a placeholder — point it at an extension you actually ship):
 
 ```elixir
 {:ok, conn} = Xqlite.open("app.db")
 
-:ok = Xqlite.enable_load_extension(conn, true)
+:ok = Xqlite.enable_load_extension(conn)
 :ok = Xqlite.load_extension(conn, "/opt/ext/mod_spatialite")
-:ok = Xqlite.enable_load_extension(conn, false)
+:ok = Xqlite.disable_load_extension(conn)
 ```
 
 Re-disabling shrinks the window in which a later `load_extension` — yours
@@ -149,16 +149,20 @@ plainly, because they shape what the authorizer can and cannot promise:
   disposition is not exposed.
 
 One caveat with security relevance: denying `:pragma` also disables
-`Xqlite.get_pragma/2`, `Xqlite.set_pragma/3`, and the schema-introspection
-helpers, since those run `PRAGMA` statements. Deny it only when you intend
-to lock those paths out too.
+`Xqlite.Pragma.get/2`, `Xqlite.Pragma.put/3`, `Xqlite.optimize/1`,
+`Xqlite.shrink_memory/1` and the schema-introspection helpers, since those
+run `PRAGMA` statements. Deny it only when you intend to lock those paths
+out too.
 
-Two reads slip past a `:pragma` deny, because neither runs a `PRAGMA`
+Three reads slip past a `:pragma` deny, because none runs a `PRAGMA`
 statement for SQLite to refuse:
 
-- `Xqlite.get_pragma(conn, :wal_autocheckpoint)` still answers. xqlite's own
+- `Xqlite.Pragma.get(conn, :wal_autocheckpoint)` still answers. xqlite's own
   WAL callback owns that setting and serves the value out of its own state.
-  Writing it with `Xqlite.set_pragma/3` does run a `PRAGMA` and is denied.
+  Writing it with `Xqlite.Pragma.put/3` does run a `PRAGMA` and is denied.
+- `Xqlite.Pragma.get(conn, :busy_timeout)` still answers while a busy policy
+  or observer holds the busy slot, from the timeout the slot keeps; with the
+  slot empty it runs a `PRAGMA` and is denied.
 - `Xqlite.get_create_sql/2` still answers. It is a `SELECT` over
   `sqlite_schema`, so it obeys the `:read` and `:select` actions instead —
   deny either of those to stop it.

@@ -65,22 +65,22 @@ defmodule XqlitePragmaTest do
     {:journal_mode,
      [
        # Most common default for file DBs
-       {"DELETE", "delete"},
-       {"TRUNCATE", "truncate"},
-       {"PERSIST", "persist"},
-       {"MEMORY", "memory"},
+       {"DELETE", :delete},
+       {"TRUNCATE", :truncate},
+       {"PERSIST", :persist},
+       {"MEMORY", :memory},
        # On in-memory, WAL falls back to memory
-       {"WAL", ~w(wal memory)},
-       {"OFF", "off"}
+       {"WAL", [:wal, :memory]},
+       {"OFF", :off}
      ], &verify_journal_mode/4},
-    {:locking_mode, [{"NORMAL", "normal"}, {"EXCLUSIVE", "exclusive"}]},
+    {:locking_mode, [{"NORMAL", :normal}, {"EXCLUSIVE", :exclusive}]},
     {:encoding,
      [
-       {"UTF-8", "UTF-8"},
-       {"UTF-16le", "UTF-16le"},
-       {"UTF-16be", "UTF-16be"},
+       {"UTF-8", :utf8},
+       {"UTF-16le", :utf16le},
+       {:utf16be, :utf16be},
        # Setting UTF-16 may result in le or be
-       {"UTF-16", ~w(UTF-16le UTF-16be)}
+       {"UTF-16", [:utf16le, :utf16be]}
      ]},
 
     # Advisory values
@@ -117,7 +117,7 @@ defmodule XqlitePragmaTest do
       end
 
       test "read pragma: foreign_key_check with table name", %{db: db} do
-        assert {:ok, _} = P.put(db, :foreign_keys, false)
+        assert :ok = P.put(db, :foreign_keys, false)
 
         assert :ok =
                  NIF.execute_batch(db, """
@@ -148,7 +148,7 @@ defmodule XqlitePragmaTest do
 
       property "every function rejects the foreign-key switch inside a transaction", %{db: db} do
         check all(
-                via <- member_of([:raw, :set_pragma, :put, :put_main, :switch]),
+                via <- member_of([:raw, :put, :put_main, :switch]),
                 name <- spelling_of(:foreign_keys),
                 on <- member_of([0, 1]),
                 open <- member_of(["BEGIN", "SAVEPOINT s"]),
@@ -163,7 +163,7 @@ defmodule XqlitePragmaTest do
       property "every other writable PRAGMA is written inside a transaction", %{db: db} do
         check all({name, value} <- accepted_pair(), name != :foreign_keys, max_runs: 2000) do
           :ok = NIF.begin(db)
-          refute Xqlite.set_pragma(db, name, value) == {:error, :transaction_in_progress}
+          refute P.put(db, name, value) == {:error, :transaction_in_progress}
           :ok = NIF.rollback(db)
         end
       end
@@ -191,7 +191,8 @@ defmodule XqlitePragmaTest do
             # We need a clean DB for some PRAGMAs like page_size
             db = if unquote(name) == :page_size, do: clean_db(), else: db
 
-            assert {:ok, _} = P.put(db, unquote(name), set_val)
+            answer = P.put(db, unquote(name), set_val)
+            assert answer == :ok or match?({:error, {:pragma_not_applied, _}}, answer)
 
             case P.get(db, unquote(name)) do
               {:ok, fetched_val} ->
@@ -225,27 +226,39 @@ defmodule XqlitePragmaTest do
     end
 
     test "put with db_name: main writes to main schema", %{db: db} do
-      assert {:ok, _} = P.put(db, :cache_size, {:pages, 5000}, db_name: "main")
+      assert :ok = P.put(db, :cache_size, {:pages, 5000}, db_name: "main")
       assert {:ok, {:pages, 5000}} = P.get(db, :cache_size, [], db_name: "main")
     end
 
     test "get/put on an attached database", %{db: db} do
       NIF.execute_batch(db, "ATTACH ':memory:' AS aux;")
 
-      assert {:ok, _} = P.put(db, :cache_size, {:pages, 3000}, db_name: "aux")
+      assert :ok = P.put(db, :cache_size, {:pages, 3000}, db_name: "aux")
       assert {:ok, {:pages, 3000}} = P.get(db, :cache_size, [], db_name: "aux")
 
       {:ok, main_cache} = P.get(db, :cache_size)
       refute main_cache == {:pages, 3000}
     end
 
-    test "the two reads this library answers itself reject a db_name", %{db: db} do
+    test "the two PRAGMAs this library answers itself reject a db_name", %{db: db} do
       for name <- [:busy_timeout, :wal_autocheckpoint] do
-        assert {:error,
-                {:invalid_pragma_argument,
-                 %{pragma: ^name, value: {:db_name, "main"}, reason: :invalid_options}}} =
-                 P.get(db, name, db_name: "main")
+        rejected =
+          {:error,
+           {:invalid_pragma_argument,
+            %{pragma: name, value: {:db_name, "main"}, reason: :invalid_options}}}
+
+        assert rejected == P.get(db, name, db_name: "main")
+        assert rejected == P.put(db, name, 100, db_name: "main")
       end
+    end
+
+    test "the anchor: a journal mode not applied names the mode in force", %{db: db} do
+      not_applied =
+        {:error,
+         {:pragma_not_applied, %{pragma: :journal_mode, asked: :wal, in_force: :memory}}}
+
+      assert not_applied == P.put(db, :journal_mode, :wal)
+      assert not_applied == P.put(db, :journal_mode, :wal, db_name: "main")
     end
 
     test "get list-returning pragma with db_name", %{db: db} do
@@ -304,26 +317,11 @@ defmodule XqlitePragmaTest do
       assert {:error, {:invalid_pragma_name, 7}} = P.get(db, 7)
     end
 
-    # `to_string(nil)` is `""`, so a raw door that converted first would hand
-    # SQLite an empty name and report the caller's key as that empty string.
-    # The two door families answer with different tags, but neither invents a
-    # key, and neither builds a statement.
     test "the anchor: nil is no name on any door", %{db: db} do
       assert :ok = Xqlite.set_authorizer(db, [:pragma])
-
-      assert {:error, {:invalid_pragma_name, nil}} = Xqlite.get_pragma(db, nil)
-      assert {:error, {:invalid_pragma_name, nil}} = Xqlite.set_pragma(db, nil, 1)
       assert {:error, {:unknown_pragma, nil}} = P.get(db, nil)
       assert {:error, {:unknown_pragma, nil}} = P.put(db, nil, 1)
-
       assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
-    end
-
-    # `true` and `false` stay names of PRAGMAs SQLite parses and ignores, by
-    # the raw doors' own rule for a name outside the typed schema.
-    test "the anchor: true and false are still names on the raw doors", %{db: db} do
-      assert {:ok, :no_value} = Xqlite.get_pragma(db, true)
-      assert {:ok, :no_value} = Xqlite.get_pragma(db, false)
     end
 
     # Denying the `:pragma` action turns any PRAGMA that really reaches SQLite
@@ -430,7 +428,7 @@ defmodule XqlitePragmaTest do
     end
 
     test "the anchor: a getter with no one-argument form refuses the argument", %{db: db} do
-      assert {:ok, _} = P.put(db, :user_version, 7)
+      assert :ok = P.put(db, :user_version, 7)
 
       assert {:error,
               {:invalid_pragma_argument,
@@ -441,7 +439,7 @@ defmodule XqlitePragmaTest do
     end
 
     property "the refused argument writes nothing", %{db: db} do
-      assert {:ok, _} = P.put(db, :user_version, 7)
+      assert :ok = P.put(db, :user_version, 7)
 
       check all(value <- pragma_scalar(), max_runs: 2000) do
         assert {:error, {:invalid_pragma_argument, %{pragma: :user_version, reason: reason}}} =
@@ -468,7 +466,7 @@ defmodule XqlitePragmaTest do
   end
 
   # SQLite answers no row at all for some PRAGMAs: memory mapped I/O has no
-  # size on a database that is not a file, and two more report nothing
+  # size on a database that is not a file, and one more reports nothing
   # anywhere. Every read door answers `:no_value` there, and no write door
   # takes the atom back.
   describe "a PRAGMA the connection has no row for" do
@@ -480,7 +478,6 @@ defmodule XqlitePragmaTest do
 
     test "memory mapped I/O has no size in memory", %{db: db} do
       assert {:ok, :no_value} = P.get(db, :mmap_size)
-      assert {:ok, :no_value} = Xqlite.get_pragma(db, :mmap_size)
     end
 
     test "the same PRAGMA answers a number off a file database" do
@@ -492,17 +489,30 @@ defmodule XqlitePragmaTest do
       assert is_integer(size)
     end
 
-    test "two more answer it on every database", %{db: db} do
+    test "one more answers it on every database", %{db: db} do
       assert {:ok, :no_value} = P.get(db, :legacy_file_format)
-      assert {:ok, :no_value} = P.get(db, :incremental_vacuum)
     end
 
     test "no write door takes the atom back", %{db: db} do
       assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: :no_value}}} =
                P.put(db, :mmap_size, :no_value)
+    end
 
-      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: :no_value}}} =
-               Xqlite.set_pragma(db, "mmap_size", :no_value)
+    test "the four actions are no PRAGMA get reads, and run nothing" do
+      path = tmp_db_path("actions")
+      {:ok, db} = Xqlite.open(path, auto_vacuum: :incremental)
+
+      :ok = NIF.execute_batch(db, "CREATE TABLE t (v); INSERT INTO t VALUES (zeroblob(9000));")
+      :ok = NIF.execute_batch(db, "DELETE FROM t;")
+      before = {P.get(db, :freelist_count), File.stat!(path <> "-wal").size}
+
+      for {name, arg} <-
+            [incremental_vacuum: 5, wal_checkpoint: "TRUNCATE", optimize: 2, shrink_memory: []] do
+        assert {:error, {:unknown_pragma, ^name}} = P.get(db, name, arg)
+      end
+
+      assert before == {P.get(db, :freelist_count), File.stat!(path <> "-wal").size}
+      :ok = Xqlite.close(db)
     end
   end
 
@@ -545,7 +555,7 @@ defmodule XqlitePragmaTest do
     end
 
     test "the anchor: the options that read keep reading", %{db: db} do
-      assert {:ok, _written} = P.put(db, :user_version, 3)
+      assert :ok = P.put(db, :user_version, 3)
 
       assert {:ok, 3} = P.get(db, :user_version, [], [])
       assert {:ok, 3} = P.get(db, :user_version, db_name: "main")
@@ -668,13 +678,7 @@ defmodule XqlitePragmaTest do
     # The getter flattens single-column rows; the values are SQLite's own.
     property "a number-reading PRAGMA answers what the raw statement answers", %{db: db} do
       check all(
-              name <-
-                StreamData.member_of([
-                  :integrity_check,
-                  :quick_check,
-                  :optimize,
-                  :incremental_vacuum
-                ]),
+              name <- StreamData.member_of([:integrity_check, :quick_check]),
               number <- StreamData.integer(1..8),
               max_runs: 2000
             ) do
@@ -776,22 +780,6 @@ defmodule XqlitePragmaTest do
                door_answers(:foreign_keys, :foreign_keys)
     end
 
-    # A door resolves the caller's spelling to the name this module knows, so
-    # what SQLite is given — and what an error payload then reports — is the
-    # same string whatever the caller wrote.
-    test "the anchor: a door hands SQLite the name the spec spells" do
-      assert {:ok, db} = NIF.open_in_memory(":memory:")
-      on_exit(fn -> NIF.close(db) end)
-
-      handler_id = Xqlite.Telemetry.TestSupport.attach_capture([[:xqlite, :pragma, :get]])
-      on_exit(fn -> Xqlite.Telemetry.TestSupport.detach(handler_id) end)
-
-      assert {:ok, _value} = Xqlite.get_pragma(db, :FUNCTION_LIST)
-
-      assert_receive {:telemetry_event, [:xqlite, :pragma, :get], _measurements,
-                      %{name: "function_list"}}
-    end
-
     property "every door answers what the canonical atom answers", %{canonical: canonical} do
       check all(
               name <- StreamData.member_of(P.all()),
@@ -813,12 +801,10 @@ defmodule XqlitePragmaTest do
     end
 
     test "the anchor: a charlist is a list, and nothing is written", %{db: db} do
-      assert {:ok, 0} = Xqlite.get_pragma(db, :user_version)
-
       assert {:error, {:invalid_pragma_name, ~c"user_version"}} =
-               Xqlite.set_pragma(db, ~c"user_version", 77)
+               P.put(db, ~c"user_version", 77)
 
-      assert {:ok, 0} = Xqlite.get_pragma(db, :user_version)
+      assert {:ok, 0} = P.get(db, :user_version)
     end
 
     property "every door refuses it, with the key unchanged", %{db: db} do
@@ -827,8 +813,6 @@ defmodule XqlitePragmaTest do
       check all(key <- non_name_key(), max_runs: 2000) do
         assert {:error, {:invalid_pragma_name, ^key}} = P.get(db, key)
         assert {:error, {:invalid_pragma_name, ^key}} = P.put(db, key, 1)
-        assert {:error, {:invalid_pragma_name, ^key}} = Xqlite.get_pragma(db, key)
-        assert {:error, {:invalid_pragma_name, ^key}} = Xqlite.set_pragma(db, key, 1)
       end
 
       # The denying authorizer turns any PRAGMA that really reaches SQLite
@@ -891,7 +875,6 @@ defmodule XqlitePragmaTest do
   defp recased_char({char, _index}), do: String.downcase(char)
 
   defp write_fk(:raw, db, name, on), do: NIF.set_pragma(db, to_string(name), on)
-  defp write_fk(:set_pragma, db, name, on), do: Xqlite.set_pragma(db, name, on)
   defp write_fk(:put, db, name, on), do: P.put(db, name, on)
   defp write_fk(:put_main, db, name, on), do: P.put(db, name, on, db_name: "main")
   defp write_fk(:switch, db, _name, 1), do: Xqlite.enable_foreign_key_enforcement(db)
@@ -903,13 +886,7 @@ defmodule XqlitePragmaTest do
     assert {:ok, db} = NIF.open_in_memory(":memory:")
     :ok = NIF.execute_batch(db, "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);")
 
-    answers =
-      [
-        P.get(db, key),
-        P.put(db, key, nil),
-        Xqlite.get_pragma(db, key),
-        Xqlite.set_pragma(db, key, nil)
-      ] ++ with_arg_answer(db, key, name)
+    answers = [P.get(db, key), P.put(db, key, nil)] ++ with_arg_answer(db, key, name)
 
     assert :ok = NIF.close(db)
     answers
@@ -943,10 +920,6 @@ defmodule XqlitePragmaTest do
     ExUnit.Callbacks.on_exit(fn -> NIF.close(db) end)
     db
   end
-
-  # ---------------------------------------------------------------------------
-  # Value checking: Xqlite.set_pragma/3 and Xqlite.Pragma.put/4 share one rule
-  # ---------------------------------------------------------------------------
 
   @writable_names P.writable()
 
@@ -1040,50 +1013,46 @@ defmodule XqlitePragmaTest do
     end)
   end
 
-  describe "Xqlite.set_pragma/3 checks the value" do
+  describe "Xqlite.Pragma.put/4 checks the value" do
     setup do
       {:ok, conn} = Xqlite.open_in_memory()
       on_exit(fn -> NIF.close(conn) end)
       {:ok, conn: conn}
     end
 
-    test "a word no boolean pragma takes is refused, and the setting stands", %{conn: conn} do
-      assert {:ok, 1} = Xqlite.get_pragma(conn, "foreign_keys")
-
-      assert {:error, {:invalid_pragma_value, %{pragma: :foreign_keys, value: :maybe}}} =
-               Xqlite.set_pragma(conn, "foreign_keys", :maybe)
-
-      assert {:ok, 1} = Xqlite.get_pragma(conn, "foreign_keys")
-    end
-
     test "a word no integer pragma takes is refused, and the setting stands", %{conn: conn} do
-      {:ok, _} = Xqlite.set_pragma(conn, "user_version", 99)
+      :ok = P.put(conn, :user_version, 99)
 
       assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: :garbage}}} =
-               Xqlite.set_pragma(conn, "user_version", :garbage)
+               P.put(conn, :user_version, :garbage)
 
-      assert {:ok, 99} = Xqlite.get_pragma(conn, "user_version")
+      assert {:ok, 99} = P.get(conn, :user_version)
     end
 
-    test "a boolean on an integer pragma is refused by both setters", %{conn: conn} do
-      {:ok, _} = Xqlite.set_pragma(conn, "user_version", 7)
+    test "a boolean on an integer pragma is rejected", %{conn: conn} do
+      :ok = P.put(conn, :user_version, 7)
 
       assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: true}}} =
                P.put(conn, :user_version, true)
 
-      assert {:ok, 7} = Xqlite.get_pragma(conn, "user_version")
+      assert {:ok, 7} = P.get(conn, :user_version)
     end
 
     # The hard limit belongs to the operating-system process and SQLite applies
-    # it only when it lowers the limit in force, so the only value that is safe
-    # to write here is one that lowers nothing. `:unlimited`, the 0 SQLite
-    # stores for no limit, does not release it: it answers the limit in force.
-    test "hard_heap_limit takes a 64-bit value, and :unlimited does not release it",
+    # it only when it lowers the limit in force; every value this file writes
+    # is a gigabyte or more, so the gigabyte itself always applies. Neither a
+    # higher value nor `:unlimited`, the 0 SQLite stores for no limit, lifts it.
+    test "hard_heap_limit applies only downward, and :unlimited does not release it",
          %{conn: conn} do
-      assert {:ok, limit} = P.put(conn, :hard_heap_limit, 9_223_372_036_854_775_807)
-      assert is_integer(limit)
-      assert {:ok, ^limit} = P.put(conn, :hard_heap_limit, :unlimited)
-      assert {:ok, ^limit} = P.get(conn, :hard_heap_limit)
+      gigabyte = 1_073_741_824
+      assert :ok = P.put(conn, :hard_heap_limit, gigabyte)
+
+      for asked <- [:unlimited, 2 * gigabyte] do
+        assert {:error,
+                {:pragma_not_applied,
+                 %{pragma: :hard_heap_limit, asked: ^asked, in_force: ^gigabyte}}} =
+                 P.put(conn, :hard_heap_limit, asked)
+      end
     end
 
     test "a pragma the spec marks read-only is refused", %{conn: conn} do
@@ -1091,54 +1060,57 @@ defmodule XqlitePragmaTest do
       assert {:error, {:read_only_pragma, :integrity_check}} = P.put(conn, :integrity_check, 5)
     end
 
-    test "every spelling of a word pragma reaches SQLite", %{conn: conn} do
-      for spelling <- ["WAL", "wal", :wal] do
-        assert {:ok, mode} = Xqlite.set_pragma(conn, "journal_mode", spelling)
-        assert mode in ["wal", "memory"]
-      end
-    end
-
-    test "an upper-case pragma name keeps working", %{conn: conn} do
-      assert {:ok, _} = Xqlite.set_pragma(conn, "FOREIGN_KEYS", 1)
-      assert {:ok, 1} = Xqlite.get_pragma(conn, "foreign_keys")
-    end
-
-    test "a name the spec does not model keeps the raw path", %{conn: conn} do
-      assert {:ok, _} = Xqlite.set_pragma(conn, "case_sensitive_like", 1)
-
-      assert {:ok, %Xqlite.Result{rows: [[0]]}} =
-               Xqlite.query(conn, "SELECT 'A' LIKE 'a'", [])
-    end
-
-    property "a value outside the spec is refused by both setters, and nothing moves", %{
-      conn: conn
-    } do
+    property "a value outside the spec is rejected, and nothing moves", %{conn: conn} do
       check all({name, value} <- hostile_pair(), max_runs: 2000) do
-        before = Xqlite.get_pragma(conn, name)
-
-        assert {:error, {:invalid_pragma_value, %{pragma: ^name, value: ^value}}} =
-                 Xqlite.set_pragma(conn, name, value)
+        before = P.get(conn, name)
 
         assert {:error, {:invalid_pragma_value, %{pragma: ^name, value: ^value}}} =
                  P.put(conn, name, value)
 
-        assert Xqlite.get_pragma(conn, name) == before
+        assert P.get(conn, name) == before
       end
     end
 
-    property "a spelling the spec lists is accepted the same way by both setters" do
-      check all({name, value} <- accepted_pair(), max_runs: 2000) do
-        {:ok, raw_db} = NIF.open_in_memory(":memory:")
-        {:ok, typed_db} = NIF.open_in_memory(":memory:")
+    property "a write SQLite answers with a row is :ok exactly when get reads it back" do
+      path = tmp_db_path("row_law")
+      {:ok, seed} = NIF.open(path)
 
-        assert Xqlite.set_pragma(raw_db, name, value) == P.put(typed_db, name, value)
-        assert Xqlite.get_pragma(raw_db, name) == Xqlite.get_pragma(typed_db, name)
+      :ok =
+        NIF.execute_batch(seed, "CREATE TABLE t (v); INSERT INTO t VALUES (zeroblob(9000));")
 
-        NIF.close(raw_db)
-        NIF.close(typed_db)
+      :ok = NIF.close(seed)
+
+      check all({name, asked} <- row_write(), max_runs: 2000) do
+        {:ok, db} = NIF.open(path)
+        answer = P.put(db, name, asked)
+        {:ok, read} = P.get(db, name)
+        :ok = NIF.close(db)
+        assert {name, answer} == {name, expected_write_answer(name, asked, read)}
       end
     end
   end
+
+  defp row_write do
+    [
+      analysis_limit: one_of([constant(:unlimited), integer(1..0x7FFFFFFF)]),
+      busy_timeout: integer(0..0x7FFFFFFF),
+      journal_mode: member_of(~w(delete truncate persist memory wal off)a),
+      journal_size_limit: one_of([constant(:unlimited), integer(0..0x7FFFFFFFFFFFFFFF)]),
+      locking_mode: member_of([:normal, :exclusive]),
+      max_page_count: one_of([integer(1..8), integer(1..4_294_967_294)]),
+      mmap_size: integer(0..0x7FFF0000),
+      secure_delete: member_of([false, true, :fast]),
+      threads: integer(0..8),
+      wal_autocheckpoint: one_of([constant(:off), integer(1..0x7FFFFFFF)])
+    ]
+    |> member_of()
+    |> bind(fn {name, values} -> map(values, &{name, &1}) end)
+  end
+
+  defp expected_write_answer(_name, asked, asked), do: :ok
+
+  defp expected_write_answer(name, asked, read),
+    do: {:error, {:pragma_not_applied, %{pragma: name, asked: asked, in_force: read}}}
 
   describe "the open path checks its values through the same rule" do
     test "every documented option value opens" do
@@ -1228,8 +1200,6 @@ defmodule XqlitePragmaTest do
     test "a pragma name that is not UTF-8 is refused as a name", %{db: db} do
       bad = <<109, 97, 255>>
 
-      assert {:error, {:invalid_pragma_name, ^bad}} = Xqlite.get_pragma(db, bad)
-      assert {:error, {:invalid_pragma_name, ^bad}} = Xqlite.set_pragma(db, bad, 1)
       assert {:error, {:invalid_pragma_name, ^bad}} = NIF.get_pragma(db, bad)
       assert {:error, {:invalid_pragma_name, ^bad}} = NIF.set_pragma(db, bad, 1)
     end
@@ -1240,7 +1210,7 @@ defmodule XqlitePragmaTest do
       assert {:error, :invalid_utf8_in_string} = NIF.set_pragma(db, "user_version", bad)
 
       assert {:error, {:invalid_pragma_value, %{pragma: :user_version, value: ^bad}}} =
-               Xqlite.set_pragma(db, :user_version, bad)
+               P.put(db, :user_version, bad)
     end
   end
 
@@ -1258,10 +1228,10 @@ defmodule XqlitePragmaTest do
     test "zero and the ceiling are written and read back", %{db: db} do
       ceiling = mmap_ceiling()
 
-      assert {:ok, ^ceiling} = P.put(db, :mmap_size, ceiling)
+      assert :ok = P.put(db, :mmap_size, ceiling)
       assert {:ok, ^ceiling} = P.get(db, :mmap_size)
 
-      assert {:ok, 0} = P.put(db, :mmap_size, 0)
+      assert :ok = P.put(db, :mmap_size, 0)
       assert {:ok, 0} = P.get(db, :mmap_size)
     end
 
@@ -1273,12 +1243,6 @@ defmodule XqlitePragmaTest do
 
       assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: ^over}}} =
                P.put(db, :mmap_size, over)
-
-      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: -1}}} =
-               Xqlite.set_pragma(db, :mmap_size, -1)
-
-      assert {:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: ^over}}} =
-               Xqlite.set_pragma(db, :mmap_size, over)
     end
 
     # The schema carries one number for eight shipped builds, so the build has

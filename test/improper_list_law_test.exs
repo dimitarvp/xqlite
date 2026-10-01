@@ -45,12 +45,6 @@ defmodule Xqlite.ImproperListLawTest do
     {:execute_keyword, :pair, :expected_keyword_list},
     {:explain_analyze_params, :value, :expected_list},
     {:explain_analyze_keyword, :pair, :expected_keyword_list},
-    {:query_cancellable_params, :value, :expected_list},
-    {:query_cancellable_keyword, :pair, :expected_keyword_list},
-    {:execute_cancellable_params, :value, :expected_list},
-    {:execute_cancellable_keyword, :pair, :expected_keyword_list},
-    {:query_with_changes_cancellable_params, :value, :expected_list},
-    {:query_with_changes_cancellable_keyword, :pair, :expected_keyword_list},
     {:nif_query_params, :value, :expected_list},
     {:nif_query_keyword, :pair, :expected_keyword_list},
     {:nif_execute_params, :value, :expected_list},
@@ -76,9 +70,6 @@ defmodule Xqlite.ImproperListLawTest do
     {:explain_analyze_type_extensions, :extension, :invalid_type_extensions},
     {:bind_type_extensions, :extension, :invalid_type_extensions},
     {:stream_type_extensions, :extension, :invalid_type_extensions},
-    {:query_cancellable_type_extensions, :extension, :invalid_type_extensions},
-    {:execute_cancellable_type_extensions, :extension, :invalid_type_extensions},
-    {:query_with_changes_cancellable_type_extensions, :extension, :invalid_type_extensions},
     {:stream_params_extension, :value, :expected_list},
     {:stream_keyword_extension, :pair, :expected_keyword_list},
     {:bind_params_extension, :value, :expected_list},
@@ -89,12 +80,6 @@ defmodule Xqlite.ImproperListLawTest do
     {:execute_keyword_extension, :pair, :expected_keyword_list},
     {:explain_analyze_params_extension, :value, :expected_list},
     {:explain_analyze_keyword_extension, :pair, :expected_keyword_list},
-    {:query_cancellable_params_extension, :value, :expected_list},
-    {:query_cancellable_keyword_extension, :pair, :expected_keyword_list},
-    {:execute_cancellable_params_extension, :value, :expected_list},
-    {:execute_cancellable_keyword_extension, :pair, :expected_keyword_list},
-    {:query_with_changes_cancellable_params_extension, :value, :expected_list},
-    {:query_with_changes_cancellable_keyword_extension, :pair, :expected_keyword_list},
     {:encode_params_no_extensions, :value, :expected_list},
     {:encode_params_no_extensions_keyword, :pair, :expected_keyword_list},
     {:decode_rows_no_extensions, :row, :expected_list},
@@ -245,11 +230,6 @@ defmodule Xqlite.ImproperListLawTest do
     conn
   end
 
-  defp new_token do
-    assert {:ok, token} = Xqlite.create_cancel_token()
-    token
-  end
-
   # `execute/4` refuses a statement that returns rows, so its door writes one.
   defp insert_sql(conn, placeholder) do
     assert :ok = NIF.execute_batch(conn, "CREATE TABLE improper_rows (v)")
@@ -299,24 +279,6 @@ defmodule Xqlite.ImproperListLawTest do
 
   defp call(:explain_analyze_keyword, conn, list),
     do: Xqlite.explain_analyze(conn, "SELECT :p1", list)
-
-  defp call(:query_cancellable_params, conn, list),
-    do: Xqlite.query_cancellable(conn, "SELECT ?1", list, new_token())
-
-  defp call(:query_cancellable_keyword, conn, list),
-    do: Xqlite.query_cancellable(conn, "SELECT :p1", list, new_token())
-
-  defp call(:execute_cancellable_params, conn, list),
-    do: Xqlite.execute_cancellable(conn, insert_sql(conn, "?1"), list, new_token())
-
-  defp call(:execute_cancellable_keyword, conn, list),
-    do: Xqlite.execute_cancellable(conn, insert_sql(conn, ":p1"), list, new_token())
-
-  defp call(:query_with_changes_cancellable_params, conn, list),
-    do: Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", list, new_token())
-
-  defp call(:query_with_changes_cancellable_keyword, conn, list),
-    do: Xqlite.query_with_changes_cancellable(conn, "SELECT :p1", list, new_token())
 
   defp call(:nif_query_params, conn, list), do: NIF.query(conn, "SELECT ?1", list)
 
@@ -399,21 +361,6 @@ defmodule Xqlite.ImproperListLawTest do
   defp call(:stream_type_extensions, conn, list),
     do: Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: list)
 
-  defp call(:query_cancellable_type_extensions, conn, list),
-    do: Xqlite.query_cancellable(conn, "SELECT ?1", [1], new_token(), type_extensions: list)
-
-  defp call(:execute_cancellable_type_extensions, conn, list) do
-    Xqlite.execute_cancellable(conn, insert_sql(conn, "?1"), [1], new_token(),
-      type_extensions: list
-    )
-  end
-
-  defp call(:query_with_changes_cancellable_type_extensions, conn, list) do
-    Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], new_token(),
-      type_extensions: list
-    )
-  end
-
   defp call(:stream_params_extension, conn, list),
     do: Xqlite.stream(conn, "SELECT ?1", list, @extension_opts)
 
@@ -447,52 +394,6 @@ defmodule Xqlite.ImproperListLawTest do
 
   defp call(:explain_analyze_keyword_extension, conn, list),
     do: Xqlite.explain_analyze(conn, "SELECT :p1", list, @extension_opts)
-
-  defp call(:query_cancellable_params_extension, conn, list),
-    do: Xqlite.query_cancellable(conn, "SELECT ?1", list, new_token(), @extension_opts)
-
-  defp call(:query_cancellable_keyword_extension, conn, list),
-    do: Xqlite.query_cancellable(conn, "SELECT :p1", list, new_token(), @extension_opts)
-
-  defp call(:execute_cancellable_params_extension, conn, list) do
-    Xqlite.execute_cancellable(
-      conn,
-      insert_sql(conn, "?1"),
-      list,
-      new_token(),
-      @extension_opts
-    )
-  end
-
-  defp call(:execute_cancellable_keyword_extension, conn, list) do
-    Xqlite.execute_cancellable(
-      conn,
-      insert_sql(conn, ":p1"),
-      list,
-      new_token(),
-      @extension_opts
-    )
-  end
-
-  defp call(:query_with_changes_cancellable_params_extension, conn, list) do
-    Xqlite.query_with_changes_cancellable(
-      conn,
-      "SELECT ?1",
-      list,
-      new_token(),
-      @extension_opts
-    )
-  end
-
-  defp call(:query_with_changes_cancellable_keyword_extension, conn, list) do
-    Xqlite.query_with_changes_cancellable(
-      conn,
-      "SELECT :p1",
-      list,
-      new_token(),
-      @extension_opts
-    )
-  end
 
   # The two chain functions judge the list they are handed before any door
   # sees it, and with no extension on the list they judge it all the same.

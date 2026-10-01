@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`open/2` keeps the `auto_vacuum` asked on a new file in WAL mode.** It
+  applies `auto_vacuum` before `journal_mode`; a new file under the default
+  WAL mode read `:none` whatever was asked.
+- **`Xqlite.error_reason/0` lists `{:strict_violations, _}` and
+  `{:unexpected_value, _}`**, which `Xqlite.enable_strict_table/2` and
+  `Xqlite.Pragma.get/2` already answered, beside the new
+  `{:pragma_not_applied, _}`.
+
 - **`backup/3`, `backup_with_progress/6` and `restore/3` no longer wait on a
   lock the caller did not ask to wait on.** A lock another connection holds
   on the file the library opens itself (a backup's destination, the file a
@@ -514,6 +522,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **One `cancel_tokens:` option replaces the `_cancellable` functions.**
+  `Xqlite.query/4`, `execute/4`, `execute_batch/3` and `multi_step/3` take
+  one token or a list (default `[]`) and keep their answers: `query/4` and
+  `execute/4` answer `%Xqlite.Result{}` with or without tokens. The removed
+  `query_cancellable/5` and `query_with_changes_cancellable/5` answered a
+  plain map, and `execute_cancellable/5` answered `{:ok, count}`; use
+  `query/4` and `execute/4` with the option. `execute_batch_cancellable/3`
+  and `multi_step_cancellable/3` became `execute_batch/3` and
+  `multi_step/3` with the option. The raw `XqliteNIF` cancellable functions
+  stay.
+- **The `[:xqlite, :query_with_changes, :start | :stop | :exception]` span
+  is gone**, and `[:xqlite, :cancel, :honored]` no longer reports
+  `operation: :query_with_changes`: a cancelled `query/4` reports
+  `operation: :query`.
+- **`Xqlite.transaction_status/1` is removed.** `Xqlite.autocommit/1`
+  answers the same question the other way round: `{:ok, true}` while no
+  transaction is open.
+- **`Xqlite.get_pragma/2` and `Xqlite.set_pragma/3` are removed.**
+  `Xqlite.Pragma.get` and `put` are the PRAGMA functions; a PRAGMA that
+  `Xqlite.Pragma` does not model is reached with `Xqlite.query/4` or the
+  raw `XqliteNIF.get_pragma/2` and `set_pragma/3`. The
+  `[:xqlite, :pragma, :get]` and `[:xqlite, :pragma, :set]` events went
+  with them.
+- **`Xqlite.optimize/1` and `Xqlite.shrink_memory/1` are added, and
+  `Xqlite.Pragma.get` no longer runs the PRAGMAs that act**: `optimize`,
+  `shrink_memory`, `wal_checkpoint` and `incremental_vacuum` answer
+  `{:error, {:unknown_pragma, name}}` there. `Xqlite.wal_checkpoint/3` runs
+  a checkpoint, and `Xqlite.query/4` runs `incremental_vacuum`, or
+  `optimize` with a mask. `Xqlite.Pragma.returning_nothing/0` is gone.
+- **`journal_mode`, `locking_mode` and `encoding` read back as atoms** from
+  `Xqlite.Pragma.get` — `:wal`, `:exclusive`, `:utf8`, `:utf16le`,
+  `:utf16be` — and take the atom, or the text in any case, on a write.
+- **`enable_load_extension/2` is split into `enable_load_extension/1` and
+  `disable_load_extension/1`**, each with its own event:
+  `[:xqlite, :extension, :enable]` and the new
+  `[:xqlite, :extension, :disable]`, both with metadata `%{conn}` (the
+  `:enabled` key is gone).
+- **`load_extension/3` and `deserialize/4` take options.** `entry_point:`
+  replaces the positional entry point (leave it out to let SQLite find the
+  init function), and `read_only:` replaces the boolean of `deserialize/4`,
+  whose schema stays positional; options given in the schema's place load
+  into `"main"`, as in `deserialize(conn, data, read_only: true)`. A value
+  of the wrong kind answers `{:error, {:invalid_option, _}}`, and so does a
+  call in the old positional form.
+- **`backup_with_progress/6` becomes
+  `backup_with_progress(conn, dest_path, pid, opts)`**, the destination
+  first as in `backup/3`, with `schema:` (default `"main"`),
+  `pages_per_step:` (default 100, as in `backup/3`; a bad value still
+  answers `{:error, {:invalid_pages_per_step, value}}`) and
+  `cancel_tokens:`.
+- **A PRAGMA write through `Xqlite.Pragma.put/3,4` answers `:ok`, or
+  `{:error, {:pragma_not_applied, %{pragma: name, asked: value, in_force:
+  value}}}` when SQLite answers it with another value** —
+  `journal_mode: :wal` on an in-memory database, `max_page_count` below the
+  page count, a heap limit SQLite will not raise — with or without
+  `db_name:`; no write answers `{:ok, value}` any more. The error can
+  follow a change, since `in_force` is what holds after the write:
+  `max_page_count: 1` sets the limit to the page count, so the next insert
+  that needs a page fails with "database or disk is full"; a
+  `soft_heap_limit` above the hard one is set to the hard one; and in
+  memory a `locking_mode: :normal` write answers `in_force: :exclusive`,
+  which `get(conn, :locking_mode, db_name: "main")` also reads, while a
+  plain `get` answers `:normal`. A write SQLite answers with no row, such
+  as `page_size` on a database with content, answers `:ok`;
+  `Xqlite.Pragma.get` tells what holds. `Xqlite.Pragma.put/4` rejects
+  `db_name:` for `busy_timeout` and `wal_autocheckpoint`, as `get` does, so
+  such a write no longer stops the WAL hook messages.
+  `enable_foreign_key_enforcement/1` and
+  `disable_foreign_key_enforcement/1` answer `:ok`.
 
 - **`open/2` and `open_in_memory/1` answer `{:error, {:invalid_option,
   %{key: key, value: value, reason: :invalid_value}}}` for an option value

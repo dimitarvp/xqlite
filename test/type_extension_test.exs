@@ -1216,7 +1216,6 @@ defmodule Xqlite.TypeExtensionTest do
 
     test "every door that takes the option judges it the same way", %{conn: conn} do
       assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE ext_rows (v)")
-      assert {:ok, token} = Xqlite.create_cancel_token()
       assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
       bad = [Xqlite.TypeExtension.JSON | :x]
 
@@ -1233,24 +1232,6 @@ defmodule Xqlite.TypeExtensionTest do
       assert refusal == Xqlite.explain_analyze(conn, "SELECT ?1", [1], type_extensions: bad)
       assert refusal == Xqlite.bind(stmt, [1], type_extensions: bad)
       assert refusal == Xqlite.stream(conn, "SELECT ?1", [1], type_extensions: bad)
-
-      assert refusal ==
-               Xqlite.query_cancellable(conn, "SELECT ?1", [1], token, type_extensions: bad)
-
-      assert refusal ==
-               Xqlite.execute_cancellable(
-                 conn,
-                 "INSERT INTO ext_rows (v) VALUES (?1)",
-                 [1],
-                 token,
-                 type_extensions: bad
-               )
-
-      assert refusal ==
-               Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], token,
-                 type_extensions: bad
-               )
-
       assert :ok = Xqlite.finalize(stmt)
     end
 
@@ -1424,7 +1405,6 @@ defmodule Xqlite.TypeExtensionTest do
 
     property "every door reports the first element that is no extension", %{conn: conn} do
       assert :ok = Xqlite.execute_batch(conn, "CREATE TABLE law_rows (v)")
-      assert {:ok, token} = Xqlite.create_cancel_token()
       assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
 
       element = one_of([member_of(@extension_modules), member_of(@non_extension_modules)])
@@ -1433,7 +1413,7 @@ defmodule Xqlite.TypeExtensionTest do
         expected = expected_outcome(extensions)
 
         conn
-        |> door_answers(stmt, token, extensions)
+        |> door_answers(stmt, extensions)
         |> Enum.each(fn answer -> assert expected == outcome(answer) end)
       end
 
@@ -1445,7 +1425,7 @@ defmodule Xqlite.TypeExtensionTest do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  defp door_answers(conn, stmt, token, extensions) do
+  defp door_answers(conn, stmt, extensions) do
     opts = [type_extensions: extensions]
 
     [
@@ -1454,15 +1434,6 @@ defmodule Xqlite.TypeExtensionTest do
       Xqlite.explain_analyze(conn, "SELECT ?1", [1], opts),
       Xqlite.bind(stmt, [1], opts),
       stream_answer(conn, opts),
-      Xqlite.query_cancellable(conn, "SELECT ?1", [1], token, opts),
-      Xqlite.execute_cancellable(
-        conn,
-        "INSERT INTO law_rows (v) VALUES (?1)",
-        [1],
-        token,
-        opts
-      ),
-      Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", [1], token, opts),
       TypeExtension.encode_params([1], extensions),
       TypeExtension.decode_rows([[1]], extensions)
     ]

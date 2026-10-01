@@ -104,9 +104,9 @@ defmodule Xqlite.TestUtil do
   # Two journal modes SQLite will not leave a database in, measured: an
   # in-memory database keeps "memory" for every mode but "off", and a
   # temporary file database cannot use WAL, staying on "delete".
-  def verify_journal_mode(:memory_private, "OFF", fetched, _expected), do: fetched == "off"
-  def verify_journal_mode(:memory_private, _set, fetched, _expected), do: fetched == "memory"
-  def verify_journal_mode(:file_temp, "WAL", fetched, _expected), do: fetched == "delete"
+  def verify_journal_mode(:memory_private, "OFF", fetched, _expected), do: fetched == :off
+  def verify_journal_mode(:memory_private, _set, fetched, _expected), do: fetched == :memory
+  def verify_journal_mode(:file_temp, "WAL", fetched, _expected), do: fetched == :delete
 
   def verify_journal_mode(_context, _set, fetched, expected),
     do: fetched in List.wrap(expected)

@@ -417,9 +417,8 @@ defmodule Xqlite.NIF.ExecutionTest do
         assert {:ok, 1} = NIF.execute(conn, sql, ["a"])
         assert {:ok, 1} = NIF.execute_cancellable(conn, sql, ["b"], [])
         assert {:ok, %Xqlite.Result{changes: 1, rows: []}} = Xqlite.execute(conn, sql, ["c"])
-        assert {:ok, 1} = Xqlite.execute_cancellable(conn, sql, ["d"], [])
 
-        assert {:ok, %{rows: [["a"], ["b"], ["c"], ["d"]]}} =
+        assert {:ok, %{rows: [["a"], ["b"], ["c"]]}} =
                  NIF.query(conn, "SELECT name FROM exec_test ORDER BY id", [])
       end
 

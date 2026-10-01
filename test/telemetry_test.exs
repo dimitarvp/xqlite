@@ -8,7 +8,7 @@ defmodule Xqlite.TelemetryTest do
 
   @emitting_macros [:emit, :span, :span_with_stop_metadata]
 
-  # A bracketed event name as the docs write it, e.g. `[:xqlite, :pragma, :get]`.
+  # A bracketed event name as the docs write it, e.g. `[:xqlite, :open, :start]`.
   @documented_name ~r/\[:xqlite\s*,([^\[\]]*)\]/
 
   # A line of the moduledoc holding an event name and nothing else, and the
@@ -32,8 +32,6 @@ defmodule Xqlite.TelemetryTest do
     [:xqlite, :execute, :stop],
     [:xqlite, :execute_batch, :start],
     [:xqlite, :execute_batch, :stop],
-    [:xqlite, :query_with_changes, :start],
-    [:xqlite, :query_with_changes, :stop],
     [:xqlite, :explain_analyze, :start],
     [:xqlite, :explain_analyze, :stop],
     [:xqlite, :transaction, :begin],
@@ -42,8 +40,6 @@ defmodule Xqlite.TelemetryTest do
     [:xqlite, :savepoint, :create],
     [:xqlite, :savepoint, :release],
     [:xqlite, :savepoint, :rollback_to],
-    [:xqlite, :pragma, :get],
-    [:xqlite, :pragma, :set],
     [:xqlite, :stream, :open, :start],
     [:xqlite, :stream, :open, :stop],
     [:xqlite, :stream, :fetch],
@@ -63,7 +59,8 @@ defmodule Xqlite.TelemetryTest do
     [:xqlite, :wal_checkpoint, :stop],
     [:xqlite, :extension, :load, :start],
     [:xqlite, :extension, :load, :stop],
-    [:xqlite, :extension, :enable]
+    [:xqlite, :extension, :enable],
+    [:xqlite, :extension, :disable]
   ]
 
   @reachable_cancel [
@@ -346,11 +343,11 @@ defmodule Xqlite.TelemetryTest do
   end
 
   describe "events/0" do
-    test "lists 35 events, 14 of them spans, with no duplicates" do
+    test "lists 33 events, 13 of them spans, with no duplicates" do
       events = Telemetry.events()
 
-      assert length(events) == 35
-      assert Enum.count(events, &span_entry?/1) == 14
+      assert length(events) == 33
+      assert Enum.count(events, &span_entry?/1) == 13
 
       names = Enum.map(events, &entry_name/1)
       assert names -- Enum.uniq(names) == []
@@ -415,15 +412,13 @@ defmodule Xqlite.TelemetryTest do
       assert triggered == expected
     end
 
-    test "connection, statement, transaction, pragma and stream events fire" do
+    test "connection, statement, transaction and stream events fire" do
       handler_id = attach_capture(@reachable_operations)
 
       {:ok, conn} = Xqlite.open_in_memory()
       :ok = Xqlite.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);")
       {:ok, _} = Xqlite.execute(conn, "INSERT INTO t VALUES (1, 'a')", [])
       {:ok, _} = Xqlite.query(conn, "SELECT id, v FROM t", [])
-      {:ok, token} = Xqlite.create_cancel_token()
-      {:ok, _} = Xqlite.query_with_changes_cancellable(conn, "SELECT id FROM t", [], token)
       {:ok, _} = Xqlite.explain_analyze(conn, "SELECT id FROM t", [])
       :ok = Xqlite.begin(conn)
       :ok = Xqlite.commit(conn)
@@ -432,8 +427,6 @@ defmodule Xqlite.TelemetryTest do
       :ok = Xqlite.savepoint(conn, "sp")
       :ok = Xqlite.rollback_to_savepoint(conn, "sp")
       :ok = Xqlite.release_savepoint(conn, "sp")
-      {:ok, _} = Xqlite.get_pragma(conn, :cache_size)
-      {:ok, _} = Xqlite.set_pragma(conn, :cache_size, {:pages, 2_000})
       [_ | _] = conn |> Xqlite.stream("SELECT id FROM t", [], batch_size: 1) |> Enum.to_list()
       :ok = Xqlite.close(conn)
 
@@ -492,15 +485,15 @@ defmodule Xqlite.TelemetryTest do
 
       {:ok, image} = Xqlite.serialize(conn, "main")
       {:ok, memory} = Xqlite.open_in_memory()
-      :ok = Xqlite.deserialize(memory, image, "main", false)
+      :ok = Xqlite.deserialize(memory, image)
 
       :ok = Xqlite.backup(conn, backup_path)
       {:ok, restored} = Xqlite.open_in_memory()
       :ok = Xqlite.restore(restored, backup_path)
 
-      :ok = Xqlite.enable_load_extension(conn, true)
+      :ok = Xqlite.enable_load_extension(conn)
       :ok = Xqlite.load_extension(conn, test_extension_path())
-      :ok = Xqlite.enable_load_extension(conn, false)
+      :ok = Xqlite.disable_load_extension(conn)
 
       :ok = Xqlite.close(restored)
       :ok = Xqlite.close(memory)
@@ -517,7 +510,8 @@ defmodule Xqlite.TelemetryTest do
       {:ok, token} = Xqlite.create_cancel_token()
       :ok = Xqlite.cancel_operation(token)
 
-      {:error, :operation_cancelled} = Xqlite.query_cancellable(conn, @endless_sql, [], token)
+      {:error, :operation_cancelled} =
+        Xqlite.query(conn, @endless_sql, [], cancel_tokens: token)
 
       :ok = Xqlite.close(conn)
 

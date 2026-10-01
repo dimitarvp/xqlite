@@ -210,8 +210,7 @@ defmodule Xqlite.NIF.QueryWithChangesTest do
           &NIF.execute_cancellable(conn, &1, [], [token]),
           fn sql ->
             with {:ok, result} <- Xqlite.execute(conn, sql), do: {:ok, result.changes}
-          end,
-          &Xqlite.execute_cancellable(conn, &1, [], token)
+          end
         ]
 
         idle = ["CREATE TABLE u (x)", "BEGIN", "COMMIT", "PRAGMA user_version = 7", "VACUUM"]

@@ -241,6 +241,18 @@ defmodule Xqlite.NIF.WalHookTest do
     :ok = NIF.unregister_wal_hook(conn, h)
   end
 
+  test "a wal_autocheckpoint put naming a schema is rejected, the slot kept", %{conn: conn} do
+    {:ok, h} = NIF.register_wal_hook(conn, self())
+
+    assert {:error, {:invalid_pragma_argument, %{reason: :invalid_options}}} =
+             Xqlite.Pragma.put(conn, :wal_autocheckpoint, 50, db_name: "main")
+
+    :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
+    assert_receive {:xqlite_wal, "main", _}, 500
+    assert {:ok, 1000} = Xqlite.Pragma.get(conn, :wal_autocheckpoint)
+    :ok = NIF.unregister_wal_hook(conn, h)
+  end
+
   test "emulated autocheckpoint keeps the WAL bounded at the set threshold",
        %{conn: conn} do
     {:ok, h} = NIF.register_wal_hook(conn, self())

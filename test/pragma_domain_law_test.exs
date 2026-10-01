@@ -9,7 +9,7 @@ defmodule Xqlite.PragmaDomainLawTest do
   keeps something else. SQLite is the oracle: a gate that refuses a value
   SQLite honours costs the caller a setting, and a gate that accepts one
   SQLite ignores reports a change that never happened. The read side of the
-  oracle is raw SQL, never `Xqlite.get_pragma/2`, because this library
+  oracle is raw SQL, never `Xqlite.Pragma.get/2`, because this library
   answers `wal_autocheckpoint` from its own state.
 
   The second: a PRAGMA whose spec maps its integers to words takes those
@@ -26,7 +26,10 @@ defmodule Xqlite.PragmaDomainLawTest do
   number SQLite stored means, by a rule written in this file, and writes that
   answer back to the same number.
 
-  All four run on fresh in-memory connections. Two of the value bands SQLite
+  The fifth: a journal or locking mode written as a word reads back as its
+  atom, on a file database, where every journal mode applies.
+
+  The first four run on fresh in-memory connections. Two of the value bands SQLite
   floors are out of reach that way rather than by exclusion: `max_page_count`
   below the database's own page count, and `auto_vacuum` on a file database,
   which cannot change without a VACUUM. The PRAGMAs listed in
@@ -94,7 +97,7 @@ defmodule Xqlite.PragmaDomainLawTest do
   test "the anchor: max_page_count's own default is accepted" do
     db = fresh()
     assert {:ok, 4_294_967_294} = P.get(db, :max_page_count)
-    assert {:ok, _} = P.put(db, :max_page_count, 4_294_967_294)
+    assert :ok = P.put(db, :max_page_count, 4_294_967_294)
   end
 
   test "the anchor: every writable PRAGMA writes back what it just read" do
@@ -103,17 +106,37 @@ defmodule Xqlite.PragmaDomainLawTest do
     for name <- writable_names() do
       assert {:ok, value} = P.get(db, name)
 
-      assert {^name, {:ok, _}} = {name, P.put(db, name, value)}
+      assert {^name, :ok} = {name, P.put(db, name, value)}
+    end
+  end
+
+  test "the anchor: a journal mode reads as an atom" do
+    assert {:ok, :memory} = P.get(fresh(), :journal_mode)
+  end
+
+  property "a journal or locking word reads back as its atom" do
+    path = Xqlite.TestUtil.tmp_db_path("mode_words")
+
+    check all(
+            name <- member_of([:journal_mode, :locking_mode]),
+            word <- member_of(P.schema()[name].valid_values),
+            spelling <- member_of([word, String.downcase(word), word_atom(word)]),
+            max_runs: 2000
+          ) do
+      {:ok, db} = NIF.open(path)
+      assert {name, :ok} == {name, P.put(db, name, spelling)}
+      assert {name, {:ok, word_atom(word)}} == {name, P.get(db, name)}
+      :ok = NIF.close(db)
     end
   end
 
   test "the anchor: a word of the mapping is accepted in any spelling" do
     db = fresh()
-    assert {:ok, _} = P.put(db, :auto_vacuum, :full)
+    assert :ok = P.put(db, :auto_vacuum, :full)
     assert {:ok, :full} = P.get(db, :auto_vacuum)
-    assert {:ok, _} = P.put(db, :secure_delete, "FAST")
+    assert :ok = P.put(db, :secure_delete, "FAST")
     assert {:ok, :fast} = P.get(db, :secure_delete)
-    assert {:ok, _} = P.put(db, :secure_delete, "fast")
+    assert :ok = P.put(db, :secure_delete, "fast")
     assert {:ok, :fast} = P.get(db, :secure_delete)
   end
 
@@ -151,11 +174,11 @@ defmodule Xqlite.PragmaDomainLawTest do
   test "the anchor: a mapped PRAGMA holding booleans takes the boolean words" do
     db = fresh()
 
-    assert {:ok, _} = P.put(db, :secure_delete, :on)
+    assert :ok = P.put(db, :secure_delete, :on)
     assert {:ok, true} = P.get(db, :secure_delete)
-    assert {:ok, _} = P.put(db, :secure_delete, "OFF")
+    assert :ok = P.put(db, :secure_delete, "OFF")
     assert {:ok, false} = P.get(db, :secure_delete)
-    assert {:ok, _} = P.put(db, :secure_delete, :fast)
+    assert :ok = P.put(db, :secure_delete, :fast)
     assert {:ok, :fast} = P.get(db, :secure_delete)
   end
 
@@ -174,12 +197,12 @@ defmodule Xqlite.PragmaDomainLawTest do
     assert {:ok, {:kib, 2000}} = P.get(db, :cache_size)
     assert {:ok, :unlimited} = P.get(db, :analysis_limit)
     assert {:ok, :unlimited} = P.get(db, :hard_heap_limit)
-    assert {:ok, :unlimited} = P.put(db, :journal_size_limit, :unlimited)
-    assert {:ok, :off} = P.put(db, :wal_autocheckpoint, :off)
-    assert {:ok, :off} = Xqlite.get_pragma(db, "WAL_AUTOCHECKPOINT")
-    assert {:ok, _} = Xqlite.set_pragma(db, :cache_spill, :off)
+    assert :ok = P.put(db, :journal_size_limit, :unlimited)
+    assert :ok = P.put(db, :wal_autocheckpoint, :off)
+    assert {:ok, :off} = P.get(db, "WAL_AUTOCHECKPOINT")
+    assert :ok = P.put(db, :cache_spill, :off)
     assert {:ok, :off} = P.get(db, :cache_spill)
-    assert {:ok, :unlimited} = Xqlite.set_pragma(db, :soft_heap_limit, :unlimited)
+    assert :ok = P.put(db, :soft_heap_limit, :unlimited)
 
     for {name, bare} <-
           [cache_size: -2_000, cache_size: {:kib, 0}, wal_autocheckpoint: 0] ++
@@ -197,9 +220,8 @@ defmodule Xqlite.PragmaDomainLawTest do
       typed = coded_meaning(name, stored)
 
       assert {name, {:ok, typed}} == {name, P.get(db, name)}
-      assert {name, {:ok, typed}} == {name, Xqlite.get_pragma(db, name)}
       other = fresh()
-      assert {name, {:ok, _}} = {name, P.put(other, name, typed)}
+      assert {name, :ok} == {name, P.put(other, name, typed)}
       assert {name, stored} == {name, raw_read(other, name)}
       reset_soft_heap_limit()
     end
@@ -209,7 +231,7 @@ defmodule Xqlite.PragmaDomainLawTest do
     check all({name, word, spelling} <- mapped_spelling(), max_runs: 2000) do
       db = fresh()
 
-      assert {^name, {:ok, _}} = {name, P.put(db, name, spelling)}
+      assert {^name, :ok} = {name, P.put(db, name, spelling)}
       assert {^name, {:ok, ^word}} = {name, P.get(db, name)}
     end
   end
@@ -219,18 +241,19 @@ defmodule Xqlite.PragmaDomainLawTest do
       db = fresh()
       stored = meaning(name, raw_write(name, word))
 
-      assert {^name, {:ok, _}} = {name, P.put(db, name, spelling)}
+      assert {^name, :ok} = {name, P.put(db, name, spelling)}
       assert {name, {:ok, stored}} == {name, P.get(db, name)}
     end
   end
 
   # `mmap_size` is left out: on an in-memory database its reader answers
-  # `:no_value`, which is not a value anything can write back.
+  # `:no_value`, which is not a value anything can write back. So is
+  # `locking_mode`, whose read there answers `:normal` while the database stays
+  # exclusive.
   defp writable_names do
     P.schema()
     |> Enum.filter(fn {name, spec} ->
-      spec.writable and name != :mmap_size and 0 in spec.read_arities and
-        spec.return_type != :nothing
+      spec.writable and name not in [:mmap_size, :locking_mode] and 0 in spec.read_arities
     end)
     |> Enum.map(fn {name, _spec} -> name end)
     |> Enum.sort()
@@ -340,10 +363,12 @@ defmodule Xqlite.PragmaDomainLawTest do
 
   defp put_accepts?(name, value) do
     case P.put(fresh(), name, value) do
-      {:ok, _} -> true
+      :ok -> true
       {:error, _} -> false
     end
   end
+
+  defp word_atom(word), do: word |> String.downcase() |> String.to_atom()
 
   defp reset_soft_heap_limit do
     :ok = NIF.execute_batch(fresh(), "PRAGMA soft_heap_limit = 0;")

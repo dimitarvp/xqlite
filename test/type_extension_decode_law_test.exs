@@ -19,7 +19,7 @@ defmodule Xqlite.TypeExtensionDecodeLawTest do
 
   @moduletag timeout: 300_000
 
-  @doors [:query, :query_cancellable, :query_with_changes_cancellable, :stream, :decode_rows]
+  @doors [:query, :stream, :decode_rows]
   @seed "CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('a'), ('b'), ('refuse:c'), ('d');"
   @four_rows "SELECT v FROM t ORDER BY rowid"
 
@@ -136,12 +136,6 @@ defmodule Xqlite.TypeExtensionDecodeLawTest do
 
   defp read(:query, conn, sql, params), do: Xqlite.query(conn, sql, params, opts())
 
-  defp read(:query_cancellable, conn, sql, params),
-    do: Xqlite.query_cancellable(conn, sql, params, new_token(), opts())
-
-  defp read(:query_with_changes_cancellable, conn, sql, params),
-    do: Xqlite.query_with_changes_cancellable(conn, sql, params, new_token(), opts())
-
   defp read(:stream, conn, sql, params) do
     assert [only] = conn |> Xqlite.stream(sql, params, opts(:emit_error)) |> Enum.to_list()
     only
@@ -154,9 +148,4 @@ defmodule Xqlite.TypeExtensionDecodeLawTest do
 
   defp opts, do: [type_extensions: [Picky]]
   defp opts(mode), do: [type_extensions: [Picky], batch_size: 10, on_error: mode]
-
-  defp new_token do
-    assert {:ok, token} = Xqlite.create_cancel_token()
-    token
-  end
 end

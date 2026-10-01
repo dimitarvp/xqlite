@@ -28,12 +28,10 @@ defmodule Xqlite.IntrospectionWrappersTest do
       end
 
       test "transaction-state readers", %{conn: conn} do
-        assert {:ok, false} = Xqlite.transaction_status(conn)
         assert {:ok, true} = Xqlite.autocommit(conn)
         assert {:ok, :none} = Xqlite.txn_state(conn)
 
         assert :ok = Xqlite.begin(conn, :immediate)
-        assert {:ok, true} = Xqlite.transaction_status(conn)
         assert {:ok, false} = Xqlite.autocommit(conn)
         assert {:ok, :write} = Xqlite.txn_state(conn, "main")
         assert :ok = Xqlite.rollback(conn)

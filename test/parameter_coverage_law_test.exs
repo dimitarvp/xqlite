@@ -50,9 +50,6 @@ defmodule Xqlite.ParameterCoverageLawTest do
     :nif_stmt_bind,
     :query,
     :execute,
-    :query_cancellable,
-    :execute_cancellable,
-    :query_with_changes_cancellable,
     :nif_query,
     :nif_execute,
     :nif_query_with_changes,
@@ -476,15 +473,6 @@ defmodule Xqlite.ParameterCoverageLawTest do
 
   defp call(:nif_explain_analyze, conn, sql, params),
     do: NIF.explain_analyze(conn, sql, params)
-
-  defp call(:query_cancellable, conn, sql, params),
-    do: Xqlite.query_cancellable(conn, sql, params, new_token())
-
-  defp call(:execute_cancellable, conn, sql, params),
-    do: Xqlite.execute_cancellable(conn, sql, params, new_token())
-
-  defp call(:query_with_changes_cancellable, conn, sql, params),
-    do: Xqlite.query_with_changes_cancellable(conn, sql, params, new_token())
 
   defp call(:nif_query_cancellable, conn, sql, params),
     do: NIF.query_cancellable(conn, sql, params, [new_token()])

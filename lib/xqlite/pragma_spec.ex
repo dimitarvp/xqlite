@@ -7,7 +7,7 @@ defmodule Xqlite.PragmaSpec do
 
   ## Fields
 
-    * `return_type` — what GET returns: `:int`, `:text`, `:bool`, `:list`, or `:nothing`
+    * `return_type` — what GET returns: `:int`, `:text`, `:bool` or `:list`
     * `read_arities` — which arities support GET: `[0]`, `[1]`, `[0, 1]`, or `[]`
     * `schema_prefix` — whether `PRAGMA db_name.pragma_name` is allowed
     * `writable` — whether SET is supported
@@ -16,7 +16,7 @@ defmodule Xqlite.PragmaSpec do
   """
 
   @type t :: %__MODULE__{
-          return_type: :int | :text | :bool | :list | :nothing,
+          return_type: :int | :text | :bool | :list,
           read_arities: [0 | 1],
           schema_prefix: boolean(),
           writable: boolean(),

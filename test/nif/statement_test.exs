@@ -306,10 +306,6 @@ defmodule Xqlite.NIF.StatementTest do
       {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
       assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.step(stmt)
       assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.multi_step(stmt, 2)
-
-      assert {:error, {:parameters_unbound, %{expected: 1}}} =
-               Xqlite.multi_step_cancellable(stmt, 2, [])
-
       assert :ok = Xqlite.finalize(stmt)
     end
 
@@ -437,12 +433,12 @@ defmodule Xqlite.NIF.StatementTest do
                Xqlite.multi_step(stmt, 0)
 
       assert {:error, {:invalid_batch_size, %{provided: 0, minimum: 1}}} =
-               Xqlite.multi_step_cancellable(stmt, 0, [token])
+               Xqlite.multi_step(stmt, 0, cancel_tokens: [token])
 
       assert {:error, {:parameters_unbound, %{expected: 1}}} = Xqlite.multi_step(stmt, 1)
 
       assert {:error, {:parameters_unbound, %{expected: 1}}} =
-               Xqlite.multi_step_cancellable(stmt, 1, [token])
+               Xqlite.multi_step(stmt, 1, cancel_tokens: [token])
 
       assert :ok = Xqlite.finalize(stmt)
 

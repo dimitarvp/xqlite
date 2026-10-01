@@ -55,11 +55,11 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
       handler_id = attach_capture([[:xqlite, :cancel, :honored]])
 
       {:error, :operation_cancelled} =
-        Xqlite.query_cancellable(
+        Xqlite.query(
           conn,
           "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT count(*) FROM n",
           [],
-          token
+          cancel_tokens: token
         )
 
       assert_receive {:telemetry_event, [:xqlite, :cancel, :honored], _, metadata}
@@ -78,15 +78,14 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
 
       handler_id = attach_capture([[:xqlite, :cancel, :honored]])
 
-      {:ok, _} = Xqlite.query_cancellable(conn, "SELECT * FROM t", [], token)
+      {:ok, _} = Xqlite.query(conn, "SELECT * FROM t", [], cancel_tokens: token)
 
       refute_receive {:telemetry_event, [:xqlite, :cancel, :honored], _, _}, 100
 
       detach(handler_id)
     end
 
-    test "cancellable execute_batch / execute / query_with_changes all fire :honored on cancel",
-         %{conn: conn} do
+    test "cancellable execute_batch / execute both fire :honored on cancel", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
 
       handler_id = attach_capture([[:xqlite, :cancel, :honored]])
@@ -97,7 +96,7 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
       slow =
         "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT count(*) FROM n"
 
-      {:error, :operation_cancelled} = Xqlite.execute_cancellable(conn, slow, [], t1)
+      {:error, :operation_cancelled} = Xqlite.execute(conn, slow, [], cancel_tokens: t1)
 
       assert_receive {:telemetry_event, [:xqlite, :cancel, :honored], _,
                       %{operation: :execute}}
@@ -106,19 +105,10 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
       :ok = Xqlite.cancel_operation(t2)
 
       {:error, :operation_cancelled} =
-        Xqlite.execute_batch_cancellable(conn, "BEGIN; #{slow};", t2)
+        Xqlite.execute_batch(conn, "BEGIN; #{slow};", cancel_tokens: t2)
 
       assert_receive {:telemetry_event, [:xqlite, :cancel, :honored], _,
                       %{operation: :execute_batch}}
-
-      {:ok, t3} = Xqlite.create_cancel_token()
-      :ok = Xqlite.cancel_operation(t3)
-
-      {:error, :operation_cancelled} =
-        Xqlite.query_with_changes_cancellable(conn, slow, [], t3)
-
-      assert_receive {:telemetry_event, [:xqlite, :cancel, :honored], _,
-                      %{operation: :query_with_changes}}
 
       detach(handler_id)
     end
@@ -231,7 +221,6 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
       Process.sleep(50)
       refute Process.alive?(pid)
 
-      # After unbridge, no more events should fire even if a commit occurs.
       handler_id = attach_capture([[:xqlite, :hook, :commit]])
 
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER);")
@@ -266,20 +255,16 @@ defmodule Xqlite.XqliteTelemetryCancelBridgeTest do
 
   describe "subscription-API contract for the bridge" do
     test "bridge does not interfere with direct hook subscribers", %{conn: conn} do
-      # Direct subscriber registers first.
       {:ok, _h_direct} = XqliteNIF.register_commit_hook(conn, self())
 
-      # Bridge registers second.
       {:ok, bridge} = Xqlite.Telemetry.bridge(conn, hooks: [:commit])
 
       handler_id = attach_capture([[:xqlite, :hook, :commit]])
 
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER);")
 
-      # Direct subscriber gets the raw message.
       assert_receive {:xqlite_commit}
 
-      # Bridge re-emits as telemetry.
       assert_receive {:telemetry_event, [:xqlite, :hook, :commit], _, _}
 
       :ok = Xqlite.Telemetry.unbridge(bridge)

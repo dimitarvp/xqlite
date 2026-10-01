@@ -42,12 +42,6 @@ defmodule Xqlite.BadInputAnswersTest do
 
     test "a pragma key that is neither an atom nor a string is an answer", %{conn: conn} do
       assert {:error, {:invalid_pragma_name, 42}} = P.get(conn, 42)
-
-      assert {:error, {:invalid_pragma_name, {:not, :a, :name}}} =
-               Xqlite.get_pragma(conn, {:not, :a, :name})
-
-      assert {:error, {:invalid_pragma_name, {:not, :a, :name}}} =
-               Xqlite.set_pragma(conn, {:not, :a, :name}, 1)
     end
 
     test "open options that are not a list raise from a guard" do

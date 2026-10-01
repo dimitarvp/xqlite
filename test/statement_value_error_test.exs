@@ -7,7 +7,7 @@ defmodule Xqlite.StatementValueErrorTest do
   bytes that are not valid UTF-8 — belongs to a row SQLite has already
   stepped past, so that row is never delivered and the run carries on at the
   row after it. `step/1` reports it at once. `multi_step/2` and
-  `multi_step_cancellable/3` hand back the rows they read before it in the
+  its `:cancel_tokens` form hand back the rows they read before it in the
   same batch and hold the error back; the next call that reads a row answers
   it, whichever of the three doors makes that call. `reset/1` and
   `finalize/1` drop an error that was held back.
@@ -129,13 +129,13 @@ defmodule Xqlite.StatementValueErrorTest do
       stmt = seeded_statement(conn, 4, 2)
 
       assert {:ok, %{rows: [["good1"]], done: false}} =
-               Xqlite.multi_step_cancellable(stmt, 10, token)
+               Xqlite.multi_step(stmt, 10, cancel_tokens: token)
 
       assert {:error, {:utf8_error, 0, _detail}} =
-               Xqlite.multi_step_cancellable(stmt, 10, token)
+               Xqlite.multi_step(stmt, 10, cancel_tokens: token)
 
       assert {:ok, %{rows: [["good3"], ["good4"]], done: true}} =
-               Xqlite.multi_step_cancellable(stmt, 10, token)
+               Xqlite.multi_step(stmt, 10, cancel_tokens: token)
 
       assert :ok = Xqlite.finalize(stmt)
     end
@@ -145,9 +145,9 @@ defmodule Xqlite.StatementValueErrorTest do
       stmt = seeded_statement(conn, 1, 1)
 
       assert {:error, {:utf8_error, 0, _detail}} =
-               Xqlite.multi_step_cancellable(stmt, 10, token)
+               Xqlite.multi_step(stmt, 10, cancel_tokens: token)
 
-      assert {:ok, %{rows: [], done: true}} = Xqlite.multi_step_cancellable(stmt, 10, token)
+      assert {:ok, %{rows: [], done: true}} = Xqlite.multi_step(stmt, 10, cancel_tokens: token)
       assert :ok = Xqlite.finalize(stmt)
     end
 
@@ -231,13 +231,13 @@ defmodule Xqlite.StatementValueErrorTest do
       assert {:ok, stmt} = Xqlite.prepare(conn, overflow_sql())
 
       assert {:error, {:sqlite_failure, _c1, _e1, _m1}} =
-               Xqlite.multi_step_cancellable(stmt, 10, new_token())
+               Xqlite.multi_step(stmt, 10, cancel_tokens: new_token())
 
       assert {:ok, %{rows: [[1, 10], [2, 20]], done: false}} =
-               Xqlite.multi_step_cancellable(stmt, 2, new_token())
+               Xqlite.multi_step(stmt, 2, cancel_tokens: new_token())
 
       assert {:error, {:sqlite_failure, _c2, _e2, _m2}} =
-               Xqlite.multi_step_cancellable(stmt, 10, new_token())
+               Xqlite.multi_step(stmt, 10, cancel_tokens: new_token())
 
       assert :ok = Xqlite.finalize(stmt)
     end
@@ -339,7 +339,7 @@ defmodule Xqlite.StatementValueErrorTest do
   defp call(:multi_step, stmt, {:batch, size}), do: Xqlite.multi_step(stmt, size)
 
   defp call(:multi_step_cancellable, stmt, {:batch, size}),
-    do: Xqlite.multi_step_cancellable(stmt, size, new_token())
+    do: Xqlite.multi_step(stmt, size, cancel_tokens: new_token())
 
   # The answers, stripped of what a law must not depend on: the text SQLite
   # wrote about the byte it could not read.

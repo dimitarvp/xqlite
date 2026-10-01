@@ -20,6 +20,18 @@ defmodule Xqlite.NIF.LoadExtensionTest do
       assert :ok = NIF.enable_load_extension(conn, false)
     end
 
+    test "Xqlite's two switches gate loading, and entry_point reaches SQLite", %{conn: conn} do
+      assert :ok = Xqlite.enable_load_extension(conn)
+
+      assert {:error, _} =
+               Xqlite.load_extension(conn, test_extension_path(), entry_point: "no_such_init")
+
+      assert :ok = Xqlite.disable_load_extension(conn)
+
+      assert {:error, :extension_loading_disabled} =
+               Xqlite.load_extension(conn, test_extension_path())
+    end
+
     test "enable is idempotent", %{conn: conn} do
       assert :ok = NIF.enable_load_extension(conn, true)
       assert :ok = NIF.enable_load_extension(conn, true)

@@ -235,7 +235,9 @@ defmodule Xqlite.NIF.BackupProgressTest do
       end
 
       property "step counts outside 1..2^31-1 are rejected", %{conn: conn, backup_path: path} do
-        assert :ok = Xqlite.backup_with_progress(conn, "main", path, self(), 2_147_483_647, [])
+        assert :ok =
+                 Xqlite.backup_with_progress(conn, path, self(), pages_per_step: 2_147_483_647)
+
         File.rm!(path)
 
         big = map(integer(0..300), &(2_147_483_647 + 2 ** &1))
@@ -244,7 +246,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
 
         check all(pages <- one_of([big, small, halves, atom(:alphanumeric)]), max_runs: 2000) do
           assert {:error, {:invalid_pages_per_step, ^pages}} =
-                   Xqlite.backup_with_progress(conn, "main", path, self(), pages, [])
+                   Xqlite.backup_with_progress(conn, path, self(), pages_per_step: pages)
 
           refute File.exists?(path)
         end
@@ -286,6 +288,18 @@ defmodule Xqlite.NIF.BackupProgressTest do
         messages = drain_progress_messages()
         assert length(messages) >= 1
         assert length(messages) <= 3
+      end
+
+      test "with no pages_per_step a step copies 100 pages", %{conn: conn, backup_path: path} do
+        :ok =
+          NIF.execute_batch(
+            conn,
+            "CREATE TABLE bd (d); INSERT INTO bd VALUES (zeroblob(1000000));"
+          )
+
+        assert {:ok, %{rows: [[pages]]}} = NIF.query(conn, "PRAGMA page_count", [])
+        assert :ok = Xqlite.backup_with_progress(conn, path, self())
+        assert length(drain_progress_messages()) == div(pages + 99, 100)
       end
 
       test "invalid dest_path returns error", %{conn: conn} do

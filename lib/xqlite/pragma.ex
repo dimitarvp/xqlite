@@ -17,8 +17,10 @@ defmodule Xqlite.Pragma do
   `{:kib, 1..2_147_483_648}`, `wal_autocheckpoint` and `cache_spill` `:off` or
   a count from 1, `journal_size_limit` `:unlimited` or a count from 0, and
   `analysis_limit`, `soft_heap_limit` and `hard_heap_limit` `:unlimited` or a
-  count from 1. The bare coded number is rejected. `Xqlite.get_pragma/2`,
-  `Xqlite.set_pragma/3` and `Xqlite.open/2` use these forms too.
+  count from 1. The bare coded number is rejected. `Xqlite.open/2` uses these
+  forms too. `journal_mode`, `locking_mode` and `encoding` answer their word
+  as an atom (`:wal`, `:exclusive`, `:utf8`, `:utf16le`, `:utf16be`) and take
+  it as an atom or as text in any case.
 
   ## The two heap limits
 
@@ -44,8 +46,8 @@ defmodule Xqlite.Pragma do
 
   `:no_value` is the answer whenever the connection has no row for the
   PRAGMA: `mmap_size` on a database that is not a file, and
-  `legacy_file_format` and `incremental_vacuum`, which answer it on every
-  database. It is a reading, not a value — no write door takes it back.
+  `legacy_file_format`, which answers it on every database. It is a reading,
+  not a value — no write takes it back.
   """
   @type get_result ::
           {:ok,
@@ -94,8 +96,6 @@ defmodule Xqlite.Pragma do
     {:wal_autocheckpoint, :off} => 0
   }
 
-  @words Map.new(@coded, fn {{name, word}, coded} -> {{Atom.to_string(name), coded}, word} end)
-
   @schema %{
     application_id: %PragmaSpec{
       return_type: :int,
@@ -141,11 +141,6 @@ defmodule Xqlite.Pragma do
       read_arities: [0],
       writable: true,
       valid_values: @heap_limit
-    },
-    incremental_vacuum: %PragmaSpec{
-      return_type: :int,
-      read_arities: [0, 1],
-      schema_prefix: true
     },
     journal_size_limit: %PragmaSpec{
       return_type: :int,
@@ -321,7 +316,7 @@ defmodule Xqlite.Pragma do
       return_type: :text,
       read_arities: [0],
       writable: true,
-      valid_values: ~w(UTF-8 UTF-16 UTF-16le UTF-16be)
+      valid_values: ~w(UTF-8 UTF-16 UTF-16le UTF-16be UTF8 UTF16 UTF16le UTF16be)
     },
     journal_mode: %PragmaSpec{
       return_type: :text,
@@ -375,11 +370,6 @@ defmodule Xqlite.Pragma do
       schema_prefix: true
     },
     module_list: %PragmaSpec{return_type: :list, read_arities: [0]},
-    optimize: %PragmaSpec{
-      return_type: :list,
-      read_arities: [0, 1],
-      schema_prefix: true
-    },
     pragma_list: %PragmaSpec{return_type: :list, read_arities: [0]},
     table_info: %PragmaSpec{
       return_type: :list,
@@ -390,14 +380,27 @@ defmodule Xqlite.Pragma do
       return_type: :list,
       read_arities: [1],
       schema_prefix: true
-    },
-    wal_checkpoint: %PragmaSpec{
-      return_type: :list,
-      read_arities: [0, 1],
-      schema_prefix: true
-    },
-    shrink_memory: %PragmaSpec{return_type: :nothing, read_arities: [0]}
+    }
   }
+
+  @words @coded
+         |> Map.new(fn {{name, word}, coded} -> {{Atom.to_string(name), coded}, word} end)
+         |> Map.merge(
+           for {name, %PragmaSpec{int_mapping: %{} = mapping}} <- @schema,
+               {code, mapped} <- mapping,
+               form <- [code, mapped |> to_string() |> String.upcase()],
+               into: %{},
+               do: {{Atom.to_string(name), form}, mapped}
+         )
+         |> Map.merge(
+           for {name, %PragmaSpec{return_type: :text, writable: true} = spec} <- @schema,
+               word <- spec.valid_values,
+               form <- [word, String.downcase(word)],
+               into: %{},
+               do:
+                 {{Atom.to_string(name), form},
+                  word |> String.downcase() |> String.replace("-", "") |> String.to_atom()}
+         )
 
   @all @schema |> Map.keys() |> Enum.sort()
 
@@ -438,11 +441,6 @@ defmodule Xqlite.Pragma do
                   |> Enum.map(fn {name, _} -> name end)
                   |> Enum.sort()
 
-  @returning_nothing @schema
-                     |> Enum.filter(fn {_, s} -> s.return_type == :nothing end)
-                     |> Enum.map(fn {name, _} -> name end)
-                     |> Enum.sort()
-
   @valid_write_arg_values @schema
                           |> Enum.filter(fn {_, s} -> s.writable and s.valid_values != nil end)
                           |> Map.new(fn {name, s} -> {name, s.valid_values} end)
@@ -463,8 +461,8 @@ defmodule Xqlite.Pragma do
   @doc ~S"""
   Checks a value against a PRAGMA's spec and answers the form SQLite is given.
 
-  This is the one rule `Xqlite.set_pragma/3`, `put/4` and the connection
-  options of `Xqlite.open/2` all apply, so no two of them can drift apart.
+  This is the one rule `put/4` and the connection options of `Xqlite.open/2`
+  both apply, so the two cannot drift apart.
   The name is matched without regard to case; the value is judged by what
   the pragma stores:
 
@@ -486,10 +484,7 @@ defmodule Xqlite.Pragma do
     * `{:error, {:read_only_pragma, name}}` — the pragma cannot be written.
     * `{:error, {:unknown_pragma, name}}` for a name this module does not
       model, atom or string alike, and `{:error, {:invalid_pragma_name,
-      key}}` for a key that is neither. `Xqlite.set_pragma/3` treats an
-      unknown name as "not mine" and hands the value to SQLite as written —
-      it refuses a key that is no name before this check runs — and `put/4`
-      refuses both.
+      key}}` for a key that is neither; `put/4` answers both.
   """
   @spec check_value(pragma_key(), term()) :: {:ok, pragma_value()} | Xqlite.error()
   def check_value(key, value) do
@@ -714,10 +709,6 @@ defmodule Xqlite.Pragma do
   @spec returning_list() :: [atom()]
   def returning_list, do: @returning_list
 
-  @doc "Returns the names of all pragmas that return nothing."
-  @spec returning_nothing() :: [atom()]
-  def returning_nothing, do: @returning_nothing
-
   @doc ~S"""
   A convenience wrapper to extract the `:rows` from a successful `XqliteNIF.query/3` call.
   """
@@ -753,8 +744,8 @@ defmodule Xqlite.Pragma do
 
   A PRAGMA the connection has no row for answers `{:ok, :no_value}`:
   `get(db, :mmap_size)` on an in-memory database is the plain case, memory
-  mapped I/O not applying to one. `put/4` and `Xqlite.set_pragma/3` refuse
-  the atom as a value like any other the PRAGMA cannot hold.
+  mapped I/O not applying to one. `put/4` rejects the atom as a value like
+  any other the PRAGMA cannot hold.
 
   A known name is matched with its case folded, so `:foreign_keys`,
   `:FOREIGN_KEYS`, `"foreign_keys"` and `"FOREIGN_KEYS"` all reach the same
@@ -763,7 +754,10 @@ defmodule Xqlite.Pragma do
   without an extra argument, and a key that is neither an atom nor a string
   with `{:error, {:invalid_pragma_name, key}}`. SQLite parses an unknown
   PRAGMA and ignores it, so letting one through would answer with an empty
-  result and no hint that the name was wrong.
+  result and no hint that the name was wrong. The four PRAGMAs that act
+  rather than read are no names here either: `Xqlite.optimize/1`,
+  `Xqlite.shrink_memory/1` and `Xqlite.wal_checkpoint/3` run three of them,
+  and `Xqlite.query/4` runs `incremental_vacuum` and `optimize` with a mask.
 
   The name is resolved first, then the argument position. An extra argument
   is a scalar — a string, an atom other than `nil`, or an integer; a list
@@ -786,10 +780,9 @@ defmodule Xqlite.Pragma do
   at the NUL and read a shorter statement than we built.
 
   An integer argument is written into the statement as a number and a string
-  or an atom as a quoted name, which is what each PRAGMA reads: `:optimize`
-  takes a bitmask, `:incremental_vacuum` a page count, `:integrity_check`
-  and `:quick_check` the most errors to report, `:wal_checkpoint` the
-  checkpoint mode, and the rest the name of a table or an index. For
+  or an atom as a quoted name, which is what each PRAGMA reads:
+  `:integrity_check` and `:quick_check` take the most errors to report, and
+  the rest the name of a table or an index. For
   `:table_info`, `:table_xinfo`, `:index_list` and `:foreign_key_list`, a
   name no table or view carries answers `{:error, {:no_such_table, name}}`,
   and for `:index_info` and `:index_xinfo` one no index carries
@@ -949,13 +942,6 @@ defmodule Xqlite.Pragma do
     end
   end
 
-  defp dispatch_get(db, key, %PragmaSpec{return_type: :nothing}, opts) do
-    case do_pragma_read(db, key, opts) do
-      {:ok, :no_value} -> :ok
-      other -> other
-    end
-  end
-
   defp query_with_arg(db, key, arg, opts) do
     with {:ok, rows} <- do_query(db, key, arg, opts),
          :ok <- named_object(db, key, arg, opts, rows) do
@@ -1043,6 +1029,19 @@ defmodule Xqlite.Pragma do
   same way whatever the `:db_name`, and inside a transaction answers
   `{:error, :transaction_in_progress}`.
 
+  A write answers `:ok`, or `{:error, {:pragma_not_applied, %{pragma: name,
+  asked: value, in_force: in_force}}}` when SQLite's answer row names another
+  value: `journal_mode: :wal` in memory answers `in_force: :memory`. `in_force`
+  is what holds after the write, which may still have changed the setting:
+  `max_page_count: 1` sets the limit to the page count, so the next insert that
+  needs a page fails with "database or disk is full"; a `soft_heap_limit` above
+  the hard one is set to the hard one; in memory, `locking_mode: :normal`
+  answers `in_force: :exclusive`, which `get(db, :locking_mode, db_name:
+  "main")` also reads, while a plain `get` answers `:normal`. A write SQLite
+  answers with no row answers `:ok` even where SQLite kept the old setting
+  (`page_size`, `auto_vacuum` and `encoding` on a database with content,
+  `mmap_size` on one that is no file); `get/2` tells what holds.
+
   ## Options
 
     * `:db_name` (a string, an atom, or `nil`) - Target a specific attached
@@ -1054,10 +1053,12 @@ defmodule Xqlite.Pragma do
       reason: :invalid_options}}}`, as in `get/4`. A `:db_name` whose bytes
       are not UTF-8 is rejected the same way with `reason: :invalid_utf8`, and
       one SQLite does not know with `{:error, {:no_such_schema, db_name}}`,
-      also as in `get/4`.
+      also as in `get/4`. `busy_timeout` and `wal_autocheckpoint`, which this
+      library answers from its own state, reject a `:db_name` other than
+      `nil`, as `get/4` does.
   """
   @spec put(Xqlite.conn(), pragma_key(), pragma_value(), pragma_opts()) ::
-          {:ok, term()} | Xqlite.error()
+          :ok | Xqlite.error()
   def put(db, key, val, opts \\ [])
 
   def put(db, key, val, opts) do
@@ -1069,24 +1070,39 @@ defmodule Xqlite.Pragma do
   defp do_put(db, key_atom, val, opts) do
     with {:ok, checked} <- check_value(key_atom, val),
          {:ok, options} <- check_options(key_atom, [], opts),
-         :ok <- known_schema(db, options[:db_name]) do
-      put_checked(db, key_atom, checked, options)
+         :ok <- known_schema(db, options[:db_name]),
+         {:ok, row} <- put_checked(db, key_atom, checked, options) do
+      applied(key_atom, val, checked, row)
     end
   end
 
   defp put_checked(db, key_atom, val, opts) do
     case Keyword.get(opts, :db_name) do
       schema when is_nil(schema) or key_atom == :foreign_keys ->
-        name = Atom.to_string(key_atom)
-        with {:ok, echo} <- XqliteNIF.set_pragma(db, name, val), do: {:ok, reading(name, echo)}
+        XqliteNIF.set_pragma(db, Atom.to_string(key_atom), val)
+
+      db_name when key_atom in [:busy_timeout, :wal_autocheckpoint] ->
+        {:error, invalid_argument(key_atom, {:db_name, db_name}, :invalid_options)}
 
       db_name ->
         sql = "PRAGMA #{quote_name(db_name)}.#{key_atom} = #{format_pragma_value(val)};"
 
-        case XqliteNIF.execute_batch(db, sql) do
-          :ok -> {:ok, nil}
+        case XqliteNIF.query(db, sql, []) do
+          {:ok, %{rows: [[row]]}} -> {:ok, row}
+          {:ok, %{rows: []}} -> {:ok, nil}
           error -> error
         end
+    end
+  end
+
+  # SQLite's row is the value in force; a read-back is not (cache_spill, in-memory locking_mode).
+  defp applied(name, asked, checked, row) do
+    name_str = Atom.to_string(name)
+    held = reading(name_str, row)
+
+    case row == nil or reading(name_str, checked) == held do
+      true -> :ok
+      false -> {:error, {:pragma_not_applied, %{pragma: name, asked: asked, in_force: held}}}
     end
   end
 

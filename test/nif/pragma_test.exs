@@ -47,7 +47,6 @@ defmodule Xqlite.NIF.PragmaTest do
         assert length(rows) > 1
 
         assert {:ok, first_option} == NIF.get_pragma(conn, "compile_options")
-        assert {:ok, first_option} == Xqlite.get_pragma(conn, :compile_options)
 
         assert {:ok, options} = Xqlite.Pragma.get(conn, :compile_options)
         assert Enum.map(options, fn option -> [option] end) == rows
@@ -113,17 +112,6 @@ defmodule Xqlite.NIF.PragmaTest do
         assert {:error, :null_byte_in_string} = NIF.set_pragma(conn, "user_version", <<0>>)
 
         assert {:ok, 0} = NIF.get_pragma(conn, "user_version")
-      end
-
-      test "the wrapper answers the same for a name the schema does not model", %{conn: conn} do
-        assert {:error, {:unsupported_data_type, :bitstring}} =
-                 Xqlite.set_pragma(conn, :not_a_pragma, <<1::7>>)
-
-        assert {:error, :invalid_utf8_in_string} =
-                 Xqlite.set_pragma(conn, :not_a_pragma, <<255>>)
-
-        assert {:error, :null_byte_in_string} =
-                 Xqlite.set_pragma(conn, :not_a_pragma, <<0>>)
       end
 
       property "a bit size that is no whole byte is refused by its kind", %{conn: conn} do

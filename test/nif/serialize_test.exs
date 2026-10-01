@@ -345,8 +345,19 @@ defmodule Xqlite.NIF.SerializeTest do
       end
 
       assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT x FROM kept", [])
-      assert :ok = Xqlite.deserialize(conn, <<head::binary, 3, tail::binary>>, "main", true)
+      image = <<head::binary, 3, tail::binary>>
+
+      assert {:error, {:invalid_option, %{key: :read_only, value: "yes"}}} =
+               Xqlite.deserialize(conn, image, "main", read_only: "yes")
+
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT x FROM kept", [])
+      assert :ok = Xqlite.deserialize(conn, image, "main", read_only: true)
       assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT v FROM t", [])
+    end
+
+    test "options in the schema's place load a read-only image into main", %{conn: conn} do
+      <<head::binary-size(18), _, tail::binary>> = image_of("CREATE TABLE t (v);")
+      assert :ok = Xqlite.deserialize(conn, <<head::binary, 3, tail::binary>>, read_only: true)
     end
 
     test "a WAL database's image loads, from serialize/2 or from the closed database's file",

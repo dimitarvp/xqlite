@@ -249,24 +249,22 @@ defmodule Xqlite.NIF.CancellationTest do
 
         {:ok, insert_token} = NIF.create_cancel_token()
 
-        assert {:ok, 1} =
-                 Xqlite.execute_cancellable(
+        assert {:ok, %Xqlite.Result{changes: 1}} =
+                 Xqlite.execute(
                    conn,
                    "INSERT INTO cancel_ext_test (id, day) VALUES (1, ?1)",
                    [~D[2026-02-03]],
-                   insert_token,
-                   exts
+                   [cancel_tokens: insert_token] ++ exts
                  )
 
         {:ok, read_token} = NIF.create_cancel_token()
 
         assert {:ok, %{rows: [[~D[2026-02-03]]]}} =
-                 Xqlite.query_cancellable(
+                 Xqlite.query(
                    conn,
                    "SELECT day FROM cancel_ext_test WHERE day = ?1",
                    [~D[2026-02-03]],
-                   read_token,
-                   exts
+                   [cancel_tokens: read_token] ++ exts
                  )
       end
 
@@ -275,9 +273,20 @@ defmodule Xqlite.NIF.CancellationTest do
         :ok = Xqlite.cancel_operation(token)
 
         assert {:error, :operation_cancelled} =
-                 Xqlite.query_cancellable(conn, @slow_query, [], token,
+                 Xqlite.query(conn, @slow_query, [],
+                   cancel_tokens: token,
                    type_extensions: [Xqlite.TypeExtension.Date]
                  )
+      end
+
+      test "a live token changes no answer of query/4 or execute/4", %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, @one_row)
+        {:ok, token} = NIF.create_cancel_token()
+
+        for call <- [&Xqlite.query/4, &Xqlite.execute/4] do
+          assert call.(conn, "UPDATE t SET v = v", [], cancel_tokens: [token]) ==
+                   call.(conn, "UPDATE t SET v = v", [], [])
+        end
       end
 
       test "a signalled token cancels a one-row write before it runs", %{conn: conn} do
@@ -301,7 +310,10 @@ defmodule Xqlite.NIF.CancellationTest do
       query_with_changes_cancellable: &NIF.query_with_changes_cancellable(&1, &2, [], &3),
       execute_batch_cancellable: &NIF.execute_batch_cancellable/3,
       stmt_multi_step_cancellable: &fresh_multi_step/3,
-      stream_fetch_cancellable: &first_fetch/3
+      stream_fetch_cancellable: &first_fetch/3,
+      query: &Xqlite.query(&1, &2, [], cancel_tokens: &3),
+      execute: &Xqlite.execute(&1, &2, [], cancel_tokens: &3),
+      execute_batch: &Xqlite.execute_batch(&1, &2, cancel_tokens: &3)
     ]
   end
 

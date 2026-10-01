@@ -248,6 +248,15 @@ defmodule Xqlite.OpenOptsTest do
       NIF.close(conn)
     end
 
+    test "a new file keeps the auto_vacuum asked under the default journal mode" do
+      for mode <- [:full, :incremental] do
+        {:ok, conn} = Xqlite.open(tmp_db_path("open_auto_vacuum"), auto_vacuum: mode)
+        assert {:ok, ^mode} = Xqlite.Pragma.get(conn, :auto_vacuum)
+        assert {:ok, :wal} = Xqlite.Pragma.get(conn, :journal_mode)
+        NIF.close(conn)
+      end
+    end
+
     test "multiple options combined" do
       {:ok, conn} =
         Xqlite.open_in_memory(

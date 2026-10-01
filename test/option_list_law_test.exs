@@ -13,10 +13,17 @@ defmodule Xqlite.OptionListLawTest do
 
   @moduletag timeout: 300_000
 
-  @one_key ~w(query execute explain_analyze bind query_cancellable execute_cancellable
-              query_with_changes_cancellable)a
+  @one_key ~w(explain_analyze bind)a
+  @token_key ~w(execute_batch multi_step)a
 
   @keys Map.merge(Map.from_keys(@one_key, [:type_extensions]), %{
+          query: [:cancel_tokens, :type_extensions],
+          execute: [:cancel_tokens, :type_extensions],
+          execute_batch: [:cancel_tokens],
+          multi_step: [:cancel_tokens],
+          load_extension: [:entry_point],
+          deserialize: [:read_only],
+          backup_with_progress: [:cancel_tokens, :pages_per_step, :schema],
           open_in_memory:
             ~w(auto_vacuum busy_timeout cache_size foreign_keys journal_mode mmap_size
                synchronous temp_store wal_autocheckpoint)a,
@@ -28,6 +35,13 @@ defmodule Xqlite.OptionListLawTest do
         })
 
   @harmless Map.merge(Map.from_keys(@one_key, type_extensions: []), %{
+              query: [cancel_tokens: [], type_extensions: []],
+              execute: [cancel_tokens: [], type_extensions: []],
+              execute_batch: [cancel_tokens: []],
+              multi_step: [cancel_tokens: []],
+              load_extension: [entry_point: "init"],
+              deserialize: [read_only: true],
+              backup_with_progress: [schema: "main", pages_per_step: 1, cancel_tokens: []],
               open_in_memory: [foreign_keys: true, journal_mode: :memory],
               set_busy_policy: [max_retries: 0, sleep_ms: 0],
               register_progress_hook: [every_n: 1, tag: :t],
@@ -42,6 +56,13 @@ defmodule Xqlite.OptionListLawTest do
     {:set_busy_policy, :max_elapsed_ms, 0..(2 ** 64 - 1)},
     {:set_busy_policy, :sleep_ms, 0..(2 ** 64 - 1)},
     {:register_progress_hook, :every_n, 1..(2 ** 32 - 1)}
+  ]
+
+  @typed_faults [
+    {:load_extension, :entry_point, nil},
+    {:load_extension, :entry_point, 1},
+    {:deserialize, :read_only, "yes"},
+    {:backup_with_progress, :schema, 1}
   ]
 
   @bridge_faults [
@@ -133,7 +154,13 @@ defmodule Xqlite.OptionListLawTest do
         {function, [{key, value}], %{key: key, value: value, reason: :invalid_value}}
       end
 
-    one_of([numbers, map(member_of(@bridge_faults), fn {opts, ex} -> {:bridge, opts, ex} end)])
+    typed =
+      map(member_of(@typed_faults), fn {function, key, value} ->
+        {function, [{key, value}], %{key: key, value: value, reason: :invalid_value}}
+      end)
+
+    bridge = map(member_of(@bridge_faults), fn {opts, ex} -> {:bridge, opts, ex} end)
+    one_of([numbers, typed, bridge])
   end
 
   defp call(:open_in_memory, _conn, opts), do: Xqlite.open_in_memory(opts)
@@ -152,9 +179,23 @@ defmodule Xqlite.OptionListLawTest do
     answer
   end
 
-  defp call(function, conn, opts) when function in ~w(query_cancellable execute_cancellable
-                           query_with_changes_cancellable)a,
-    do: apply(Xqlite, function, [conn, "SELECT 1", [], [], opts])
+  defp call(:multi_step, conn, opts) do
+    {:ok, stmt} = Xqlite.prepare(conn, "SELECT 1")
+    answer = Xqlite.multi_step(stmt, 1, opts)
+    :ok = Xqlite.finalize(stmt)
+    answer
+  end
+
+  defp call(function, conn, opts) when function in @token_key,
+    do: apply(Xqlite, function, [conn, "SELECT 1", opts])
+
+  defp call(:load_extension, conn, opts), do: Xqlite.load_extension(conn, "no_such_lib", opts)
+  defp call(:deserialize, conn, opts), do: Xqlite.deserialize(conn, "", "main", opts)
+
+  defp call(:backup_with_progress, conn, opts) do
+    dest = Path.join(System.tmp_dir!(), "xqlite_option_law_never_written.db")
+    Xqlite.backup_with_progress(conn, dest, self(), opts)
+  end
 
   defp call(function, conn, opts), do: apply(Xqlite, function, [conn, "SELECT 1", [], opts])
 

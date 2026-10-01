@@ -106,7 +106,7 @@ defmodule Xqlite.XqliteTelemetryIoOpsTest do
 
       handler_id = attach_capture([[:xqlite, :deserialize, :stop]])
 
-      :ok = Xqlite.deserialize(conn2, bin, "main", false)
+      :ok = Xqlite.deserialize(conn2, bin)
 
       assert_receive {:telemetry_event, [:xqlite, :deserialize, :stop], _, metadata}
       assert metadata.result_class == :ok
@@ -201,59 +201,26 @@ defmodule Xqlite.XqliteTelemetryIoOpsTest do
     test "load_extension :stop fires with :error for nonexistent path", %{conn: conn} do
       handler_id = attach_capture([[:xqlite, :extension, :load, :stop]])
 
-      :ok = Xqlite.enable_load_extension(conn, true)
+      :ok = Xqlite.enable_load_extension(conn)
       {:error, _} = Xqlite.load_extension(conn, "/no/such/extension")
 
       assert_receive {:telemetry_event, [:xqlite, :extension, :load, :stop], _, metadata}
       assert metadata.result_class == :error
       assert metadata.path == "/no/such/extension"
 
-      :ok = Xqlite.enable_load_extension(conn, false)
+      :ok = Xqlite.disable_load_extension(conn)
       detach(handler_id)
     end
 
-    test "enable_load_extension fires :enable event", %{conn: conn} do
-      handler_id = attach_capture([[:xqlite, :extension, :enable]])
+    test "each switch fires its own event", %{conn: conn} do
+      handler_id =
+        attach_capture([[:xqlite, :extension, :enable], [:xqlite, :extension, :disable]])
 
-      :ok = Xqlite.enable_load_extension(conn, true)
-      assert_receive {:telemetry_event, [:xqlite, :extension, :enable], _, %{enabled: true}}
+      :ok = Xqlite.enable_load_extension(conn)
+      assert_receive {:telemetry_event, [:xqlite, :extension, :enable], _, %{conn: ^conn}}
 
-      :ok = Xqlite.enable_load_extension(conn, false)
-      assert_receive {:telemetry_event, [:xqlite, :extension, :enable], _, %{enabled: false}}
-
-      detach(handler_id)
-    end
-  end
-
-  describe "pragma get/set telemetry" do
-    test "set fires :pragma, :set with name + value", %{conn: conn} do
-      handler_id = attach_capture([[:xqlite, :pragma, :set]])
-
-      {:ok, _} = Xqlite.set_pragma(conn, "cache_size", {:pages, 100})
-
-      assert_receive {:telemetry_event, [:xqlite, :pragma, :set], _, metadata}
-      assert metadata.name == "cache_size"
-      assert metadata.value == {:pages, 100}
-
-      detach(handler_id)
-    end
-
-    test "get fires :pragma, :get with name", %{conn: conn} do
-      handler_id = attach_capture([[:xqlite, :pragma, :get]])
-
-      {:ok, _} = Xqlite.get_pragma(conn, "cache_size")
-
-      assert_receive {:telemetry_event, [:xqlite, :pragma, :get], _, %{name: "cache_size"}}
-
-      detach(handler_id)
-    end
-
-    test "atom names get converted to strings", %{conn: conn} do
-      handler_id = attach_capture([[:xqlite, :pragma, :get]])
-
-      {:ok, _} = Xqlite.get_pragma(conn, :cache_size)
-
-      assert_receive {:telemetry_event, [:xqlite, :pragma, :get], _, %{name: "cache_size"}}
+      :ok = Xqlite.disable_load_extension(conn)
+      assert_receive {:telemetry_event, [:xqlite, :extension, :disable], _, %{conn: ^conn}}
 
       detach(handler_id)
     end

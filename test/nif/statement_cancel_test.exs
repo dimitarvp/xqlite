@@ -35,7 +35,7 @@ defmodule Xqlite.NIF.StatementCancelTest do
       :ok = NIF.cancel_operation(token)
     end)
 
-    assert {:error, :operation_cancelled} = Xqlite.multi_step_cancellable(stmt, 10, token)
+    assert {:error, :operation_cancelled} = Xqlite.multi_step(stmt, 10, cancel_tokens: token)
 
     :ok = Xqlite.finalize(stmt)
   end
@@ -45,16 +45,7 @@ defmodule Xqlite.NIF.StatementCancelTest do
     {:ok, token} = NIF.create_cancel_token()
     :ok = NIF.cancel_operation(token)
 
-    assert {:error, :operation_cancelled} = Xqlite.multi_step_cancellable(stmt, 1, [token])
-
-    :ok = Xqlite.finalize(stmt)
-  end
-
-  test "an empty token list behaves like plain multi_step", %{conn: conn} do
-    {:ok, stmt} = Xqlite.prepare(conn, "SELECT 1 UNION ALL SELECT 2")
-
-    assert {:ok, %{rows: [[1], [2]], done: true}} =
-             Xqlite.multi_step_cancellable(stmt, 10, [])
+    assert {:error, :operation_cancelled} = Xqlite.multi_step(stmt, 1, cancel_tokens: [token])
 
     :ok = Xqlite.finalize(stmt)
   end
@@ -72,12 +63,11 @@ defmodule Xqlite.NIF.StatementCancelTest do
     {:ok, token} = NIF.create_cancel_token()
     :ok = NIF.cancel_operation(token)
 
-    {:error, :operation_cancelled} = Xqlite.multi_step_cancellable(stmt, 1, [token])
+    {:error, :operation_cancelled} = Xqlite.multi_step(stmt, 1, cancel_tokens: [token])
 
     :ok = Xqlite.reset(stmt)
 
-    assert {:ok, %{rows: [[1_000_001]], done: true}} =
-             Xqlite.multi_step_cancellable(stmt, 2, [])
+    assert {:ok, %{rows: [[1_000_001]], done: true}} = Xqlite.multi_step(stmt, 2)
 
     :ok = Xqlite.finalize(stmt)
   end
@@ -86,7 +76,7 @@ defmodule Xqlite.NIF.StatementCancelTest do
     {:ok, stmt} = Xqlite.prepare(conn, "SELECT 1")
     :ok = Xqlite.finalize(stmt)
 
-    assert {:error, :statement_finalized} = Xqlite.multi_step_cancellable(stmt, 1, [])
+    assert {:error, :statement_finalized} = Xqlite.multi_step(stmt, 1)
   end
 
   # Earlier runs and rows stepped first move SQLite's progress checks, so a cancel
@@ -117,7 +107,7 @@ defmodule Xqlite.NIF.StatementCancelTest do
     for _ <- 1..stepped//1, do: assert({:row, _} = Xqlite.step(stmt))
     assert {:ok, token} = Xqlite.create_cancel_token()
     assert :ok = Xqlite.cancel_operation(token)
-    kind = kind(Xqlite.multi_step_cancellable(stmt, batch, token))
+    kind = kind(Xqlite.multi_step(stmt, batch, cancel_tokens: token))
     assert :ok = Xqlite.finalize(stmt)
     assert :ok = Xqlite.finalize(other)
     assert {:ok, autocommit} = Xqlite.autocommit(conn)

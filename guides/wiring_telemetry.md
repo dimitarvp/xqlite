@@ -64,10 +64,9 @@ measurement and metadata key. A `:*` below stands for the span's
 |---|---|---|
 | `[:xqlite, :open, :*]` | `Xqlite.open/2` and the other `open_*` functions | `:path`, `:mode` |
 | `[:xqlite, :close, :*]` | `Xqlite.close/1` | `:conn`, `:path` |
-| `[:xqlite, :query, :*]` | `Xqlite.query/4`, `Xqlite.query_cancellable/5` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows` (on stop) |
-| `[:xqlite, :execute, :*]` | `Xqlite.execute/4` and cancellable variant | `:sql`, `:params_count`, `:cancellable?`, `:affected_rows` (on stop) |
-| `[:xqlite, :execute_batch, :*]` | `Xqlite.execute_batch/2` and cancellable variant | `:sql_batch_size_bytes`, `:cancellable?` |
-| `[:xqlite, :query_with_changes, :*]` | `Xqlite.query_with_changes_cancellable/5` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows`, `:changes` (on stop) |
+| `[:xqlite, :query, :*]` | `Xqlite.query/4` | `:sql`, `:params_count`, `:cancellable?`, `:num_rows` (on stop) |
+| `[:xqlite, :execute, :*]` | `Xqlite.execute/4` | `:sql`, `:params_count`, `:cancellable?`, `:affected_rows` (on stop) |
+| `[:xqlite, :execute_batch, :*]` | `Xqlite.execute_batch/3` | `:sql_batch_size_bytes`, `:cancellable?` |
 | `[:xqlite, :explain_analyze, :*]` | `Xqlite.explain_analyze/4` | `:params_count`, `:wall_time_ns`, `:rows_produced`, `:scan_count` |
 | `[:xqlite, :transaction, :begin / :commit / :rollback]` | `Xqlite.begin/2`, `commit/1`, `rollback/1` | `:mode` (begin), `:reason` (rollback) |
 | `[:xqlite, :savepoint, :create / :release / :rollback_to]` | `Xqlite.savepoint/2` etc. | `:name` |
@@ -80,8 +79,7 @@ measurement and metadata key. A `:*` below stands for the span's
 | `[:xqlite, :serialize, :*]` | `Xqlite.serialize/2` | `:schema`, `:byte_size` |
 | `[:xqlite, :deserialize, :*]` | `Xqlite.deserialize/4` | `:schema`, `:read_only?`, `:byte_size` |
 | `[:xqlite, :extension, :load, :*]` | `Xqlite.load_extension/3` | `:path`, `:entry_point` |
-| `[:xqlite, :extension, :enable]` | `Xqlite.enable_load_extension/2` | `:enabled` |
-| `[:xqlite, :pragma, :get / :set]` | `Xqlite.get_pragma/2`, `Xqlite.set_pragma/3` | `:name`, `:value` (on set) |
+| `[:xqlite, :extension, :enable / :disable]` | `Xqlite.enable_load_extension/1`, `disable_load_extension/1` | `:conn` |
 | `[:xqlite, :cancel, :token_created]` | `Xqlite.create_cancel_token/0` | `:token` |
 | `[:xqlite, :cancel, :signalled]` | `Xqlite.cancel_operation/1` | `:token` |
 | `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:conn`, `:operation`, `:tokens` |
@@ -90,7 +88,7 @@ The table lists the doors that emit. Every other `Xqlite` door hands its
 work straight to `XqliteNIF` without an event of its own — `prepare/2`,
 `bind/3`, `reset/1`, `changes/1` and the rest of the statement, blob and
 schema doors among them. Two are worth naming because a reader goes
-looking for them: `Xqlite.backup_with_progress/6` reports its progress to
+looking for them: `Xqlite.backup_with_progress/4` reports its progress to
 a pid instead of emitting, and `Xqlite.get_limit/2` and
 `Xqlite.put_limit/3` are pass-throughs that read and set SQLite's
 per-connection limits.

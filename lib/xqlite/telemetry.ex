@@ -92,11 +92,6 @@ defmodule Xqlite.Telemetry do
         stop metadata:  %{conn, sql_batch_size_bytes, cancellable?,
                           result_class, error_reason}
 
-      [:xqlite, :query_with_changes, :start | :stop | :exception]
-        start metadata: %{conn, sql, params_count, cancellable?}
-        stop metadata:  %{conn, sql, params_count, cancellable?,
-                          result_class, error_reason, num_rows, changes}
-
       [:xqlite, :explain_analyze, :start | :stop | :exception]
         start metadata: %{conn, sql, params_count}
         stop metadata:  %{conn, sql, params_count, result_class,
@@ -105,10 +100,9 @@ defmodule Xqlite.Telemetry do
 
   `wall_time_ns` is SQLite's own nanosecond measurement of the executed
   statement (from `EXPLAIN ANALYZE`). `:cancellable?` is `true` iff
-  the operation was invoked through a `*_cancellable` NIF or
-  `Xqlite.query_cancellable/5` and its siblings. `changes` is
-  `sqlite3_changes()` read beside the rows; it is `nil` on error and on
-  the cancellable query path. `params_count` counts the proper prefix of
+  the call was given cancel tokens through `:cancel_tokens`. `changes` is
+  `sqlite3_changes()` read beside the rows; it is `nil` on error.
+  `params_count` counts the proper prefix of
   the list the caller passed, which is also the number bound: the
   type-extension chain rewrites values, never their count. A list whose
   tail is not a list counts the elements before that tail, and the NIF
@@ -193,7 +187,7 @@ defmodule Xqlite.Telemetry do
                           result_class, error_reason}
 
   `byte_size` is `nil` on a failed backup or serialize.
-  `Xqlite.backup_with_progress/6` reports to a pid instead and emits
+  `Xqlite.backup_with_progress/4` reports to a pid instead and emits
   no telemetry of its own.
 
   ### WAL checkpoint and extensions
@@ -207,20 +201,14 @@ defmodule Xqlite.Telemetry do
         start metadata: %{conn, path, entry_point}
         stop metadata:  %{conn, path, entry_point, result_class, error_reason}
 
-      [:xqlite, :extension, :enable]
+      [:xqlite, :extension, :enable | :disable]
         measurements: %{monotonic_time}
-        metadata:     %{conn, enabled}
+        metadata:     %{conn}
 
   WAL `:mode` is `:passive`, `:full`, `:restart`, or `:truncate`.
   `:busy?` is `true` if the checkpoint did not complete because of
   reader/writer contention. The three checkpoint counters are present
   only when the checkpoint succeeded.
-
-  ### PRAGMA
-
-      [:xqlite, :pragma, :get | :set]
-        measurements: %{monotonic_time}
-        metadata:     %{conn, name, value (on :set only)}
 
   ### Cancellation
 
@@ -237,8 +225,8 @@ defmodule Xqlite.Telemetry do
         metadata:     %{conn, operation, tokens}
 
   `:operation` is the operation that the cancel signal interrupted:
-  `:query`, `:execute`, `:execute_batch`, `:query_with_changes`, or
-  `:stream_fetch`. `:tokens` is the list of tokens that operation was
+  `:query`, `:execute`, `:execute_batch` or `:stream_fetch`. `:tokens` is
+  the list of tokens that operation was
   watching.
 
   ## Event surface — hook bridge events (opt-in registration)
@@ -328,7 +316,6 @@ defmodule Xqlite.Telemetry do
     %{name: [:xqlite, :query], kind: :span},
     %{name: [:xqlite, :execute], kind: :span},
     %{name: [:xqlite, :execute_batch], kind: :span},
-    %{name: [:xqlite, :query_with_changes], kind: :span},
     %{name: [:xqlite, :explain_analyze], kind: :span},
     %{name: [:xqlite, :transaction, :begin], kind: :event},
     %{name: [:xqlite, :transaction, :commit], kind: :event},
@@ -346,8 +333,7 @@ defmodule Xqlite.Telemetry do
     %{name: [:xqlite, :wal_checkpoint], kind: :span},
     %{name: [:xqlite, :extension, :load], kind: :span},
     %{name: [:xqlite, :extension, :enable], kind: :event},
-    %{name: [:xqlite, :pragma, :get], kind: :event},
-    %{name: [:xqlite, :pragma, :set], kind: :event},
+    %{name: [:xqlite, :extension, :disable], kind: :event},
     %{name: [:xqlite, :cancel, :token_created], kind: :event},
     %{name: [:xqlite, :cancel, :signalled], kind: :event},
     %{name: [:xqlite, :cancel, :honored], kind: :event},

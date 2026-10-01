@@ -29,11 +29,6 @@ defmodule Xqlite.TypeExtensionQueryTest do
     Enum.map_join([a, b, c, d, e], "-", fn part -> Base.encode16(part, case: :lower) end)
   end
 
-  defp token do
-    {:ok, ref} = Xqlite.create_cancel_token()
-    ref
-  end
-
   describe "Xqlite.query/4 with :type_extensions" do
     test "encodes params and decodes result rows through the chain", %{conn: conn} do
       exts = [TypeExtension.Date]
@@ -93,7 +88,7 @@ defmodule Xqlite.TypeExtensionQueryTest do
   end
 
   describe ":type_extensions on every parameter-taking function" do
-    property "a value written through execute/4 is found through all five", %{conn: conn} do
+    property "a value written through execute/4 is found through all four", %{conn: conn} do
       check all(bytes <- StreamData.binary(length: 16), max_runs: 2000) do
         uuid = uuid_text(bytes)
 
@@ -111,29 +106,13 @@ defmodule Xqlite.TypeExtensionQueryTest do
                  )
 
         assert {:ok, %{rows: [[^uuid]], num_rows: 1}} =
-                 Xqlite.query_cancellable(
-                   conn,
-                   "SELECT u FROM holders WHERE u = ?1",
-                   [uuid],
-                   token(),
-                   @uuid_exts
-                 )
+                 Xqlite.query(conn, "SELECT u FROM holders WHERE u = ?1", [uuid], @uuid_exts)
 
-        assert {:ok, %{rows: [[^uuid]], num_rows: 1}} =
-                 Xqlite.query_with_changes_cancellable(
-                   conn,
-                   "SELECT u FROM holders WHERE u = ?1",
-                   [uuid],
-                   token(),
-                   @uuid_exts
-                 )
-
-        assert {:ok, 1} =
-                 Xqlite.execute_cancellable(
+        assert {:ok, %Xqlite.Result{changes: 1}} =
+                 Xqlite.execute(
                    conn,
                    "UPDATE holders SET tag = 'b' WHERE u = ?1",
                    [uuid],
-                   token(),
                    @uuid_exts
                  )
 
@@ -155,65 +134,24 @@ defmodule Xqlite.TypeExtensionQueryTest do
       end
     end
 
-    test "with no extensions the five behave as they do today", %{conn: conn} do
-      {:ok, _} = Xqlite.execute(conn, "INSERT INTO holders (id, tag) VALUES (1, 'a')", [])
-
-      plain = Xqlite.query_cancellable(conn, "SELECT tag FROM holders", [], token())
-      opted = Xqlite.query_cancellable(conn, "SELECT tag FROM holders", [], token(), [])
-      assert plain == opted
-
-      with_option =
-        Xqlite.query_cancellable(conn, "SELECT tag FROM holders", [], token(),
-          type_extensions: []
-        )
-
-      assert plain == with_option
-
-      plain_changes =
-        Xqlite.query_with_changes_cancellable(conn, "SELECT tag FROM holders", [], token())
-
-      opted_changes =
-        Xqlite.query_with_changes_cancellable(conn, "SELECT tag FROM holders", [], token(),
-          type_extensions: []
-        )
-
-      assert plain_changes == opted_changes
-    end
-
     test "nil parameters keep working on the forms that accept them", %{conn: conn} do
       assert {:ok, _} = Xqlite.explain_analyze(conn, "SELECT 1", nil)
       assert {:ok, _} = Xqlite.explain_analyze(conn, "SELECT 1", nil, @uuid_exts)
     end
 
-    test "a blob wrapper passes the chain untouched on all five", %{conn: conn} do
+    test "a blob wrapper passes the chain untouched on all four", %{conn: conn} do
       wrapper = %Xqlite.Blob{bytes: <<0xFF, 0x00, 0xFE>>}
 
-      assert {:ok, 1} =
-               Xqlite.execute_cancellable(
+      assert {:ok, %Xqlite.Result{changes: 1}} =
+               Xqlite.execute(
                  conn,
                  "INSERT INTO holders (id, u) VALUES (2, ?1)",
                  [wrapper],
-                 token(),
                  @uuid_exts
                )
 
       assert {:ok, %{rows: [["blob"]]}} =
-               Xqlite.query_cancellable(
-                 conn,
-                 "SELECT typeof(u) FROM holders WHERE id = 2",
-                 [],
-                 token(),
-                 @uuid_exts
-               )
-
-      assert {:ok, %{rows: [["blob"]]}} =
-               Xqlite.query_with_changes_cancellable(
-                 conn,
-                 "SELECT typeof(u) FROM holders WHERE id = ?1",
-                 [2],
-                 token(),
-                 @uuid_exts
-               )
+               Xqlite.query(conn, "SELECT typeof(u) FROM holders WHERE id = 2", [], @uuid_exts)
 
       assert {:ok, _} =
                Xqlite.explain_analyze(conn, "SELECT ?1", [wrapper], @uuid_exts)
@@ -224,25 +162,16 @@ defmodule Xqlite.TypeExtensionQueryTest do
       :ok = Xqlite.finalize(stmt)
     end
 
-    test "a refused parameter answers the refusal tuple on all five", %{conn: conn} do
+    test "a rejected parameter answers the error tuple on all four", %{conn: conn} do
       exts = [type_extensions: [Xqlite.TypeExtension.Decimal]]
       params = [%Decimal{sign: 1, coef: :inf}]
       refusal = {:non_finite, :infinity}
 
       assert {:error, {:type_extension_refused, %{position: 1, reason: ^refusal}}} =
-               Xqlite.query_cancellable(conn, "SELECT ?1", params, token(), exts)
+               Xqlite.query(conn, "SELECT ?1", params, exts)
 
       assert {:error, {:type_extension_refused, %{position: 1, reason: ^refusal}}} =
-               Xqlite.query_with_changes_cancellable(conn, "SELECT ?1", params, token(), exts)
-
-      assert {:error, {:type_extension_refused, %{position: 1, reason: ^refusal}}} =
-               Xqlite.execute_cancellable(
-                 conn,
-                 "INSERT INTO holders (u) VALUES (?1)",
-                 params,
-                 token(),
-                 exts
-               )
+               Xqlite.execute(conn, "INSERT INTO holders (u) VALUES (?1)", params, exts)
 
       assert {:error, {:type_extension_refused, %{position: 1, reason: ^refusal}}} =
                Xqlite.explain_analyze(conn, "SELECT ?1", params, exts)

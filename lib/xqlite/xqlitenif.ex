@@ -266,7 +266,7 @@ defmodule XqliteNIF do
   query is executing, the query will be interrupted (OR-semantics — the
   earliest signal wins). Pass an empty list to run without cancellation.
 
-  Use `Xqlite.query_cancellable/4` to pass either a single token or a list;
+  Use `Xqlite.query/4` with `:cancel_tokens` to pass either a single token or a list;
   this raw NIF accepts only the list form.
 
   Returns `{:ok, result_map}` on successful completion, where `result_map` is
@@ -708,9 +708,9 @@ defmodule XqliteNIF do
   and `foreign_keys` written inside a transaction, which SQLite would
   ignore, returns `{:error, :transaction_in_progress}`.
   Any other value is formatted and handed to SQLite, which parses what it can
-  of it and reports success even when it stored its own fallback instead. `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4`
-  check the value against the PRAGMA's definition first and refuse what it
-  cannot take; use one of them unless you mean to reach SQLite unchecked.
+  of it and reports success even when it stored its own fallback instead. `Xqlite.Pragma.put/4`
+  checks the value against the PRAGMA's definition first and rejects what it
+  cannot take; use it unless you mean to reach SQLite unchecked.
   """
   @spec set_pragma(conn :: Xqlite.conn(), name :: String.t(), value :: term()) ::
           {:ok, term()} | Xqlite.error()
@@ -1669,7 +1669,7 @@ defmodule XqliteNIF do
   @doc """
   Advances a prepared statement up to `batch_size` rows, cancellable (raw NIF).
 
-  Most users want `Xqlite.multi_step_cancellable/3`. Same return shape as
+  Most users want `Xqlite.multi_step/3` with `:cancel_tokens`. Same return shape as
   `stmt_multi_step/2`; any signalled token in the list aborts the loop with
   `{:error, :operation_cancelled}` (OR-semantics; an empty list means plain
   stepping). The unbound-parameter refusal of `stmt_multi_step/2` applies
@@ -2091,7 +2091,7 @@ defmodule XqliteNIF do
   `{:xqlite_backup_progress, %{remaining: r, total: t, status: s}}` to `pid`
   after each step: `status` is `:copied`, or `:busy` when a lock blocked the
   step, which then ends the call with the error `backup/3` answers for the
-  same lock (see `Xqlite.backup_with_progress/6`). A `:busy` message before
+  same lock (see `Xqlite.backup_with_progress/4`). A `:busy` message before
   any step copied pages carries `remaining: nil, total: nil`. Before the
   destination is opened and between steps, all of `cancel_tokens` are polled —
   if *any* is signalled, returns `{:error, :operation_cancelled}`

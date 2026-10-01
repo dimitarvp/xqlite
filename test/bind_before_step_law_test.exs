@@ -7,7 +7,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
   stepped straight after `prepare/2` writes NULL into every column it touches,
   and a bind the library refused binds nothing at all, which leaves the
   statement in exactly that state. Both are refused here instead: `step/1`,
-  `multi_step/2` and `multi_step_cancellable/3` answer
+  `multi_step/2` and its `:cancel_tokens` form answer
   `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds or
   `clear_bindings/1` asks for NULLs on purpose.
 
@@ -164,7 +164,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
       tuple({constant(:bind), member_of(forms(n))}),
       tuple({constant(:rejected_bind), member_of(rejected_binds(n))}),
       member_of([:clear, :reset, :step]),
-      tuple({member_of([:multi_step, :cancellable, :cancel]), member_of([1, 2, 10])})
+      tuple({member_of([:multi_step, :cancel]), member_of([1, 2, 10])})
     ])
   end
 
@@ -244,7 +244,7 @@ defmodule Xqlite.BindBeforeStepLawTest do
     assert {:ok, token} = Xqlite.create_cancel_token()
     assert :ok = Xqlite.cancel_operation(token)
 
-    case shape(Xqlite.multi_step_cancellable(stmt, k, [token])) do
+    case shape(Xqlite.multi_step(stmt, k, cancel_tokens: [token])) do
       {:error, :operation_cancelled} when s.set? and s.held == nil ->
         rolled_back(s)
 
@@ -254,9 +254,9 @@ defmodule Xqlite.BindBeforeStepLawTest do
     end
   end
 
-  defp act({call, k}, stmt, s) do
+  defp act({:multi_step, k}, stmt, s) do
     {expected, next} = gated(s, &batch(&1, k, []))
-    assert expected == shape(multi_step(call, stmt, k))
+    assert expected == shape(Xqlite.multi_step(stmt, k))
     next
   end
 
@@ -350,9 +350,6 @@ defmodule Xqlite.BindBeforeStepLawTest do
     assert {:ok, %{rows: rows}} = Xqlite.query(s.conn, "SELECT id, v, w, x FROM t ORDER BY id")
     rows
   end
-
-  defp multi_step(:multi_step, stmt, k), do: Xqlite.multi_step(stmt, k)
-  defp multi_step(:cancellable, stmt, k), do: Xqlite.multi_step_cancellable(stmt, k, [])
 
   defp shape({:error, {:sqlite_failure, code, extended, _message}}),
     do: {:error, {:sqlite_failure, code, extended}}

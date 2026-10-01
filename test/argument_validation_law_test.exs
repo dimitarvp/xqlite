@@ -162,9 +162,9 @@ defmodule Xqlite.ArgumentValidationLawTest do
              %{conn: conn} do
       check all(ms <- non_timeout_term(), max_runs: 2000) do
         rejected = {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}
-        assert {:ok, before} = Xqlite.get_pragma(conn, :busy_timeout)
+        assert {:ok, before} = Xqlite.get_busy_timeout(conn)
         assert ^rejected = Xqlite.put_busy_timeout(conn, ms)
-        assert {:ok, ^before} = Xqlite.get_pragma(conn, :busy_timeout)
+        assert {:ok, ^before} = Xqlite.get_busy_timeout(conn)
       end
     end
 
@@ -200,9 +200,9 @@ defmodule Xqlite.ArgumentValidationLawTest do
 
     test "put_busy_timeout/2 accepts zero and a positive integer", %{conn: conn} do
       assert :ok = Xqlite.put_busy_timeout(conn, 0)
-      assert {:ok, 0} = Xqlite.get_pragma(conn, :busy_timeout)
+      assert {:ok, 0} = Xqlite.get_busy_timeout(conn)
       assert :ok = Xqlite.put_busy_timeout(conn, 250)
-      assert {:ok, 250} = Xqlite.get_pragma(conn, :busy_timeout)
+      assert {:ok, 250} = Xqlite.get_busy_timeout(conn)
     end
   end
 end

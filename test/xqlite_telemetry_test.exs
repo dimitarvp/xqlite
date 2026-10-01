@@ -191,8 +191,8 @@ defmodule Xqlite.XqliteTelemetryTest do
     end
   end
 
-  describe "Xqlite.query_cancellable/4 telemetry" do
-    test "fires with cancellable?: true on success", %{conn: conn} do
+  describe "Xqlite.query/4 telemetry with cancel tokens" do
+    test "cancellable? is true only when a token is given", %{conn: conn} do
       :ok = XqliteNIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY);")
       :ok = XqliteNIF.execute_batch(conn, "INSERT INTO t VALUES (1), (2);")
 
@@ -204,13 +204,15 @@ defmodule Xqlite.XqliteTelemetryTest do
           [:xqlite, :query, :stop]
         ])
 
-      {:ok, _} = Xqlite.query_cancellable(conn, "SELECT * FROM t", [], token)
+      {:ok, _} = Xqlite.query(conn, "SELECT * FROM t", [], cancel_tokens: token)
 
       assert_receive {:telemetry_event, [:xqlite, :query, :start], _, %{cancellable?: true}}
 
       assert_receive {:telemetry_event, [:xqlite, :query, :stop], _,
                       %{cancellable?: true, result_class: :ok}}
 
+      {:ok, _} = Xqlite.query(conn, "SELECT * FROM t", [], cancel_tokens: [])
+      assert_receive {:telemetry_event, [:xqlite, :query, :start], _, %{cancellable?: false}}
       detach(handler_id)
     end
 
@@ -221,11 +223,11 @@ defmodule Xqlite.XqliteTelemetryTest do
       handler_id = attach_capture([[:xqlite, :query, :stop]])
 
       {:error, :operation_cancelled} =
-        Xqlite.query_cancellable(
+        Xqlite.query(
           conn,
           "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) SELECT count(*) FROM n",
           [],
-          token
+          cancel_tokens: token
         )
 
       assert_receive {:telemetry_event, [:xqlite, :query, :stop], _, metadata}

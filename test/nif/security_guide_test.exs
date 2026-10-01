@@ -8,9 +8,9 @@ defmodule Xqlite.NIF.SecurityGuideTest do
 
   for_each_opener "security_guide" do
     test "enable, load, disable — the guide's extension snippet", %{conn: conn} do
-      assert :ok = Xqlite.enable_load_extension(conn, true)
+      assert :ok = Xqlite.enable_load_extension(conn)
       assert :ok = Xqlite.load_extension(conn, test_extension_path())
-      assert :ok = Xqlite.enable_load_extension(conn, false)
+      assert :ok = Xqlite.disable_load_extension(conn)
 
       assert {:ok, %{rows: [["xqlite_ext_ok"]]}} =
                Xqlite.query(conn, "SELECT xqlite_test_ext()")

@@ -38,15 +38,7 @@ defmodule Xqlite.CancelTokenLawTest do
   # NIFs that take a list and nothing else. `XqliteNIF.cancel_operation/1` is
   # in neither: it decodes its one argument through rustler and raises for
   # every term that is not a live token, the documented kind for a raw NIF.
-  @elixir_doors [
-    :query,
-    :execute,
-    :execute_batch,
-    :query_with_changes,
-    :multi_step,
-    :backup,
-    :stream
-  ]
+  @elixir_doors [:query, :execute, :execute_batch, :multi_step, :backup, :stream]
 
   @raw_doors [
     :nif_query,
@@ -88,7 +80,7 @@ defmodule Xqlite.CancelTokenLawTest do
 
       assert {:error,
               {:invalid_cancel_tokens, %{reason: :bad_element, position: 2, value_type: :atom}}} =
-               Xqlite.query_cancellable(conn, @select, [], tokens)
+               Xqlite.query(conn, @select, [], cancel_tokens: tokens)
     end
 
     test "the anchor: a token list that does not end in [] is refused", %{conn: conn} do
@@ -98,7 +90,7 @@ defmodule Xqlite.CancelTokenLawTest do
                Xqlite.stream(conn, @select, [], cancel_tokens: improper)
 
       assert {:error, {:invalid_cancel_tokens, %{reason: :improper_tail, value_type: :atom}}} =
-               Xqlite.query_cancellable(conn, @select, [], improper)
+               Xqlite.query(conn, @select, [], cancel_tokens: improper)
     end
 
     test "the anchor: a raw door names the position too", %{conn: conn} do
@@ -120,7 +112,7 @@ defmodule Xqlite.CancelTokenLawTest do
 
       assert {:error,
               {:invalid_cancel_tokens, %{reason: :bad_element, position: 1, value_type: :atom}}} =
-               Xqlite.execute_batch_cancellable(conn, @insert, :bogus)
+               Xqlite.execute_batch(conn, @insert, cancel_tokens: :bogus)
     end
 
     # The other list of the same call keeps its own tag, which is what makes
@@ -155,7 +147,7 @@ defmodule Xqlite.CancelTokenLawTest do
 
       assert {:error,
               {:invalid_cancel_tokens, %{reason: :bad_element, position: 1, value_type: :atom}}} =
-               Xqlite.query_cancellable(conn, @select, [], :bogus)
+               Xqlite.query(conn, @select, [], cancel_tokens: :bogus)
 
       assert {_start_md, stop_md} = assert_span([:xqlite, :query])
       assert stop_md.result_class == :error
@@ -282,22 +274,19 @@ defmodule Xqlite.CancelTokenLawTest do
   end
 
   defp answer(:query, %{conn: conn}, value),
-    do: Xqlite.query_cancellable(conn, @select, [], value)
+    do: Xqlite.query(conn, @select, [], cancel_tokens: value)
 
   defp answer(:execute, %{conn: conn}, value),
-    do: Xqlite.execute_cancellable(conn, @insert, [], value)
+    do: Xqlite.execute(conn, @insert, [], cancel_tokens: value)
 
   defp answer(:execute_batch, %{conn: conn}, value),
-    do: Xqlite.execute_batch_cancellable(conn, @insert, value)
-
-  defp answer(:query_with_changes, %{conn: conn}, value),
-    do: Xqlite.query_with_changes_cancellable(conn, @insert, [], value)
+    do: Xqlite.execute_batch(conn, @insert, cancel_tokens: value)
 
   defp answer(:multi_step, %{stmt: stmt}, value),
-    do: Xqlite.multi_step_cancellable(stmt, 1, value)
+    do: Xqlite.multi_step(stmt, 1, cancel_tokens: value)
 
   defp answer(:backup, %{conn: conn, dest: dest}, value),
-    do: Xqlite.backup_with_progress(conn, "main", dest, self(), 1, value)
+    do: Xqlite.backup_with_progress(conn, dest, self(), cancel_tokens: value)
 
   defp answer(:stream, %{conn: conn}, value),
     do: Xqlite.stream(conn, @select, [], cancel_tokens: value)
@@ -325,11 +314,10 @@ defmodule Xqlite.CancelTokenLawTest do
 
   defp taking_doors(conn, stmt, value) do
     [
-      {:query, Xqlite.query_cancellable(conn, @select, [], value)},
-      {:execute, Xqlite.execute_cancellable(conn, @insert, [], value)},
-      {:execute_batch, Xqlite.execute_batch_cancellable(conn, @insert, value)},
-      {:query_with_changes, Xqlite.query_with_changes_cancellable(conn, @insert, [], value)},
-      {:multi_step, Xqlite.multi_step_cancellable(stmt, 1, value)},
+      {:query, Xqlite.query(conn, @select, [], cancel_tokens: value)},
+      {:execute, Xqlite.execute(conn, @insert, [], cancel_tokens: value)},
+      {:execute_batch, Xqlite.execute_batch(conn, @insert, cancel_tokens: value)},
+      {:multi_step, Xqlite.multi_step(stmt, 1, cancel_tokens: value)},
       {:stream, drained_stream(conn, value)}
     ]
   end

@@ -278,7 +278,7 @@ cancelled before its statement runs, so it does no work at all.
 :ok = Xqlite.cancel_operation(token)
 
 # Reusing the SAME, already-signalled token cancels the next op at once:
-Xqlite.query_cancellable(conn, "SELECT * FROM big_table", [], token)
+Xqlite.query(conn, "SELECT * FROM big_table", [], cancel_tokens: token)
 #=> {:error, :operation_cancelled}
 ```
 
@@ -323,8 +323,8 @@ same map — except for a term that is no list at all, which they refuse as
 
 A token that is already signalled when a cancellable call starts cancels the
 call before its statement runs, as long as that statement has not started:
-the one-shot calls such as `Xqlite.execute_cancellable/4`,
-`Xqlite.multi_step_cancellable/3` on a statement not started or finished, and
+the one-shot calls such as `Xqlite.execute/4` with `:cancel_tokens`,
+`Xqlite.multi_step/3` on a statement not started or finished, and
 a stream's first fetch. Nothing is written then, and a transaction you opened
 stays as it was. A statement already mid-run is stepped, one that SQLite keeps
 running after `SQLITE_BUSY` included, and so is every statement once it
@@ -345,13 +345,13 @@ turns autocommit back on: every statement you run afterwards commits on its
 own, and a later `Xqlite.commit/1` or `Xqlite.rollback/1` answers
 `{:error, :no_transaction}`. `Xqlite.autocommit/1` tells you whether the
 transaction survived. A cancelled read rolls back nothing.
-`Xqlite.execute_batch_cancellable/3` also reads its tokens between
+`Xqlite.execute_batch/3` also reads its `:cancel_tokens` between
 statements, so a signal stops a batch of short statements before the next
 one starts. SQLite rolls back nothing there: the statements before it stay
 committed in autocommit mode, the library rolls back a transaction the batch
 opened itself, and a transaction you opened before the call stays open. Rows
 that a `RETURNING` write handed out before the cancel, through
-`Xqlite.multi_step_cancellable/3` or a stream, describe changes the cancel
+`Xqlite.multi_step/3` or a stream, describe changes the cancel
 took back.
 
 ### A failed commit leaves the transaction open
@@ -448,9 +448,9 @@ damage — and the call answers
 ```
 
 The map says what is holding the slot. Every path that prepares SQL on the
-connection reports it the same way: `query/4`, `execute/4`, `execute_batch/2`
+connection reports it the same way: `query/4`, `execute/4`, `execute_batch/3`
 (the statements before the rejected one have run), `prepare/2`, `stream/4`, and
-the typed `Xqlite.set_pragma(conn, :busy_timeout, ms)` /
+the typed `Xqlite.Pragma.put(conn, :busy_timeout, ms)` /
 `XqliteNIF.set_pragma/3`. Every spelling is covered, including
 `PRAGMA busy_timeout(N)`, a quoted name, a `main.` or `temp.` prefix, and a
 value of `0` or less — SQLite treats anything at or below zero as "stop
@@ -512,7 +512,7 @@ longest operation currently running on that connection.
 
 ### A backup or restore right after a busy answer does not wait
 
-`Xqlite.backup/3`, `Xqlite.backup_with_progress/6` and `Xqlite.restore/3` wait
+`Xqlite.backup/3`, `Xqlite.backup_with_progress/4` and `Xqlite.restore/3` wait
 on a lock only through SQLite's busy handler, and SQLite restarts the handler's
 retry count only when a statement is prepared or run on the connection. After a
 call gave up on a lock, the next backup or restore on the same connection
