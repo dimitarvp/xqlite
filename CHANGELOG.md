@@ -247,7 +247,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the connection, or an open blob, now makes the load answer
   `{:error, {:database_busy_or_locked, 5, _}}` and replace nothing, where
   before only one on the target did: the load drops every cached schema,
-  and a running statement may read a table definition on every row.
+  and a running statement may read a table definition on every row. The
+  schema re-read the load runs afterwards is not subject to the
+  connection's `:sql_length` limit, and the statements are marked to be
+  prepared again whatever that re-read answers.
 - **A TEMP trigger on a loaded table works after `deserialize/4`.** After a
   load, a TEMP trigger on a table of the replaced schema stopped firing,
   and `DROP TRIGGER` on it could take the VM down: SQLite's reload left the

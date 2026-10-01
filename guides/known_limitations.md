@@ -164,6 +164,17 @@ authorizer before it applies a PRAGMA, so the string answers
 - [After a blob call answers code 4, close the handle](gotchas.md#after-a-blob-call-answers-code-4-close-the-handle):
   SQLite has ended it; open a new one.
 
+## Limits
+
+- A `:sql_length` limit below 71 bytes, SQLite's own schema-table
+  definition, or below the longest `CREATE` text of the connection's
+  schemas, makes any statement that needs the schema answer SQLite's own
+  error until the limit is raised: SQLite reads a schema under the
+  caller's limit. A load (`Xqlite.deserialize/4`) on a connection whose
+  schema SQLite has not read yet answers `{:error, {:sqlite_failure, 11,
+  11, _}}` under such a limit and replaces nothing; the library's own
+  schema re-read after a load is not subject to the limit.
+
 ## Deployment
 
 - [Hot code upgrades are not supported](gotchas.md#hot-code-upgrades-are-not-supported-restart-the-node):

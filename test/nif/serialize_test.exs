@@ -540,6 +540,27 @@ defmodule Xqlite.NIF.SerializeTest do
       assert {:ok, %{rows: [[2]]}} = NIF.query(conn, "SELECT x FROM temp.audit", [])
     end
 
+    test "under every :sql_length limit from 18 to 29 a load answers :ok, and a write prepared before it and a TEMP trigger run against the loaded table",
+         %{conn: conn} do
+      :ok = temp_audit_trigger(conn)
+      image = image_of("CREATE TABLE t (a);")
+      {:ok, default} = Xqlite.get_limit(conn, :sql_length)
+
+      for n <- 18..29 do
+        {:ok, insert} = NIF.stmt_prepare(conn, "INSERT INTO t VALUES (?1)")
+        :ok = NIF.stmt_bind(insert, [n])
+        {:ok, ^n} = Xqlite.put_limit(conn, :sql_length, n)
+        assert :ok = Xqlite.deserialize(conn, image)
+        {:ok, ^default} = Xqlite.put_limit(conn, :sql_length, default)
+        assert :done = NIF.stmt_step(insert)
+        :ok = NIF.stmt_finalize(insert)
+        assert {:ok, %{rows: [[^n]]}} = NIF.query(conn, "SELECT a FROM t", [])
+      end
+
+      assert {:ok, %{rows: rows}} = NIF.query(conn, "SELECT x FROM temp.audit", [])
+      assert rows == Enum.map(18..29, &[&1])
+    end
+
     test "a load or a restore while a statement runs on another schema answers busy, and the statement finishes with its types",
          %{conn: conn} do
       path = Xqlite.TestUtil.tmp_db_path("restore_src")

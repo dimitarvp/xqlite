@@ -1601,12 +1601,18 @@ fn deserialize<'a>(
         crate::progress_dispatch::require_idle(conn)?;
         let image = rollback_image(bytes);
         conn.deserialize_read_exact(schema.as_str(), image, bytes.len(), read_only)?;
+        // SAFETY: with_conn_mut holds the Mutex, so `handle()` is the live `sqlite3*`.
+        let swap_sql_length = |value| unsafe {
+            ffi::sqlite3_limit(conn.handle(), ffi::SQLITE_LIMIT_SQL_LENGTH, value)
+        };
+        let caller_limit = swap_sql_length(std::os::raw::c_int::MAX);
         // RESET makes SQLite re-read every schema, rebinding TEMP triggers to the loaded tables;
         // the authorizer re-install then expires every prepared statement.
-        handle
+        let reset = handle
             .busy_flags
-            .own_read(|| conn.execute_batch("PRAGMA writable_schema = RESET"))?;
-        authorizer::sync(conn, &handle)
+            .own_read(|| conn.execute_batch("PRAGMA writable_schema = RESET"));
+        swap_sql_length(caller_limit);
+        authorizer::sync(conn, &handle).and(reset.map_err(XqliteError::from))
     });
     singular_ok_or_error_tuple(env, result)
 }
