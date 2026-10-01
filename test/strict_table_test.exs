@@ -826,6 +826,69 @@ defmodule Xqlite.StrictTableTest do
     end
   end
 
+  describe "a connection other processes share" do
+    property "what another process sends while the table converts runs after the rebuild" do
+      check all(actions <- shared_actions(), max_runs: 2000) do
+        run_shared(200, actions)
+      end
+    end
+
+    test "a rollback/1 sent while the rows are copied finds no transaction" do
+      run_shared(20_000, [:rollback])
+    end
+
+    test "a writer sharing the connection loses no row and slips in no orphan", %{conn: conn} do
+      seed_shared(conn, 20_000)
+      parent = self()
+      spawn_link(fn -> send(parent, {:rebuilt, Xqlite.enable_strict_table(conn, "t")}) end)
+
+      assert {:ok, answers} = write_until_rebuilt(conn, [])
+      assert row_count(conn, "t") == 20_000 + Enum.count(answers, &(&1 == {:ok, 1}))
+      assert fk_check(conn, "main") == []
+    end
+
+    for {mode, holder} <- [delete: "BEGIN; SELECT count(*) FROM t", wal: "BEGIN IMMEDIATE"] do
+      test "another connection's lock in #{mode} journal mode rolls the rebuild back" do
+        path = tmp_db_path("strict_busy")
+        assert {:ok, conn} = Xqlite.open(path, journal_mode: unquote(mode), busy_timeout: 0)
+        seed_shared(conn, 200)
+        assert {:ok, other} = Xqlite.open(path, journal_mode: unquote(mode))
+        assert :ok = NIF.execute_batch(other, unquote(holder))
+
+        assert {{:error, {:database_busy_or_locked, 5, _}}, {:ok, :ok}} =
+                 rebuild_while(conn, fn -> {Xqlite.begin(conn), Xqlite.rollback(conn)} end)
+
+        refute strict?(conn, "t")
+        assert row_count(conn, "t") == 200
+        assert {:ok, true} = Xqlite.autocommit(conn)
+        assert flags(conn) == {1, 0}
+        assert :ok = NIF.close(other)
+      end
+    end
+
+    test "a statement left mid-run answers busy and keeps every row it writes", %{conn: conn} do
+      seed_shared(conn, 200)
+      assert :ok = NIF.execute_batch(conn, "CREATE TABLE log (n INTEGER)")
+      assert {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM t", [])
+      assert {:ok, %{rows: [_ | _]}} = NIF.stream_fetch(stream, 10)
+
+      assert {:ok, stmt} =
+               NIF.stmt_prepare(conn, "INSERT INTO log VALUES (1), (2) RETURNING n")
+
+      assert {:row, [1]} = NIF.stmt_step(stmt)
+
+      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.enable_strict_table(conn, "t")
+
+      assert {:ok, %{rows: [_ | _]}} = NIF.stream_fetch(stream, 10)
+      assert {:ok, %{rows: [[2]], done: true}} = NIF.stmt_multi_step(stmt, 10)
+      assert row_count(conn, "log") == 2
+      refute strict?(conn, "t")
+      assert flags(conn) == {1, 0}
+      assert :ok = NIF.stream_close(stream)
+      assert :ok = NIF.stmt_finalize(stmt)
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # the rebuild drops and recreates the table, so everything SQLite attaches to
   # a table — foreign-key actions on its children, its triggers, the views that
@@ -1185,6 +1248,22 @@ defmodule Xqlite.StrictTableTest do
       assert {:ok, true} = Xqlite.autocommit(conn)
       assert pragma_flag(conn, "foreign_keys") == 1
       assert pragma_flag(conn, "legacy_alter_table") == 0
+    end
+
+    test "a stored table text holding a second statement runs neither", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE q (id INTEGER PRIMARY KEY);
+               PRAGMA writable_schema = ON;
+               UPDATE sqlite_master SET sql = 'CREATE TABLE q (id INTEGER PRIMARY KEY); CREATE TABLE smuggled (x INTEGER)';
+               PRAGMA writable_schema = OFF;
+               """)
+
+      assert {:error, :multiple_statements} = Xqlite.enable_strict_table(conn, "q")
+
+      assert tables(conn) == ["q"]
+      refute strict?(conn, "q")
+      assert flags(conn) == {1, 0}
     end
   end
 
@@ -1721,8 +1800,8 @@ defmodule Xqlite.StrictTableTest do
   defp layout_statements(layout) do
     [{law_create_statement(layout), []}] ++
       law_row_statements(layout) ++
-      law_index_statements(layout) ++
       law_trigger_statements(layout) ++
+      law_index_statements(layout) ++
       law_view_statements(layout) ++
       law_child_statements(layout)
   end
@@ -1923,7 +2002,8 @@ defmodule Xqlite.StrictTableTest do
               :not_a_plain_table,
               :without_rowid,
               :rowid_shadowed,
-              :table_exists
+              :table_exists,
+              :fails_inside
             ]),
           schema <- StreamData.member_of(@law_schemas),
           foreign_keys <- StreamData.boolean(),
@@ -1963,6 +2043,7 @@ defmodule Xqlite.StrictTableTest do
   defp refused?({:without_rowid_unsupported, "t"}, :without_rowid), do: true
   defp refused?({:rowid_shadowed, "t"}, :rowid_shadowed), do: true
   defp refused?({:table_exists, "t_xqlite_strict_rebuild"}, :table_exists), do: true
+  defp refused?({:sqlite_failure, 1, 1, _message}, :fails_inside), do: true
   defp refused?(_reason, _kind), do: false
 
   defp refusal_statements(%{kind: :violations} = refusal) do
@@ -1999,5 +2080,85 @@ defmodule Xqlite.StrictTableTest do
       {"CREATE TABLE " <> law_object(refusal, "t") <> " (c INTEGER)", []},
       {"CREATE TABLE " <> law_object(refusal, "t_xqlite_strict_rebuild") <> " (c INTEGER)", []}
     ]
+  end
+
+  # table_info hides a generated column, so its type passes the check before
+  # the call and SQLite rejects it inside, compiling the STRICT copy.
+  defp refusal_statements(%{kind: :fails_inside} = refusal) do
+    [{"CREATE TABLE " <> law_object(refusal, "t") <> " (a INTEGER, b NUMERIC AS (a * 2))", []}]
+  end
+
+  defp seed_shared(conn, rows) do
+    assert :ok =
+             NIF.execute_batch(conn, """
+             CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+             WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < #{rows})
+             INSERT INTO t SELECT x, 'seed' FROM n;
+             CREATE TABLE ch (id INTEGER PRIMARY KEY, tid INTEGER REFERENCES t(id));
+             INSERT INTO ch (tid) VALUES (1), (2), (3);
+             """)
+  end
+
+  defp run_shared(rows, actions) do
+    assert {:ok, conn} = Xqlite.open_in_memory()
+    seed_shared(conn, rows)
+    assert {:ok, answers} = rebuild_while(conn, fn -> Enum.map(actions, &act(conn, &1)) end)
+    assert actions |> Enum.zip(answers) |> Enum.all?(&idle_answer?/1)
+    assert strict?(conn, "t")
+    assert row_count(conn, "t") == rows + Enum.count(actions, &(&1 == :row))
+    assert fk_check(conn, "main") == []
+    assert {:ok, true} = Xqlite.autocommit(conn)
+    assert flags(conn) == {1, 0}
+    assert :ok = NIF.close(conn)
+  end
+
+  defp rebuild_while(conn, actions) do
+    parent = self()
+    other = spawn_link(fn -> send(parent, {:acted, after_copy(actions)}) end)
+    assert {:ok, _hook} = NIF.register_update_hook(conn, other)
+    rebuilt = Xqlite.enable_strict_table(conn, "t")
+    send(other, :returned)
+
+    receive do
+      {:acted, answers} -> {rebuilt, answers}
+    end
+  end
+
+  defp after_copy(actions) do
+    receive do
+      {:xqlite_update, :insert, _schema, "t_xqlite_strict_rebuild", _rowid} -> actions.()
+      :returned -> actions.()
+    end
+  end
+
+  defp shared_actions do
+    [:row, :orphan, :rollback, :commit]
+    |> member_of()
+    |> list_of(min_length: 1, max_length: 4)
+  end
+
+  defp flags(conn),
+    do: {pragma_flag(conn, "foreign_keys"), pragma_flag(conn, "legacy_alter_table")}
+
+  defp act(conn, :row), do: NIF.execute(conn, "INSERT INTO t (v) VALUES ('w')", [])
+  defp act(conn, :orphan), do: NIF.execute(conn, "INSERT INTO ch (tid) VALUES (424242)", [])
+  defp act(conn, :rollback), do: Xqlite.rollback(conn)
+  defp act(conn, :commit), do: Xqlite.commit(conn)
+
+  defp idle_answer?({:row, answer}), do: answer == {:ok, 1}
+
+  defp idle_answer?({:orphan, answer}),
+    do: match?({:error, {:constraint_violation, :constraint_foreign_key, _}}, answer)
+
+  defp idle_answer?({_ends, answer}), do: answer == {:error, :no_transaction}
+
+  defp write_until_rebuilt(conn, answers) do
+    act(conn, :orphan)
+
+    receive do
+      {:rebuilt, rebuilt} -> {rebuilt, answers}
+    after
+      0 -> write_until_rebuilt(conn, [act(conn, :row) | answers])
+    end
   end
 end

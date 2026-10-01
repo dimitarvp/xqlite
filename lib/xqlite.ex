@@ -397,6 +397,7 @@ defmodule Xqlite do
           | {:sql_input_error, sql_input_error()}
           | {:sqlite_failure, integer(), integer(), String.t() | nil}
           | {:strict_violations, [map()]}
+          | {:table_changed, %{table: String.t()}}
           | {:table_exists, String.t()}
           | {:to_sql_conversion_failure, String.t()}
           | {:too_big, integer(), String.t()}
@@ -891,8 +892,17 @@ defmodule Xqlite do
   @doc """
   Converts an existing table to STRICT mode via table rebuild.
 
-  This creates a new STRICT table, copies all data, drops the original, and
-  renames the new table — all inside a transaction.
+  This creates a new STRICT table, copies all data, drops the original and
+  renames the new table, in one transaction run by one call that holds the
+  connection's lock from its first statement to its last. A process that
+  shares the connection waits for the whole rebuild, so what it sends runs
+  before the rebuild or after it, never inside the rebuild's transaction. That
+  wait covers the copy, the index builds and any wait for another connection's
+  lock, each up to the connection's `busy_timeout`, and no cancel token stops
+  the call. A step that fails, a `COMMIT` that answers busy included, rolls the
+  transaction back and leaves the table as it was. When that `ROLLBACK` itself
+  fails, which only running out of memory causes, the transaction stays open,
+  `autocommit/1` says so, and `PRAGMA foreign_keys` stays off.
 
   If anything `check_strict_violations/2` reports would stop the conversion —
   a stored value SQLite would reject, a column whose declared type STRICT does
@@ -921,22 +931,38 @@ defmodule Xqlite do
   included; the indexes; the triggers, a `TEMP` trigger — which lives in the
   `temp` schema, not in the table's — included; and the views that read the
   table keep answering. The rows of child tables are left alone:
-  `PRAGMA foreign_keys` is switched off around the rebuild, so dropping the
+  `PRAGMA foreign_keys` is switched off for the rebuild, so dropping the
   original runs no `ON DELETE` action, and `PRAGMA legacy_alter_table` is
-  switched on around the rename, so a view still naming the original does not
-  fail it. Both pragmas are read first and put back afterwards, on every path.
+  switched on for it, so a view still naming the original does not fail the
+  rename. Both are read, switched and put back inside the same call, after the
+  transaction has ended, on every path.
   The copy's column list comes from `PRAGMA table_info`, so a table with
   generated columns converts too.
 
   The rebuild needs a transaction of its own. Called while the caller has one
   open it returns `{:error, :transaction_in_progress}` and touches nothing —
-  its rollback would discard the caller's uncommitted rows. Two more rejections
-  come before any statement runs: an existing
+  its rollback would discard the caller's uncommitted rows. It answers the same
+  when another process on the connection opens a transaction after the call
+  has begun. A statement of the connection that has started and not finished,
+  such as a prepared statement stepped and not reset, a stream partly read or
+  an open blob handle, makes it return
+  `{:error, {:database_busy_or_locked, 5, _}}` and change nothing, since the
+  rebuild's rollback could undo that statement's write: finish, reset or close
+  it first. Two more rejections come before any statement runs: an existing
   `<table>_xqlite_strict_rebuild` in the same schema returns
   `{:error, {:table_exists, name}}`, and a table declaring all three of
   `rowid`, `_rowid_` and `oid` as columns without one of them being the
   `INTEGER PRIMARY KEY` alias returns `{:error, {:rowid_shadowed, table}}`,
   because with every spelling taken the copy cannot name the rowid.
+
+  The rebuild reads the stored definitions of the table, its indexes and its
+  triggers, a `TEMP` trigger included, and the schema version of the table's
+  database before its transaction begins, and again inside it. When one has
+  changed in between, because another process or connection added, dropped or
+  renamed a column, created or dropped an index or a trigger, dropped or
+  renamed the table, or changed anything else in that database's schema, it
+  returns `{:error, {:table_changed, %{table: name}}}` with nothing changed;
+  run the call again.
 
   ## Examples
 
@@ -954,10 +980,25 @@ defmodule Xqlite do
     do: :ok
 
   defp convert_to_strict(conn, object, columns) do
-    with {:ok, violations} <- strict_violations(conn, object.name, columns),
+    with {:ok, version} <- schema_version(conn, object.schema),
+         {:ok, violations} <- strict_violations(conn, object.name, columns),
          :ok <- reject_violations(violations),
          {:ok, create_sql} <- table_create_sql(conn, object.schema, object.name) do
-      rebuild_as_strict(conn, object.schema, object.name, create_sql)
+      rebuild_as_strict(conn, object.schema, object.name, version, create_sql)
+    end
+  end
+
+  # Read first: a column dropped and added back while the plan is read moves only this.
+  defp schema_version(conn, schema) do
+    case XqliteNIF.query(conn, "PRAGMA #{Xqlite.Pragma.quote_name(schema)}.schema_version", []) do
+      {:ok, %{rows: [[version]]}} when is_integer(version) ->
+        {:ok, version}
+
+      {:ok, %{rows: rows}} ->
+        {:error, {:schema_parsing_error, "schema_version", {:unexpected_value, inspect(rows)}}}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -1018,15 +1059,11 @@ defmodule Xqlite do
   # Every name the rebuild writes carries the schema the table was resolved in,
   # except the `RENAME TO` target: SQLite takes a bare name there and calls a
   # qualified one a syntax error.
-  defp rebuild_as_strict(conn, schema, table, original_create_sql) do
+  defp rebuild_as_strict(conn, schema, table, version, original_create_sql) do
     with :ok <- reject_open_transaction(conn),
          :ok <- reject_tmp_collision(conn, schema, tmp_table_name(table)),
-         {:ok, plan} <- rebuild_plan(conn, schema, table, original_create_sql),
-         {:ok, pragmas} <- rebuild_pragmas(conn),
-         :ok <- suspend_foreign_keys(conn, pragmas) do
-      conn
-      |> run_rebuild(plan)
-      |> restore_pragmas(conn, pragmas)
+         {:ok, statements, stored} <- rebuild_plan(conn, schema, table, original_create_sql) do
+      XqliteNIF.strict_rebuild(conn, statements, schema, table, version, stored)
     end
   end
 
@@ -1055,93 +1092,24 @@ defmodule Xqlite do
 
   defp rebuild_plan(conn, schema, table, original_create_sql) do
     with {:ok, columns} <- copy_column_list(conn, schema, table),
-         {:ok, replays} <- saved_object_sqls(conn, schema, table) do
-      {:ok, rebuild_statements(schema, table, original_create_sql, columns, replays)}
+         {:ok, saved} <- saved_object_sqls(conn, schema, table),
+         {:ok, replays, saved_texts} <- plan_replays(saved) do
+      statements = rebuild_statements(schema, table, original_create_sql, columns)
+      {:ok, statements ++ replays, [original_create_sql | saved_texts]}
     end
   end
 
-  defp rebuild_statements(schema, table, original_create_sql, columns, replays) do
+  defp rebuild_statements(schema, table, original_create_sql, columns) do
     qualified_table = qualified_name(schema, table)
     qualified_tmp = qualified_name(schema, tmp_table_name(table))
 
-    %{
-      create: strict_create_sql(original_create_sql, qualified_tmp),
-      copy:
-        "INSERT INTO #{qualified_tmp} (#{columns}) SELECT #{columns} FROM #{qualified_table}",
-      drop: "DROP TABLE #{qualified_table}",
-      rename: "ALTER TABLE #{qualified_tmp} RENAME TO #{Xqlite.Pragma.quote_name(table)}",
-      replays: replays
-    }
+    [
+      strict_create_sql(original_create_sql, qualified_tmp),
+      "INSERT INTO #{qualified_tmp} (#{columns}) SELECT #{columns} FROM #{qualified_table}",
+      "DROP TABLE #{qualified_table}",
+      "ALTER TABLE #{qualified_tmp} RENAME TO #{Xqlite.Pragma.quote_name(table)}"
+    ]
   end
-
-  defp run_rebuild(conn, plan) do
-    case exec(conn, "BEGIN IMMEDIATE") do
-      :ok -> conn |> rebuild_steps(plan) |> settle_rebuild(conn)
-      {:error, _} = err -> err
-    end
-  end
-
-  # Without `legacy_alter_table` the rename re-parses every view and trigger in
-  # the schema, and one still naming the dropped original fails the statement.
-  defp rebuild_steps(conn, plan) do
-    with :ok <- exec(conn, plan.create),
-         :ok <- exec(conn, plan.copy),
-         :ok <- exec(conn, plan.drop),
-         :ok <- exec(conn, "PRAGMA legacy_alter_table = ON"),
-         :ok <- exec(conn, plan.rename) do
-      replay_objects(conn, plan.replays)
-    end
-  end
-
-  defp settle_rebuild(:ok, conn), do: exec(conn, "COMMIT")
-
-  defp settle_rebuild({:error, _} = err, conn) do
-    exec(conn, "ROLLBACK")
-    err
-  end
-
-  defp rebuild_pragmas(conn) do
-    with {:ok, foreign_keys} <- pragma_flag(conn, "foreign_keys"),
-         {:ok, legacy_alter_table} <- pragma_flag(conn, "legacy_alter_table") do
-      {:ok, %{foreign_keys: foreign_keys, legacy_alter_table: legacy_alter_table}}
-    end
-  end
-
-  defp pragma_flag(conn, name) do
-    case XqliteNIF.query(conn, "PRAGMA " <> name, []) do
-      {:ok, %{rows: [[value]]}} ->
-        {:ok, value == 1}
-
-      {:ok, %{rows: rows}} ->
-        {:error, {:schema_parsing_error, name, {:unexpected_value, inspect(rows)}}}
-
-      {:error, _} = err ->
-        err
-    end
-  end
-
-  # SQLite ignores this pragma inside a transaction, so it has to precede the
-  # BEGIN.
-  defp suspend_foreign_keys(conn, %{foreign_keys: true}),
-    do: exec(conn, "PRAGMA foreign_keys = OFF")
-
-  defp suspend_foreign_keys(_conn, _pragmas), do: :ok
-
-  defp restore_pragmas(:ok, conn, pragmas), do: set_rebuild_pragmas(conn, pragmas)
-
-  defp restore_pragmas({:error, _} = err, conn, pragmas) do
-    set_rebuild_pragmas(conn, pragmas)
-    err
-  end
-
-  defp set_rebuild_pragmas(conn, pragmas) do
-    with :ok <- exec(conn, "PRAGMA foreign_keys = " <> pragma_word(pragmas.foreign_keys)) do
-      exec(conn, "PRAGMA legacy_alter_table = " <> pragma_word(pragmas.legacy_alter_table))
-    end
-  end
-
-  defp pragma_word(true), do: "ON"
-  defp pragma_word(false), do: "OFF"
 
   defp qualified_name(schema, name) do
     Xqlite.Pragma.quote_name(schema) <> "." <> Xqlite.Pragma.quote_name(name)
@@ -1339,12 +1307,12 @@ defmodule Xqlite do
   defp saved_sqls([row | _rest], _schema, _acc),
     do: {:error, {:schema_parsing_error, "sqlite_master", {:unexpected_value, inspect(row)}}}
 
-  defp replay_objects(_conn, []), do: :ok
+  defp plan_replays([]), do: {:ok, [], []}
 
-  defp replay_objects(conn, [{schema, sql} | rest]) do
+  defp plan_replays([{schema, sql} | rest]) do
     with {:ok, qualified} <- qualify_object_sql(schema, sql),
-         :ok <- exec(conn, qualified) do
-      replay_objects(conn, rest)
+         {:ok, replays, saved_texts} <- plan_replays(rest) do
+      {:ok, [qualified | replays], [sql | saved_texts]}
     end
   end
 

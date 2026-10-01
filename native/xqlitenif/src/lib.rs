@@ -250,6 +250,7 @@ pub(crate) mod atoms {
         stmt_used,
         stored_generated,
         table,
+        table_changed,
         table_exists,
         target_type,
         tempbuf_spill,

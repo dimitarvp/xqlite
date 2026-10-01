@@ -360,6 +360,9 @@ pub(crate) enum XqliteError {
     NoSuchSchema(String),
     InvalidSchemaName(String),
     NoPages,
+    TableChanged {
+        table: String,
+    },
     TableExists {
         name: String,
         message: String,
@@ -629,6 +632,7 @@ impl Display for XqliteError {
             XqliteError::NoSuchSchema(name) => write!(f, "No such schema: {name}"),
             XqliteError::InvalidSchemaName(name) => write!(f, "Invalid schema name: '{name}'"),
             XqliteError::NoPages => write!(f, "The schema has no page to copy"),
+            XqliteError::TableChanged { table } => write!(f, "Table changed: {table}"),
             XqliteError::TableExists { name: _, message } => {
                 write!(f, "Table already exists: {message}")
             }
@@ -912,6 +916,17 @@ impl Encoder for XqliteError {
                 (atoms::invalid_schema_name(), name).encode(env)
             }
             XqliteError::NoPages => atoms::no_pages().encode(env),
+            XqliteError::TableChanged { table } => {
+                match map_new(env).map_put(atoms::table(), table) {
+                    Ok(map) => (atoms::table_changed(), map).encode(env),
+                    Err(_) => {
+                        let err = XqliteError::InternalEncodingError {
+                            context: "Failed map create for TableChanged".to_string(),
+                        };
+                        err.encode(env)
+                    }
+                }
+            }
             XqliteError::TableExists { name, message: _ } => {
                 (atoms::table_exists(), name).encode(env)
             }

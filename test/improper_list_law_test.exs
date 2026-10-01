@@ -65,6 +65,8 @@ defmodule Xqlite.ImproperListLawTest do
     {:nif_stream_fetch_cancellable_tokens, :token, :invalid_cancel_tokens},
     {:nif_set_authorizer, :action, :expected_list},
     {:nif_backup_with_progress_tokens, :token, :invalid_cancel_tokens},
+    {:nif_strict_rebuild_statements, :sql, :expected_list},
+    {:nif_strict_rebuild_stored_texts, :sql, :expected_list},
     {:query_type_extensions, :extension, :invalid_type_extensions},
     {:execute_type_extensions, :extension, :invalid_type_extensions},
     {:explain_analyze_type_extensions, :extension, :invalid_type_extensions},
@@ -170,15 +172,17 @@ defmodule Xqlite.ImproperListLawTest do
     end
   end
 
-  # The raw door, the typed statement door at both arities, and two doors with
-  # a type extension on, which walks the term in Elixir before the native side
-  # is reached.
+  # The raw query, both lists of the raw STRICT rebuild, the typed bind at both
+  # arities, and two calls with a type extension on, which walks the term in
+  # Elixir before the native side is reached.
   defp not_a_list_answers(term) do
     conn = fresh_conn()
     assert {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
 
     [
       {:nif_query, NIF.query(conn, "SELECT ?1", term)},
+      {:nif_strict_rebuild, NIF.strict_rebuild(conn, term, "main", "t", 0, [])},
+      {:nif_strict_rebuild, NIF.strict_rebuild(conn, [], "main", "t", 0, term)},
       {:bind2, Xqlite.bind(stmt, term)},
       {:bind3, Xqlite.bind(stmt, term, [])},
       {:bind3_extension, Xqlite.bind(stmt, term, @extension_opts)},
@@ -217,6 +221,7 @@ defmodule Xqlite.ImproperListLawTest do
     do: Enum.map(1..count, fn _i -> Xqlite.TypeExtension.JSON end)
 
   defp elements(:row, count), do: Enum.map(1..count, fn i -> [i] end)
+  defp elements(:sql, count), do: Enum.map(1..count, fn _i -> "SELECT 1" end)
 
   defp elements(:token, count) do
     Enum.map(1..count, fn _i ->
@@ -338,6 +343,12 @@ defmodule Xqlite.ImproperListLawTest do
   end
 
   defp call(:nif_set_authorizer, conn, list), do: NIF.set_authorizer(conn, list)
+
+  defp call(:nif_strict_rebuild_statements, conn, list),
+    do: NIF.strict_rebuild(conn, list, "main", "t", 0, [])
+
+  defp call(:nif_strict_rebuild_stored_texts, conn, list),
+    do: NIF.strict_rebuild(conn, [], "main", "t", 0, list)
 
   defp call(:nif_backup_with_progress_tokens, conn, list) do
     dest = Path.join(System.tmp_dir!(), "xqlite_improper_list_backup_never_written.db")

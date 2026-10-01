@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`XqliteNIF.strict_rebuild/6`**, the raw call behind
+  `Xqlite.enable_strict_table/2`. It runs a list of statements, each
+  exactly one, in one `BEGIN IMMEDIATE` transaction while it holds the
+  connection, with `foreign_keys` off and `legacy_alter_table` on, and
+  puts both back once the transaction has ended. Inside the transaction,
+  before any statement runs, it checks that the schema version of the
+  table's database and the stored definitions of the table, its indexes
+  and its triggers still equal the ones it is given. Any failure, a busy
+  `COMMIT` included, rolls the transaction back.
+
 - **A Known limitations guide.** `guides/known_limitations.md` lists every
   limitation the library documents, with what to do instead, among them
   four ways a read-only connection can still write: through `ATTACH`,
@@ -27,6 +37,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range and raises `ArgumentError` for an integer outside 64 bits.
 
 ### Fixed
+
+- **`Xqlite.enable_strict_table/2` runs the whole rebuild in one call, so
+  another process sharing the connection can no longer act inside it.**
+  The rebuild sent each of its statements as a call of its own, and
+  between two of them a process sharing the connection ran its own
+  statements, inside the rebuild's transaction or after ending it. An
+  insert it had been told succeeded could vanish, and a child row naming a
+  missing parent got in while foreign keys were off. A `commit/1` or
+  `rollback/1` it sent left the remaining steps running outside any
+  transaction, so a failure could leave the table dropped with all its
+  rows. The rebuild, the switch of `foreign_keys` and `legacy_alter_table`
+  and their restore now run inside one call that holds the connection
+  until it ends. A process sharing the connection waits for the whole
+  rebuild, including any wait for another connection's lock up to
+  `busy_timeout`, and no cancel token stops it.
+- **A rebuild whose `COMMIT` answers busy is rolled back.** With another
+  connection reading the database in rollback-journal mode, the `COMMIT`
+  answered `{:error, {:database_busy_or_locked, 5, _}}`. It left the
+  caller inside the rebuild's transaction with foreign-key enforcement
+  off, and enforcement stayed off after the caller rolled back. The
+  rebuild now rolls its transaction back on that answer, as on any other
+  failure, and puts both pragmas back once the transaction has ended.
+- **A rebuild no longer erases the rows of a statement still running on
+  the connection.** A write another process had started but not finished,
+  such as an `INSERT … RETURNING` stepped once, keeps `autocommit/1`
+  reading `true`, so the rebuild's transaction took that write over. When
+  a later step failed, the rebuild's rollback erased the write's rows,
+  while the write still finished without an error; a stream left partly
+  read was ended the same way. While a statement, stream or blob handle of
+  the connection is running, the rebuild now answers
+  `{:error, {:database_busy_or_locked, 5, _}}` and changes nothing.
+- **A rebuild notices a schema change made after it read the table.** The
+  rebuild builds its statements from the stored definitions of the table,
+  its indexes and its triggers, read before its transaction begins. A
+  column another process or connection added in that time was dropped with
+  its values, and a column dropped or renamed came back holding its own
+  name as text in every row. An index or trigger created then was dropped,
+  and the call still answered `:ok`. The rebuild now reads those
+  definitions and the schema version of the table's database again inside
+  its transaction. When one differs or the table is gone, it answers
+  `{:error, {:table_changed, %{table: name}}}` with nothing changed. Any
+  other schema change in that database in between answers the same; run
+  the call again.
 
 - **An authorizer no longer denies statements over names that are not
   UTF-8.** A deny list from `set_authorizer/2`, a busy policy and a busy
@@ -682,6 +735,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **A transaction another process opens while the rebuild is starting
+  answers `{:error, :transaction_in_progress}`.** The rebuild checked for
+  an open transaction before it read the table. A transaction opened
+  between that check and the rebuild's own `BEGIN` made the call answer
+  `{:error, {:sqlite_failure, 1, 1, "cannot start a transaction within a transaction"}}`.
+  The rebuild now checks again inside its call, before anything is
+  switched, and answers as it does for the caller's own transaction.
 
 - **`:unknown` in a deny list no longer matches an `ATTACH` or `DETACH`.**
   An `ATTACH` whose file name was a bound parameter or an expression, and

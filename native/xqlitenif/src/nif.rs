@@ -727,6 +727,25 @@ fn get_create_sql(
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
+fn strict_rebuild<'a>(
+    env: Env<'a>,
+    handle: ResourceArc<XqliteConn>,
+    statements: Term<'a>,
+    schema: TextArg,
+    table: TextArg,
+    schema_version: i64,
+    stored_texts: Term<'a>,
+) -> Term<'a> {
+    let result = query::text_list(statements).and_then(|statements| {
+        let stored = query::text_list(stored_texts)?;
+        connection::with_conn(&handle, |conn| {
+            query::strict_rebuild(conn, &statements, &schema, &table, schema_version, &stored)
+        })
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
 fn last_insert_rowid(handle: ResourceArc<XqliteConn>) -> Result<i64, XqliteError> {
     connection::with_conn(&handle, |conn| Ok(conn.last_insert_rowid()))
 }

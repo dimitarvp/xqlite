@@ -5,6 +5,31 @@ defmodule Xqlite.NIF.StrictModeTest do
 
   alias XqliteNIF, as: NIF
 
+  @t_sql "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"
+  @aux_t "ATTACH ':memory:' AS aux; CREATE TABLE aux.t (id INTEGER PRIMARY KEY, v TEXT)"
+  @changed {:table_changed, %{table: "t"}}
+
+  # What lands between the reads that plan the rebuild of aux.t and the call.
+  # The rewritten CHECK and the swapped database keep the schema version; the
+  # column dropped and added back keeps every stored text.
+  @between_reads_and_call [
+    {"ALTER TABLE aux.t DROP COLUMN v", @changed},
+    {"ALTER TABLE aux.t RENAME COLUMN v TO w", @changed},
+    {"ALTER TABLE aux.t ADD COLUMN extra TEXT DEFAULT 'kept'", @changed},
+    {"CREATE INDEX aux.t_v ON t(v)", @changed},
+    {"CREATE TRIGGER aux.t_ai AFTER INSERT ON t BEGIN SELECT 1; END", @changed},
+    {"CREATE TEMP TRIGGER t_tai AFTER INSERT ON aux.t BEGIN SELECT 1; END", @changed},
+    {"PRAGMA writable_schema = ON; UPDATE aux.sqlite_master SET sql = " <>
+       "'CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT CHECK (v <> 1))'", @changed},
+    {"ALTER TABLE aux.t DROP COLUMN v; ALTER TABLE aux.t ADD COLUMN v TEXT", @changed},
+    {"ALTER TABLE aux.t RENAME TO u", @changed},
+    {"DROP TABLE aux.t", @changed},
+    {"DETACH aux; ATTACH ':memory:' AS aux; CREATE TABLE aux.t (id INTEGER PRIMARY KEY, w)",
+     @changed},
+    {"DETACH aux", {:no_such_schema, "aux"}},
+    {"BEGIN; INSERT INTO aux.t VALUES (2, 'b')", :transaction_in_progress}
+  ]
+
   # --- Shared test code (generated via `for` loop) ---
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix} with STRICT mode enabled" do
@@ -689,10 +714,57 @@ defmodule Xqlite.NIF.StrictModeTest do
         assert col_c.type_affinity == :integer
         assert col_c.hidden_kind == :virtual_generated
       end
+
+      for {change, answer} <- @between_reads_and_call do
+        test "strict_rebuild changes nothing after #{change}", %{conn: conn} do
+          assert :ok = NIF.execute_batch(conn, @aux_t)
+          version = aux_version(conn)
+          assert :ok = NIF.execute_batch(conn, unquote(change))
+          before = rebuild_state(conn)
+
+          assert NIF.strict_rebuild(conn, ["DROP TABLE aux.t"], "aux", "t", version, [@t_sql]) ==
+                   {:error, unquote(Macro.escape(answer))}
+
+          assert rebuild_state(conn) == before
+        end
+      end
+
+      test "strict_rebuild rolls back a statement that fails", %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, @aux_t)
+        statements = ["CREATE TABLE aux.n (a INT) STRICT", "INSERT INTO aux.n VALUES ('x')"]
+        before = rebuild_state(conn)
+
+        assert {:error,
+                {:constraint_violation, :constraint_datatype, %{table: "n", columns: ["a"]}}} =
+                 NIF.strict_rebuild(conn, statements, "aux", "n", aux_version(conn), [])
+
+        assert rebuild_state(conn) == before
+      end
+
+      test "strict_rebuild answers an element that is no UTF-8 text", %{conn: conn} do
+        bad = {:expected_list, %{reason: :bad_element, position: 2, value_type: :integer}}
+
+        for {element, reason} <- [{1, bad}, {<<0xFF>>, :invalid_utf8_in_string}] do
+          list = ["SELECT 1", element]
+          assert {:error, ^reason} = NIF.strict_rebuild(conn, list, "aux", "t", 0, [])
+          assert {:error, ^reason} = NIF.strict_rebuild(conn, [], "aux", "t", 0, list)
+        end
+      end
     end
 
     # End of describe "using #{prefix}..."
   end
 
   # End of for loop
+
+  defp aux_version(conn) do
+    assert {:ok, %{rows: [[version]]}} = NIF.query(conn, "PRAGMA aux.schema_version", [])
+    version
+  end
+
+  defp rebuild_state(conn) do
+    master = "SELECT * FROM aux.sqlite_master UNION ALL SELECT * FROM temp.sqlite_master"
+    flags = "SELECT * FROM pragma_foreign_keys, pragma_legacy_alter_table"
+    {NIF.query(conn, master, []), NIF.query(conn, flags, []), NIF.autocommit(conn)}
+  end
 end

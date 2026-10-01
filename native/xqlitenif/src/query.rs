@@ -131,3 +131,115 @@ pub(crate) fn core_execute_batch(
         result
     }
 }
+
+/// Reads a caller's list of SQL texts, before the connection is locked.
+pub(crate) fn text_list(term: Term<'_>) -> Result<Vec<String>, XqliteError> {
+    crate::util::walk_list(term)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let bytes: rustler::Binary = item
+                .decode()
+                .map_err(|_not_binary| XqliteError::bad_element(index + 1, item))?;
+            std::str::from_utf8(bytes.as_slice())
+                .map(str::to_owned)
+                .map_err(|_not_utf8| XqliteError::InvalidUtf8InString)
+        })
+        .collect()
+}
+
+/// Runs the STRICT rebuild's statements, each exactly one, in one
+/// `BEGIN IMMEDIATE` transaction inside the caller's one hold of the
+/// connection Mutex, so no other caller of the connection runs between them.
+/// `foreign_keys` goes off before the `BEGIN`, since SQLite drops that write
+/// inside a transaction, and `legacy_alter_table` on, or the rename re-parses
+/// every view and trigger and fails on one still naming the original; both
+/// are written back once the transaction has ended. Each failure becomes its
+/// error before the `ROLLBACK` resets the connection's message.
+pub(crate) fn strict_rebuild(
+    conn: &Connection,
+    statements: &[String],
+    schema: &str,
+    table: &str,
+    schema_version: i64,
+    stored: &[String],
+) -> Result<(), XqliteError> {
+    if !conn.is_autocommit() {
+        return Err(XqliteError::TransactionInProgress);
+    }
+    crate::progress_dispatch::require_idle(conn)?;
+    crate::schema::require_schema(conn, schema)?;
+    let flag = |name: &str| conn.pragma_query_value(None, name, |row| row.get::<_, i64>(0));
+    let restore = format!(
+        "PRAGMA foreign_keys = {}; PRAGMA legacy_alter_table = {}",
+        flag("foreign_keys")?,
+        flag("legacy_alter_table")?
+    );
+    // SAFETY: the caller holds the connection Mutex for the whole call and `db` is its live
+    // handle; each statement's error is read before its holder finalizes it.
+    unsafe {
+        let db = conn.handle();
+        let run = |sql: &String| {
+            let held = PreparedStmt::new(statement::prepare_one(db, sql)?);
+            let mut rc = rusqlite::ffi::sqlite3_step(held.as_ptr());
+            while rc == rusqlite::ffi::SQLITE_ROW {
+                rc = rusqlite::ffi::sqlite3_step(held.as_ptr());
+            }
+            match rc {
+                rusqlite::ffi::SQLITE_DONE => Ok(()),
+                failed => Err(crate::error::prepare_failure(db, failed, sql)),
+            }
+        };
+        let begin =
+            "PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON; BEGIN IMMEDIATE";
+        let result = statement::execute_batch(db, begin, &[])
+            .and_then(|()| require_unchanged(conn, schema, table, schema_version, stored))
+            .and_then(|()| statements.iter().try_for_each(run))
+            .and_then(|()| statement::execute_batch(db, "COMMIT", &[]));
+        if result.is_err() && !conn.is_autocommit() {
+            let _ = statement::execute_batch(db, "ROLLBACK", &[]);
+        }
+        result.and(statement::execute_batch(db, &restore, &[]))
+    }
+}
+
+/// Answers `TableChanged` unless the schema's version and the stored texts of
+/// the table, its indexes and its triggers, TEMP ones included, in any order,
+/// are still the ones the plan was built from.
+fn require_unchanged(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    schema_version: i64,
+    stored: &[String],
+) -> Result<(), XqliteError> {
+    let quoted = crate::util::quote_identifier(schema)?;
+    let version: i64 =
+        conn.query_row(&format!("PRAGMA {quoted}.schema_version"), [], |row| {
+            row.get(0)
+        })?;
+    let own = format!(
+        "SELECT sql FROM {quoted}.sqlite_master WHERE tbl_name = ?1 AND sql IS NOT NULL \
+         AND type IN ('table', 'index', 'trigger')"
+    );
+    let sql = match schema.eq_ignore_ascii_case("temp") {
+        true => own,
+        false => {
+            own + " UNION ALL SELECT sql FROM temp.sqlite_master WHERE tbl_name = ?1 \
+               AND sql IS NOT NULL AND type = 'trigger'"
+        }
+    };
+    let mut live = conn
+        .prepare(&sql)?
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expected = stored.to_vec();
+    live.sort_unstable();
+    expected.sort_unstable();
+    match version == schema_version && live == expected {
+        true => Ok(()),
+        false => Err(XqliteError::TableChanged {
+            table: table.to_owned(),
+        }),
+    }
+}

@@ -191,9 +191,10 @@ pub(crate) unsafe fn any_mid_run(conn: &rusqlite::Connection) -> bool {
 
 /// A load and a restore end with SQLite dropping every cached schema of the
 /// connection, whose table definitions a running statement's program may read
-/// on every row: none may be mid-run.
+/// on every row, and the STRICT rebuild's `ROLLBACK` would undo the write of a
+/// statement its `BEGIN` joined: none may be mid-run.
 pub(crate) fn require_idle(conn: &rusqlite::Connection) -> Result<(), XqliteError> {
-    // SAFETY: both callers hold the connection Mutex through `with_conn_mut`.
+    // SAFETY: every caller holds the connection Mutex for the whole call.
     if unsafe { any_mid_run(conn) } {
         Err(rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_BUSY), None).into())
     } else {

@@ -1044,6 +1044,39 @@ defmodule XqliteNIF do
   def get_create_sql(_conn, _object_name), do: err()
 
   @doc """
+  Runs `statements`, each exactly one SQL statement, in one `BEGIN IMMEDIATE`
+  transaction while holding the connection's lock, with `PRAGMA foreign_keys`
+  off and `PRAGMA legacy_alter_table` on, both put back once the transaction
+  has ended, on every path. A failure, a `COMMIT` that answers busy included,
+  rolls the transaction back and returns its error.
+  `Xqlite.enable_strict_table/2` builds the statements and calls it.
+
+  Before anything is switched it returns `{:error, :transaction_in_progress}`
+  while a transaction is open, `{:error, {:database_busy_or_locked, 5, _}}`
+  while a statement, stream or blob of the connection is mid-run, and
+  `{:error, {:no_such_schema, schema}}` for a schema the connection lacks.
+  Inside the transaction it returns `{:error, {:table_changed, %{table: table}}}`
+  when `PRAGMA schema_version` of `schema` is no longer `schema_version`, or
+  when the stored `sqlite_master` text of `table`, its indexes and its
+  triggers, the `TEMP` triggers on its name included when `schema` is not
+  `"temp"`, differs from `stored_texts`, in any order.
+
+  An element of either list that is no binary returns
+  `{:error, {:expected_list, %{reason: :bad_element, position: n, value_type: t}}}`,
+  and one that is not UTF-8 `{:error, :invalid_utf8_in_string}`.
+  """
+  @spec strict_rebuild(
+          conn :: Xqlite.conn(),
+          statements :: [String.t()],
+          schema :: String.t(),
+          table :: String.t(),
+          schema_version :: integer(),
+          stored_texts :: [String.t()]
+        ) :: :ok | Xqlite.error()
+  def strict_rebuild(_conn, _statements, _schema, _table, _schema_version, _stored_texts),
+    do: err()
+
+  @doc """
   Retrieves the rowid of the most recent successful `INSERT` into a rowid table.
 
   This function calls SQLite's `sqlite3_last_insert_rowid()` for the given
