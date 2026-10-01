@@ -221,10 +221,20 @@ pins `panic = "unwind"` in `native/xqlitenif/.cargo/config.toml`, where it
 outranks any machine-wide cargo setting, and `mix verify` reads the built
 library's symbols to check that the pin held.
 
-Two limits to that guarantee are worth naming. A caught panic costs you
-the connection it happened on, not just the call: the Rust lock that
-serialises access to it is left poisoned, and every later call on that
-connection — `close/1` included — answers `{:error, {:lock_error, _}}`.
+The SQLite callbacks xqlite installs on a connection — the authorizer and
+the update, WAL, busy and progress hooks — run inside SQLite's C code, out
+of that wrapper's reach, so each catches its own panic before it can unwind
+there: the authorizer then denies the statement it was judging, the busy
+hook stops waiting, and the others let the statement go on, and the
+connection stays usable. The commit and rollback hooks run inside rusqlite's
+callbacks, which catch theirs. None of them decodes a name as UTF-8, so a
+table or database whose stored name is not UTF-8 reaches them as its bytes.
+
+Two limits to that guarantee are worth naming. A panic the NIF wrapper
+catches costs you the connection it happened on, not just the call: the
+Rust lock that serialises access to it is left poisoned, and every later
+call on that connection — `close/1` included — answers
+`{:error, {:lock_error, _}}`.
 And nothing in xqlite panics on purpose: an input it cannot read is a
 structured error, so a panic would be a bug, not a documented answer.
 

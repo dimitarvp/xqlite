@@ -1,19 +1,19 @@
 use crate::atoms;
-use crate::busy_handler::BusySlotFlags;
+use crate::busy_handler::{self, BusySlotFlags};
 use crate::connection::XqliteConn;
 use crate::error::XqliteError;
-use rusqlite::Connection;
-use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+use crate::hook_util;
+use rusqlite::{Connection, ffi};
 use rustler::{Atom, Term};
 use std::collections::HashSet;
+use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 
-/// A single authorizer action *kind*.
+/// A single authorizer action *kind*, one per SQLite action code.
 ///
 /// v1 granularity is the action kind only — the table / column / trigger /
-/// database arguments rusqlite carries on each `AuthAction` are intentionally
-/// discarded. Exhaustive over the rusqlite 0.40 `AuthAction` enum; `Unknown`
-/// also absorbs any future (`#[non_exhaustive]`) variant.
+/// database names SQLite passes with each code are never read, whatever
+/// their bytes. `Unknown` is a code this build does not map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ActionKind {
     CreateIndex,
@@ -53,44 +53,42 @@ pub(crate) enum ActionKind {
 }
 
 impl ActionKind {
-    /// Kind of an incoming authorizer action (all arguments discarded).
     #[inline]
-    fn of(action: &AuthAction<'_>) -> Self {
-        match action {
-            AuthAction::CreateIndex { .. } => Self::CreateIndex,
-            AuthAction::CreateTable { .. } => Self::CreateTable,
-            AuthAction::CreateTempIndex { .. } => Self::CreateTempIndex,
-            AuthAction::CreateTempTable { .. } => Self::CreateTempTable,
-            AuthAction::CreateTempTrigger { .. } => Self::CreateTempTrigger,
-            AuthAction::CreateTempView { .. } => Self::CreateTempView,
-            AuthAction::CreateTrigger { .. } => Self::CreateTrigger,
-            AuthAction::CreateView { .. } => Self::CreateView,
-            AuthAction::Delete { .. } => Self::Delete,
-            AuthAction::DropIndex { .. } => Self::DropIndex,
-            AuthAction::DropTable { .. } => Self::DropTable,
-            AuthAction::DropTempIndex { .. } => Self::DropTempIndex,
-            AuthAction::DropTempTable { .. } => Self::DropTempTable,
-            AuthAction::DropTempTrigger { .. } => Self::DropTempTrigger,
-            AuthAction::DropTempView { .. } => Self::DropTempView,
-            AuthAction::DropTrigger { .. } => Self::DropTrigger,
-            AuthAction::DropView { .. } => Self::DropView,
-            AuthAction::Insert { .. } => Self::Insert,
-            AuthAction::Pragma { .. } => Self::Pragma,
-            AuthAction::Read { .. } => Self::Read,
-            AuthAction::Select => Self::Select,
-            AuthAction::Transaction { .. } => Self::Transaction,
-            AuthAction::Update { .. } => Self::Update,
-            AuthAction::Attach { .. } => Self::Attach,
-            AuthAction::Detach { .. } => Self::Detach,
-            AuthAction::AlterTable { .. } => Self::AlterTable,
-            AuthAction::Reindex { .. } => Self::Reindex,
-            AuthAction::Analyze { .. } => Self::Analyze,
-            AuthAction::CreateVtable { .. } => Self::CreateVtable,
-            AuthAction::DropVtable { .. } => Self::DropVtable,
-            AuthAction::Function { .. } => Self::Function,
-            AuthAction::Savepoint { .. } => Self::Savepoint,
-            AuthAction::Recursive => Self::Recursive,
-            // `AuthAction::Unknown` and any future non_exhaustive variant.
+    fn of(code: c_int) -> Self {
+        match code {
+            ffi::SQLITE_CREATE_INDEX => Self::CreateIndex,
+            ffi::SQLITE_CREATE_TABLE => Self::CreateTable,
+            ffi::SQLITE_CREATE_TEMP_INDEX => Self::CreateTempIndex,
+            ffi::SQLITE_CREATE_TEMP_TABLE => Self::CreateTempTable,
+            ffi::SQLITE_CREATE_TEMP_TRIGGER => Self::CreateTempTrigger,
+            ffi::SQLITE_CREATE_TEMP_VIEW => Self::CreateTempView,
+            ffi::SQLITE_CREATE_TRIGGER => Self::CreateTrigger,
+            ffi::SQLITE_CREATE_VIEW => Self::CreateView,
+            ffi::SQLITE_DELETE => Self::Delete,
+            ffi::SQLITE_DROP_INDEX => Self::DropIndex,
+            ffi::SQLITE_DROP_TABLE => Self::DropTable,
+            ffi::SQLITE_DROP_TEMP_INDEX => Self::DropTempIndex,
+            ffi::SQLITE_DROP_TEMP_TABLE => Self::DropTempTable,
+            ffi::SQLITE_DROP_TEMP_TRIGGER => Self::DropTempTrigger,
+            ffi::SQLITE_DROP_TEMP_VIEW => Self::DropTempView,
+            ffi::SQLITE_DROP_TRIGGER => Self::DropTrigger,
+            ffi::SQLITE_DROP_VIEW => Self::DropView,
+            ffi::SQLITE_INSERT => Self::Insert,
+            ffi::SQLITE_PRAGMA => Self::Pragma,
+            ffi::SQLITE_READ => Self::Read,
+            ffi::SQLITE_SELECT => Self::Select,
+            ffi::SQLITE_TRANSACTION => Self::Transaction,
+            ffi::SQLITE_UPDATE => Self::Update,
+            ffi::SQLITE_ATTACH => Self::Attach,
+            ffi::SQLITE_DETACH => Self::Detach,
+            ffi::SQLITE_ALTER_TABLE => Self::AlterTable,
+            ffi::SQLITE_REINDEX => Self::Reindex,
+            ffi::SQLITE_ANALYZE => Self::Analyze,
+            ffi::SQLITE_CREATE_VTABLE => Self::CreateVtable,
+            ffi::SQLITE_DROP_VTABLE => Self::DropVtable,
+            ffi::SQLITE_FUNCTION => Self::Function,
+            ffi::SQLITE_SAVEPOINT => Self::Savepoint,
+            ffi::SQLITE_RECURSIVE => Self::Recursive,
             _ => Self::Unknown,
         }
     }
@@ -167,15 +165,11 @@ enum BusyTimeout {
 
 /// Recognise `PRAGMA busy_timeout` however it was typed. SQLite hands the
 /// callback the name as written, quotes removed, with any schema prefix
-/// carried separately — so the compare is on the bare name and ignores case,
-/// and a value is present exactly when the statement writes.
-fn busy_timeout_action(action: &AuthAction<'_>) -> Option<BusyTimeout> {
-    match action {
-        AuthAction::Pragma {
-            pragma_name,
-            pragma_value,
-            ..
-        } if pragma_name.eq_ignore_ascii_case("busy_timeout") => match pragma_value {
+/// carried separately — so the compare is on the bare name's bytes and ignores
+/// ASCII case, and a value is present exactly when the statement writes.
+fn busy_timeout_action(pragma: Option<(&[u8], Option<&[u8]>)>) -> Option<BusyTimeout> {
+    match pragma {
+        Some((name, value)) if name.eq_ignore_ascii_case(b"busy_timeout") => match value {
             Some(_value) => Some(BusyTimeout::Write),
             None => Some(BusyTimeout::Read),
         },
@@ -186,53 +180,91 @@ fn busy_timeout_action(action: &AuthAction<'_>) -> Option<BusyTimeout> {
 /// The PRAGMAs the image functions run on their target: `encoding` without a
 /// value and `writable_schema = RESET` in `deserialize`, and `page_count`
 /// without a value in `serialize`, by xqlite and again by `sqlite3_serialize`.
-fn image_pragma(action: &AuthAction<'_>) -> bool {
-    match action {
-        AuthAction::Pragma {
-            pragma_name,
-            pragma_value: None,
-            ..
-        } => {
-            pragma_name.eq_ignore_ascii_case("encoding")
-                || pragma_name.eq_ignore_ascii_case("page_count")
+fn image_pragma(pragma: Option<(&[u8], Option<&[u8]>)>) -> bool {
+    match pragma {
+        Some((name, None)) => {
+            name.eq_ignore_ascii_case(b"encoding") || name.eq_ignore_ascii_case(b"page_count")
         }
-        AuthAction::Pragma {
-            pragma_name,
-            pragma_value: Some(value),
-            ..
-        } => {
-            pragma_name.eq_ignore_ascii_case("writable_schema")
-                && value.eq_ignore_ascii_case("reset")
+        Some((name, Some(value))) => {
+            name.eq_ignore_ascii_case(b"writable_schema")
+                && value.eq_ignore_ascii_case(b"reset")
         }
-        _ => false,
+        None => false,
     }
 }
 
-/// The answer for one action: xqlite's own reads and the busy slot's rules
-/// about `busy_timeout` first, then the kinds the caller denied.
+/// The answer for one action code, `pragma` holding a PRAGMA's name and value:
+/// xqlite's own reads and the busy slot's rules about `busy_timeout` first,
+/// then the kinds the caller denied.
 fn decide(
-    action: &AuthAction<'_>,
+    code: c_int,
+    pragma: Option<(&[u8], Option<&[u8]>)>,
     denied: &HashSet<ActionKind>,
     flags: &BusySlotFlags,
-) -> Authorization {
-    match busy_timeout_action(action) {
-        Some(BusyTimeout::Read) if flags.reading_own_pragma() => Authorization::Allow,
+) -> c_int {
+    match busy_timeout_action(pragma) {
+        Some(BusyTimeout::Read) if flags.reading_own_pragma() => ffi::SQLITE_OK,
         Some(BusyTimeout::Write) if flags.slot_held() => {
             flags.note_write_refused();
-            Authorization::Deny
+            ffi::SQLITE_DENY
         }
-        None if flags.reading_own_pragma() && image_pragma(action) => Authorization::Allow,
-        _ => user_decision(action, denied),
+        None if flags.reading_own_pragma() && image_pragma(pragma) => ffi::SQLITE_OK,
+        _ => user_decision(code, denied),
     }
 }
 
 /// The caller's own deny-list: the only rule that looks at the action kind.
-fn user_decision(action: &AuthAction<'_>, denied: &HashSet<ActionKind>) -> Authorization {
-    if denied.contains(&ActionKind::of(action)) {
-        Authorization::Deny
+fn user_decision(code: c_int, denied: &HashSet<ActionKind>) -> c_int {
+    if denied.contains(&ActionKind::of(code)) {
+        ffi::SQLITE_DENY
     } else {
-        Authorization::Allow
+        ffi::SQLITE_OK
     }
+}
+
+/// What the authorizer callback decides with: the caller's denied kinds and a
+/// handle on the busy slot's flags, in the box the authorizer slot holds.
+pub(crate) struct AuthorizerState {
+    denied: HashSet<ActionKind>,
+    flags: Arc<BusySlotFlags>,
+}
+
+/// The authorizer SQLite calls for each action of a statement it compiles. It
+/// reads the action code and, for a PRAGMA only, the PRAGMA's name and value
+/// as bytes; no other name is read.
+///
+/// # Safety
+///
+/// `user_data` is the `AuthorizerState` box the authorizer slot holds. SQLite
+/// runs the authorizer only while it compiles SQL inside a `sqlite3_*` call
+/// the library makes under the connection Mutex. `install` hands SQLite the
+/// new box before it frees the old one, and `clear` takes the pointer back
+/// from SQLite before it frees the box, both under that Mutex, so the box
+/// lives for the whole call. The text arguments are NULL or NUL-terminated
+/// strings SQLite keeps valid for the call, and nothing built from them
+/// outlives it.
+unsafe extern "C" fn authorizer_callback(
+    user_data: *mut c_void,
+    code: c_int,
+    arg1: *const c_char,
+    arg2: *const c_char,
+    _db_name: *const c_char,
+    _accessor: *const c_char,
+) -> c_int {
+    hook_util::guard_ffi_callback("authorizer_callback", ffi::SQLITE_DENY, move || {
+        // SAFETY: see the doc comment above.
+        let state = unsafe { &*(user_data as *const AuthorizerState) };
+        let pragma = match code {
+            ffi::SQLITE_PRAGMA => {
+                // SAFETY: see the doc comment above; for a PRAGMA they are its name and value.
+                let (name, value) =
+                    unsafe { (hook_util::c_bytes(arg1), hook_util::c_bytes(arg2)) };
+                name.map(|name| (name, value))
+            }
+            _ => None,
+        };
+        decide(code, pragma, &state.denied, &state.flags)
+    })
 }
 
 /// Record the action kinds the caller denies and make the connection's
@@ -267,9 +299,7 @@ fn store_denied(
 
 /// Install or clear the connection's single authorizer so it carries what is
 /// asked of it now: the caller's denied kinds, the busy slot's rules, or
-/// neither. Callers must hold the connection Mutex, and must not call this
-/// from inside a row-mapping closure of the same connection — rusqlite
-/// borrows the connection mutably to install.
+/// neither. Callers must hold the connection Mutex.
 pub(crate) fn sync(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
     let denied = {
         let guard = handle
@@ -280,31 +310,46 @@ pub(crate) fn sync(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteE
     };
 
     match (denied, handle.busy_flags.slot_held()) {
-        (None, false) => clear(conn),
-        (user_denied, _) => {
-            let flags = Arc::clone(&handle.busy_flags);
-            install(conn, user_denied.unwrap_or_default(), flags)
-        }
+        (None, false) => clear(conn, handle),
+        (user_denied, _) => install(conn, handle, user_denied.unwrap_or_default()),
     }
 }
 
-/// Install the composed closure. It owns the denied set and a handle on the
-/// busy slot's flags, which makes it `FnMut`, `Send` and `'static` — what
-/// rusqlite's safe authorizer API requires.
 fn install(
     conn: &Connection,
+    handle: &XqliteConn,
     denied: HashSet<ActionKind>,
-    flags: Arc<BusySlotFlags>,
 ) -> Result<(), XqliteError> {
-    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
-        decide(&ctx.action, &denied, &flags)
-    }))
-    .map_err(XqliteError::from)
+    let flags = Arc::clone(&handle.busy_flags);
+    hook_util::install_hook(
+        &handle.callback_boxes.authorizer,
+        AuthorizerState { denied, flags },
+        |state| register(conn, state),
+    )
 }
 
-/// Clear any installed authorizer. Idempotent. Callers must hold the
-/// connection Mutex.
-fn clear(conn: &Connection) -> Result<(), XqliteError> {
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-        .map_err(XqliteError::from)
+/// Clear any installed authorizer and free its box. Idempotent. SQLite expires
+/// every prepared statement on this call even with nothing installed, which
+/// `deserialize` relies on after a load. Callers must hold the connection Mutex.
+fn clear(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
+    hook_util::uninstall_hook(&handle.callback_boxes.authorizer, || {
+        register(conn, std::ptr::null_mut())
+    })
+}
+
+/// Point SQLite's authorizer at `state`, or clear it for a null `state`, and
+/// answer its code. Callers must hold the connection Mutex.
+fn register(conn: &Connection, state: *mut AuthorizerState) -> Result<(), XqliteError> {
+    let callback = (!state.is_null()).then_some(authorizer_callback as _);
+    // SAFETY: the caller holds the connection Mutex, so `conn.handle()` is the live handle.
+    let rc = unsafe { ffi::sqlite3_set_authorizer(conn.handle(), callback, state.cast()) };
+    if rc == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(busy_handler::ffi_rc_to_error(
+            conn,
+            "sqlite3_set_authorizer",
+            rc,
+        ))
+    }
 }

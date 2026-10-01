@@ -137,8 +137,8 @@ per-connection, so it takes no `conn`.
 |---|---|---|
 | `[:xqlite, :hook, :commit]` | a transaction commits on the bridged connection | `:conn`, `:tag` |
 | `[:xqlite, :hook, :rollback]` | a transaction rolls back | `:conn`, `:tag` |
-| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:conn`, `:tag`, `:action`, `:db_name`, `:table`, `:rowid` |
-| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:conn`, `:tag`, `:db_name`; measurement `pages` |
+| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:conn`, `:tag`, `:action`, `:db_name`, `:table`, `:rowid`; `:db_name` and `:table` hold the names' bytes, which need not be UTF-8: a handler that treats them as strings checks them first (`String.valid?/1`), since the `telemetry` library detaches a handler that raises |
+| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:conn`, `:tag`, `:db_name`, the name's bytes, which need not be UTF-8 (check it as for `:update`); measurement `pages` |
 | `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:tag`, `:hook_tag`; measurements `count`, `elapsed` |
 | `[:xqlite, :hook, :busy]` | the connection meets a lock another one holds | `:conn`, `:tag`; measurements `retries`, `elapsed` |
 | `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:tag`, `:code`, `:base_code`, `:message` |

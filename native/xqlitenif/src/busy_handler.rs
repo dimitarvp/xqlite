@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// What the busy slot holds and whether xqlite runs a PRAGMA of its own, shared
-/// with the authorizer closure and with the error mapping in `connection.rs`.
-/// Every write happens under the connection Mutex; the closure reads these
-/// while SQLite prepares a statement, which holds that Mutex too.
+/// with the authorizer callback and with the error mapping in `connection.rs`.
+/// Every write happens under the connection Mutex; the callback reads these
+/// while SQLite compiles a statement, inside a call made under that Mutex too.
 #[derive(Debug, Default)]
 pub(crate) struct BusySlotFlags {
     slot_held: AtomicBool,
@@ -38,7 +38,7 @@ impl BusySlotFlags {
     }
 
     /// Run `read`, a PRAGMA read of xqlite's own, with the flag that lets the
-    /// authorizer closure pass it whatever the caller denied.
+    /// authorizer callback pass it whatever the caller denied.
     pub(crate) fn own_read<T>(&self, read: impl FnOnce() -> T) -> T {
         self.internal_read.store(true, Ordering::Relaxed);
         let value = read();
@@ -90,7 +90,7 @@ pub(crate) struct BusyPolicy {
 /// an optional retry policy plus any number of observer subscribers.
 ///
 /// Allocated via `Box::into_raw`, stored as a raw pointer in
-/// `XqliteConn.busy_handler`, and reclaimed on mutation, by `Drop`, or
+/// `XqliteConn.callback_boxes`, and reclaimed on mutation, by `Drop`, or
 /// when the slot empties (no policy, no observers → callback removed).
 ///
 /// Mutation concurrency: every mutator runs under the connection Mutex,
@@ -208,7 +208,7 @@ fn fallback_delay_ms(retries: u32, timeout_ms: u64) -> Option<u64> {
 }
 
 /// Read the connection's current `busy_timeout`, the value the slot is about
-/// to displace. The flag around the read tells the authorizer closure that
+/// to displace. The flag around the read tells the authorizer callback that
 /// this PRAGMA is xqlite's own, so a caller who denies `:pragma` cannot hide
 /// the wait their connection had.
 fn read_busy_timeout(conn: &Connection, flags: &BusySlotFlags) -> Result<u64, XqliteError> {
@@ -283,7 +283,7 @@ pub(crate) fn set_policy(
     handle: &XqliteConn,
     policy: BusyPolicy,
 ) -> Result<(), XqliteError> {
-    let mut next = snapshot(&handle.busy_handler);
+    let mut next = snapshot(&handle.callback_boxes.busy);
     next.policy = Some(policy);
     swap_in(conn, handle, next)
 }
@@ -295,7 +295,7 @@ pub(crate) fn remove_policy(
     conn: &Connection,
     handle: &XqliteConn,
 ) -> Result<(), XqliteError> {
-    let mut next = snapshot(&handle.busy_handler);
+    let mut next = snapshot(&handle.callback_boxes.busy);
     next.policy = None;
     swap_in(conn, handle, next)
 }
@@ -311,7 +311,7 @@ pub(crate) fn set_timeout(
     timeout_ms: u64,
 ) -> Result<(), XqliteError> {
     busy_timeout_c_int(timeout_ms)?;
-    let mut next = snapshot(&handle.busy_handler);
+    let mut next = snapshot(&handle.callback_boxes.busy);
 
     if next.policy.is_none() && next.observers.is_empty() {
         apply_busy_timeout(conn, timeout_ms)
@@ -325,7 +325,7 @@ pub(crate) fn set_timeout(
 /// and SQLite's own handler holds the wait. Callers must hold the
 /// connection Mutex.
 pub(crate) fn kept_timeout(handle: &XqliteConn) -> Option<u64> {
-    let current = handle.busy_handler.load(Ordering::Acquire);
+    let current = handle.callback_boxes.busy.load(Ordering::Acquire);
     // SAFETY: a non-null slot pointer always points to a live
     // BusySlotState; the connection Mutex the caller holds excludes its
     // reclamation.
@@ -340,7 +340,7 @@ pub(crate) fn register_observer(
     handle: &XqliteConn,
     pid: LocalPid,
 ) -> Result<u64, XqliteError> {
-    let mut next = snapshot(&handle.busy_handler);
+    let mut next = snapshot(&handle.callback_boxes.busy);
     let observer_handle = next.next_handle;
     next.next_handle += 1;
     next.observers.push((observer_handle, pid));
@@ -356,7 +356,7 @@ pub(crate) fn unregister_observer(
     handle: &XqliteConn,
     observer_handle: u64,
 ) -> Result<(), XqliteError> {
-    let mut next = snapshot(&handle.busy_handler);
+    let mut next = snapshot(&handle.callback_boxes.busy);
     next.observers.retain(|(h, _pid)| *h != observer_handle);
     swap_in(conn, handle, next)
 }
@@ -405,7 +405,7 @@ fn swap_in(
     handle: &XqliteConn,
     mut next: BusySlotState,
 ) -> Result<(), XqliteError> {
-    let slot = &handle.busy_handler;
+    let slot = &handle.callback_boxes.busy;
     let has_policy = next.policy.is_some();
     let observer_count = next.observers.len();
 

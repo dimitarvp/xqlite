@@ -5,6 +5,43 @@ defmodule Xqlite.NIF.AuthorizerTest do
 
   alias XqliteNIF, as: NIF
 
+  # Every kind no other test here denies, and the ATTACH and DETACH forms whose name is an
+  # expression: each statement's compile reports that kind's action code to the authorizer.
+  @per_code [
+    {:attach, "", "ATTACH ':mem' || 'ory:' AS c"},
+    {:attach, "", "ATTACH printf('%s', ':memory:') AS c"},
+    {:attach, "", "ATTACH CAST(':memory:' AS TEXT) AS c"},
+    {:attach, "", "ATTACH (SELECT ':memory:') AS c"},
+    {:detach, "ATTACH ':memory:' AS c", "DETACH 'c' || ''"},
+    {:detach, "ATTACH ':memory:' AS c", "DETACH printf('%s', 'c')"},
+    {:detach, "ATTACH ':memory:' AS c", "DETACH CAST('c' AS TEXT)"},
+    {:detach, "ATTACH ':memory:' AS c", "DETACH (SELECT 'c')"},
+    {:create_index, "", "CREATE INDEX i ON t(name)"},
+    {:create_temp_index, "CREATE TEMP TABLE v(x)", "CREATE INDEX i ON v(x)"},
+    {:create_temp_table, "", "CREATE TEMP TABLE v(x)"},
+    {:create_temp_trigger, "", "CREATE TEMP TRIGGER g DELETE ON t BEGIN SELECT 1; END"},
+    {:create_temp_view, "", "CREATE TEMP VIEW w AS SELECT 1"},
+    {:create_trigger, "", "CREATE TRIGGER g DELETE ON t BEGIN SELECT 1; END"},
+    {:create_view, "", "CREATE VIEW w AS SELECT 1"},
+    {:drop_index, "CREATE INDEX i ON t(name)", "DROP INDEX i"},
+    {:drop_table, "CREATE TABLE d(x)", "DROP TABLE d"},
+    {:drop_temp_index, "CREATE TEMP TABLE v(x); CREATE INDEX i ON v(x)", "DROP INDEX i"},
+    {:drop_temp_table, "CREATE TEMP TABLE v(x)", "DROP TABLE v"},
+    {:drop_temp_trigger, "CREATE TEMP TRIGGER g DELETE ON t BEGIN SELECT 1; END",
+     "DROP TRIGGER g"},
+    {:drop_temp_view, "CREATE TEMP VIEW w AS SELECT 1", "DROP VIEW w"},
+    {:drop_trigger, "CREATE TRIGGER g DELETE ON t BEGIN SELECT 1; END", "DROP TRIGGER g"},
+    {:drop_view, "CREATE VIEW w AS SELECT 1", "DROP VIEW w"},
+    {:update, "", "UPDATE t SET name = 'b'"},
+    {:alter_table, "", "ALTER TABLE t ADD COLUMN e"},
+    {:reindex, "CREATE INDEX i ON t(name)", "REINDEX i"},
+    {:analyze, "", "ANALYZE t"},
+    {:create_vtable, "", "CREATE VIRTUAL TABLE f USING fts5(x)"},
+    {:drop_vtable, "CREATE VIRTUAL TABLE f USING fts5(x)", "DROP TABLE f"},
+    {:savepoint, "", "SAVEPOINT s"},
+    {:recursive, "", "WITH RECURSIVE c AS (SELECT 1 UNION SELECT * FROM c) SELECT * FROM c"}
+  ]
+
   for_each_opener "authorizer" do
     setup %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT);")
@@ -182,6 +219,35 @@ defmodule Xqlite.NIF.AuthorizerTest do
 
       assert {:ok, 1} = NIF.execute(conn, "INSERT INTO t(id, name) VALUES (2, 'b')", [])
       assert {:ok, %{rows: [[1500]]}} = NIF.query(conn, "PRAGMA busy_timeout = 1500", [])
+    end
+
+    for {kind, setup, sql} <- @per_code do
+      test "a deny of #{inspect(kind)} stops #{sql}, and a deny of :unknown does not",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, unquote(setup))
+        :ok = Xqlite.set_authorizer(conn, [unquote(kind)])
+        assert {:error, {:authorization_denied, _, _}} = NIF.query(conn, unquote(sql), [])
+        :ok = Xqlite.set_authorizer(conn, [:unknown])
+        assert {:ok, _} = NIF.query(conn, unquote(sql), [])
+      end
+    end
+
+    test "a deny of :function answers the SQL error SQLite reports for it", %{conn: conn} do
+      :ok = Xqlite.set_authorizer(conn, [:function])
+      assert {:error, {:sql_input_error, _}} = NIF.query(conn, "SELECT abs(-1)", [])
+      :ok = Xqlite.set_authorizer(conn, [:unknown])
+      assert {:ok, _} = NIF.query(conn, "SELECT abs(-1)", [])
+    end
+
+    test "a deny of :attach or :detach stops the forms whose name is a bound parameter",
+         %{conn: conn} do
+      attach = fn -> NIF.execute(conn, "ATTACH ? AS b", [":memory:"]) end
+      :ok = Xqlite.set_authorizer(conn, [:attach])
+      assert {:error, {:authorization_denied, _, _}} = attach.()
+      :ok = Xqlite.set_authorizer(conn, [:unknown])
+      assert {:ok, 0} = attach.()
+      :ok = Xqlite.set_authorizer(conn, [:detach])
+      assert {:error, {:authorization_denied, _, _}} = NIF.execute(conn, "DETACH ?", ["b"])
     end
   end
 

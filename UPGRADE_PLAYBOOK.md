@@ -72,6 +72,10 @@ here is optional on a bump that changes the bundled SQLite version.
      triggers bound to the schema it frees, which `PRAGMA writable_schema =
      RESET` repairs: `deserialize/4` relies on both, and the stale-statement
      and TEMP-trigger tests in `test/nif/serialize_test.exs` guard them,
+   - the authorizer's action codes, which `authorizer.rs:ActionKind::of`
+     maps by number, one arm per code: a code a newer SQLite adds reads as
+     `:unknown` until it gets an arm and a kind, so compare the
+     `SQLITE_*` action codes in `sqlite3.h` with those arms,
    - `sqlite3_changes`/`total_changes` stickiness (the
      `query_with_changes` contract),
    - where SQLite calls the progress handler and when a statement counts

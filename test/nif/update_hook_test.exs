@@ -1,9 +1,18 @@
 defmodule Xqlite.NIF.UpdateHookTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
+  import Xqlite.ConnCase
   import Xqlite.TestUtil, only: [connection_openers: 0, find_opener_mfa!: 1]
 
   alias XqliteNIF, as: NIF
+
+  # The column-name law's invalid sequences, both quotes, and a run making a 255-byte name.
+  @hostile Enum.map(~w(E9 FF 80 C080 E08080 EDA080 F4908080 E282 22 27), &Base.decode16!/1) ++
+             [String.duplicate("x", 254)]
+  @in_memory "SELECT hex(name) FROM pragma_table_list
+              WHERE schema = 'main' AND name NOT IN ('s', 'sqlite_schema')"
+  @insert "INSERT INTO s VALUES (1)"
 
   for {type_tag, prefix, _opener_mfa} <- connection_openers() do
     describe "#{prefix}: set_update_hook/2" do
@@ -1133,6 +1142,52 @@ defmodule Xqlite.NIF.UpdateHookTest do
     end
   end
 
+  for_each_opener "names that are not UTF-8" do
+    property "a write reaches the subscriber with the table name's bytes, whatever the authorizer",
+             context do
+      {mod, fun, args} = find_opener_mfa!(context)
+
+      check all({name, draw} <- name_and_draw(), max_runs: 2000) do
+        {:ok, conn} = apply(mod, fun, args)
+        :ok = seed(conn, name)
+        assert {:ok, %{rows: [[hex]]}} = Xqlite.query(conn, @in_memory)
+        assert Base.decode16!(hex) == name
+        {:ok, _handle} = NIF.register_update_hook(conn, self())
+        :ok = Xqlite.TestUtil.install_draw(conn, draw)
+        assert {:ok, 1} = NIF.execute(conn, @insert, [])
+        assert_receive {:xqlite_update, :insert, "main", "s", 1}, 1_000
+        assert_received {:xqlite_update, :insert, "main", ^name, 1}
+        assert :ok = NIF.close(conn)
+      end
+    end
+
+    test "a write to a table stored under a Latin-1 name reaches the subscriber, and [:insert] still denies it",
+         %{conn: conn} do
+      :ok = seed(conn, "t\xE9")
+      {:ok, _handle} = NIF.register_update_hook(conn, self())
+      assert {:ok, 1} = NIF.execute(conn, @insert, [])
+      assert_receive {:xqlite_update, :insert, "main", "t\xE9", 1}, 1_000
+      :ok = Xqlite.set_authorizer(conn, [:insert])
+      assert {:error, {:authorization_denied, _, _}} = NIF.execute(conn, @insert, [])
+    end
+
+    test "a write to a database attached under a Latin-1 name names it in the update and WAL messages",
+         %{conn: conn} do
+      path = Xqlite.TestUtil.tmp_db_path("attached_e9")
+      {:ok, side} = Xqlite.open(path, journal_mode: :wal)
+      :ok = NIF.execute_batch(side, "CREATE TABLE u(x)")
+      :ok = Xqlite.close(side)
+      {:ok, 0} = NIF.execute(conn, "ATTACH ? AS CAST(X'E9' AS TEXT)", [path])
+      {:ok, _update} = NIF.register_update_hook(conn, self())
+      {:ok, _wal} = NIF.register_wal_hook(conn, self())
+      :ok = Xqlite.set_authorizer(conn, [])
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO u VALUES (1)", [])
+      assert_receive {:xqlite_update, :insert, <<0xE9>>, "u", 1}, 1_000
+      assert_receive {:xqlite_wal, <<0xE9>>, _pages}, 1_000
+      assert {:ok, %{rows: [[1]]}} = Xqlite.query(conn, "SELECT x FROM u")
+    end
+  end
+
   # --- Tests outside the for loop ---
   # Only tests that inherently require multiple independent connections
   # belong here. Everything else must be inside the for loop.
@@ -1223,6 +1278,34 @@ defmodule Xqlite.NIF.UpdateHookTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # A table name starting with `n`, so apart from `s` and SQLite's own, and a draw of what
+  # puts an authorizer on the connection, the insert and the trigger's read left allowed.
+  defp name_and_draw do
+    piece = one_of([string(:printable, max_length: 3), member_of(@hostile)])
+    name = piece |> list_of(min_length: 1, max_length: 3) |> map(&("n" <> Enum.join(&1)))
+    tuple({name, Xqlite.TestUtil.authorizer_draw([:insert, :read])})
+  end
+
+  # A trigger on `s` writes into the table `name`. SQL text must be UTF-8, so the stored text
+  # goes in as hex; RESET reloads it, checking that name, tbl_name and sql agree.
+  defp seed(conn, name) do
+    hex = &"CAST(x'#{Base.encode16(&1)}' AS TEXT)"
+    quoted = "\"" <> String.replace(name, "\"", "\"\"") <> "\""
+
+    trigger =
+      hex.("CREATE TRIGGER g INSERT ON s BEGIN INSERT INTO #{quoted} VALUES (new.x); END")
+
+    :ok =
+      NIF.execute_batch(conn, """
+      CREATE TABLE s(x); CREATE TABLE n(x); CREATE TRIGGER g INSERT ON s BEGIN SELECT 1; END;
+      PRAGMA writable_schema = ON; UPDATE sqlite_schema SET sql = #{trigger} WHERE name = 'g';
+      UPDATE sqlite_schema SET name = #{hex.(name)}, tbl_name = #{hex.(name)},
+        sql = #{hex.("CREATE TABLE #{quoted}(x)")} WHERE name = 'n';
+      """)
+
+    NIF.execute_batch(conn, "PRAGMA writable_schema = RESET")
+  end
 
   defp spawn_collector do
     spawn(fn -> collector_loop([]) end)

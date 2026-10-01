@@ -225,10 +225,11 @@ defmodule XqliteNIF do
   one at a time, and keeps the ones that ran before a failure unless it
   opened their transaction itself.
 
-  Column names are read before anything is bound or run: on a connection
-  without an authorizer, one that is not UTF-8 answers
-  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}`, and a
-  table another connection changed before the first step answers
+  Column names are read before anything is bound or run: one that is not
+  UTF-8 answers `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}`
+  (a statement the authorizer denies answers
+  `{:error, {:authorization_denied, 23, message}}` first), and a table
+  another connection changed before the first step answers
   `{:error, {:columns_changed, %{expected: names, live: names}}}` after that
   step; see `Xqlite.query/4`.
 
@@ -1836,6 +1837,11 @@ defmodule XqliteNIF do
   - `table_name` is the table that was modified
   - `rowid` is the rowid of the affected row
 
+  `db_name` and `table_name` are binaries holding the names' bytes as SQLite
+  stores them, which need not be UTF-8 (a schema another program wrote, a
+  database attached under a name built from bytes); such a write is
+  delivered like any other.
+
   Multiple subscribers can coexist on the same connection — each gets a
   unique handle. The callback fires for every subscriber on every
   update. Use the returned handle to unregister via
@@ -1866,9 +1872,9 @@ defmodule XqliteNIF do
 
       {:xqlite_wal, db_name, pages}
 
-  — `db_name` is a binary (`"main"`, `"temp"`, or attached database
-  name), `pages` is a non-negative integer (number of frames in the WAL
-  log).
+  — `db_name` is a binary holding the name's bytes as they are, UTF-8 or
+  not (`"main"`, `"temp"`, or attached database name), `pages` is a
+  non-negative integer (number of frames in the WAL log).
 
   Useful for WAL-size monitoring and triggering manual checkpoints when
   the log grows past a threshold. Multiple subscribers register

@@ -1,4 +1,6 @@
 defmodule Xqlite.TestUtil do
+  import StreamData, only: [constant: 1, list_of: 2, member_of: 1, one_of: 1, tuple: 1]
+
   alias XqliteNIF, as: NIF
 
   # A list of: an ExUnit tag, a `describe` block prefix, and a MFA to open a connection.
@@ -68,6 +70,33 @@ defmodule Xqlite.TestUtil do
 
     # Lookup and return the MFA using the found tag
     Map.fetch!(@tag_to_mfa_map, found_tag)
+  end
+
+  @action_kinds ~w(create_index create_table create_temp_index create_temp_table
+    create_temp_trigger create_temp_view create_trigger create_view delete drop_index drop_table
+    drop_temp_index drop_temp_table drop_temp_trigger drop_temp_view drop_trigger drop_view insert
+    pragma read select transaction update attach detach alter_table reindex analyze create_vtable
+    drop_vtable function savepoint recursive unknown)a
+
+  @doc """
+  Generates what puts an authorizer on a connection: what holds the busy slot (nothing, an
+  observer or a policy) and a deny list (none, or any list of the kinds outside `excluded`).
+  """
+  def authorizer_draw(excluded) do
+    kinds = @action_kinds -- excluded
+    deny = kinds |> member_of() |> list_of(max_length: 6)
+    tuple({member_of([:nothing, :observer, :policy]), one_of([constant(:none), deny])})
+  end
+
+  @doc "Installs a draw of `authorizer_draw/1` on `conn`, failing the test if a step fails."
+  def install_draw(conn, {holder, deny}) do
+    case holder do
+      :nothing -> :ok
+      :observer -> {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
+      :policy -> :ok = Xqlite.set_busy_policy(conn, max_retries: 1)
+    end
+
+    if deny == :none, do: :ok, else: Xqlite.set_authorizer(conn, deny)
   end
 
   @doc """

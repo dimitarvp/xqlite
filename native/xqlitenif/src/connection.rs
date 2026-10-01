@@ -1,5 +1,5 @@
 use crate::atoms;
-use crate::authorizer::ActionKind;
+use crate::authorizer::{ActionKind, AuthorizerState};
 use crate::busy_handler::{BusySlotFlags, BusySlotState};
 use crate::commit_hook::{self, CommitSubscriber};
 use crate::error::XqliteError;
@@ -89,17 +89,14 @@ pub(crate) struct XqliteConn {
 
     pub(crate) read_only: bool,
 
-    // The busy slot: a single-slot retry POLICY (a policy cannot
-    // compose) plus any number of observer subscribers, one C callback
-    // serving both halves. Installed lazily, removed when both empty.
-    pub(crate) busy_handler: AtomicPtr<BusySlotState>,
+    pub(crate) callback_boxes: CallbackBoxes,
 
-    // What the busy slot holds, readable without touching the pointer
-    // above. The authorizer closure owns a clone.
+    // What the busy slot holds, readable without touching its box. The
+    // authorizer's state owns a clone.
     pub(crate) busy_flags: Arc<BusySlotFlags>,
 
     // The action kinds `set_authorizer` denies, `None` when the caller
-    // asked for none. One composed closure serves these and the busy slot.
+    // asked for none. One authorizer callback serves these and the busy slot.
     pub(crate) denied_actions: Mutex<Option<HashSet<ActionKind>>>,
 
     // Multi-subscriber per-connection hook lists. Each holds N
@@ -116,7 +113,7 @@ pub(crate) struct XqliteConn {
     // The master callback is re-installed by the `set_pragma` NIF when
     // the `wal_autocheckpoint` PRAGMA steals the slot.
     pub(crate) wal_hook: WalDispatch,
-    pub(crate) update_hook: Arc<HookList<UpdateSubscriber>>,
+    pub(crate) update_hook: HookList<UpdateSubscriber>,
     pub(crate) commit_hook: Arc<HookList<CommitSubscriber>>,
     pub(crate) rollback_hook: Arc<HookList<RollbackSubscriber>>,
 
@@ -181,14 +178,21 @@ impl XqliteConn {
     }
 }
 
-impl Drop for XqliteConn {
+/// The boxes two raw callbacks read through the pointer SQLite hands back.
+/// `XqliteConn` declares this field after `conn`, so its `Drop` frees them
+/// only once the connection has closed, whatever rusqlite's close does first.
+#[derive(Debug, Default)]
+pub(crate) struct CallbackBoxes {
+    /// The busy slot: a single retry policy plus any number of observers, one
+    /// C callback serving both. Installed lazily, removed when both empty.
+    pub(crate) busy: AtomicPtr<BusySlotState>,
+    pub(crate) authorizer: AtomicPtr<AuthorizerState>,
+}
+
+impl Drop for CallbackBoxes {
     fn drop(&mut self) {
-        // Field declaration order ensures `conn` (the SQLite Connection)
-        // drops first, so no callback can fire while we reclaim
-        // subscriber state below. Each HookList<T> reclaims its own
-        // box via its Drop impl; busy_handler is the only remaining
-        // boxed-pointer slot we manage explicitly.
-        hook_util::drop_hook(&self.busy_handler);
+        hook_util::drop_hook(&self.busy);
+        hook_util::drop_hook(&self.authorizer);
     }
 }
 
@@ -246,7 +250,6 @@ pub(crate) fn handle_open_result(
 ) -> Result<ResourceArc<XqliteConn>, XqliteError> {
     match open_result {
         Ok(conn) => {
-            let update_hook_list = Arc::new(HookList::new());
             let commit_hook_list = Arc::new(HookList::new());
             let rollback_hook_list = Arc::new(HookList::new());
 
@@ -255,11 +258,11 @@ pub(crate) fn handle_open_result(
                 children: Mutex::new(HashMap::new()),
                 extensions_enabled: AtomicBool::new(false),
                 read_only,
-                busy_handler: AtomicPtr::new(std::ptr::null_mut()),
+                callback_boxes: CallbackBoxes::default(),
                 busy_flags: Arc::new(BusySlotFlags::default()),
                 denied_actions: Mutex::new(None),
                 wal_hook: WalDispatch::new(),
-                update_hook: Arc::clone(&update_hook_list),
+                update_hook: HookList::new(),
                 commit_hook: Arc::clone(&commit_hook_list),
                 rollback_hook: Arc::clone(&rollback_hook_list),
                 progress_dispatch: ProgressDispatch::new(),
@@ -270,19 +273,19 @@ pub(crate) fn handle_open_result(
             // lifetime; subscriber-level register/unregister never
             // touches SQLite again.
             //
-            // SAFETY for the FFI hooks (wal, progress): the WalDispatch
-            // / ProgressDispatch references are taken from inside the
-            // ResourceArc, so they live as long as `handle`. The conn
-            // (and any in-flight callback) drops before subscriber
-            // state via field declaration order.
+            // SAFETY for the FFI hooks (wal, progress, update): the
+            // WalDispatch / ProgressDispatch / update HookList references are
+            // taken from inside the ResourceArc, so they live as long as
+            // `handle`. The conn (and any in-flight callback) drops before
+            // subscriber state via field declaration order.
             {
                 let conn_guard = handle
                     .conn
                     .lock()
                     .map_err(|e| XqliteError::LockError(e.to_string()))?;
                 if let Some(conn_ref) = conn_guard.as_ref() {
-                    // SAFETY: the conn Mutex is held here; the wal/progress
-                    // dispatch references live inside the same ResourceArc as
+                    // SAFETY: the conn Mutex is held here; the progress, WAL and
+                    // update references live inside the same ResourceArc as
                     // `handle`, so they outlive any in-flight callback (see the
                     // field-order note above).
                     unsafe {
@@ -291,8 +294,8 @@ pub(crate) fn handle_open_result(
                             &handle.progress_dispatch,
                         );
                         wal_hook::install_callback(conn_ref, &handle.wal_hook);
+                        update_hook::install_callback(conn_ref, &handle.update_hook);
                     }
-                    update_hook::install_callback(conn_ref, update_hook_list)?;
                     commit_hook::install_callback(conn_ref, commit_hook_list)?;
                     rollback_hook::install_callback(conn_ref, rollback_hook_list)?;
                 }
@@ -420,6 +423,7 @@ where
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::sync::atomic::AtomicUsize;
 
     // A statement rusqlite does not own is the one way a test can make
     // `sqlite3_close` refuse: the connection comes back with the error, which
@@ -454,5 +458,46 @@ mod tests {
         // still open because the close was refused, and nothing else holds it.
         assert_eq!(unsafe { ffi::sqlite3_finalize(stmt) }, ffi::SQLITE_OK);
         assert!(conn.close().is_ok());
+    }
+
+    struct CountOnDrop(Arc<BusySlotFlags>, Arc<AtomicUsize>);
+
+    impl Drop for CountOnDrop {
+        fn drop(&mut self) {
+            self.1.store(Arc::strong_count(&self.0), Ordering::SeqCst);
+        }
+    }
+
+    // rusqlite frees a commit hook's closure inside the close, so the witness in
+    // it counts the busy flags' owners while the connection closes.
+    #[test]
+    fn the_authorizer_state_outlives_the_connection_close() {
+        let handle = XqliteConn {
+            conn: Mutex::new(Some(Connection::open_in_memory().expect("a connection"))),
+            children: Mutex::new(HashMap::new()),
+            extensions_enabled: AtomicBool::new(false),
+            read_only: false,
+            callback_boxes: CallbackBoxes::default(),
+            busy_flags: Arc::new(BusySlotFlags::default()),
+            denied_actions: Mutex::new(None),
+            wal_hook: WalDispatch::new(),
+            update_hook: HookList::new(),
+            commit_hook: Arc::new(HookList::new()),
+            rollback_hook: Arc::new(HookList::new()),
+            progress_dispatch: ProgressDispatch::new(),
+        };
+        let recorded = Arc::new(AtomicUsize::new(0));
+        let owners = {
+            let guard = handle.conn.lock().expect("an unpoisoned lock");
+            let conn = guard.as_ref().expect("an open connection");
+            crate::authorizer::set(conn, &handle, HashSet::new()).expect("an authorizer");
+            let witness = CountOnDrop(Arc::clone(&handle.busy_flags), Arc::clone(&recorded));
+            let hook = move || witness.0.slot_held();
+            conn.commit_hook(Some(hook)).expect("a commit hook");
+            Arc::strong_count(&handle.busy_flags)
+        };
+
+        drop(handle);
+        assert_eq!(recorded.load(Ordering::SeqCst), owners);
     }
 }

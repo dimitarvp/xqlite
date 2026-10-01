@@ -6,9 +6,9 @@
 //!   `make_binary`) — used by every hook that forwards events as
 //!   `{:xqlite_*, ...}` tuples.
 //! * Single-subscriber atomic-slot lifecycle (`install_hook`,
-//!   `uninstall_hook`, `drop_hook`) — used by `busy_handler`, where
-//!   the callback returns a policy decision and multi-subscriber
-//!   composition is ill-defined.
+//!   `uninstall_hook`, `drop_hook`) — used by `busy_handler` and
+//!   `authorizer`, where the callback returns a decision and
+//!   multi-subscriber composition is ill-defined.
 //! * Multi-subscriber lists (`HookList<T>`) — used by every fan-out
 //!   hook (`update`, `wal`, `commit`, `rollback`, `log`, `progress`,
 //!   plus the cancel sub-list inside `progress_dispatch`). N
@@ -16,10 +16,11 @@
 //!   handle for unregistration; the C callback walks a snapshot
 //!   without locks.
 //! * Raw-FFI callback unwind guard (`guard_ffi_callback`) — wraps the
-//!   body of the three callbacks we register directly through
-//!   `ffi::sqlite3_*` (progress / wal / busy) in `catch_unwind`, so a
-//!   panic can never unwind across `extern "C"` into SQLite's C stack
-//!   and crash the BEAM.
+//!   body of the five callbacks we register directly through
+//!   `ffi::sqlite3_*` (progress / wal / busy / update / authorizer) in
+//!   `catch_unwind`, so a panic can never unwind across `extern "C"`
+//!   into SQLite's C stack and crash the BEAM. Those that receive text
+//!   read it as bytes (`c_bytes`) and never decode it as UTF-8.
 //!
 //! Both slot styles share the same release-acquire ordering and the
 //! same "caller holds connection Mutex during writes" invariant. The
@@ -38,8 +39,9 @@
 
 use crate::error::XqliteError;
 use rustler::sys::{ERL_NIF_TERM, ErlNifEnv, enif_make_atom_len, enif_make_new_binary};
+use std::ffi::CStr;
 use std::io::Write;
-use std::os::raw::c_int;
+use std::os::raw::{c_char, c_int};
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 /// # Safety
@@ -68,12 +70,30 @@ pub(crate) unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TE
     }
 }
 
+/// The bytes of a C string SQLite hands a callback, `None` for NULL. Nothing
+/// is decoded: a name SQLite stores need not be UTF-8.
+///
+/// # Safety
+///
+/// `ptr` is NULL or a NUL-terminated string that stays valid and unchanged as
+/// long as the slice lives, which the caller keeps inside the callback.
+#[inline]
+pub(crate) unsafe fn c_bytes<'a>(ptr: *const c_char) -> Option<&'a [u8]> {
+    if ptr.is_null() {
+        None
+    } else {
+        // SAFETY: not NULL, so a NUL-terminated string valid for `'a` (fn contract).
+        Some(unsafe { CStr::from_ptr(ptr) }.to_bytes())
+    }
+}
+
 /// Run the body of a raw-FFI-registered SQLite C callback under
 /// `catch_unwind`, returning `fallback` if it panics.
 ///
-/// xqlite registers three callbacks directly through `ffi::sqlite3_*`
-/// (`progress_dispatch_callback`, `wal_hook_callback`, `busy_callback`)
-/// instead of rusqlite's safe wrappers. rusqlite guards its OWN
+/// xqlite registers five callbacks directly through `ffi::sqlite3_*`
+/// (`progress_dispatch_callback`, `wal_hook_callback`, `busy_callback`,
+/// `update_callback`, `authorizer_callback`) instead of rusqlite's safe
+/// wrappers. rusqlite guards its OWN
 /// callbacks with `catch_unwind` trampolines; a raw registration has no
 /// such guard, so a panic escaping the body would unwind across the
 /// `extern "C"` boundary into SQLite's C stack — undefined behavior that
@@ -84,7 +104,10 @@ pub(crate) unsafe fn make_binary(env: *mut ErlNifEnv, data: &[u8]) -> ERL_NIF_TE
 ///
 /// `fallback` must be the callback's safe-on-panic return: a value that
 /// neither changes normal behavior nor corrupts SQLite state (0 for the
-/// progress and busy handlers, `SQLITE_OK` for the WAL hook).
+/// progress and busy handlers, `SQLITE_OK` for the WAL hook; the update
+/// hook returns nothing, so its 0 is never read). The authorizer's is
+/// `SQLITE_DENY`: a panic stops the statement rather than let through an
+/// action nothing judged.
 #[inline]
 pub(crate) fn guard_ffi_callback<F>(what: &str, fallback: c_int, body: F) -> c_int
 where
@@ -189,10 +212,10 @@ where
     Ok(())
 }
 
-/// Reclaim any box still held by the slot — used by `XqliteConn::drop`.
+/// Reclaim any box still held by the slot — used by `CallbackBoxes`'s `Drop`.
 ///
-/// Called after the connection has been dropped (which clears SQLite's
-/// internal state), so there's no active FFI side to tear down.
+/// That field drops after the connection field, whose drop runs
+/// `sqlite3_close`, so there's no active FFI side to tear down.
 pub(crate) fn drop_hook<T>(slot: &AtomicPtr<T>) {
     let ptr = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
     if !ptr.is_null() {
@@ -360,9 +383,9 @@ impl<T> HookList<T> {
         self.head.load(Ordering::Acquire).is_null()
     }
 
-    /// Reclaim any list still held by the slot. Used by
-    /// `XqliteConn::drop` after the SQLite Connection has dropped, so
-    /// no callback can fire and dereference the snapshot.
+    /// Reclaim any list still held by the slot. Used by this type's
+    /// `Drop`: a `HookList` field of `XqliteConn` drops after its `conn`
+    /// field, so no callback can fire and dereference the snapshot.
     pub(crate) fn drop_all(&self) {
         let ptr = self.head.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !ptr.is_null() {

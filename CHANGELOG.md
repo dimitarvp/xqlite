@@ -28,6 +28,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An authorizer no longer denies statements over names that are not
+  UTF-8.** A deny list from `set_authorizer/2`, a busy policy and a busy
+  observer each put an authorizer on the connection. With one there, a
+  statement that touched a table, column, trigger, view or attached
+  database whose stored name is not UTF-8 answered
+  `{:error, {:authorization_denied, 23, message}}`, whatever the deny list
+  held, and wrote a panic message to standard error. The authorizer now
+  decides by the kind of action alone and reads only a PRAGMA's name and
+  value, so such a statement answers as it does with no authorizer: a
+  result column whose name is not UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}`, and a
+  CTE column list renames it. A statement that does an action the deny list
+  names is still denied.
+- **A deny of `:attach` stops every `ATTACH`, and a deny of `:detach` every
+  `DETACH`.** An `ATTACH` whose file name was anything but a string literal
+  (a bound parameter, a blob literal, a concatenation, a function call such
+  as `printf(...)`, `CAST(...)` or a subquery) got past a deny list naming
+  `:attach`, and a `DETACH` whose name was a bound parameter or an
+  expression got past one naming `:detach`. The security guide's example
+  for SQL from an untrusted source and the Known limitations guide's advice
+  for a read-only connection rely on that deny.
+- **The update hook reports a write whatever the table's name.** A write to
+  a table whose stored name is not UTF-8, or to any table of a database
+  attached under such a name, sent no `{:xqlite_update, ...}` message and
+  wrote a panic message to standard error. Such a write now reaches every
+  subscriber, as a write to any other table does: `db_name` and
+  `table_name` are binaries holding the names' bytes as SQLite stores them,
+  which need not be UTF-8, and the telemetry bridge passes them on as they
+  are.
+- **The WAL hook names a database attached under a name that is not
+  UTF-8.** Its message, `{:xqlite_wal, db_name, pages}`, carried `""` as
+  `db_name` for such a database; it now carries the name's bytes.
+- **A connection garbage-collected without `close/1` frees its busy-handler
+  state only after SQLite has closed it.** That state was freed first,
+  while the connection could still be open. Nothing the library runs
+  reached it, but a virtual-table module from a loaded extension that ran
+  SQL waiting on a lock while the connection closed could have read freed
+  memory. The authorizer's state, now the library's own, is freed the same
+  way, after the close.
+
 - **A string rejected for holding a second statement changes nothing.**
   The functions that run one statement answer such a string with
   `{:error, :multiple_statements}`, but to find the second statement they
@@ -642,6 +682,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **`:unknown` in a deny list no longer matches an `ATTACH` or `DETACH`.**
+  An `ATTACH` whose file name was a bound parameter or an expression, and
+  such a `DETACH`, counted as `:unknown`, so a deny list naming `:unknown`
+  stopped them where one naming `:attach` or `:detach` did not. They now
+  count as `:attach` and `:detach`, and no action of the bundled SQLite
+  counts as `:unknown`.
 
 - **Text after the first statement answers
   `{:error, :multiple_statements}` whenever it holds anything but

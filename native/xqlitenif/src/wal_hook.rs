@@ -12,7 +12,6 @@ use rustler::sys::{
     enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
-use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -87,18 +86,14 @@ unsafe extern "C" fn wal_hook_callback(
         // SAFETY: see the doc comment above.
         let dispatch = unsafe { &*(user_data as *const WalDispatch) };
 
-        let db_name_str = if db_name.is_null() {
-            ""
-        } else {
-            // SAFETY: SQLite passes a valid null-terminated C string.
-            unsafe { CStr::from_ptr(db_name) }.to_str().unwrap_or("")
-        };
+        // SAFETY: SQLite passes NULL or a NUL-terminated name valid for this call.
+        let name = unsafe { hook_util::c_bytes(db_name) }.unwrap_or_default();
 
         // SAFETY: snapshot borrow is valid while the callback runs (the conn
         // mutex is held; no concurrent unregister can free the snapshot).
         unsafe {
             dispatch.list.for_each_snapshot(|entry| {
-                send_wal_to_pid(&entry.state.pid, db_name_str, pages);
+                send_wal_to_pid(&entry.state.pid, name, pages);
             });
         }
 
@@ -135,13 +130,13 @@ unsafe extern "C" fn wal_hook_callback(
 ///
 /// See `busy_handler::send_busy_to_pid` for the OTP 26.1 NULL-env
 /// invariant.
-unsafe fn send_wal_to_pid(pid: &LocalPid, db_name: &str, pages: c_int) {
+unsafe fn send_wal_to_pid(pid: &LocalPid, db_name: &[u8], pages: c_int) {
     // SAFETY: all enif_* calls operate on a freshly allocated msg_env.
     unsafe {
         let msg_env = enif_alloc_env();
 
         let tag = hook_util::make_atom(msg_env, b"xqlite_wal");
-        let db_term = hook_util::make_binary(msg_env, db_name.as_bytes());
+        let db_term = hook_util::make_binary(msg_env, db_name);
         let pages_term = enif_make_int64(msg_env, pages as i64);
 
         let elements = [tag, db_term, pages_term];

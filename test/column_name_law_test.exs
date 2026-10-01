@@ -2,13 +2,15 @@ defmodule Xqlite.ColumnNameLawTest do
   @moduledoc """
   The law: every function that reads result column names answers
   `{:column_name_not_utf8, %{column: index, name: bytes}}` for the first name SQLite hands
-  back that is not UTF-8, before it binds or steps, and any other name byte for byte.
+  back that is not UTF-8, before it binds or steps, and any other name byte for byte, with or
+  without an authorizer on the connection.
   """
 
   use ExUnit.Case, async: true
   use ExUnitProperties
 
   import Xqlite.ConnCase
+  import Xqlite.TestUtil, only: [authorizer_draw: 1, install_draw: 2]
 
   alias XqliteNIF, as: NIF
 
@@ -28,11 +30,25 @@ defmodule Xqlite.ColumnNameLawTest do
       assert {:ok, %{rows: [[0]]}} = Xqlite.query(conn, "SELECT count(*) FROM t")
     end
 
+    test "under a busy observer a Latin-1 name answers as with none, and [:read] still denies",
+         %{conn: conn} do
+      :ok = NIF.execute_batch(conn, @setup)
+      :ok = rewrite_columns(conn, ["pr\xE9nom", "b"])
+      {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
+      result = Xqlite.query(conn, @sql)
+      assert {:error, {:column_name_not_utf8, %{column: 0, name: "pr\xE9nom"}}} = result
+      cte = "WITH s(a, b) AS (#{@sql}) SELECT * FROM s"
+      assert {:ok, %{columns: ["a", "b"]}} = Xqlite.query(conn, cte)
+      :ok = Xqlite.set_authorizer(conn, [:read])
+      assert {:error, {:authorization_denied, 23, _}} = Xqlite.query(conn, @sql)
+    end
+
     # A close frees what the readers left open and fails on a statement a rejected prepare leaked.
-    property "every reader answers the first name that is not UTF-8", context do
+    property "every reader answers the first name that is not UTF-8, whatever authorizer the connection carries",
+             context do
       {mod, fun, args} = Xqlite.TestUtil.find_opener_mfa!(context)
 
-      check all(names <- names(), max_runs: 2000) do
+      check all(names <- names(), draw <- authorizer_draw([:read, :select]), max_runs: 2000) do
         assert {:ok, conn} = apply(mod, fun, args)
         :ok = NIF.execute_batch(conn, @setup)
         {:ok, early} = Xqlite.prepare(conn, @sql)
@@ -40,8 +56,10 @@ defmodule Xqlite.ColumnNameLawTest do
         assert {:ok, %{rows: stored}} = Xqlite.query(conn, @stored)
         assert stored |> List.flatten() |> Enum.map(&Base.decode16!/1) == names
         assert :done = Xqlite.step(early)
+        :ok = install_draw(conn, draw)
         assert readers(conn, early) == names |> expected() |> List.duplicate(4)
         assert :done = Xqlite.step(early)
+        assert {:ok, %{rows: []}} = Xqlite.query(conn, "SELECT 1 FROM (#{@sql})")
         assert :ok = Xqlite.close(conn)
       end
     end

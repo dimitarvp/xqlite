@@ -283,11 +283,11 @@ defmodule Xqlite do
 
   `:column_name_not_utf8` is a result column whose name SQLite hands back as
   bytes that are not UTF-8: `:column` is its zero-based place and `:name`
-  those bytes. On a connection without an authorizer, every function that
-  reads result column names answers it for the first such column before
-  anything is bound or stepped; with one (`set_authorizer/2`, a busy policy
-  or a busy observer), rusqlite's authorizer wrapper cannot read the name and
-  the prepare answers `{:authorization_denied, 23, message}` first.
+  those bytes. Every function that reads result column names answers it for
+  the first such column before anything is bound or stepped, with or without
+  an authorizer on the connection. A statement the authorizer denies, such as
+  a `SELECT` of that column under a deny of `:read` or `:select`, answers
+  `{:authorization_denied, 23, message}` first.
   `:columns_changed` is a statement whose result columns changed between the
   read of its names and its first step, because a schema change — by another
   connection, or for a stream by its own between the open and the first
@@ -626,9 +626,8 @@ defmodule Xqlite do
   statements, streams and blobs opened on it, which close takes first, so the
   connection stays open, stays usable, and every later close repeats the same
   error. Neither is reachable today — this library's own Rust has no
-  `unwrap`, `expect`, `panic!` or indexing outside its unit tests, and
-  rusqlite, whose authorizer and update-hook wrappers do panic on a name that
-  is not UTF-8, catches that panic inside its own callback, so none unwinds
+  `unwrap`, `expect`, `panic!` or indexing outside its unit tests, and every
+  SQLite callback it installs catches a panic of its own, so none unwinds
   through a held lock — and a broken lock is never repaired, because after a
   panic SQLite's own state may be half written and must not be touched.
 
@@ -1439,10 +1438,12 @@ defmodule Xqlite do
   UTF-8 answers
   `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` for the
   first such column; a CTE column list renames columns by position,
-  `WITH s(a, b) AS (SELECT * FROM t) SELECT * FROM s`. On a connection with
-  an authorizer (`set_authorizer/2`, a busy policy or a busy observer), a
-  statement that reads such a column, that CTE included, answers
-  `{:error, {:authorization_denied, 23, message}}` at prepare instead. When
+  `WITH s(a, b) AS (SELECT * FROM t) SELECT * FROM s`. An authorizer on the
+  connection (`set_authorizer/2`, a busy policy or a busy observer) changes
+  neither answer, except that a statement it denies answers
+  `{:error, {:authorization_denied, 23, message}}` at prepare, as a deny of
+  `:read` or `:select` does for a `SELECT` of such a column, that CTE
+  included. When
   another connection changes the table between the read and the first step,
   the answer comes after that step, a write in the statement having run:
   `{:error, {:columns_changed, %{expected: names, live: names}}}` when the
