@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A Known limitations guide.** `guides/known_limitations.md` lists every
+  limitation the library documents, with what to do instead, among them
+  four ways a read-only connection can still write: through `ATTACH`,
+  through `VACUUM INTO`, through `PRAGMA query_only = 0` or a
+  journal-mode change, and through a `mode=ro&cache=shared` URI on
+  `Xqlite.open/2` or `XqliteNIF.open/1`.
+
 - **`Xqlite.get_limit/2` and `Xqlite.put_limit/3`**, and the raw
   `XqliteNIF.get_limit/2` and `XqliteNIF.put_limit/3` — SQLite's
   per-connection limits (`sqlite3_limit`), thirteen categories.
@@ -20,6 +27,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range and raises `ArgumentError` for an integer outside 64 bits.
 
 ### Fixed
+
+- **A rejected second statement can still change a setting.** The
+  functions that run one statement reject a string holding a second one
+  with `{:error, :multiple_statements}`, but they compile both statements
+  to find it, and SQLite applies some PRAGMAs while it compiles them,
+  `foreign_keys` and `query_only` among them, so such a PRAGMA takes
+  effect even in a rejected string. The `XqliteNIF.query/3` and
+  `execute/3` docs, which said nothing runs, and the Known limitations
+  guide now say what happens and what to do; the `prepare/2`,
+  `stmt_prepare/2` and `stream_open/3` docs no longer say only one
+  statement is compiled.
+- **The docs say what the code answers.** `stream/4` states that a stream
+  over a `RETURNING` write keeps the whole write when it ends before its
+  last row (an early stop, a value that is not UTF-8, a decode rejection),
+  that a cancel rolls the write back only when SQLite checks the token
+  before the statement finishes, and that a later enumeration halted
+  before reading closes the first pass, whose next fetch answers
+  `:stream_consumed`. A cancel token already signalled stops a call before
+  its statement runs, unless that statement is already mid-run. A
+  `CREATE VIRTUAL TABLE` with `rtree` or `fts5` reports one change, and a
+  `DROP TABLE` that SQLite precedes with a `DELETE` reports that
+  `DELETE`'s rows. `connection_stats/1` reports the current half of
+  `:lookaside_used`, and `deferred_fks?` stays `false` with `foreign_keys`
+  off. `autocommit/1` and `txn_state/2` take the connection lock and wait
+  behind a running statement. `schema_databases/1` reports `""` as the
+  file of an in-memory or temporary database. The bundled SQLite starts
+  every connection with foreign keys enforced. `busy_timeout: :infinity`
+  stores 2_147_483_647 ms, and only the options of `open/2` and
+  `open_in_memory/1` take it. `column_names/1` changes only at the step
+  that re-prepares the statement. An ATTACH by a URI naming a `mode=`
+  reaches the file from `XqliteNIF.open_in_memory/1`. The telemetry guide
+  lists every error answered with no event, and the `:conn` key of the
+  bridged update and WAL events. Function names in the docs that named no
+  existing function now name the right one.
+- **The README's numbers and lists match the code.** It counts 53 typed
+  PRAGMAs in both places (one said 57), lists the precompiled targets per
+  platform (RISC-V on glibc only, Windows on x86_64 only), and gives a
+  generated column's `default_value` as `:none`.
 
 - **The session capture docs say what a capture holds.**
   `XqliteNIF.session_changeset/1` and `session_patchset/1` hold the net
@@ -281,7 +326,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `execute_cancellable/5` answered SQLite's sticky `sqlite3_changes()`, so
   CREATE, BEGIN, COMMIT, PRAGMA, VACUUM and DROP reported the previous
   write's count; they now answer 0 for a statement that changed no row, as
-  `query_with_changes` does.
+  `query_with_changes` does, except `CREATE VIRTUAL TABLE` with a module
+  that writes rows of its own while it creates them, such as `rtree` and
+  `fts5`, which answers 1.
 - **A `Stream.zip` cleanup no longer leaves an `Xqlite.stream/4` statement
   open.** A raise on the first pair of a zip holding the stream (from the
   consumer, the other enumerable, or `Enum.zip_reduce`) left the first
@@ -308,10 +355,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A cancel that reaches SQLite's progress check after a statement's last
   step no longer turns a finished write into `{:error, :operation_cancelled}`;**
   the call answers its normal result. A cancelled answer now always means the
-  run was stopped, and for a write the whole transaction rolled back, an
-  explicit one included. The gotchas guide states what a cancelled answer
-  means and when SQLite checks for a cancel, replacing "checked every 8 VM
-  instructions".
+  run was stopped. A write cancelled while it runs rolls back the whole
+  transaction, an explicit one included; a token already signalled before a
+  write starts stops it before its first step, writes nothing and leaves an
+  open transaction as it was. The gotchas guide states what a cancelled
+  answer means and when SQLite checks for a cancel, replacing "checked
+  every 8 VM instructions".
 
 - **A second enumeration of an `Xqlite.stream/4` stream read on where the
   first stopped, or looked like an empty table.** The statement opens at the
@@ -569,6 +618,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One vocabulary in the docs.** The README, the guides and the module
+  docs say "reject" and "rejection" where they said "refuse" and
+  "refusal", and use one word, "function", for the library's public
+  functions.
+
 - **`changeset_apply/3` names the foreign key in its key error.** A
   changeset SQLite rolls back for a broken foreign key answers
   `{:error, {:constraint_violation, :constraint_foreign_key, details}}`
@@ -741,7 +795,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **On the four one-shot cancellable calls a signalled token answers
   `{:error, :operation_cancelled}` before an SQL or parameter error,** since
-  the tokens are read before the SQL is prepared.
+  the tokens are read before the SQL is prepared. With `:type_extensions`
+  set, a parameter list that is no proper list answers first, because the
+  extension walk runs in Elixir before the native call reads the tokens.
 
 - **`Xqlite.busy_timeout/2` is now `Xqlite.put_busy_timeout/2`, and it no
   longer removes the retry policy:** while a policy is set it decides the wait,
@@ -765,8 +821,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `{:invalid_path, %{path}}`;** use `open_temporary/0` and
   `open_in_memory/1`. `file:` URIs pass as written.
 - **`XqliteNIF.open_in_memory/1` opens any name but `":memory:"`, `file:` URIs
-  included, with `SQLITE_OPEN_MEMORY` and ATTACHes files in memory;** a plain
-  file name no longer creates a file. `":memory:"`, the name
+  included, with `SQLITE_OPEN_MEMORY` and ATTACHes a plain path in memory;**
+  a plain file name no longer creates a file, while an ATTACH by a URI
+  naming a `mode=` still reaches the file. `":memory:"`, the name
   `Xqlite.open_in_memory/1` passes, is unchanged.
 - **`backup_with_progress/6` answers a blocked step with `{:error,
   {:database_busy_or_locked, code, message}}`,** as `backup/3` does, instead of
@@ -988,15 +1045,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `%{reason: :improper_tail, value_type: type}` for a list whose tail is not
   `[]`. `Xqlite.cancel_operation/1` takes one token and refuses a list, an
   empty one and a list of live tokens included, as the one element it was
-  handed. The raw NIFs keep `{:expected_list, _}` for a term that is no list.
+  handed. The raw NIFs answer `%{reason: :not_a_list, value_type: type}` for
+  a term that is no list.
 - **`XqliteNIF.stmt_bind/2` reads `nil` as no parameters, like its siblings.**
   `query`, `execute`, `query_with_changes`, `explain_analyze` and
   `stream_open` all took a parameter term of `nil` as "no parameters" while
   `stmt_bind` answered `{:expected_list, _}` for it. One rule now, in one
   place: `stmt_bind(stmt, nil)` means zero parameters, so it answers `:ok` on
   a statement that takes none and `{:invalid_parameter_count, _}` on one that
-  takes any (see the parameter-count fix above). `Xqlite.bind/2,3` still
-  guards `is_list/1`, so `nil` raises at the typed door as before.
+  takes any (see the parameter-count fix above). `Xqlite.bind/2,3` reads
+  `nil` the same way and answers
+  `{:expected_list, %{reason: :not_a_list, value_type: type}}` for any other
+  term that is no list.
 - **`Xqlite.Pragma` judges its options.** The options position — the last
   argument of `get/4` and `put/4`, and the third argument of `get/4` when it
   is a keyword list, the two being merged — used to reach `Keyword.get/3`

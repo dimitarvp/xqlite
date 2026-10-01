@@ -11,7 +11,7 @@ defmodule Xqlite.TypeExtension.JSON do
   specific converter.
 
   A map or list `Jason` cannot encode — one holding an invalid-UTF-8 binary, or
-  a tuple, pid, reference or function, which JSON has no form for — is refused
+  a tuple, pid, reference or function, which JSON has no form for — is rejected
   with `{:error, {:json_encode_failed, %{reason: reason}}}`, where `reason` is
   the `Jason.EncodeError` or `Protocol.UndefinedError` Jason returned. The
   caller hears which parameter and why, instead of the same

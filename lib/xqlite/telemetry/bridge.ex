@@ -12,7 +12,7 @@ defmodule Xqlite.Telemetry.Bridge do
   2. Receives each hook message in its mailbox.
   3. Re-emits the message as a `[:xqlite, :hook, :*]` telemetry event.
 
-  Each `bridge/2` (or `bridge_log/1`) call returns a struct holding
+  Each `Xqlite.Telemetry.bridge/2` (or `Xqlite.Telemetry.bridge_log/1`) call returns a struct holding
   the GenServer pid and the registered subscriber handles. Pass it
   to `unbridge/1` to tear down all subscriptions and stop the
   GenServer.
@@ -20,12 +20,12 @@ defmodule Xqlite.Telemetry.Bridge do
   > #### Opt-in {: .info}
   >
   > Bridges are NEVER attached automatically. Users must call
-  > `bridge/2` or `bridge_log/1` explicitly for the connections /
-  > log hook they care about.
+  > `Xqlite.Telemetry.bridge/2` or `Xqlite.Telemetry.bridge_log/1`
+  > explicitly for the connections / log hook they care about.
   >
   > When telemetry is compile-disabled (`config :xqlite,
-  > :telemetry_enabled, false`, the default), `bridge/2` and
-  > `bridge_log/1` return `{:error, :telemetry_disabled}` rather
+  > :telemetry_enabled, false`, the default), `Xqlite.Telemetry.bridge/2` and
+  > `Xqlite.Telemetry.bridge_log/1` return `{:error, :telemetry_disabled}` rather
   > than silently registering hooks that produce no events.
 
   ## Per-connection bridge

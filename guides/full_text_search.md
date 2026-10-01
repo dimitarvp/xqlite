@@ -153,7 +153,7 @@ into the query string.
 - **Size/speed knobs.** `'optimize'` merges the b-trees after heavy
   write churn; `detail = 'column'` or `'none'` shrink the index if you
   don't need phrase/NEAR queries.
-- FTS5 refuses `STRICT` and column constraints rather than ignoring
+- FTS5 rejects `STRICT` and column constraints rather than ignoring
   them. A `STRICT` suffix on `CREATE VIRTUAL TABLE` is a syntax error,
   and `NOT NULL`, `PRIMARY KEY`, `CHECK`, `UNIQUE` or a type name on a
   column is rejected when the table is created. An FTS5 column is a

@@ -84,19 +84,31 @@ measurement and metadata key. A `:*` below stands for the span's
 | `[:xqlite, :cancel, :signalled]` | `Xqlite.cancel_operation/1` | `:token` |
 | `[:xqlite, :cancel, :honored]` | a cancellable operation observed cancellation | `:conn`, `:operation`, `:tokens` |
 
-The table lists the doors that emit. Every other `Xqlite` door hands its
+The table lists the functions that emit. Every other `Xqlite` function hands its
 work straight to `XqliteNIF` without an event of its own — `prepare/2`,
 `bind/3`, `reset/1`, `changes/1` and the rest of the statement, blob and
-schema doors among them. Two are worth naming because a reader goes
+schema functions among them. Two are worth naming because a reader goes
 looking for them: `Xqlite.backup_with_progress/4` reports its progress to
 a pid instead of emitting, and `Xqlite.get_limit/2` and
 `Xqlite.put_limit/3` are pass-throughs that read and set SQLite's
 per-connection limits.
 
-One refusal is answered without any event at all: a `:type_extensions`
-option that is no proper list of extension modules is refused before the
-span is opened, so such a call emits neither a start nor a stop. Every
-other refusal happens inside the span and ends it.
+Some errors are answered before the span opens, so the call emits neither
+a start nor a stop:
+
+- a wrong option list on `query/4`, `execute/4`, `execute_batch/3`,
+  `stream/4`, `explain_analyze/4`, `deserialize/4` and `load_extension/3`:
+  an unknown or repeated key, an element that is no `{key, value}` pair, a
+  `:type_extensions` value that is no proper list of extension modules, and
+  a `:read_only` or `:entry_point` of the wrong type;
+- on `wal_checkpoint/3`, a mode other than the four and a schema that is
+  no string.
+
+`open/2` and `open_in_memory/1` judge their options inside the span, and
+so do the other option values of the functions above (`:cancel_tokens`,
+`:on_error`, `:batch_size`): every other error of a span ends it. The
+transaction and savepoint events are sent on success only, so a failed
+`commit/1` emits nothing.
 
 ## Event surface — hook bridge events (opt-in)
 
@@ -125,8 +137,8 @@ per-connection, so it takes no `conn`.
 |---|---|---|
 | `[:xqlite, :hook, :commit]` | a transaction commits on the bridged connection | `:conn`, `:tag` |
 | `[:xqlite, :hook, :rollback]` | a transaction rolls back | `:conn`, `:tag` |
-| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:tag`, `:action`, `:db_name`, `:table`, `:rowid` |
-| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:tag`, `:db_name`; measurement `pages` |
+| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:conn`, `:tag`, `:action`, `:db_name`, `:table`, `:rowid` |
+| `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:conn`, `:tag`, `:db_name`; measurement `pages` |
 | `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:tag`, `:hook_tag`; measurements `count`, `elapsed` |
 | `[:xqlite, :hook, :busy]` | the connection meets a lock another one holds | `:conn`, `:tag`; measurements `retries`, `elapsed` |
 | `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:tag`, `:code`, `:base_code`, `:message` |

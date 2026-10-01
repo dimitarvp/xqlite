@@ -86,7 +86,18 @@ here is optional on a bump that changes the bundled SQLite version.
      RESET` repairs: `deserialize/4` relies on both, and the stale-statement
      and TEMP-trigger tests in `test/nif/serialize_test.exs` guard them,
    - `sqlite3_changes`/`total_changes` stickiness (the
-     `query_with_changes` contract).
+     `query_with_changes` contract),
+   - where SQLite calls the progress handler and when a statement counts
+     as running, which cancellation rests on (`progress_dispatch.rs`,
+     `cancel.rs`): the handler runs at certain jumps (a loop's bottom, a
+     trigger's entry, the `Goto` that ends a statement's setup), at the end
+     of every step (the loop at `vdbe_return` in `sqlite3VdbeExec`, after a
+     write has committed) and while a statement compiles;
+     `sqlite3_stmt_busy` turns false inside `sqlite3VdbeHalt`, before that
+     end-of-step call, and stays true for a statement SQLite keeps for a
+     retry after `SQLITE_BUSY`; a `RETURNING` write makes all its changes at
+     its first step. `test/nif/statement_cancel_test.exs` and
+     `test/nif/stream_cancel_test.exs` guard these.
 6. **`cargo fmt` + `cargo clippy -- -D warnings`** from the crate
    directory.
 7. **`mix verify`** — the full local CI gate. The test suite includes

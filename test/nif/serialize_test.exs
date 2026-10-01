@@ -42,6 +42,17 @@ defmodule Xqlite.NIF.SerializeTest do
       NIF.close(conn2)
     end
 
+    test "a serialized image written to a file opens as that database", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE f (x); INSERT INTO f VALUES (1), (2);")
+      {:ok, image} = NIF.serialize(conn, "main")
+      path = Xqlite.TestUtil.tmp_db_path("image_file")
+      :ok = File.write(path, image)
+      {:ok, file_conn} = NIF.open(path)
+      assert {:ok, %{rows: [[2]]}} = NIF.query(file_conn, "SELECT count(*) FROM f", [])
+      assert {:ok, %{rows: [["ok"]]}} = NIF.query(file_conn, "PRAGMA integrity_check", [])
+      NIF.close(file_conn)
+    end
+
     test "serialize captures schema (tables, indexes)", %{conn: conn} do
       :ok =
         NIF.execute_batch(conn, """

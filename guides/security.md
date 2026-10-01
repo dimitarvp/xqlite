@@ -18,7 +18,10 @@ full privileges of your BEAM OS process. Those three inputs are the trust
 boundary. The rest of this page is about controlling them.
 
 The upstream project keeps a matching document worth reading alongside
-this one: [SQLite — Security](https://www.sqlite.org/security.html).
+this one: [SQLite — Security](https://www.sqlite.org/security.html). The
+[Gotchas](gotchas.md) guide covers the surprising-but-defined behaviours,
+and [Known limitations](known_limitations.md) what the library cannot do
+yet, including the ways a read-only connection can still write.
 
 ## Thread-safety model
 
@@ -155,7 +158,7 @@ run `PRAGMA` statements. Deny it only when you intend to lock those paths
 out too.
 
 Three reads slip past a `:pragma` deny, because none runs a `PRAGMA`
-statement for SQLite to refuse:
+statement for SQLite to reject:
 
 - `Xqlite.Pragma.get(conn, :wal_autocheckpoint)` still answers. xqlite's own
   WAL callback owns that setting and serves the value out of its own state.
@@ -268,7 +271,7 @@ A few smaller behaviors that occasionally surprise, all deliberate:
   interior NUL (`\0`) byte returns `{:error, :null_byte_in_string}` rather
   than being silently cut off at the NUL. Silent truncation is a classic
   way for a crafted value to shorten a statement into something
-  unintended; xqlite refuses instead.
+  unintended; xqlite rejects the statement instead.
 - **Invalid UTF-8 in a TEXT column is surfaced, not mangled.** Reading a
   `TEXT` value whose bytes are not valid UTF-8 returns `{:error,
   {:utf8_error, column, reason}}`, naming the column. xqlite does not

@@ -42,7 +42,7 @@ defmodule Xqlite.Pragma do
           String.t() | integer() | boolean() | atom() | {:pages | :kib, integer()}
 
   @typedoc """
-  What a read door answers.
+  What a read function answers.
 
   `:no_value` is the answer whenever the connection has no row for the
   PRAGMA: `mmap_size` on a database that is not a file, and
@@ -470,7 +470,7 @@ defmodule Xqlite.Pragma do
       `on`, `off`, `yes`, `no`, `true` and `false` as atoms or strings in
       any case. It answers `1` or `0`.
     * a pragma that stores a number takes an integer inside the range its
-      spec gives and nothing else — a boolean is refused, because SQLite
+      spec gives and nothing else — a boolean is rejected, because SQLite
       would write it as `ON` and store zero.
     * a pragma that names a mode takes the words its spec lists, as atoms
       or strings in any case, and the integers its spec lists. It answers
@@ -733,9 +733,9 @@ defmodule Xqlite.Pragma do
     a second hold of the connection lock: a database detached between the two
     answers SQLite's own error.
 
-  `:db_name` is the only key these doors read. Options that are no keyword
+  `:db_name` is the only key these functions read. Options that are no keyword
   list, a key other than `:db_name`, and a `:db_name` that is neither a
-  string nor an atom are all refused with
+  string nor an atom are all rejected with
   `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
   reason: :invalid_options}}}` before a statement is built — `value` being
   the whole term when it is no keyword list and the `{key, value}` pair that
@@ -749,7 +749,7 @@ defmodule Xqlite.Pragma do
 
   A known name is matched with its case folded, so `:foreign_keys`,
   `:FOREIGN_KEYS`, `"foreign_keys"` and `"FOREIGN_KEYS"` all reach the same
-  PRAGMA. A name this module does not know is refused with
+  PRAGMA. A name this module does not know is rejected with
   `{:error, {:unknown_pragma, name}}` before any statement is built, with or
   without an extra argument, and a key that is neither an atom nor a string
   with `{:error, {:invalid_pragma_name, key}}`. SQLite parses an unknown
@@ -763,7 +763,7 @@ defmodule Xqlite.Pragma do
   is a scalar — a string, an atom other than `nil`, or an integer; a list
   there is the options and only when every element is a `{key, value}` pair,
   so `[]` is options too. Anything else in that position, `nil` and a plain
-  list included, is refused with `{:error, {:invalid_pragma_argument,
+  list included, is rejected with `{:error, {:invalid_pragma_argument,
   %{pragma: name, value: value, reason: :not_a_scalar}}}`. What the PRAGMA
   reads with decides the rest:
   one that reads only with an argument (`:table_info` and its siblings)
@@ -773,9 +773,9 @@ defmodule Xqlite.Pragma do
   writable pragma as a write, so a getter must not build it.
 
   Both the argument and a `:db_name` are written into the statement, so they
-  have to be text: a binary whose bytes are not UTF-8 is refused with
+  have to be text: a binary whose bytes are not UTF-8 is rejected with
   `reason: :invalid_utf8`, carrying the bytes as they were given, before
-  anything is built from them. One holding a NUL byte is refused a step later,
+  anything is built from them. One holding a NUL byte is rejected a step later,
   with `{:error, :null_byte_in_string}`, because SQLite's tokenizer would stop
   at the NUL and read a shorter statement than we built.
 
@@ -1012,7 +1012,7 @@ defmodule Xqlite.Pragma do
   Changes a PRAGMA's value.
 
   A known name is matched with its case folded, the same way `get/3,4` match
-  it. A name this module does not know is refused with
+  it. A name this module does not know is rejected with
   `{:error, {:unknown_pragma, name}}` before any statement is built, and a
   key that is neither an atom nor a string with
   `{:error, {:invalid_pragma_name, key}}`. SQLite parses an unknown PRAGMA
@@ -1020,8 +1020,8 @@ defmodule Xqlite.Pragma do
   nothing.
 
   The value goes through `check_value/2`, so a value the PRAGMA cannot take
-  is refused with `{:error, {:invalid_pragma_value, %{pragma: name, value:
-  value}}}` and a PRAGMA that can only be read is refused with
+  is rejected with `{:error, {:invalid_pragma_value, %{pragma: name, value:
+  value}}}` and a PRAGMA that can only be read is rejected with
   `{:error, {:read_only_pragma, name}}`. What SQLite is given is the form
   `check_value/2` answered, never the caller's spelling.
 
@@ -1046,9 +1046,9 @@ defmodule Xqlite.Pragma do
 
     * `:db_name` (a string, an atom, or `nil`) - Target a specific attached
       database schema. `"main"` and `"temp"` are built-in; other values refer
-      to ATTACH-ed databases. It is the only key this door reads: options
+      to ATTACH-ed databases. It is the only key this function reads: options
       that are no keyword list, another key, and a `:db_name` that is neither
-      a string nor an atom are refused with
+      a string nor an atom are rejected with
       `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
       reason: :invalid_options}}}`, as in `get/4`. A `:db_name` whose bytes
       are not UTF-8 is rejected the same way with `reason: :invalid_utf8`, and

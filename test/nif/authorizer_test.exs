@@ -28,6 +28,16 @@ defmodule Xqlite.NIF.AuthorizerTest do
                NIF.query(conn, "SELECT id, name FROM t", [])
     end
 
+    test "a denied action kind is denied on every table, TEMP included", %{conn: conn} do
+      :ok = NIF.execute_batch(conn, "CREATE TABLE u(x); CREATE TEMP TABLE v(x);")
+      :ok = Xqlite.set_authorizer(conn, [:delete])
+
+      for table <- ["t", "u", "temp.v"] do
+        assert {:error, {:authorization_denied, _, _}} =
+                 NIF.execute(conn, "DELETE FROM #{table}", [])
+      end
+    end
+
     test "denying :create_table blocks CREATE TABLE; removal restores it", %{conn: conn} do
       :ok = Xqlite.set_authorizer(conn, [:create_table])
 

@@ -23,7 +23,7 @@ defmodule Xqlite.TypeExtension do
       the call fails as above, `column: n` (its place in the row) replacing
       `position`.
       A value no extension converts is handed back as SQLite stored it. Any
-      other answer from either callback is refused with `{:bad_return, answer}`.
+      other answer from either callback is rejected with `{:bad_return, answer}`.
 
   ## Built-in extensions
 
@@ -178,13 +178,13 @@ defmodule Xqlite.TypeExtension do
 
   Answers `{:ok, params}` with the encoded list, or
   `{:error, {:type_extension_refused, %{position: n, extension: module,
-  reason: reason}}}` for the first parameter an extension refused. The
+  reason: reason}}}` for the first parameter an extension rejected. The
   position is 1-based and counts a keyword pair as one parameter, the same
   way the NIF numbers its bindings. `nil` in place of a list is accepted and
   answers `{:ok, nil}`.
 
   The parameter list is walked by hand, so it answers for a broken list what
-  the native walk answers for the same one, and a call refuses the same way
+  the native walk answers for the same one, and a call rejects the same way
   with extensions as without: a list whose tail is not `[]` is
   `{:error, {:expected_list, %{reason: :improper_tail, value_type: kind}}}`
   (`:expected_keyword_list` for a keyword list), a term that is no list and
@@ -193,12 +193,12 @@ defmodule Xqlite.TypeExtension do
   to the NIF, which answers `{:error, {:expected_keyword_tuple, %{reason:
   :bad_element, position: n, value_type: kind}}}`.
 
-  The extension list is judged first, the way every door that takes the
+  The extension list is judged first, the way every function that takes the
   `:type_extensions` option judges it: it must be a proper list, or `nil` for
   none, and every element an atom naming a module that declares
   `@behaviour Xqlite.TypeExtension` and exports both callbacks. Anything else
-  answers `{:error, {:invalid_type_extensions, refusal}}` before a single
-  parameter is touched, the refusal naming what stopped the walk and, for an
+  answers `{:error, {:invalid_type_extensions, rejection}}` before a single
+  parameter is touched, the rejection naming what stopped the walk and, for an
   element that is no extension module, its one-based position.
   """
   @spec encode_params(params :: term(), extensions :: term()) ::
@@ -293,11 +293,11 @@ defmodule Xqlite.TypeExtension do
   Each cell in each row is passed through the extension chain.
   Values that no extension handles pass through unchanged.
 
-  Answers `{:ok, rows}` with the decoded rows, or the refusal of the first
-  value an extension refuses to decode. The extension list is judged
+  Answers `{:ok, rows}` with the decoded rows, or the error of the first
+  value an extension rejects on decode. The extension list is judged
   first, exactly as `encode_params/2` judges it, and a list that is no proper
   list of extension modules answers
-  `{:error, {:invalid_type_extensions, refusal}}` before a single value is
+  `{:error, {:invalid_type_extensions, rejection}}` before a single value is
   touched.
 
   The rows are judged the way `encode_params/2` judges a parameter list: a
@@ -306,7 +306,7 @@ defmodule Xqlite.TypeExtension do
   list whose tail is not `[]` the same tag with `:improper_tail`, and a row
   that is no list the same tag with `:bad_element` and the row's one-based
   `:position`. A row's own tail is read only by the walk that decodes its
-  values, so a row whose tail is not `[]` is refused when an extension is on
+  values, so a row whose tail is not `[]` is rejected when an extension is on
   and handed back untouched when the extension list is empty.
   """
   @spec decode_rows(rows :: term(), extensions :: term()) ::
@@ -383,7 +383,7 @@ defmodule Xqlite.TypeExtension do
   `{:error, %{extension: module, reason: reason}}` and the chain stops
   there, as it does with `reason: {:bad_return, answer}` for any other
   answer. The answer is always tagged, so a parameter whose own value is an
-  `{:error, term}` tuple is never mistaken for a refusal.
+  `{:error, term}` tuple is never mistaken for a rejection.
 
   This function runs once per value, so it does not judge the extension
   list — the caller vouches for it. `encode_params/2` and `decode_rows/2`

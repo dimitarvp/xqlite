@@ -7,11 +7,15 @@ defmodule Xqlite do
   mistake in the calling code and raises at the call — from a guard
   (`FunctionClauseError`) or from the native function's argument decoding
   (`ArgumentError`), whichever the term reaches first. A value of the right
-  type that this library or SQLite refuses is an answer instead —
-  `{:error, reason}`, with the reason saying what was wrong. One exception:
-  `txn_state/2` and `wal_checkpoint/3` answer a schema of the wrong type, `nil`
-  included, with `{:error, {:invalid_schema_name, schema}}`. How a schema name
-  of the right type is judged is in `XqliteNIF`'s moduledoc.
+  type that this library or SQLite rejects is an answer instead —
+  `{:error, reason}`, with the reason saying what was wrong. Three
+  exceptions: a parameter list that is no list answers
+  `{:error, {:expected_list, _}}`, on `bind/3` as on the functions that run
+  SQL; `txn_state/2` and `wal_checkpoint/3` answer a schema of the wrong
+  type, `nil` included, with `{:error, {:invalid_schema_name, schema}}`; and
+  `cancel_operation/1` answers a term that is no cancel token with
+  `{:error, {:invalid_cancel_tokens, _}}`. How a schema name of the right
+  type is judged is in `XqliteNIF`'s moduledoc.
 
   An option list is judged whole before anything runs, and anything wrong in it
   is an answer whatever its type: `{:error, {:invalid_option, _}}`, unless the
@@ -34,13 +38,13 @@ defmodule Xqlite do
                         type: :timeout,
                         default: 5_000,
                         doc:
-                          "Milliseconds to wait when the database is locked. `:infinity` waits forever. Every connection already starts at 5000 ms before this is applied, so a connection nobody configures still waits that long."
+                          "Milliseconds to wait when the database is locked. `:infinity` stores 2_147_483_647 ms, about 24.8 days, the most SQLite takes; only this option takes `:infinity`, while `Xqlite.Pragma.put/3` and `put_busy_timeout/2` reject it. Every connection already starts at 5000 ms before this is applied, so a connection nobody configures still waits that long."
                       ],
                       foreign_keys: [
                         type: :boolean,
                         default: true,
                         doc:
-                          "Enable foreign key constraint enforcement. SQLite defaults to OFF."
+                          "Enable foreign key constraint enforcement. SQLite's own default is OFF; the bundled build starts every connection with it ON."
                       ],
                       synchronous: [
                         type: {:in, [:off, :normal, :full, :extra]},
@@ -114,7 +118,7 @@ defmodule Xqlite do
 
   An integer is a 64-bit signed one, SQLite having no room for more:
   `-9223372036854775808` up to `9223372036854775807`. Elixir's integers have
-  no size, so one outside that range is refused with
+  no size, so one outside that range is rejected with
   `{:error, {:integer_out_of_range, %{position: n}}}` rather than wrapped or
   rounded.
   """
@@ -179,8 +183,8 @@ defmodule Xqlite do
   atom or string for a PRAGMA the typed schema does not know.
   `:invalid_pragma_name` carries one of three things: the caller's key when
   it is neither an atom nor a string, `nil`, which is no name on the raw
-  doors even though it is an atom, or the name itself when it holds a byte
-  outside `A-Z`, `a-z`, `0-9` and `_`, which the native side refuses because
+  functions even though it is an atom, or the name itself when it holds a byte
+  outside `A-Z`, `a-z`, `0-9` and `_`, which the native side rejects because
   it writes the name into the statement.
 
   Three more name the option, argument or path that was wrong and why.
@@ -205,7 +209,7 @@ defmodule Xqlite do
 
   Two of them are about a binary handed in where text was meant, one byte
   apart. `:invalid_utf8_in_string` is a binary whose bytes are not UTF-8 —
-  SQL text, a file path, a schema or an object name — refused on the way in,
+  SQL text, a file path, a schema or an object name — rejected on the way in,
   before SQLite is asked anything. `:null_byte_in_string` is text that is
   UTF-8 but holds a NUL byte: SQLite's tokenizer would stop at the NUL and
   read a shorter statement than we built.
@@ -231,9 +235,9 @@ defmodule Xqlite do
   statement; `:name` is `nil` only for a bare `?`, which no key can name.
 
   `:parameters_unbound` is a statement stepped before anything set its
-  parameters, `:expected` being how many it takes. A bind the library refused
+  parameters, `:expected` being how many it takes. A bind the library rejected
   bound nothing, so it leaves the statement in whatever state it was already
-  in — an earlier successful bind stays in force. A bind SQLite itself refused
+  in — an earlier successful bind stays in force. A bind SQLite itself rejected
   after it had taken values is the other way round: the values before the
   failing one stayed bound, so the statement answers this error until a bind
   succeeds or `clear_bindings/1` runs, which is also how a caller asks for a
@@ -244,8 +248,8 @@ defmodule Xqlite do
   — and no `:position` at all where one value was judged on its own, as
   `XqliteNIF.set_pragma/3` does. `:value_too_large` is a TEXT or BLOB
   parameter longer than the connection's own length limit, which
-  `Xqlite.put_limit/3` sets; every door judges every value against it
-  before it binds anything, so the refusal binds nothing. `:too_big` is the
+  `Xqlite.put_limit/3` sets; every function judges every value against it
+  before it binds anything, so the rejection binds nothing. `:too_big` is the
   other side of the same limit: SQLite met it while it ran — a row it was
   building, a concatenation, a column read — and it carries the code SQLite
   gave, the way `:read_only_database` does. SQLite defines no extended code
@@ -256,18 +260,18 @@ defmodule Xqlite do
   `0..2_147_483_647`.
 
   `:too_many_named_parameters` is a keyword list on a statement of more than
-  `:limit` (2 048) parameters, refused before any value is read.
+  `:limit` (2 048) parameters, rejected before any value is read.
 
   `:invalid_batch_size` carries the caller's own term in `:provided`, whatever
-  kind of term it was: the stream fetch doors take it and judge it, where the
-  statement doors take an integer and raise for anything else. A stream's
-  batch size must also fit in 64 signed bits, which is all the fetch door
+  kind of term it was: the stream fetch functions take it and judge it, where the
+  statement functions take an integer and raise for anything else. A stream's
+  batch size must also fit in 64 signed bits, which is all the fetch function
   reads.
 
   `:invalid_type_extensions` is the `:type_extensions` option when it is not
-  a proper list of extension modules, refused before anything else happens
-  on every door that takes the option, and the extension list of
-  `Xqlite.TypeExtension.encode_params/2` and `decode_rows/2`, which judge
+  a proper list of extension modules, rejected before anything else happens
+  on every function that takes the option, and the extension list of
+  `Xqlite.TypeExtension.encode_params/2` and `Xqlite.TypeExtension.decode_rows/2`, which judge
   it the same way.
 
   `:duplicate_column_name` is a statement `Xqlite.stream/4` cannot stream: a
@@ -426,10 +430,10 @@ defmodule Xqlite do
   `@behaviour Xqlite.TypeExtension`, or it does not export both `encode/1`
   and `decode/1`.
 
-  A cancellable call takes two lists, so the tag says which one it refused:
+  A cancellable call takes two lists, so the tag says which one it rejected:
   `:invalid_cancel_tokens` is always about the tokens, `:expected_list` always
   about the parameters. For a token argument that is no list at all the reason
-  differs by door, on purpose: a raw `XqliteNIF` function takes a list and
+  differs by function, on purpose: a raw `XqliteNIF` function takes a list and
   nothing else, so it answers `:not_a_list`, while the `Xqlite` function takes
   one token or a list of them and reads a bare term as one token, so it
   answers `:bad_element` at position 1.
@@ -544,9 +548,12 @@ defmodule Xqlite do
   Opens a read-only connection to an existing database file.
 
   Fails with a structured error if the file does not exist — read-only
-  opens never create. Writes fail with
-  `{:error, {:read_only_database, extended_code, message}}`.
-  `path` is judged as in `open/2`.
+  opens never create. Writes to the connection's own database fail with
+  `{:error, {:read_only_database, extended_code, message}}`. A database it
+  attaches is not covered: an `ATTACH` of a shared cache another connection
+  holds read-write can be written, and so can a file `open_in_memory_readonly/1`
+  attaches with `mode=rw` or `mode=rwc`, which also creates it — see the
+  Known limitations guide. `path` is judged as in `open/2`.
 
   SQLite drops the read-only flag for a `cache=shared` URI whose cache another
   connection opened read-write, and for a URI with `mode=memory`. There the
@@ -603,7 +610,7 @@ defmodule Xqlite do
   `:ok`. A session is not covered — delete sessions before closing (see
   `XqliteNIF.session_delete/1`).
 
-  SQLite can refuse to free the handle, which answers
+  SQLite can decline to free the handle, which answers
   `{:error, {:database_busy_or_locked, code, message}}`. The drain has
   already run by then, so that answer never means "nothing happened": every
   prepared statement, stream and blob is finalized, and the connection —
@@ -735,12 +742,12 @@ defmodule Xqlite do
   Returns `{:ok, []}` if the table is clean, or `{:ok, violations}`. A
   violation is one of three maps:
 
-  * a stored value SQLite would refuse —
+  * a stored value SQLite would reject —
     `%{rowid: _, column: _, actual_type: _, expected_type: _}`;
   * a column whose declared type is not one STRICT knows —
     `%{kind: :unknown_declared_type, column: name, declared: type}`. STRICT
     accepts only `INT`, `INTEGER`, `REAL`, `TEXT`, `BLOB` and `ANY`, in any
-    case, so `VARCHAR(255)`, `DATETIME` and `NUMERIC` are all refused;
+    case, so `VARCHAR(255)`, `DATETIME` and `NUMERIC` are all rejected;
   * a column with no declared type at all —
     `%{kind: :missing_declared_type, column: name}`.
 
@@ -889,7 +896,7 @@ defmodule Xqlite do
   renames the new table — all inside a transaction.
 
   If anything `check_strict_violations/2` reports would stop the conversion —
-  a stored value SQLite would refuse, a column whose declared type STRICT does
+  a stored value SQLite would reject, a column whose declared type STRICT does
   not know, a column with no declared type — the operation fails with
   `{:error, {:strict_violations, violations}}` before any SQL runs, and the
   original table is left untouched.
@@ -924,7 +931,7 @@ defmodule Xqlite do
 
   The rebuild needs a transaction of its own. Called while the caller has one
   open it returns `{:error, :transaction_in_progress}` and touches nothing —
-  its rollback would discard the caller's uncommitted rows. Two more refusals
+  its rollback would discard the caller's uncommitted rows. Two more rejections
   come before any statement runs: an existing
   `<table>_xqlite_strict_rebuild` in the same schema returns
   `{:error, {:table_exists, name}}`, and a table declaring all three of
@@ -1367,8 +1374,11 @@ defmodule Xqlite do
   @doc """
   Enables foreign key constraint enforcement for the given database connection.
 
-  By default, SQLite parses foreign key constraints but does not enforce them.
-  This function turns on enforcement.
+  SQLite's own default is to parse foreign key constraints without enforcing
+  them, but the bundled SQLite is built with `SQLITE_DEFAULT_FOREIGN_KEYS`,
+  so every connection starts with enforcement on, however it was opened. This
+  function turns enforcement back on after `disable_foreign_key_enforcement/1`
+  or an `open/2` with `foreign_keys: false`.
 
   Inside a transaction, where SQLite ignores the switch, it answers
   `{:error, :transaction_in_progress}` and changes nothing.
@@ -1408,7 +1418,7 @@ defmodule Xqlite do
   committed in autocommit mode, pending inside a transaction, where
   `rollback/1` undoes it.
 
-  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
@@ -1419,11 +1429,11 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  `[{:"@b", 1}]` names `@b`. The first two rejections carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
   named, read from the statement. A statement of more than 2 048 parameters
-  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
+  rejects any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   Column names are read before anything is bound or run. A name that is not
   UTF-8 answers
@@ -1448,16 +1458,16 @@ defmodule Xqlite do
       fails the call with
       `{:error, {:type_extension_refused, %{position: n, extension: module,
       reason: reason}}}` before any SQL runs; `n` is the parameter's 1-based
-      place in the list. A value an extension refuses to decode fails it with
+      place in the list. A value an extension rejects on decode fails it with
       `column: n` instead, after the statement ran: its changes stand.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      `{:error, {:invalid_type_extensions, rejection}}` before anything
       runs, as in `stream/4`.
     * `:cancel_tokens` — a token from `create_cancel_token/0` or a list of
       them, default `[]`. Signalling any one of them ends the call with
-      `{:error, :operation_cancelled}`, and a cancelled write rolls back the
-      whole transaction, as `create_cancel_token/0` describes. A value that
+      `{:error, :operation_cancelled}`, and a write cancelled while it runs
+      rolls back the whole transaction, as `create_cancel_token/0` describes. A value that
       is no live token, or a list holding one, returns
       `{:error, {:invalid_cancel_tokens, _}}` before the statement runs.
   """
@@ -1524,7 +1534,7 @@ defmodule Xqlite do
   statement that returns rows runs to its end with its rows dropped, so an
   `INSERT ... RETURNING` answers its count here; `query/4` reads the rows.
 
-  Parameters, one rule on every door: a plain list is positional (`?1`, `?2`,
+  Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
   value is bound — `[]` and `nil` count as zero. A keyword list is named and
@@ -1535,22 +1545,22 @@ defmodule Xqlite do
   a bare `?`, and a statement holding `?` or `?3` takes a positional list
   only. A key starting with `:`, `@` or `$` names that parameter as written;
   every other key gets the `:` prefix, so `[a: 1]` names `:a` and
-  `[{:"@b", 1}]` names `@b`. The first two refusals carry the name the
+  `[{:"@b", 1}]` names `@b`. The first two rejections carry the name the
   key resolved to that way, never the key itself: `[c: 1]` answers `":c"`.
   `:missing_parameter` carries SQLite's own spelling of the parameter no key
   named, read from the statement. A statement of more than 2 048 parameters
-  refuses any keyword list with `{:error, {:too_many_named_parameters, _}}`.
+  rejects any keyword list with `{:error, {:too_many_named_parameters, _}}`.
 
   ## Options
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
       parameters are encoded through the chain before binding (there are
       no result rows to decode). Default: `[]`. A parameter an extension
-      refuses fails the call with `{:error, {:type_extension_refused, _}}`,
+      rejects fails the call with `{:error, {:type_extension_refused, _}}`,
       as described in `query/4`.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      `{:error, {:invalid_type_extensions, rejection}}` before anything
       runs, as in `stream/4`.
     * `:cancel_tokens` — as in `query/4`.
   """
@@ -1679,18 +1689,18 @@ defmodule Xqlite do
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before
   anything is bound, `[]` and `nil` count as zero parameters, and a keyword
   list must name every parameter of the statement exactly once — see
-  `query/4` for the three refusals, the 2 048 cap and how a key names a parameter.
+  `query/4` for the three rejections, the 2 048 cap and how a key names a parameter.
 
   ## Options
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
       parameters are encoded through the chain before binding, as in
       `query/4`, so the statement profiled here is the one the application
-      runs. A parameter an extension refuses returns
+      runs. A parameter an extension rejects returns
       `{:error, {:type_extension_refused, _}}`. Default: `[]`.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      `{:error, {:invalid_type_extensions, rejection}}` before anything
       runs, as in `stream/4`.
 
   ## Examples
@@ -1767,32 +1777,32 @@ defmodule Xqlite do
 
     * `:batch_size` (integer, default: `#{Xqlite.StreamResourceCallbacks.default_batch_size()}`) - The maximum number of rows
       to fetch from the database in a single batch. It has to be an integer
-      from 1 up to 9223372036854775807, which is all the fetch door reads;
+      from 1 up to 9223372036854775807, which is all the fetch function reads;
       anything else returns `{:error, {:invalid_batch_size, %{provided: _,
       minimum: 1}}}` at stream open rather than failing on the first batch.
     * `:type_extensions` (list of modules, default: `[]`) - A list of modules
       implementing the `Xqlite.TypeExtension` behaviour. Parameters are encoded
       before binding, and result values are decoded as rows are fetched.
       Extensions are applied in list order; the first match wins. A parameter
-      an extension refuses returns `{:error, {:type_extension_refused, _}}` at
+      an extension rejects returns `{:error, {:type_extension_refused, _}}` at
       stream open, before any statement is prepared, as described in
-      `query/4`; a stored value one refuses to decode is a mid-fetch error,
+      `query/4`; a stored value one rejects on decode is a mid-fetch error,
       surfaced per `:on_error`. The option itself must be a proper list, or `nil` for none,
       and every element must be an extension module: an atom naming a module
       that declares `@behaviour Xqlite.TypeExtension` and exports both
       `encode/1` and `decode/1`. Checking an element loads the module if
       nothing has loaded it yet, so the first such call reads its `.beam`;
       inside a release booted in embedded mode only a module that shipped
-      with the release can be loaded, and every other atom is refused. Both
+      with the release can be loaded, and every other atom is rejected. Both
       callbacks are checked on every call, so a module recompiled without
-      one, or unloaded and no longer loadable, is refused from then on, and
+      one, or unloaded and no longer loadable, is rejected from then on, and
       one recompiled whole passes again. The behaviour declaration is read
       once per node and remembered, so a module recompiled with both
-      callbacks and no declaration keeps passing. A module that was refused
+      callbacks and no declaration keeps passing. A module that was rejected
       is remembered as nothing and asked again on the next call. Anything
       else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before the stream is
-      opened, the refusal naming what stopped the walk and, for an element
+      `{:error, {:invalid_type_extensions, rejection}}` before the stream is
+      opened, the rejection naming what stopped the walk and, for an element
       that is no extension module, its one-based position.
     * `:on_error` (`:raise` | `:halt` | `:emit_error`, default: `:raise`) -
       How a mid-fetch error (e.g. an invalid-UTF-8 TEXT value) is surfaced.
@@ -1815,17 +1825,21 @@ defmodule Xqlite do
       stream open.
     * `:cancel_tokens` (a token or a list of them, default: `[]`) - Tokens
       from `create_cancel_token/0`, handed to *every* fetch this stream
-      makes. Signalling any one of them ends the fetch it lands in with
-      `{:error, :operation_cancelled}` and closes the stream; that error
+      makes. A signal from any one of them takes effect when SQLite next
+      checks the token while the statement still runs (see
+      `create_cancel_token/0`): that fetch ends with
+      `{:error, :operation_cancelled}` and the stream closes; that error
       then follows the `:on_error` mode above, like any other fetch error.
       Rows already read in the same batch are discarded with it, and over a
       `RETURNING` write the cancel rolls back the changes that rows of
-      earlier fetches described. Tokens are
+      earlier fetches described. A statement that reaches its end before
+      that check ends the stream with no error, and a `RETURNING` write
+      then stays (see the `RETURNING` paragraph below). Tokens are
       single-use, so a token you have already signalled kills the next
       stream you hand it to on its first fetch — create a fresh one per
       stream. Any value that is not a live token, or a list holding one,
-      returns `{:error, {:invalid_cancel_tokens, refusal}}` at stream open,
-      the refusal naming the one-based position of the element that is no
+      returns `{:error, {:invalid_cancel_tokens, rejection}}` at stream open,
+      the rejection naming the one-based position of the element that is no
       token and the kind of term it is — a plain `make_ref/0` included,
       which the NIF tells apart from a token where Elixir cannot.
 
@@ -1846,7 +1860,7 @@ defmodule Xqlite do
   `"v"` — and giving each column an alias (`SELECT a.v AS x, b.v AS y`) makes
   it streamable. SQLite names a column that has no name of its own after the
   text that produced it, so `SELECT 1, 1` and `SELECT ?, ?` repeat too.
-  `query/4` and the raw stream doors answer lists and take any names.
+  `query/4` and the raw stream functions answer lists and take any names.
 
   The names are read at open: one that is not UTF-8 answers
   `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` there,
@@ -1868,7 +1882,26 @@ defmodule Xqlite do
   `:stream_consumed` through `:on_error`: `:raise` raises
   `Xqlite.StreamError` with it, `:emit_error` yields only
   `{:error, :stream_consumed}` and `:halt` logs it and yields nothing. Call
-  `stream/4` again to read the rows again.
+  `stream/4` again to read the rows again. A later enumeration that stops
+  before it reads anything, in the process running the first one, closes the
+  first one too: `Stream.zip/2` does this when it cleans up after a raise, and
+  so does `Stream.zip([], stream)` inside the first pass. The first pass then
+  hands out the rows of the batch it holds, and its next fetch answers
+  `:stream_consumed` through `:on_error`, even when no row was left to read.
+
+  SQLite makes every change of a `RETURNING` write at the statement's first
+  step, before the first row comes back. So a stream over such a write keeps
+  the whole write when it ends before its last row: a consumer that stops
+  early (`Enum.take/2`), and a fetch that ends on an error — a value that is
+  not valid UTF-8, a value an extension rejects on decode — in every
+  `:on_error` mode. In autocommit mode the write is committed then; inside a
+  transaction it stays pending, and `rollback/1` undoes it. A cancel rolls
+  the write back, but only when SQLite checks the token before the
+  statement finishes, as `:cancel_tokens` above says. The steps after the
+  first only hand out rows SQLite already holds, so the statement can
+  finish first: with the token signalled once the first row came back, the
+  stream over a one-row write, or over a two-row write read in one batch,
+  ends with no error, and the write stays, committed or pending as above.
 
   Parameters follow `query/4`'s rule. A plain list is positional (`?1`,
   `?2`, …) and its length must be the statement's own parameter count;
@@ -1876,7 +1909,7 @@ defmodule Xqlite do
   provided: _}}}` at stream open, before a value is bound. `[]` and `nil`
   count as zero parameters, so they pass only on a statement that takes
   none. A keyword list is named and must name every parameter of the
-  statement exactly once — see `query/4` for the three refusals, the 2 048 cap and for how
+  statement exactly once — see `query/4` for the three rejections, the 2 048 cap and for how
   a key names a parameter. Every one of them comes at stream open too.
 
   The SQL must hold exactly one statement, the same rule `prepare/2` and
@@ -1956,7 +1989,7 @@ defmodule Xqlite do
   SQL parsing/planning on every iteration — the reason prepared statements
   exist. For one-shot calls, `query/3` and `execute/3` remain simpler.
 
-  Exactly ONE statement is compiled: SQL holding no statement at all
+  The handle holds exactly ONE statement: SQL holding no statement at all
   returns `{:error, :no_statement}` and a second statement
   after the first returns `{:error, :multiple_statements}` — nothing is
   silently dropped. Text after the first statement counts as a second
@@ -2014,9 +2047,9 @@ defmodule Xqlite do
   Accepts a plain list for positional placeholders (`?1`, `?2`, …; the
   count must match, otherwise `{:error, {:invalid_parameter_count,
   %{provided: _, expected: _}}}`) or a keyword list for named placeholders.
-  An empty list counts as zero parameters, so it is refused by a statement
+  An empty list counts as zero parameters, so it is rejected by a statement
   that takes any. A keyword list must name every parameter of the statement
-  exactly once — see `query/4` for the three refusals, the 2 048 cap and for how a key names
+  exactly once — see `query/4` for the three rejections, the 2 048 cap and for how a key names
   a parameter — so one call hands over one complete list; two partial binds
   in a row no longer add up. A statement that takes parameters and is mid-run
   (see `clear_bindings/1`) answers `{:error, :statement_mid_run}` before the
@@ -2027,8 +2060,8 @@ defmodule Xqlite do
   A term that is no list at all answers
   `{:error, {:expected_list, %{reason: :not_a_list, value_type: kind}}}`, and
   a list whose tail is not `[]` the same tag with `:improper_tail`. `nil`
-  means no parameters here as it does at every other parameter door, so a
-  statement that takes one refuses it as a count mismatch.
+  means no parameters here as it does at every other function that takes parameters, so a
+  statement that takes one rejects it as a count mismatch.
 
   A binary value is stored as `TEXT` when its bytes are valid UTF-8 and as a
   `BLOB` otherwise. Pass `%Xqlite.Blob{bytes: bytes}` in either form — a
@@ -2039,14 +2072,14 @@ defmodule Xqlite do
 
     * `:type_extensions` — a list of `Xqlite.TypeExtension` modules;
       parameters are encoded through the chain before binding, as in
-      `query/4`, and a parameter an extension refuses returns
+      `query/4`, and a parameter an extension rejects returns
       `{:error, {:type_extension_refused, _}}`. Default: `[]`. The rows
       `step/1` and `multi_step/2` return are never decoded — run them
       through `Xqlite.TypeExtension.decode_rows/2` yourself, which answers
       `{:ok, rows}`, if you want the decoded form.
       The option itself must be a proper list of extension modules, or `nil`
       for none; anything else returns
-      `{:error, {:invalid_type_extensions, refusal}}` before anything
+      `{:error, {:invalid_type_extensions, rejection}}` before anything
       runs, as in `stream/4`.
   """
   @spec bind(stmt(), list() | keyword()) :: :ok | error()
@@ -2080,7 +2113,7 @@ defmodule Xqlite do
   before it in the same batch first, with `done: false`, and hold the error
   back. The next call that reads a row answers it — `step/1`,
   `multi_step/2` or its `:cancel_tokens` form, whichever the caller
-  uses — and every door then carries on at the row after the bad one:
+  uses — and every function then carries on at the row after the bad one:
   `:done`, or `done: true` with no rows, when the bad row was the last.
   `reset/1` drops a held-back error, a reset run being a new run, and
   `finalize/1` drops it and answers its own result; a caller that finalizes
@@ -2103,15 +2136,15 @@ defmodule Xqlite do
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
   stops on such an error rather than stepping on. The exception is a step
-  refused as busy while taking or committing its lock: SQLite keeps that run
+  rejected as busy while taking or committing its lock: SQLite keeps that run
   for a retry, so the statement stays mid-run and the next step carries on.
 
-  A statement that takes parameters is refused until something sets them:
+  A statement that takes parameters is rejected until something sets them:
   before a successful `bind/3` the answer is
   `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
-  parameters the statement takes. A bind the library refused binds nothing at
+  parameters the statement takes. A bind the library rejected binds nothing at
   all, so it leaves that answer as it found it and an earlier successful bind
-  stays in force; a bind SQLite itself refused after it had taken values is
+  stays in force; a bind SQLite itself rejected after it had taken values is
   the other way round, and leaves the statement unrunnable until a bind
   succeeds or `clear_bindings/1` runs. SQLite's own rule is the opposite — it
   reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
@@ -2152,7 +2185,7 @@ defmodule Xqlite do
   before it in the same batch first, with `done: false`, and hold the error
   back. The next call that reads a row answers it — `step/1`,
   `multi_step/2` or its `:cancel_tokens` form, whichever the caller
-  uses — and every door then carries on at the row after the bad one:
+  uses — and every function then carries on at the row after the bad one:
   `:done`, or `done: true` with no rows, when the bad row was the last.
   `reset/1` drops a held-back error, a reset run being a new run, and
   `finalize/1` drops it and answers its own result; a caller that finalizes
@@ -2175,15 +2208,15 @@ defmodule Xqlite do
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
   stops on such an error rather than stepping on. The exception is a step
-  refused as busy while taking or committing its lock: SQLite keeps that run
+  rejected as busy while taking or committing its lock: SQLite keeps that run
   for a retry, so the statement stays mid-run and the next step carries on.
 
-  A statement that takes parameters is refused until something sets them:
+  A statement that takes parameters is rejected until something sets them:
   before a successful `bind/3` the answer is
   `{:error, {:parameters_unbound, %{expected: n}}}`, `n` being the number of
-  parameters the statement takes. A bind the library refused binds nothing at
+  parameters the statement takes. A bind the library rejected binds nothing at
   all, so it leaves that answer as it found it and an earlier successful bind
-  stays in force; a bind SQLite itself refused after it had taken values is
+  stays in force; a bind SQLite itself rejected after it had taken values is
   the other way round, and leaves the statement unrunnable until a bind
   succeeds or `clear_bindings/1` runs. SQLite's own rule is the opposite — it
   reads an unbound parameter as NULL and runs — so `clear_bindings/1` is how
@@ -2219,7 +2252,7 @@ defmodule Xqlite do
   An unreadable-value error a batch held back is dropped here: the run it
   belonged to is over. After a step that failed outright a reset changes
   nothing — the statement was already back at the top — unless SQLite
-  refused the step as busy: it keeps that run for a retry, and a reset gives
+  rejected the step as busy: it keeps that run for a retry, and a reset gives
   it up.
   """
   @spec reset(stmt()) :: :ok | error()
@@ -2229,9 +2262,9 @@ defmodule Xqlite do
   Clears all parameter bindings on a prepared statement back to NULL.
 
   A statement that takes parameters and is mid-run — a step has answered a
-  row, or was refused as busy while taking or committing its lock (SQLite
+  row, or was rejected as busy while taking or committing its lock (SQLite
   keeps that run for a retry), and neither `:done`, another failure nor a
-  `reset/1` has followed — is refused with
+  `reset/1` has followed — is rejected with
   `{:error, :statement_mid_run}`, and keeps the values it was bound. SQLite
   itself allows the call there and would release the values in place, which
   leaves every row still to come reading NULL. Call `reset/1` first.
@@ -2248,10 +2281,11 @@ defmodule Xqlite do
   @doc """
   Returns the result column names of a prepared statement.
 
-  Live statements reflect SQLite's auto-reprepare after schema changes
-  (e.g. `SELECT *` re-expansion); finalized statements answer with the
-  prepare-time snapshot. A live name that is not UTF-8, which such a
-  re-prepare can bring in, answers
+  A live statement answers the names SQLite holds now: after a schema change
+  they stay the prepare-time names until the next step re-prepares the
+  statement (a `SELECT *` then gains a new column), and are the new ones from
+  then on; finalized statements answer with the prepare-time snapshot. A
+  live name that is not UTF-8, which such a re-prepare can bring in, answers
   `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` on every
   call while the statement stays usable; the snapshot was read at prepare
   and is always UTF-8.
@@ -2848,7 +2882,7 @@ defmodule Xqlite do
   ## Caveat — denying `:pragma` disables the PRAGMA functions
 
   `Xqlite.Pragma.get/2`, `Xqlite.Pragma.put/3`, `optimize/1`, `shrink_memory/1`
-  and the raw `XqliteNIF.get_pragma/2` and `set_pragma/3` run `PRAGMA` statements, which
+  and the raw `XqliteNIF.get_pragma/2` and `XqliteNIF.set_pragma/3` run `PRAGMA` statements, which
   SQLite authorizes as the `:pragma` action; the schema-introspection helpers
   lean on PRAGMAs too. Denying `:pragma` therefore makes all of them fail with
   `{:error, {:authorization_denied, _, _}}`. Deny it only when you intend to lock
@@ -2973,9 +3007,10 @@ defmodule Xqlite do
 
   A token is **single-use**: its flag is set once and never reset, so once
   `cancel_operation/1` has signalled it the token stays signalled. Reusing an
-  already-signalled token cancels the next operation the moment it starts —
-  create a fresh token per cancellable operation. See the "Cancel tokens are
-  single-use" section of the Gotchas guide.
+  already-signalled token cancels the next operation before its statement
+  runs, unless that statement is already mid-run (below) — create a fresh
+  token per cancellable operation. See the "Cancel tokens are single-use"
+  section of the Gotchas guide.
 
   A token already signalled when a call starts cancels it before its statement
   runs if that statement has not started: nothing is written, and an open
@@ -2985,9 +3020,10 @@ defmodule Xqlite do
   end of every step, once 8 VM instructions have run since the last check. A
   statement that reaches its end first answers its normal result. SQLite also
   checks while it compiles; a signal then takes effect once the statement
-  runs. A cancelled write rolls back the whole transaction, an explicit one
-  included, and turns autocommit back on; a cancelled read rolls back nothing.
-  See "A cancelled write rolls back the whole transaction" in the Gotchas guide.
+  runs. A write cancelled while it runs rolls back the whole transaction, an
+  explicit one included, and turns autocommit back on; a cancelled read rolls
+  back nothing. See "A write cancelled while it runs rolls back the whole
+  transaction" in the Gotchas guide.
   """
   @spec create_cancel_token() :: {:ok, reference()} | error()
   def create_cancel_token do
@@ -3015,13 +3051,14 @@ defmodule Xqlite do
 
   There is no un-signal: once signalled, the token stays cancelled for its
   lifetime. A signalled token is spent — passing it to another cancellable
-  operation cancels that operation immediately. Create a fresh token per
+  operation cancels that operation before its statement runs, unless the
+  statement is already mid-run (see `create_cancel_token/0`). Create a fresh token per
   operation; see the "Cancel tokens are single-use" section of the Gotchas
   guide.
 
   Takes one token, not a list: the cancellable operations take a list, this
   signals a single token. Anything else, a list of live tokens included, is
-  refused as the one element it was handed,
+  rejected as the one element it was handed,
   `{:error, {:invalid_cancel_tokens, %{reason: :bad_element, position: 1,
   value_type: type}}}`.
   """
@@ -3272,7 +3309,7 @@ defmodule Xqlite do
   `[:xqlite, :savepoint, :rollback_to]`.
 
   Note: this does NOT invoke SQLite's `rollback_hook` — that fires only
-  for outer-transaction rollbacks. Use `register_rollback_hook/2` for
+  for outer-transaction rollbacks. Use `XqliteNIF.register_rollback_hook/2` for
   outer rollback observability; this telemetry event is what's
   available for partial-rollback observability.
   """
@@ -3327,7 +3364,7 @@ defmodule Xqlite do
   category, value: value}}}` before the category is looked at; a term of the
   wrong kind raises `FunctionClauseError`.
 
-  `:length` bounds every TEXT or BLOB parameter a door binds
+  `:length` bounds every TEXT or BLOB parameter a function binds
   (`:value_too_large`) and every value SQLite reads or builds (`:too_big`).
 
   ## Examples

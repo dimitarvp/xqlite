@@ -312,5 +312,11 @@ defmodule Xqlite.OpenOptsTest do
       assert timeout == 8_000
       NIF.close(conn)
     end
+
+    test "a PRAGMA that fails at open ends the open with its error" do
+      path = tmp_db_path("open_opts")
+      :ok = File.write(path, String.duplicate("not a database ", 300))
+      assert {:error, {:cannot_execute_pragma, "auto_vacuum", _}} = Xqlite.open(path)
+    end
   end
 end

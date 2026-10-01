@@ -9,7 +9,7 @@ if Code.ensure_loaded?(Decimal) do
     This extension is **encode-only**: `decode/1` always returns `:skip`.
     Deciding that a numeric-looking string should become a `Decimal` (rather
     than a float, integer, or plain string) is application-specific divination
-    the library refuses to guess — load your stored decimals with an
+    the library does not attempt — load your stored decimals with an
     `Ecto.Type` or an explicit `Decimal.new/1` at the call site. So a column
     written through this extension reads back as what it is stored as, a
     string: the text carries no mark saying a `Decimal` wrote it, unlike the
@@ -23,9 +23,9 @@ if Code.ensure_loaded?(Decimal) do
     exists to preserve. A `TEXT` (or affinity-less) column keeps the exact
     digits.
 
-    ## What it refuses
+    ## What it rejects
 
-    Two kinds of `Decimal` have no plain text form and are refused rather
+    Two kinds of `Decimal` have no plain text form and are rejected rather
     than written as a word or a truncated number:
 
       * a value that is not a number — `NaN`, `-NaN`, `Infinity` and
@@ -43,7 +43,7 @@ if Code.ensure_loaded?(Decimal) do
         still leaves a whole part, and otherwise the leading zero plus the
         places after the point. 6178 is xqlite's own ceiling on every
         supported `:decimal` version: `Decimal.to_string/2` raises there on
-        3.x and renders any length on 2.x, and refusing at one fixed point
+        3.x and renders any length on 2.x, and rejecting at one fixed point
         keeps the answer the same on both.
 
     Everything within the ceiling is written exactly as

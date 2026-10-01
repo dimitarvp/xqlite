@@ -32,7 +32,7 @@ value
 ```
 
 Why atoms, and not floats? A BEAM float is an IEEE 754 double, but the runtime
-refuses to *construct* a non-finite one — there is no `+Inf`/`-Inf`/`NaN` term,
+will not *construct* a non-finite one — there is no `+Inf`/`-Inf`/`NaN` term,
 and the encoder that would build one rejects the value rather than returning it.
 Mapping the non-finite cases onto atoms keeps a read on the ordinary `{:ok, _}`
 path instead of turning a legitimate query into a raised exception.
@@ -73,13 +73,13 @@ column, or a TEXT tag. See
 [SQLite — Datatypes](https://www.sqlite.org/datatype3.html) for the five storage
 classes.
 
-### A non-finite `Decimal` is refused, not written as a word
+### A non-finite `Decimal` is rejected, not written as a word
 
 `Xqlite.TypeExtension.Decimal` has the same problem one level up, and answers
 it the other way. `Decimal` *can* hold `NaN` and the infinities, and
 `Decimal.to_string/2` writes them as the words `"NaN"`, `"-NaN"`, `"Infinity"`
 and `"-Infinity"` — text no later reader could tell apart from data somebody
-stored on purpose. So the extension refuses them:
+stored on purpose. So the extension rejects them:
 
 ```elixir
 {:ok, conn} = Xqlite.open_in_memory()
@@ -94,7 +94,7 @@ Xqlite.execute(conn, "INSERT INTO t VALUES (?1)", [value],
 #=>     reason: {:non_finite, :infinity}}}}
 ```
 
-The same refusal covers a number whose plain form would need more than 6178
+The same rejection covers a number whose plain form would need more than 6178
 digit characters, as `{:too_many_digits, %{digits: n, maximum: 6178}}`. Both
 happen in Elixir, before any SQL runs, so the table is untouched. Round the
 value, store its scientific form as your own TEXT, or keep a companion column
@@ -149,8 +149,12 @@ instant you stored, as a UTC `DateTime`.
 
 If you need `ORDER BY` to be chronological, store a sort-stable form:
 
-- **UTC-normalize before storing**, so every value carries the same offset
-  (`...Z`). Once all rows share one offset, lexical order *is* chronological.
+- **UTC-normalize before storing, at one precision**, so every value carries
+  the same offset (`...Z`) and the same number of fraction digits
+  (`DateTime.truncate(dt, :second)` on every value). A value with a fraction sorts ahead of one
+  without in the same second, `"...00:00:00.500000Z"` before
+  `"...00:00:00Z"`, because `.` sorts before `Z`. Once all rows share one
+  offset and one precision, lexical order *is* chronological.
 - **Use `Xqlite.TypeExtension.Instant`**, which stores a `DateTime` as an int64
   nanosecond count since the Unix epoch. Integers sort numerically, which is
   always chronological. (`Instant` is encode-only — it deliberately has no
@@ -166,7 +170,7 @@ once per call and binds by index. Reading the name at one index is itself a
 walk of the same list, so the map's cost grows faster than the number of
 names — 7.1 ms at 2 048 parameters on one machine. A keyword list is
 therefore taken only on a statement of at most 2 048 parameters; above that
-it is refused with
+it is rejected with
 `{:error, {:too_many_named_parameters, %{count: n, limit: 2048}}}` before any
 value is read. A positional list has no such cap: it binds each value
 straight at its index.
@@ -183,7 +187,7 @@ statement with thousands of parameters, write `?` and bind a positional list.
 
 `Xqlite.stream/4` hands each row back as a map keyed by column name, and a
 map cannot hold two entries under one key. A statement whose column names
-repeat is therefore refused when the stream opens, before any row is read:
+repeat is therefore rejected when the stream opens, before any row is read:
 
 ```elixir
 Xqlite.stream(conn, "SELECT a.id, o.id FROM accounts a, orders o")
@@ -199,7 +203,7 @@ SQLite also names a column that has no name of its own after the text that
 produced it, so `SELECT 1, 1` and `SELECT ?, ?` repeat as well. Give each
 column an alias and the statement streams.
 
-`Xqlite.query/4` and the raw stream doors (`XqliteNIF.stream_open/3` and
+`Xqlite.query/4` and the raw stream functions (`XqliteNIF.stream_open/3` and
 friends) answer rows as lists, so they keep both values and take any names.
 
 ### Mid-stream errors surface via `:on_error`
@@ -271,7 +275,8 @@ A cancellation token (`Xqlite.create_cancel_token/0`) wraps a flag that is set
 and it stays that way for the life of the token — signalling twice is
 idempotent, but there is no un-signal. So a token you have already signalled is
 *spent*: hand it to another cancellable operation and that operation is
-cancelled before its statement runs, so it does no work at all.
+cancelled before its statement runs, so it does no work at all — unless the
+statement is already mid-run, as the next section explains.
 
 ```elixir
 {:ok, token} = Xqlite.create_cancel_token()
@@ -310,16 +315,16 @@ Elixir alone cannot tell one from the other — the NIF is asked instead
 (`XqliteNIF.is_cancel_token/1`). Every entry point that takes tokens checks
 before it does any work: anything that is not a live token, a plain
 `make_ref()` and `:bogus` alike, and any list holding one, answers
-`{:error, {:invalid_cancel_tokens, refusal}}`, where `refusal` is
+`{:error, {:invalid_cancel_tokens, rejection}}`, where `rejection` is
 `%{reason: :bad_element, position: n, value_type: type}` naming the
 one-based position of the element that is no token and the kind of term it
 is, or `%{reason: :improper_tail, value_type: type}` for a list whose tail
 stops being one part-way through. `Xqlite.stream/4` answers it at stream
-open, the others at the call, and the raw `XqliteNIF` functions answer the
-same map — except for a term that is no list at all, which they refuse as
-`{:expected_list, _}`, taking a list and nothing else.
+open, the others at the call. The raw `XqliteNIF` functions take a list and
+nothing else: they answer the same map, and a term that is no list at all
+as `%{reason: :not_a_list, value_type: type}`.
 
-### A cancelled write rolls back the whole transaction
+### A write cancelled while it runs rolls back the whole transaction
 
 A token that is already signalled when a cancellable call starts cancels the
 call before its statement runs, as long as that statement has not started:
@@ -521,7 +526,7 @@ Every operation that touches a connection runs on the BEAM's *dirty* schedulers:
 the heavy ones (`query`, `execute`, `stream`, blob read/write, session and
 changeset work, `backup`, `serialize`, …) *and* the cheap state readers
 (`changes/1`, `total_changes/1`, `db_path/1`, `autocommit/1`,
-`transaction_state/2`, …). The readers are sub-microsecond in the intended usage,
+`txn_state/2`, …). The readers are sub-microsecond in the intended usage,
 but they take the connection mutex and so can block; keeping them on a dirty
 scheduler means a slow operation on a shared handle never ties up a *normal*
 scheduler, so the VM's normal-scheduler latency is protected however connections
@@ -601,7 +606,7 @@ worth stating plainly because the failure mode is silent-to-the-uninitiated: an
 in-place upgrade of the xqlite module simply *does not take*.
 
 Here is exactly what the VM does if you try. Attempting to reload the NIF module
-while it is already loaded is **refused, cleanly**:
+while it is already loaded is **rejected, cleanly**:
 
 ```elixir
 :code.load_file(XqliteNIF)
@@ -616,8 +621,8 @@ The reason is structural. The BEAM will not load a new NIF library into a module
 that already has old code with a loaded NIF library *unless the library provides
 an `upgrade` callback* — and the Rustler version xqlite builds against generates a
 NIF entry whose `upgrade` (and `reload`, and `unload`) callback is absent (NULL).
-So the second load is rejected before it can take effect. There is no back door:
-calling `:erlang.load_nif/2` directly from another module is refused too
+So the second load is rejected before it can take effect. There is no way around it:
+calling `:erlang.load_nif/2` directly from another module is rejected too
 (`{:error, {:bad_lib, ...}}`) — the only load path is the module's own `on_load`,
 which is exactly the path that fails.
 

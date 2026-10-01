@@ -412,6 +412,23 @@ defmodule Xqlite.TelemetryTest do
       assert triggered == expected
     end
 
+    test "statements, the authorizer, schema reads and transaction state emit nothing" do
+      {:ok, conn} = Xqlite.open_in_memory()
+      handler_id = attach_capture(expanded_catalogue())
+      {:ok, stmt} = Xqlite.prepare(conn, "SELECT ?1")
+      :ok = Xqlite.bind(stmt, [1])
+      {:row, [1]} = Xqlite.step(stmt)
+      :ok = Xqlite.reset(stmt)
+      :ok = Xqlite.finalize(stmt)
+      :ok = Xqlite.set_authorizer(conn, [:delete])
+      :ok = Xqlite.remove_authorizer(conn)
+      {:ok, [_main]} = Xqlite.schema_databases(conn)
+      {:ok, _state} = Xqlite.txn_state(conn, "main")
+      {:ok, true} = Xqlite.autocommit(conn)
+      refute_received {:telemetry_event, _, _, %{conn: ^conn}}
+      detach(handler_id)
+    end
+
     test "connection, statement, transaction and stream events fire" do
       handler_id = attach_capture(@reachable_operations)
 

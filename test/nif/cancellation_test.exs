@@ -107,6 +107,19 @@ defmodule Xqlite.NIF.CancellationTest do
                  NIF.query_cancellable(conn, @slow_query, [], [token])
       end
 
+      test "a reader on the same connection waits while a statement runs on it", %{conn: conn} do
+        {:ok, token} = NIF.create_cancel_token()
+        {:ok, _hook} = Xqlite.register_progress_hook(conn, self(), every_n: 1000)
+        slow = Task.async(fn -> NIF.query_cancellable(conn, @slow_query, [], [token]) end)
+        assert_receive {:xqlite_progress, _, _}, @await_timeout
+        reader = Task.async(fn -> NIF.autocommit(conn) end)
+        for _ <- 1..20, do: assert_receive({:xqlite_progress, _, _}, @await_timeout)
+        assert Task.yield(reader, 0) == nil
+        :ok = NIF.cancel_operation(token)
+        assert {:error, :operation_cancelled} = Task.await(slow, @await_timeout)
+        assert {:ok, true} = Task.await(reader, @await_timeout)
+      end
+
       test "normal query works after a cancelled query (handler unregistered)", %{conn: conn} do
         # --- Part 1: Run and cancel a query using the helper ---
         assert_cancellation(conn, fn conn, token ->

@@ -25,13 +25,13 @@ defmodule Xqlite.Blob do
 
   It is accepted everywhere a parameter value is accepted — in a positional
   list and as the value of a keyword pair — by `Xqlite.query/4`,
-  `Xqlite.execute/4`, their cancellable forms, `Xqlite.stream/4`,
-  `Xqlite.bind/3`, `Xqlite.explain_analyze/4` and the matching `XqliteNIF`
-  functions. `execute_batch/2` takes no parameters and is unaffected. No
+  `Xqlite.execute/4`, `Xqlite.stream/4`, `Xqlite.bind/3`,
+  `Xqlite.explain_analyze/4` and the matching `XqliteNIF` functions, their
+  cancellable forms included. `Xqlite.execute_batch/3` takes no parameters and is unaffected. No
   built-in type extension claims it, so it passes the chain untouched even
   with `:type_extensions` set.
 
-  `bytes` must be a binary. Anything else is refused with
+  `bytes` must be a binary. Anything else is rejected with
   `{:error, {:invalid_blob_bytes, %{position: n, type: t}}}`, where `n` is
   the parameter's one-based position in the list you passed and `t` names the
   term found in `bytes`: one of `:atom`, `:bitstring`, `:float`, `:function`,
@@ -40,9 +40,9 @@ defmodule Xqlite.Blob do
   a binary is accepted, so `t` is never `:binary`.
 
   `bytes` is a required key: `%Xqlite.Blob{}` without it does not compile, and
-  `struct!(Xqlite.Blob, [])` raises. The two doors that stay open are
-  `struct/2` with no `bytes` and `struct!(Xqlite.Blob, bytes: nil)` — both
-  build a wrapper holding `nil`, which the binder refuses at bind time with
+  `struct!(Xqlite.Blob, [])` raises. Two calls still build a wrapper without
+  bytes: `struct/2` with no `bytes` and `struct!(Xqlite.Blob, bytes: nil)`
+  both give one holding `nil`, which the binder rejects at bind time with
   `type: :atom`. A pattern is unaffected: `%Xqlite.Blob{}` still matches any
   wrapper.
 

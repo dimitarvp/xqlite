@@ -106,8 +106,8 @@ defmodule Xqlite.Telemetry do
   the list the caller passed, which is also the number bound: the
   type-extension chain rewrites values, never their count. A list whose
   tail is not a list counts the elements before that tail, and the NIF
-  below refuses the call. A parameter or a stored value an extension
-  refuses produces a normal stop event with `result_class: :error` and
+  below rejects the call. A parameter or a stored value an extension
+  rejects produces a normal stop event with `result_class: :error` and
   `error_reason: {:type_extension_refused, _}`, because the chain runs
   inside the span.
 
@@ -591,7 +591,7 @@ defmodule Xqlite.Telemetry do
       `[:xqlite, :hook, :*]` event's metadata. Useful when one
       handler receives bridged events from multiple connections.
     * `:progress` — keyword opts forwarded to
-      `register_progress_hook/3` (default `every_n: 1000`).
+      `Xqlite.register_progress_hook/3` (default `every_n: 1000`).
 
   An unknown or repeated key, here or in `:progress`, and a `:hooks` value that
   is neither `:all` nor a list of those kinds answer `{:error, {:invalid_option,

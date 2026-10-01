@@ -491,6 +491,7 @@ defmodule XqliteTest do
     end
 
     test "blocks FK violations when enabled", %{conn: conn} do
+      assert :ok = Xqlite.disable_foreign_key_enforcement(conn)
       assert :ok = Xqlite.enable_foreign_key_enforcement(conn)
 
       :ok =

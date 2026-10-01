@@ -2,7 +2,9 @@ defmodule Xqlite.StreamError do
   @moduledoc """
   Raised when a mid-stream fetch fails and the stream was opened with
   `on_error: :raise` (the default mode of `Xqlite.stream/4`), and with
-  `reason: :stream_consumed` when such a stream is enumerated a second time.
+  `reason: :stream_consumed` when such a stream is enumerated a second time,
+  or when its first pass fetches after a later one closed it (see
+  `Xqlite.stream/4`).
 
   Streaming is the one place where xqlite departs from its tuples-only
   contract: `Stream.resource/3` cannot hand an error back to the consumer

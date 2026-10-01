@@ -7,7 +7,7 @@ defmodule Xqlite.Schema.DatabaseInfo do
   Struct definition.
 
   * `:name` - The logical name of the database (e.g., "main", "temp", or attached name).
-  * `:file` - The absolute path to the database file, or `nil` for in-memory/temporary databases.
+  * `:file` - The absolute path to the database file, or `""` for an in-memory or temporary database.
   """
   @type t :: %__MODULE__{
           name: String.t(),

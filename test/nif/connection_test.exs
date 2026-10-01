@@ -47,6 +47,12 @@ defmodule Xqlite.NIF.ConnectionTest do
                  NIF.query(conn, "SELECT 1;", [])
       end
 
+      @tag capture_log: true
+      test "a reload of the NIF library is rejected, the connection kept", %{conn: conn} do
+        assert {:error, :on_load_failure} = :code.load_file(XqliteNIF)
+        assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT 1;", [])
+      end
+
       test "basic statement execution works", %{conn: conn} do
         assert {:ok, 0} =
                  NIF.execute(
@@ -101,6 +107,13 @@ defmodule Xqlite.NIF.ConnectionTest do
   end
 
   describe "concurrent access" do
+    test "every NIF on a normal scheduler takes no handle but a cancel token" do
+      assert {:ok, source} = File.read(Path.join(__DIR__, "../../native/xqlitenif/src/nif.rs"))
+      plain = Regex.scan(~r/#\[rustler::nif\]\s*fn \w+[^(]*\(([^)]*)/, source)
+      assert length(plain) == length(Regex.scan(~r/#\[rustler::nif\]/, source))
+      for [_fn, params] <- plain, do: refute(params =~ ~r/ResourceArc<Xqlite(?!CancelToken)/)
+    end
+
     test "multiple tasks inserting through the same connection handle" do
       {:ok, conn} = NIF.open_in_memory(":memory:")
       on_exit(fn -> NIF.close(conn) end)

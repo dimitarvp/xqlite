@@ -258,7 +258,7 @@ unsafe extern "C" fn progress_dispatch_callback(user_data: *mut c_void) -> c_int
             });
         }
         // SQLite runs this after a statement's last step too, past its commit
-        // (sqlite3.c:105815): interrupt only while the call's statement runs.
+        // (at `vdbe_return` in sqlite3VdbeExec): interrupt only while it runs.
         let running = || {
             // SAFETY: SQLite calls this under the connection Mutex.
             let busy = unsafe { dispatch.busy_statements(std::ptr::null_mut()) };

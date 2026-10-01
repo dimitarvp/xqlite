@@ -175,6 +175,10 @@ defmodule Xqlite.NIF.PragmaTest do
       assert {:ok, _} = NIF.set_pragma(conn, "cache_size", -1000)
     end
 
+    test "set_pragma writes a text value holding a quote as one literal", %{conn: conn} do
+      assert {:ok, "memory"} = NIF.set_pragma(conn, "journal_mode", "it's")
+    end
+
     # A name of digits passes the name check and then fails SQLite's parser,
     # which is the only way to reach the two arms that carry the statement.
     test "a refused PRAGMA names itself, whichever step refused it", %{conn: conn} do

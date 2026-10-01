@@ -13,10 +13,10 @@ use std::os::raw::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// What the busy slot holds right now, shared with the authorizer closure
-/// and with the error mapping in `connection.rs`. Every write happens under
-/// the connection Mutex; the closure reads these while SQLite prepares a
-/// statement, which holds that Mutex too.
+/// What the busy slot holds and whether xqlite runs a PRAGMA of its own, shared
+/// with the authorizer closure and with the error mapping in `connection.rs`.
+/// Every write happens under the connection Mutex; the closure reads these
+/// while SQLite prepares a statement, which holds that Mutex too.
 #[derive(Debug, Default)]
 pub(crate) struct BusySlotFlags {
     slot_held: AtomicBool,
@@ -105,8 +105,8 @@ pub(crate) struct BusySlotState {
     observers: Vec<(u64, LocalPid)>,
     next_handle: u64,
     start: Cell<Instant>,
-    /// The `busy_timeout` this slot displaced when it took SQLite's single
-    /// busy callback (`sqlite3_busy_handler` zeroes it); 0 when there was none.
+    /// The `busy_timeout` the slot keeps: the one it displaced on taking SQLite's
+    /// busy callback (which zeroes it), or the one `set_timeout` set since; 0 for none.
     fallback_timeout_ms: u64,
 }
 
@@ -241,8 +241,8 @@ fn apply_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteEr
     }
 }
 
-/// Put back the timeout the slot displaced, so emptying the slot undoes
-/// taking it. Callers must hold the connection Mutex.
+/// Hand the timeout the slot keeps back to SQLite's own handler as the slot
+/// empties. Callers must hold the connection Mutex.
 fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
     if timeout_ms == 0 {
         return Ok(());
@@ -396,7 +396,7 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
 }
 
 /// Swap the derived state in: empty states clear the C callback, restore
-/// the displaced timeout and clear the slot; non-empty states (re-)register
+/// the kept timeout and clear the slot; non-empty states (re-)register
 /// the callback pointing at the new allocation, remembering the timeout
 /// they displace when the slot was empty. Both paths reclaim the previous
 /// allocation and leave the connection's authorizer matching the result.

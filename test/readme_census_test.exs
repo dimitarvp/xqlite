@@ -71,6 +71,20 @@ defmodule Xqlite.ReadmeCensusTest do
     assert Map.get(@number_words, stated) == length(extension_modules())
   end
 
+  test "the README's Rust floor is the crate's rust-version" do
+    assert [[_whole, stated]] = Regex.scan(~r/needs Rust (\d+\.\d+) or newer/, readme())
+    assert {:ok, cargo} = File.read(Path.join(__DIR__, "../native/xqlitenif/Cargo.toml"))
+    assert [[_line, ^stated]] = Regex.scan(~r/^rust-version = "([\d.]+)"/m, cargo)
+  end
+
+  test "decimal is an optional dependency and no OpenTelemetry package is one" do
+    deps = Mix.Project.config()[:deps]
+    assert {:decimal, _requirement, opts} = List.keyfind(deps, :decimal, 0)
+    assert opts[:optional]
+    names = Enum.map(deps, &dep_name/1)
+    refute Enum.any?(names, &(&1 |> Atom.to_string() |> String.starts_with?("opentelemetry")))
+  end
+
   defp readme do
     assert {:ok, text} = File.read(Path.join([__DIR__, "..", "README.md"]))
     String.replace(text, "\r\n", "\n")
@@ -88,6 +102,9 @@ defmodule Xqlite.ReadmeCensusTest do
 
   defp member_name({:atom, _line, value}), do: value
   defp member_name(other), do: other
+
+  defp dep_name({name, _requirement}), do: name
+  defp dep_name({name, _requirement, _opts}), do: name
 
   defp extension_modules do
     [__DIR__, "..", "lib", "xqlite", "type_extension", "*.ex"]

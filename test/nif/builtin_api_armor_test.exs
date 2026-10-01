@@ -14,6 +14,13 @@ defmodule Xqlite.NIF.BuiltinApiArmorTest do
     NIF.close(conn)
   end
 
+  test "the build has no SQLITE_DEBUG, which the full lock ladder would need" do
+    {:ok, conn} = NIF.open_in_memory(":memory:")
+    assert {:ok, options} = NIF.compile_options(conn)
+    refute "DEBUG" in options
+    NIF.close(conn)
+  end
+
   for_each_opener "API_ARMOR raw FFI safety" do
     test "stream_close mid-iteration finalizes cleanly", %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE aa_mid (id INTEGER);")

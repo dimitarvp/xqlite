@@ -92,8 +92,12 @@ defmodule Xqlite.TypeExtensionInstantDurationTest do
 
       test "calendar-unit durations are skipped and fail binding structurally", %{conn: conn} do
         d = Duration.new!(month: 1)
+        assert :skip = TypeExtension.Duration.encode(Duration.new!(year: 1))
 
-        assert {:error, _structured} =
+        assert {:ok, 604_800_000_000_000} =
+                 TypeExtension.Duration.encode(Duration.new!(week: 1))
+
+        assert {:error, {:unsupported_data_type, :map}} =
                  Xqlite.execute(conn, "INSERT INTO t (v) VALUES (?1)", [d],
                    type_extensions: [TypeExtension.Duration]
                  )
