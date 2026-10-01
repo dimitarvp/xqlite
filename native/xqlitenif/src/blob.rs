@@ -1,9 +1,9 @@
-use crate::connection::{self, ChildHandle, XqliteConn};
+use crate::connection::{self, ChildHandle, Orphan, XqliteConn};
 use crate::error::XqliteError;
+use crate::release;
 use crate::session::to_owned_binary;
 use rusqlite::ffi;
 use rustler::{Resource, ResourceArc, resource_impl};
-use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -62,16 +62,8 @@ impl Resource for XqliteBlob {}
 
 impl Drop for XqliteBlob {
     fn drop(&mut self) {
-        if let Err(e) = close(self) {
-            // Errors from Drop cannot be propagated. Log to stderr — writeln!,
-            // never eprintln!: eprintln! panics on a broken stderr (EPIPE), and
-            // rustler 0.38 resource destructors have no catch_unwind, so a panic
-            // here would unwind into C and kill the VM.
-            let _ = writeln!(
-                std::io::stderr(),
-                "[xqlite] Error closing SQLite blob during resource drop: {e:?}"
-            );
-        }
+        let blob = ChildHandle::Blob(Arc::clone(&self.blob));
+        release::orphan(&self.conn_resource_arc, Orphan::Child(blob));
     }
 }
 
@@ -235,8 +227,8 @@ pub(crate) fn reopen(
 }
 
 /// Close the `sqlite3_blob` under the connection Mutex and drop it from the
-/// connection's child registry. Shared by the `blob_close` NIF and `Drop`;
-/// idempotent (a null pointer means already closed).
+/// connection's child registry, for the `blob_close` NIF; idempotent (a null
+/// pointer means already closed).
 ///
 /// Mirrors `stream::take_and_finalize_raw`: take the connection Mutex first,
 /// then claim the pointer under it, so no concurrent `sqlite3_*` runs on the
@@ -250,11 +242,7 @@ pub(crate) fn close(blob_handle: &XqliteBlob) -> Result<(), XqliteError> {
     if blob_handle.blob.load(Ordering::Acquire).is_null() {
         Ok(())
     } else {
-        let _conn_guard = blob_handle
-            .conn_resource_arc
-            .conn
-            .lock()
-            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        let _conn_guard = blob_handle.conn_resource_arc.lock_conn()?;
         let child = ChildHandle::Blob(Arc::clone(&blob_handle.blob));
         // SAFETY: the connection Mutex is held for the whole release, so no
         // concurrent `sqlite3_*` runs on this db, and the cell holds a blob
@@ -277,11 +265,7 @@ fn with_live_blob<F, R>(blob_handle: &ResourceArc<XqliteBlob>, f: F) -> Result<R
 where
     F: FnOnce(*mut ffi::sqlite3_blob, *mut ffi::sqlite3) -> Result<R, XqliteError>,
 {
-    let guard = blob_handle
-        .conn_resource_arc
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let guard = blob_handle.conn_resource_arc.lock_conn()?;
     let conn = guard.as_ref().ok_or(XqliteError::ConnectionClosed)?;
 
     let ptr = blob_handle.blob.load(Ordering::Acquire);

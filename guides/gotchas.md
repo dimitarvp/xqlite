@@ -530,7 +530,14 @@ changeset work, `backup`, `serialize`, …) *and* the cheap state readers
 but they take the connection mutex and so can block; keeping them on a dirty
 scheduler means a slow operation on a shared handle never ties up a *normal*
 scheduler, so the VM's normal-scheduler latency is protected however connections
-are used.
+are used. A handle the garbage collector frees, and a connection dropped without
+`close/1`, are released on xqlite's release thread or by the call that holds the
+connection, never on a normal scheduler. There are three exceptions, all in the
+destructor of a dropped connection, which runs on a normal scheduler: it first
+removes the WAL, progress and update callbacks, which point into the connection's
+own memory (each removal only clears a pointer inside SQLite); it closes the
+connection itself when a panic has left the connection's lock poisoned; and it
+closes the connection itself when the release thread has stopped.
 
 The intended usage is still **one connection per process** — a pool of
 independent handles, which is exactly how the Ecto adapter uses xqlite. If you

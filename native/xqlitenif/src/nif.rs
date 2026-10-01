@@ -1215,7 +1215,7 @@ fn stream_fetch_impl<'a>(
     let mut stream_definitively_exhausted = false;
 
     let conn_lock_guard = match stream_handle.conn_resource_arc.conn.lock() {
-        Ok(guard) => guard,
+        Ok(guard) => connection::ConnGuard::new(&stream_handle.conn_resource_arc, guard),
         Err(p_err_conn) => {
             // SAFETY: the Mutex is poisoned, so no other thread can enter
             // SQLite on this connection. The registry result is dropped: the

@@ -30,12 +30,14 @@
 //!
 //! Sending from a callback: erl_nif documents a NULL `caller_env` for
 //! a thread ERTS did not spawn. Every `enif_send(NULL, …)` in this
-//! crate runs inside a NIF scheduled `DirtyIo`, never on a normal
-//! scheduler — that is the case to keep avoiding. The six NIFs
-//! without that schedule (`create_cancel_token`, `cancel_operation`,
-//! `is_cancel_token`, `sqlite_version`, `register_log_hook`,
-//! `unregister_log_hook`) drive no SQLite callback, so none of them can
-//! reach such a send.
+//! crate runs inside a NIF scheduled `DirtyIo` or on the release thread
+//! (`release.rs`), never on a normal scheduler — that is the case to keep
+//! avoiding. The six NIFs without that schedule (`create_cancel_token`,
+//! `cancel_operation`, `is_cancel_token`, `sqlite_version`,
+//! `register_log_hook`, `unregister_log_hook`) drive no SQLite callback,
+//! and no resource destructor makes a SQLite call that can send, except a
+//! dropped connection's close in its own destructor: when its lock is
+//! poisoned, or when no release thread takes the close job.
 
 use crate::error::XqliteError;
 use rustler::sys::{ERL_NIF_TERM, ErlNifEnv, enif_make_atom_len, enif_make_new_binary};
@@ -121,9 +123,7 @@ where
         Err(payload) => {
             // writeln!, never eprintln!: eprintln! panics on a broken
             // stderr (EPIPE), and panicking again while already handling a
-            // panic at the C boundary is exactly what must not happen. This
-            // mirrors the resource-destructor logging in blob.rs /
-            // statement.rs / stream.rs.
+            // panic at the C boundary is exactly what must not happen.
             let _ = writeln!(
                 std::io::stderr(),
                 "[xqlite] panic caught in {what} at the SQLite FFI boundary ({}); returning {fallback}",
@@ -214,8 +214,8 @@ where
 
 /// Reclaim any box still held by the slot — used by `CallbackBoxes`'s `Drop`.
 ///
-/// That field drops after the connection field, whose drop runs
-/// `sqlite3_close`, so there's no active FFI side to tear down.
+/// That runs only once the connection has closed (see `CallbackBoxes`), so
+/// there's no active FFI side to tear down.
 pub(crate) fn drop_hook<T>(slot: &AtomicPtr<T>) {
     let ptr = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
     if !ptr.is_null() {
@@ -385,7 +385,8 @@ impl<T> HookList<T> {
 
     /// Reclaim any list still held by the slot. Used by this type's
     /// `Drop`: a `HookList` field of `XqliteConn` drops after its `conn`
-    /// field, so no callback can fire and dereference the snapshot.
+    /// field, or after its destructor removed the callback that reads it, so
+    /// no callback can fire and dereference the snapshot.
     pub(crate) fn drop_all(&self) {
         let ptr = self.head.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !ptr.is_null() {

@@ -37,9 +37,10 @@ impl UpdateSubscriber {
 /// # Safety
 ///
 /// `user_data` is the update `HookList` inside the connection's resource,
-/// registered once at open. The `conn` field is declared first and drops
-/// first, and rusqlite's close clears the update hook before `sqlite3_close`,
-/// so the list outlives every call. The two names are NUL-terminated strings
+/// registered once at open. Its destructor removes the hook before the
+/// `Connection` leaves it, a poisoned slot's `conn` field drops first, and
+/// rusqlite's close clears the update hook before `sqlite3_close`, so the
+/// list outlives every call. The two names are NUL-terminated strings
 /// SQLite keeps valid for the call; `make_binary` copies them into the
 /// message environment before the send.
 unsafe extern "C" fn update_callback(
@@ -75,9 +76,10 @@ unsafe extern "C" fn update_callback(
 ///
 /// # Safety
 ///
-/// `list` must outlive the SQLite Connection (live in the same
-/// `XqliteConn`, whose `Mutex<Connection>` field drops first by
-/// declaration order). Caller holds the connection Mutex.
+/// `list` lives in the same `XqliteConn` as the Connection, whose destructor
+/// removes the hook before the Connection leaves it (a poisoned slot's
+/// Connection drops first by declaration order). Caller holds the connection
+/// Mutex.
 pub(crate) unsafe fn install_callback(conn: &Connection, list: &HookList<UpdateSubscriber>) {
     let user_data = list as *const HookList<UpdateSubscriber> as *mut c_void;
     // SAFETY: see the doc comment.

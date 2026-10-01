@@ -159,6 +159,18 @@ answers its syntax error.
   use `Xqlite.put_busy_timeout/2`.
 - [A shared handle serializes](gotchas.md#give-each-process-its-own-connection-a-shared-handle-serializes):
   open one connection per process.
+- xqlite releases the handles the garbage collector frees on one release
+  thread for all connections, or in the call that holds the handle's
+  connection, before that call returns. A release that commits a write in
+  rollback-journal mode (a write statement stopped after a step, or a
+  read-write blob) can wait in that connection's busy handler: on the
+  release thread, releases for other idle connections wait behind it; in a
+  call, that call answers only after it. A connection dropped without
+  `close/1` runs its WAL checkpoint on the release thread. A release
+  finishes after the collection returns, so another connection can meet the
+  handle's lock right after the collection. Where release latency matters,
+  finalize, close and delete handles yourself, and close connections with
+  `close/1`.
 - [After a blob call answers code 4, close the handle](gotchas.md#after-a-blob-call-answers-code-4-close-the-handle):
   SQLite has ended it; open a new one.
 

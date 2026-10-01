@@ -1,11 +1,14 @@
 use crate::atoms;
 use crate::authorizer::{ActionKind, AuthorizerState};
 use crate::busy_handler::{BusySlotFlags, BusySlotState};
+use crate::cancel::XqliteCancelToken;
 use crate::commit_hook::{self, CommitSubscriber};
 use crate::error::XqliteError;
 use crate::hook_util::{self, HookList};
 use crate::progress_dispatch::{self, ProgressDispatch};
+use crate::release;
 use crate::rollback_hook::{self, RollbackSubscriber};
+use crate::session::OrphanSession;
 use crate::update_hook::{self, UpdateSubscriber};
 use crate::util::encode_text;
 use crate::wal_hook::{self, WalDispatch};
@@ -13,17 +16,20 @@ use rusqlite::ffi;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 
 /// One raw handle xqlite opened on a connection: a prepared statement (a
 /// stream owns one of those too) or an incremental blob. The cell is shared
 /// with the resource that owns the handle, so whoever reaches it first —
-/// the owner's finalize, its `Drop`, or the connection's own close — swaps
-/// it to null and hands the handle back to SQLite exactly once.
+/// the owner's finalize, the release its `Drop` queued, or the connection's
+/// own close — swaps it to null and hands the handle back to SQLite exactly once.
 #[derive(Debug)]
 pub(crate) enum ChildHandle {
     Stmt(Arc<AtomicPtr<ffi::sqlite3_stmt>>),
@@ -44,15 +50,16 @@ impl ChildHandle {
     ///
     /// The caller holds the owning connection's `Mutex` for the whole call —
     /// or holds it poisoned, which keeps every other thread out of SQLite on
-    /// that connection — and the cell holds null or a handle SQLite created
+    /// that connection, or owns its `Connection` as a dropped connection's
+    /// close job does — and the cell holds null or a handle SQLite created
     /// on that same connection.
-    unsafe fn release(&self) {
+    pub(crate) unsafe fn release(&self) {
         match self {
             ChildHandle::Stmt(cell) => {
                 let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
                 if !ptr.is_null() {
-                    // SAFETY: the swap gives exclusive ownership of `ptr`, and the
-                    // connection Mutex is held (fn contract). `sqlite3_finalize`
+                    // SAFETY: the swap gives exclusive ownership of `ptr`, and no
+                    // other thread is in SQLite (fn contract). `sqlite3_finalize`
                     // echoes the statement's last evaluation error and destroys it
                     // either way; that error already reached the caller at step
                     // time, so it is deliberately discarded here.
@@ -72,6 +79,13 @@ impl ChildHandle {
     }
 }
 
+/// A handle whose resource was collected, queued on its connection for release.
+#[derive(Debug)]
+pub(crate) enum Orphan {
+    Child(ChildHandle),
+    Session(OrphanSession),
+}
+
 #[derive(Debug)]
 pub(crate) struct XqliteConn {
     pub(crate) conn: Mutex<Option<Connection>>,
@@ -84,6 +98,10 @@ pub(crate) struct XqliteConn {
     // disconnects those itself during close. Lock order is always the
     // connection Mutex first, this one second.
     pub(crate) children: Mutex<HashMap<usize, ChildHandle>>,
+
+    /// What destructors queued (`release::orphan`). Its lock is taken alone,
+    /// to push, to take the whole list, or to look whether it is empty.
+    pub(crate) orphans: Mutex<Vec<Orphan>>,
 
     pub(crate) extensions_enabled: AtomicBool,
 
@@ -176,11 +194,136 @@ impl XqliteConn {
         }
         Ok(())
     }
+
+    /// The queue, its lock recovered when poisoned: a push or a take is never half done.
+    pub(crate) fn queue(&self) -> MutexGuard<'_, Vec<Orphan>> {
+        self.orphans.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the connection Mutex for a NIF call; see `ConnGuard`.
+    pub(crate) fn lock_conn(&self) -> Result<ConnGuard<'_>, XqliteError> {
+        let guard = self
+            .conn
+            .lock()
+            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        Ok(ConnGuard::new(self, guard))
+    }
+
+    /// Releases the handles queued on this connection; a session is deleted only
+    /// while the slot holds the `Connection`, and leaked once it does not.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds this connection's Mutex, and `open` says whether the slot
+    /// holds the `Connection`.
+    unsafe fn release_orphans(&self, open: bool) {
+        let orphans = std::mem::take(&mut *self.queue());
+        for orphan in orphans {
+            match orphan {
+                Orphan::Child(child) => {
+                    // SAFETY: forwarded from this function's own contract.
+                    if let Err(e) = unsafe { self.release_child(&child) } {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[xqlite] Error releasing a collected handle: {e:?}"
+                        );
+                    }
+                }
+                Orphan::Session(session) if open => drop(ManuallyDrop::into_inner(session.0)),
+                Orphan::Session(_closed) => {}
+            }
+        }
+    }
+
+    /// Releases the queued handles while any are queued and the Mutex is free:
+    /// the release thread's drain, and the look a holder takes after its unlock.
+    pub(crate) fn release_queued(&self) {
+        while !self.queue().is_empty() {
+            match self.conn.try_lock() {
+                // SAFETY: `guard` holds the connection Mutex.
+                Ok(guard) => unsafe { self.release_orphans(guard.is_some()) },
+                Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => break,
+            }
+        }
+    }
 }
 
-/// The boxes two raw callbacks read through the pointer SQLite hands back.
-/// `XqliteConn` declares this field after `conn`, so its `Drop` frees them
-/// only once the connection has closed, whatever rusqlite's close does first.
+/// A NIF call's hold of the connection Mutex. It releases the queued handles when
+/// the hold starts and when it ends (not while a panic unwinds: that hold poisons
+/// the lock), and looks again after the unlock: a destructor queues, then wakes
+/// the release thread, whose `try_lock` fails while the hold lasts.
+pub(crate) struct ConnGuard<'a> {
+    conn: &'a XqliteConn,
+    guard: ManuallyDrop<MutexGuard<'a, Option<Connection>>>,
+}
+
+impl<'a> ConnGuard<'a> {
+    pub(crate) fn new(
+        conn: &'a XqliteConn,
+        guard: MutexGuard<'a, Option<Connection>>,
+    ) -> Self {
+        // SAFETY: `guard` holds the connection Mutex.
+        unsafe { conn.release_orphans(guard.is_some()) };
+        let guard = ManuallyDrop::new(guard);
+        ConnGuard { conn, guard }
+    }
+}
+
+impl Deref for ConnGuard<'_> {
+    type Target = Option<Connection>;
+
+    fn deref(&self) -> &Option<Connection> {
+        &self.guard
+    }
+}
+
+impl DerefMut for ConnGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<Connection> {
+        &mut self.guard
+    }
+}
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            // SAFETY: `guard` still holds the connection Mutex.
+            unsafe { self.conn.release_orphans(self.guard.is_some()) };
+        }
+        // SAFETY: the guard is dropped here, once, and never read again.
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+        self.conn.release_queued();
+    }
+}
+
+impl Drop for XqliteConn {
+    /// Hands the connection to the release thread once the WAL hook, the progress
+    /// handler and the update hook, which point into this struct, are off. A
+    /// poisoned slot stays where it is and closes in the field's own drop.
+    fn drop(&mut self) {
+        if let Ok(slot) = self.conn.get_mut()
+            && let Some(conn) = slot.take()
+        {
+            // SAFETY: `&mut self` is the only reference, and each call only
+            // clears one of the connection's callback slots.
+            unsafe {
+                ffi::sqlite3_wal_hook(conn.handle(), None, std::ptr::null_mut());
+                ffi::sqlite3_progress_handler(conn.handle(), 0, None, std::ptr::null_mut());
+                ffi::sqlite3_update_hook(conn.handle(), None, std::ptr::null_mut());
+            }
+            let orphans = std::mem::take(&mut *self.queue());
+            let boxes = std::mem::take(&mut self.callback_boxes);
+            let close = release::Job::Close(Box::new((conn, boxes, orphans)));
+            if let Err(job) = release::send(close) {
+                job.run();
+            }
+        }
+    }
+}
+
+/// The boxes two raw callbacks read through the pointer SQLite hands back, freed
+/// only once the connection has closed, whatever rusqlite's close does first:
+/// `XqliteConn` declares this field after `conn`, and a dropped connection's close
+/// job frees it after the close.
 #[derive(Debug, Default)]
 pub(crate) struct CallbackBoxes {
     /// The busy slot: a single retry policy plus any number of observers, one
@@ -252,10 +395,12 @@ pub(crate) fn handle_open_result(
         Ok(conn) => {
             let commit_hook_list = Arc::new(HookList::new());
             let rollback_hook_list = Arc::new(HookList::new());
+            release::KEEP_LOADED.get_or_init(|| ResourceArc::new(XqliteCancelToken::new()));
 
             let handle = ResourceArc::new(XqliteConn {
                 conn: Mutex::new(Some(conn)),
                 children: Mutex::new(HashMap::new()),
+                orphans: Mutex::new(Vec::new()),
                 extensions_enabled: AtomicBool::new(false),
                 read_only,
                 callback_boxes: CallbackBoxes::default(),
@@ -276,8 +421,8 @@ pub(crate) fn handle_open_result(
             // SAFETY for the FFI hooks (wal, progress, update): the
             // WalDispatch / ProgressDispatch / update HookList references are
             // taken from inside the ResourceArc, so they live as long as
-            // `handle`. The conn (and any in-flight callback) drops before
-            // subscriber state via field declaration order.
+            // `handle`, whose destructor removes all three before the conn leaves
+            // it; a poisoned slot's conn drops first by field declaration order.
             {
                 let conn_guard = handle
                     .conn
@@ -287,7 +432,7 @@ pub(crate) fn handle_open_result(
                     // SAFETY: the conn Mutex is held here; the progress, WAL and
                     // update references live inside the same ResourceArc as
                     // `handle`, so they outlive any in-flight callback (see the
-                    // field-order note above).
+                    // note above).
                     unsafe {
                         progress_dispatch::install_callback(
                             conn_ref,
@@ -320,10 +465,7 @@ pub(crate) fn handle_open_result(
 }
 
 pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), XqliteError> {
-    let mut conn_guard = handle
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let mut conn_guard = handle.lock_conn()?;
 
     match conn_guard.as_ref() {
         // Second close is a no-op: the first one emptied the registry.
@@ -391,10 +533,7 @@ pub(crate) fn with_conn<F, R>(
 where
     F: FnOnce(&Connection) -> Result<R, XqliteError>,
 {
-    let conn_guard = handle
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn_guard = handle.lock_conn()?;
     match conn_guard.as_ref() {
         Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
         None => Err(XqliteError::ConnectionClosed),
@@ -409,10 +548,7 @@ pub(crate) fn with_conn_mut<F, R>(
 where
     F: FnOnce(&mut Connection) -> Result<R, XqliteError>,
 {
-    let mut conn_guard = handle
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let mut conn_guard = handle.lock_conn()?;
     match conn_guard.as_mut() {
         Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
         None => Err(XqliteError::ConnectionClosed),
@@ -475,6 +611,7 @@ mod tests {
         let handle = XqliteConn {
             conn: Mutex::new(Some(Connection::open_in_memory().expect("a connection"))),
             children: Mutex::new(HashMap::new()),
+            orphans: Mutex::new(Vec::new()),
             extensions_enabled: AtomicBool::new(false),
             read_only: false,
             callback_boxes: CallbackBoxes::default(),

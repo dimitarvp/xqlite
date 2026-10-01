@@ -67,9 +67,9 @@ impl WalSubscriber {
 ///
 /// # Safety
 ///
-/// `user_data` is the `*const WalDispatch` passed at open time; it
-/// lives as long as the `XqliteConn` (drop order: conn drops first,
-/// then the WalDispatch).
+/// `user_data` is the `*const WalDispatch` passed at open time, inside the
+/// `XqliteConn`, whose destructor removes this hook before the conn leaves it
+/// (a poisoned slot's conn drops first, then the WalDispatch).
 unsafe extern "C" fn wal_hook_callback(
     user_data: *mut c_void,
     db: *mut ffi::sqlite3,
@@ -156,9 +156,10 @@ unsafe fn send_wal_to_pid(pid: &LocalPid, db_name: &[u8], pages: c_int) {
 ///
 /// # Safety
 ///
-/// `dispatch` must outlive the SQLite Connection (live in the same
-/// `XqliteConn`, whose `Mutex<Connection>` field drops first by
-/// declaration order). Caller holds the connection Mutex.
+/// `dispatch` lives in the same `XqliteConn` as the Connection, whose
+/// destructor removes the hook before the Connection leaves it (a poisoned
+/// slot's Connection drops first by declaration order). Caller holds the
+/// connection Mutex.
 pub(crate) unsafe fn install_callback(conn: &Connection, dispatch: &WalDispatch) {
     let user_data = dispatch as *const WalDispatch as *mut c_void;
     // SAFETY: see the doc comment.

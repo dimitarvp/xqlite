@@ -38,6 +38,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A garbage-collected handle no longer stalls a scheduler while its
+  connection is busy.** When the garbage collector freed a statement,
+  stream, blob or session while another call held its connection, the
+  handle's destructor waited for that call on one of the BEAM's normal
+  schedulers, and every process queued on that scheduler waited with it.
+  A connection waiting for a database lock held by one of those processes
+  then answered a busy error at its busy timeout, and under a busy policy
+  that kept retrying, the node could hang. Such a handle is now queued on
+  its connection, and the call that holds the connection releases it
+  before returning.
+- **A garbage-collected write no longer commits on a scheduler.**
+  Releasing a write statement stopped after a step, or a read-write blob,
+  commits the write when the connection is in autocommit mode. That
+  commit ran inside the destructor on a normal scheduler. In
+  rollback-journal mode, while another connection read, it waited there
+  in the busy handler and held up every process on that scheduler; when
+  the reader's process was one of them, the wait ran to its timeout and
+  the write was rolled back. Every release now runs on xqlite's release
+  thread or in the call that holds the connection.
+- **A connection dropped without `close/1` no longer closes on a
+  scheduler.** Its destructor closed the SQLite handle on the normal
+  scheduler where the garbage collector freed it. The last connection to
+  a WAL database runs a checkpoint as it closes, which takes longer the
+  larger the WAL is, and every process on that scheduler waited for it.
+  The destructor now hands the connection to xqlite's release thread,
+  which closes it there.
+
 - **`Xqlite.enable_strict_table/2` runs the whole rebuild in one call, so
   another process sharing the connection can no longer act inside it.**
   The rebuild sent each of its statements as a call of its own, and
@@ -735,6 +762,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **Loading xqlite starts a release thread.** The NIF library starts an
+  OS thread of its own when it loads. The thread releases the handles the
+  garbage collector frees while their connection is idle, and closes the
+  connections dropped without `close/1`. If the thread cannot start, the
+  library fails to load.
+- **A handle the garbage collector frees is released after the
+  collection, not by its destructor.** A statement, stream, blob or
+  session is released by xqlite's release thread, or by the call that
+  holds its connection before that call returns, and the docs of
+  `Xqlite.prepare/2`, `XqliteNIF.stmt_prepare/2` and
+  `XqliteNIF.stmt_finalize/1` say so. The release thread serves every
+  connection, one release after another, so a release that waits in its
+  connection's busy handler, or the close of a dropped connection, delays
+  the releases of the others. A release is no longer finished when the
+  collection returns: another connection that meets the handle's lock
+  right after it, with no busy timeout, answers a busy error. A handle
+  collected while a call holds its connection is released by that call
+  before it returns, so that call can wait for the commit the release
+  makes. Where that matters, finalize, close and delete handles yourself,
+  and close connections with `close/1`, as the Known limitations guide
+  says.
+- **After its first connection opens, the NIF library stays loaded until
+  the node stops.** From the first connection it opens, it keeps a
+  resource of its own alive, so that the BEAM never unloads the code its
+  release thread runs, even after the module is purged.
 
 - **A transaction another process opens while the rebuild is starting
   answers `{:error, :transaction_in_progress}`.** The rebuild checked for

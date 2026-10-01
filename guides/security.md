@@ -253,10 +253,11 @@ handle is garbage-collected. Destructors are invoked by the BEAM's own
 memory management, *outside* the per-call panic guard, so a panic there
 would unwind into C and take down the VM. That boundary is known and
 designed around: every destructor xqlite ships is written to be
-panic-proof — teardown runs under the connection mutex, failures are
-logged rather than unwrapped, and nothing in the drop path calls an
-operation that can panic. It is a guarantee with a named edge, not an
-unconditional one.
+panic-proof — a destructor only queues its handle; the teardown runs under
+the connection mutex, on xqlite's release thread or in the call that holds
+it, failures are logged rather than unwrapped, and nothing in the drop
+path calls an operation that can panic. It is a guarantee with a named
+edge, not an unconditional one.
 
 ## Defense in depth: API_ARMOR
 

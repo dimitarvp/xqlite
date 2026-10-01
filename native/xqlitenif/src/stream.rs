@@ -1,5 +1,6 @@
-use crate::connection::{ChildHandle, XqliteConn};
+use crate::connection::{ChildHandle, Orphan, XqliteConn};
 use crate::error::XqliteError;
+use crate::release;
 use crate::util::{
     Params, decode_exec_keyword_params, decode_plain_list_params, sqlite_row_to_elixir_terms,
     walk_params,
@@ -8,7 +9,6 @@ use rusqlite::ffi;
 use rusqlite::types::Value;
 use rustler::{Env, Resource, ResourceArc, Term};
 use std::collections::HashMap;
-use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -73,8 +73,8 @@ impl XqliteStream {
 
 /// Finalizes a raw statement under the connection Mutex and drops it from the
 /// connection's child registry. Shared by every resource that owns a raw
-/// `sqlite3_stmt` (`XqliteStream`, `XqliteStatement`) — their Drop impls
-/// and explicit close/finalize NIFs all funnel here.
+/// `sqlite3_stmt` (`XqliteStream`, `XqliteStatement`): their explicit close and
+/// finalize NIFs funnel here, while their `Drop` queues the statement instead.
 ///
 /// The connection lock comes first and the cell is claimed under it: the
 /// connection's own close drains these same cells while holding that lock, so
@@ -91,10 +91,7 @@ pub(crate) fn take_and_finalize_raw(
     if atomic_raw_stmt.load(Ordering::Acquire).is_null() {
         Ok(())
     } else {
-        let _conn_guard = conn_resource_arc
-            .conn
-            .lock()
-            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        let _conn_guard = conn_resource_arc.lock_conn()?;
         let child = ChildHandle::Stmt(Arc::clone(atomic_raw_stmt));
         // SAFETY: the connection Mutex is held for the whole release, so no
         // other thread is inside a `sqlite3_*` call on this connection, and
@@ -121,18 +118,8 @@ pub(crate) unsafe fn finalize_stream_stmt_locked(
 
 impl Drop for XqliteStream {
     fn drop(&mut self) {
-        if let Err(e) = self.take_and_finalize_atomic_stmt() {
-            // Errors from Drop cannot be propagated. Log to stderr —
-            // writeln!, never eprintln!: eprintln! panics on a broken
-            // stderr (EPIPE), and rustler 0.38 resource destructors have
-            // no catch_unwind, so a panic here would unwind into C and
-            // kill the VM. A failed finalize here is a potential resource
-            // leak if SQLite itself failed to finalize.
-            let _ = writeln!(
-                std::io::stderr(),
-                "[xqlite] Error finalizing SQLite statement during stream resource drop: {e:?}"
-            );
-        }
+        let stmt = ChildHandle::Stmt(Arc::clone(&self.atomic_raw_stmt));
+        release::orphan(&self.conn_resource_arc, Orphan::Child(stmt));
     }
 }
 

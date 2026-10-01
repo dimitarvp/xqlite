@@ -1624,8 +1624,9 @@ defmodule XqliteNIF do
   never compiled, so a trailing comment, extra semicolons and
   whitespace are accepted; `query/3`, `execute/3`, `stream_open/3` and
   `explain_analyze/3` apply the same rule. The returned handle must
-  eventually be finalized via `stmt_finalize/1` (garbage collection also
-  finalizes abandoned handles).
+  eventually be finalized via `stmt_finalize/1` (an abandoned handle is also
+  finalized after garbage collection, by xqlite's release thread, or before the
+  call that holds the connection returns).
 
   A result column name that is not UTF-8 answers
   `{:column_name_not_utf8, %{column: index, name: bytes}}` and the statement
@@ -1796,7 +1797,8 @@ defmodule XqliteNIF do
 
   Most users want `Xqlite.finalize/1`. Idempotent — finalizing an
   already-finalized statement returns `:ok`. Abandoned statements are also
-  finalized when garbage-collected, but explicit finalization frees the
+  finalized after garbage collection, by xqlite's release thread, or before the
+  call that holds the connection returns, but explicit finalization frees the
   handle at once. Closing the connection finalizes every statement still
   open on it: every later step, bind, reset and clear answers
   `{:error, :connection_closed}`, this answers `:ok`, and

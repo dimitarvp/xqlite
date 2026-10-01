@@ -1975,7 +1975,8 @@ defmodule Xqlite do
 
   Closing the connection finalizes any statement still outstanding on it, so
   the SQLite handle is freed either way; an abandoned statement is finalized
-  by garbage collection. After an explicit `Xqlite.close/1` every operation
+  after garbage collection, by xqlite's release thread, or before the call that
+  holds the connection returns. After an explicit `Xqlite.close/1` every operation
   on such a statement returns `{:error, :connection_closed}` and
   `finalize/1` returns `:ok`.
 

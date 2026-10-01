@@ -1,12 +1,14 @@
 use crate::atoms;
-use crate::connection::{self, XqliteConn};
+use crate::connection::{self, Orphan, XqliteConn};
 use crate::error::XqliteError;
+use crate::release;
 use rusqlite::Connection;
 use rusqlite::session::{ConflictAction, ConflictType, Session};
 use rustler::{Resource, ResourceArc, resource_impl};
 use std::io::Cursor;
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub(crate) struct XqliteSession {
     // SAFETY: the `Session<'static>` is sound because `conn_resource_arc`
@@ -15,8 +17,9 @@ pub(crate) struct XqliteSession {
     // via transmute at construction.
     //
     // Lifetime is NOT the same as exclusion. Every `sqlite3session_*` call
-    // goes through `with_session`/`with_session_mut`/`close`, which hold the
-    // *connection* Mutex for the whole duration of the raw call. The
+    // goes through `with_session`/`with_session_mut`/`close` or a queued
+    // session's release, which hold the *connection* Mutex (or own the
+    // `Connection`) for the whole duration of the raw call. The
     // per-session Mutex only provides interior mutability and guards the
     // `Option` for explicit delete.
     pub(crate) session: Mutex<Option<Session<'static>>>,
@@ -34,12 +37,34 @@ impl Resource for XqliteSession {}
 
 impl Drop for XqliteSession {
     fn drop(&mut self) {
-        let _ = close(self);
+        let slot = self
+            .session
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(session) = slot.take() {
+            let orphan = Orphan::Session(OrphanSession(ManuallyDrop::new(session)));
+            release::orphan(&self.conn_resource_arc, orphan);
+        }
     }
 }
 
-/// Delete the `sqlite3_session` under the connection Mutex. Shared by the
-/// `session_delete` NIF and `Drop`; idempotent.
+/// A collected session, queued on its connection. rusqlite deletes a `Session` as
+/// it drops; held here, one is deleted only by a release that holds the connection
+/// Mutex or owns the `Connection`, and leaked anywhere else.
+pub(crate) struct OrphanSession(pub(crate) ManuallyDrop<Session<'static>>);
+
+// SAFETY: xqlite sets no table filter, so a session is its raw handle, which only
+// a release under the connection Mutex or a close job owning the Connection touches.
+unsafe impl Send for OrphanSession {}
+
+impl std::fmt::Debug for OrphanSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OrphanSession")
+    }
+}
+
+/// Delete the `sqlite3_session` under the connection Mutex, for the
+/// `session_delete` NIF; idempotent.
 ///
 /// Lock order — connection Mutex, then the per-session guard — matches
 /// `with_session`. Unlike a blob or statement, a session registers no
@@ -48,7 +73,7 @@ impl Drop for XqliteSession {
 /// use-after-free. So we delete ONLY while the connection is still open; on a
 /// closed or poisoned connection we leak the (small) session object instead.
 pub(crate) fn close(session_handle: &XqliteSession) -> Result<(), XqliteError> {
-    let conn_lock = session_handle.conn_resource_arc.conn.lock();
+    let conn_lock = session_handle.conn_resource_arc.lock_conn();
     // Recover the per-session guard even if poisoned: the session MUST be torn
     // down here (leak-or-delete), never left for the field's default `Drop` to
     // delete without the connection lock.
@@ -85,11 +110,7 @@ where
     // Raw-handle locking rule: every `sqlite3session_*` call must hold the
     // connection Mutex. Acquire it first (order conn -> session, matching
     // `close`), prove the connection open, then take the per-session guard.
-    let conn_guard = session_handle
-        .conn_resource_arc
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn_guard = session_handle.conn_resource_arc.lock_conn()?;
     if conn_guard.is_none() {
         return Err(XqliteError::ConnectionClosed);
     }
@@ -115,11 +136,7 @@ pub(crate) fn with_session_mut<F, R>(
 where
     F: FnOnce(&mut Session<'static>) -> Result<R, XqliteError>,
 {
-    let conn_guard = session_handle
-        .conn_resource_arc
-        .conn
-        .lock()
-        .map_err(|e| XqliteError::LockError(e.to_string()))?;
+    let conn_guard = session_handle.conn_resource_arc.lock_conn()?;
     if conn_guard.is_none() {
         return Err(XqliteError::ConnectionClosed);
     }

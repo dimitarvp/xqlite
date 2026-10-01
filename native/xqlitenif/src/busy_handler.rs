@@ -129,8 +129,9 @@ impl std::fmt::Debug for BusySlotState {
 ///
 /// `user_data` must point to a `BusySlotState` previously installed and
 /// not yet reclaimed. SQLite guarantees the pointer is exactly what we
-/// passed to `sqlite3_busy_handler`, and the connection Mutex (held by
-/// the stepping caller) excludes concurrent mutation.
+/// passed to `sqlite3_busy_handler`, and the connection Mutex held by the
+/// stepping caller, or a dropped connection's close job owning the
+/// `Connection`, excludes concurrent mutation.
 unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_int {
     // Guard the body against a future panic: this callback is registered
     // via raw `ffi::sqlite3_busy_handler`, so — unlike rusqlite's own busy

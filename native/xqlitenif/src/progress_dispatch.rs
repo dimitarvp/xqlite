@@ -209,9 +209,9 @@ pub(crate) fn require_idle(conn: &rusqlite::Connection) -> Result<(), XqliteErro
 ///
 /// # Safety
 ///
-/// `dispatch` must outlive the SQLite Connection (i.e., live in the
-/// same `ResourceArc<XqliteConn>` whose Mutex<Connection> field
-/// drops first on Drop). Caller holds the connection Mutex.
+/// `dispatch` lives in the same `ResourceArc<XqliteConn>` as the Connection,
+/// whose destructor removes the handler before the Connection leaves it (a
+/// poisoned slot's Connection drops first). Caller holds the connection Mutex.
 pub(crate) unsafe fn install_callback(
     conn: &rusqlite::Connection,
     dispatch: &ProgressDispatch,

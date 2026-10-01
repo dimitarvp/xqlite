@@ -310,6 +310,7 @@ mod nif;
 mod pragma;
 mod progress_dispatch;
 mod query;
+mod release;
 mod rollback_hook;
 mod schema;
 mod session;
@@ -323,7 +324,7 @@ mod wal_hook;
 use rustler::{Env, Term};
 
 fn on_load(_env: Env, _info: Term) -> bool {
-    true
+    release::start()
 }
 
 rustler::init!("Elixir.XqliteNIF", load = on_load);

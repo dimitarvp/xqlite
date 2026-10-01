@@ -1,11 +1,11 @@
 use crate::cancel::cancel_if_signalled;
-use crate::connection::{self, XqliteConn};
+use crate::connection::{self, ChildHandle, Orphan, XqliteConn};
 use crate::error::{self, XqliteError};
+use crate::release;
 use crate::stream::take_and_finalize_raw;
 use rusqlite::ffi;
 use rustler::{Resource, ResourceArc};
 use std::ffi::{CStr, CString};
-use std::io::Write;
 use std::os::raw::{c_char, c_int};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -296,9 +296,9 @@ fn tail_offset(start: *const c_char, tail: *const c_char, len: c_int) -> Option<
 /// The raw `sqlite3_stmt` lives in an `AtomicPtr` (null ⇒ finalized), shared
 /// with the connection's child registry. The owning connection's
 /// `ResourceArc` keeps the connection *resource* alive — not the SQLite
-/// handle itself — so every statement operation, including the GC-driven
-/// `Drop`, can always lock the connection Mutex per the raw-handle locking
-/// rule. Closing the connection first finalizes this statement through the
+/// handle itself — so every statement operation can always lock the connection
+/// Mutex per the raw-handle locking rule, and the GC-driven `Drop` can queue the
+/// statement on it. Closing the connection first finalizes this statement through the
 /// registry: its operations then fail with `ConnectionClosed` and its
 /// `finalize` finds a null cell and answers `:ok`.
 pub(crate) struct XqliteStatement {
@@ -416,11 +416,7 @@ impl XqliteStatement {
     where
         F: FnOnce(*mut ffi::sqlite3_stmt, *mut ffi::sqlite3) -> Result<R, XqliteError>,
     {
-        let guard = self
-            .conn_resource_arc
-            .conn
-            .lock()
-            .map_err(|e| XqliteError::LockError(e.to_string()))?;
+        let guard = self.conn_resource_arc.lock_conn()?;
         let conn = guard.as_ref().ok_or(XqliteError::ConnectionClosed)?;
 
         let ptr = self.atomic_raw_stmt.load(Ordering::Acquire);
@@ -438,17 +434,8 @@ impl XqliteStatement {
 
 impl Drop for XqliteStatement {
     fn drop(&mut self) {
-        if let Err(e) = self.take_and_finalize() {
-            // Errors from Drop cannot be propagated. Log to stderr —
-            // writeln!, never eprintln!: eprintln! panics on a broken
-            // stderr, and rustler 0.38 resource destructors have no
-            // catch_unwind, so a panic here would unwind into C and kill
-            // the VM.
-            let _ = writeln!(
-                std::io::stderr(),
-                "[xqlite] Error finalizing SQLite statement during statement resource drop: {e:?}"
-            );
-        }
+        let stmt = ChildHandle::Stmt(Arc::clone(&self.atomic_raw_stmt));
+        release::orphan(&self.conn_resource_arc, Orphan::Child(stmt));
     }
 }
 
