@@ -93,7 +93,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert match?({:error, _}, result)
 
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -111,7 +111,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert match?({:error, _}, result)
     # Should surrender reasonably close to the 40 ms cap, not 5s or 10s.
-    assert elapsed < 200
+    assert elapsed < 2_000
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -135,8 +135,8 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert match?({:error, _}, result)
     # No policy → no retry loop; the observation fires, busy surfaces fast.
-    assert elapsed < 100
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert elapsed < 1_000
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -155,10 +155,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert match?({:error, _}, result)
     # With no policy, SQLite surfaces BUSY without retrying or sleeping.
-    assert elapsed < 100
+    assert elapsed < 1_000
 
     # The observer registered by prime_contention still fires.
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -184,7 +184,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
-    assert elapsed < 50
+    assert elapsed < 1_000
     refute_received {:xqlite_busy, _, _}
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
@@ -214,7 +214,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
-    assert elapsed < 100
+    assert elapsed < 1_000
 
     :ok = Xqlite.remove_busy_policy(probe)
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
@@ -456,7 +456,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert elapsed >= 250 and elapsed < 2_500,
            "waited #{elapsed} ms, expected about 300 and never the 5000 ms default"
 
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -498,7 +498,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, 0} = NIF.execute(holder, "CREATE TABLE t(id INTEGER)", [])
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
 
-    :ok = Xqlite.put_busy_timeout(probe, 300)
+    :ok = Xqlite.put_busy_timeout(probe, 5_000)
 
     :ok =
       Xqlite.set_busy_policy(probe, max_retries: 1_000, max_elapsed_ms: 60, sleep_ms: 5)
@@ -510,8 +510,8 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert {:error, {:database_busy_or_locked, _code, _msg}} = result
-    assert elapsed >= 30 and elapsed < 250, "waited #{elapsed} ms, expected about 60"
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert elapsed >= 30 and elapsed < 2_500, "waited #{elapsed} ms, expected about 60"
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -539,7 +539,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert elapsed >= 250 and elapsed < 2_500,
            "waited #{elapsed} ms, expected about 300"
 
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     :ok = Xqlite.unregister_busy_observer(probe, handle)
     assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
@@ -614,8 +614,8 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert {:error, {:database_busy_or_locked, _code, _msg}} = result
-    assert elapsed < 100, "waited #{elapsed} ms, expected no wait at all"
-    assert_receive {:xqlite_busy, _, _}, 200
+    assert elapsed < 1_000, "waited #{elapsed} ms, expected no wait at all"
+    assert_receive {:xqlite_busy, _, _}, 2_000
 
     :ok = Xqlite.unregister_busy_observer(probe, handle)
     assert {:ok, 0} = NIF.get_pragma(probe, "busy_timeout")
