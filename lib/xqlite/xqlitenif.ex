@@ -932,7 +932,11 @@ defmodule XqliteNIF do
     - `:column_sequence` (integer()): 0-based index of the column within the FK (for compound FKs).
     - `:target_table` (String.t()): Name of the table referenced by the foreign key.
     - `:from_column` (String.t()): Name of the column in the current table that is part of the FK.
-    - `:to_column` (String.t() | nil): Name of the column in the target table referenced.
+    - `:to_column` (String.t() | nil): Name of the column in the target table referenced,
+      or `nil` when the REFERENCES clause names none. SQLite then uses the parent's
+      primary key (`schema_columns/2` gives it in `primary_key_index` order), and a parent
+      without one of that many columns makes every write the key checks answer
+      `{:error, {:sqlite_failure, 1, 1, _}}`, SQLite's "foreign key mismatch".
     - `:on_update` (atom): Action on update (e.g., `:cascade`, `:set_null`).
     - `:on_delete` (atom): Action on delete (e.g., `:restrict`, `:no_action`).
     - `:match_clause` (atom): The `MATCH` clause type (e.g., `:none`, `:simple`).
@@ -2133,8 +2137,18 @@ defmodule XqliteNIF do
   @doc """
   Captures a changeset from the session.
 
-  Returns a binary containing all INSERT/UPDATE/DELETE operations
-  recorded since the session was created or the last changeset capture.
+  Returns a binary holding the net change of every row of each attached table
+  since that table was attached, built from what the database holds at the
+  capture; only tables with a PRIMARY KEY are recorded, and no row whose key is
+  NULL. A capture clears nothing, so a later one holds again each earlier change
+  that still has a net effect, which conflicts on a replica that took an earlier
+  capture: `:abort` answers `{:error, {:sqlite_failure, 4, 4, _}}` and applies
+  nothing, or `:ok` when the later capture holds no such change, and `:omit` skips
+  the later update of a row shipped before. No strategy deletes a row inserted,
+  shipped and then deleted, since no capture holds a row with no net change. To
+  ship changes in rounds, start a new session after each capture
+  (`session_delete/1`, `session_new/1`, `session_attach/2`); a write between the
+  capture and the new attach reaches no capture.
   """
   @spec session_changeset(session :: reference()) :: {:ok, binary()} | Xqlite.error()
   def session_changeset(_session), do: err()
@@ -2143,13 +2157,16 @@ defmodule XqliteNIF do
   Captures a patchset from the session.
 
   Like `session_changeset/1` but the patchset format is more compact —
-  it omits original primary key values for UPDATE operations.
+  it omits original primary key values for UPDATE operations. It accumulates
+  the same way: a capture clears nothing.
   """
   @spec session_patchset(session :: reference()) :: {:ok, binary()} | Xqlite.error()
   def session_patchset(_session), do: err()
 
   @doc """
-  Returns `{:ok, true}` if the session has recorded no changes.
+  Returns `{:ok, true}` if the session has recorded no changes. A capture does
+  not empty it, and it answers `{:ok, false}` once any change was recorded, even
+  when the changes cancel out and a capture holds nothing.
   """
   @spec session_is_empty(session :: reference()) :: {:ok, boolean()} | Xqlite.error()
   def session_is_empty(_session), do: err()
@@ -2166,15 +2183,25 @@ defmodule XqliteNIF do
   Applies a changeset binary to a connection.
 
   `conflict_strategy` determines behavior on conflicts:
-  - `:omit` — skip conflicting changes
+  - `:omit` — silently skip each change whose row in the target differs or is missing,
+    whose key is taken, or that would break a CHECK, NOT NULL or UNIQUE constraint
   - `:replace` — overwrite with the changeset's values. SQLite only permits
-    replacement for `DATA` and `CONFLICT` conflicts; for a `NOTFOUND`,
-    `CONSTRAINT`, or `FOREIGN_KEY` conflict there is nothing to overwrite, so
+    replacement for `DATA` and `CONFLICT` conflicts; for a `NOTFOUND` or
+    `CONSTRAINT` conflict there is nothing to overwrite, so
     the entire apply is aborted and rolled back, returning an error. The
     offending change is not silently skipped — that is `:omit`, not `:replace`.
   - `:abort` — abort the entire apply operation
 
   Any other atom returns `{:error, {:invalid_conflict_strategy, strategy}}`.
+
+  A changeset that would leave the connection holding a foreign-key violation,
+  its own or one the caller's open transaction holds, is rolled back whole under
+  every strategy and answers `{:error, {:constraint_violation,
+  :constraint_foreign_key, details}}`: SQLite checks the keys once, after the last
+  change, so a conflict that stops `:abort` or `:replace` first answers
+  `{:error, {:sqlite_failure, 4, 4, _}}`. With the target's key checks off
+  (`Xqlite.disable_foreign_key_enforcement/1`, outside a transaction only) such a
+  changeset commits. Every apply turns the connection's `defer_foreign_keys` off.
   """
   @spec changeset_apply(
           conn :: Xqlite.conn(),
@@ -2224,7 +2251,7 @@ defmodule XqliteNIF do
 
   The read is a window over the bytes that are there: it answers fewer bytes
   than asked for when the blob ends first, and `{:ok, ""}` when `offset` is at
-  or past the end, without asking SQLite anything. A short answer therefore
+  or past the end, without reading any bytes. A short answer therefore
   means the blob ended, not that the read failed — a caller that wants the
   size asks `blob_size/1`. A `length` of zero answers `{:ok, ""}` too.
 
@@ -2247,8 +2274,8 @@ defmodule XqliteNIF do
   Writes `data` to the blob starting at `offset`.
 
   Cannot change the blob size — the data must fit within the existing
-  blob. Use `zeroblob()` in SQL to pre-allocate the desired size. A write that
-  would run past the end writes nothing and returns `{:error,
+  blob. Use `zeroblob()` in SQL to pre-allocate the desired size. On a live
+  handle, a write that would run past the end writes nothing and returns `{:error,
   {:blob_write_out_of_bounds, %{offset: offset, byte_size: byte_size(data),
   blob_size: size}}}`, where a read of the same range answers the bytes that
   are there.
@@ -2258,7 +2285,15 @@ defmodule XqliteNIF do
   def blob_write(_blob, _offset, _data), do: err()
 
   @doc """
-  Returns the size of the blob in bytes.
+  Returns the size of the blob in bytes, as SQLite fixed it at `blob_open/6` or
+  the last `blob_reopen/2`. Once SQLite has ended the handle, every read, write,
+  size and reopen answers `{:error, {:sqlite_failure, 4, _, _}}` until
+  `blob_close/1`. It ends when a read, write or size call meets its changed row
+  (that call answers the error too), when a reopen fails, and when a transaction
+  or savepoint rolls back: a read-write handle ends even if it was opened
+  before the `BEGIN` and wrote nothing, a read-only one only if the rollback undid
+  a schema change. A reopen before any read, write or size call still moves a
+  handle whose row changed.
   """
   @spec blob_size(blob :: reference()) :: {:ok, non_neg_integer()} | Xqlite.error()
   def blob_size(_blob), do: err()
@@ -2266,7 +2301,8 @@ defmodule XqliteNIF do
   @doc """
   Moves the blob handle to a different row in the same table/column.
 
-  More efficient than closing and re-opening for sequential row access.
+  More efficient than closing and re-opening for sequential row access. A
+  reopen that fails ends the handle (see `blob_size/1`).
   """
   @spec blob_reopen(blob :: reference(), row_id :: integer()) :: :ok | Xqlite.error()
   def blob_reopen(_blob, _row_id), do: err()

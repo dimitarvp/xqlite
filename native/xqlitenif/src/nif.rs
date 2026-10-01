@@ -18,7 +18,7 @@ use crate::transaction;
 use crate::util::{MaybeTextArg, NameOrAll, TextArg, singular_ok_or_error_tuple};
 use rusqlite::Connection;
 use rusqlite::ffi;
-use rusqlite::session::{ConflictAction, ConflictType};
+use rusqlite::session::ConflictAction;
 use rustler::{
     Encoder, Env, ResourceArc, Term,
     types::{
@@ -1726,10 +1726,10 @@ fn load_extension<'a>(
     path: TextArg,
     entry_point: MaybeTextArg,
 ) -> Term<'a> {
-    if !handle.extensions_enabled.load(Ordering::Acquire) {
-        return (atoms::error(), atoms::extension_loading_disabled()).encode(env);
-    }
     let result = connection::with_conn(&handle, |conn| {
+        if !handle.extensions_enabled.load(Ordering::Acquire) {
+            return Err(XqliteError::ExtensionLoadingDisabled);
+        }
         // SAFETY: Extension loading was explicitly enabled by the caller via
         // enable_load_extension. The path points to a user-provided shared
         // library — the user accepts the trust boundary.
@@ -2002,35 +2002,7 @@ fn changeset_apply<'a>(
     };
 
     let result = connection::with_conn(&handle, |conn| {
-        let bytes = changeset_binary.as_slice();
-        let mut cursor = Cursor::new(bytes);
-        let strategy_code = strategy as i32;
-        conn.apply_strm(
-            &mut cursor,
-            None::<fn(&str) -> bool>,
-            move |conflict_type, _item| {
-                if strategy_code == ConflictAction::SQLITE_CHANGESET_ABORT as i32 {
-                    ConflictAction::SQLITE_CHANGESET_ABORT
-                } else if strategy_code == ConflictAction::SQLITE_CHANGESET_REPLACE as i32 {
-                    // SQLITE_CHANGESET_REPLACE is a legal return ONLY for DATA
-                    // and CONFLICT conflicts; returning it for NOTFOUND /
-                    // CONSTRAINT / FOREIGN_KEY makes sqlite3changeset_apply fail
-                    // with SQLITE_MISUSE. A `:replace` request cannot overwrite
-                    // in those cases, so abort the whole apply cleanly (rolled
-                    // back) rather than surface an opaque misuse error.
-                    match conflict_type {
-                        ConflictType::SQLITE_CHANGESET_DATA
-                        | ConflictType::SQLITE_CHANGESET_CONFLICT => {
-                            ConflictAction::SQLITE_CHANGESET_REPLACE
-                        }
-                        _ => ConflictAction::SQLITE_CHANGESET_ABORT,
-                    }
-                } else {
-                    ConflictAction::SQLITE_CHANGESET_OMIT
-                }
-            },
-        )?;
-        Ok(())
+        session::apply_changeset(conn, changeset_binary.as_slice(), strategy)
     });
     singular_ok_or_error_tuple(env, result)
 }

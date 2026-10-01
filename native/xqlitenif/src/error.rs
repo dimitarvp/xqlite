@@ -300,6 +300,7 @@ pub(crate) enum XqliteError {
     NotInWalMode,
     NoTransaction,
     TransactionInProgress,
+    ExtensionLoadingDisabled,
     InvalidAuthorizerAction {
         action: Atom,
     },
@@ -730,6 +731,7 @@ impl Display for XqliteError {
             XqliteError::NotInWalMode => write!(f, "The database is not in WAL mode"),
             XqliteError::NoTransaction => write!(f, "No transaction is open"),
             XqliteError::TransactionInProgress => write!(f, "A transaction is open"),
+            XqliteError::ExtensionLoadingDisabled => write!(f, "Extension loading is off"),
             XqliteError::InvalidAuthorizerAction { action: _ } => {
                 write!(f, "Invalid authorizer action atom")
             }
@@ -1099,6 +1101,9 @@ impl Encoder for XqliteError {
             XqliteError::NotInWalMode => atoms::not_in_wal_mode().encode(env),
             XqliteError::NoTransaction => atoms::no_transaction().encode(env),
             XqliteError::TransactionInProgress => atoms::transaction_in_progress().encode(env),
+            XqliteError::ExtensionLoadingDisabled => {
+                atoms::extension_loading_disabled().encode(env)
+            }
             XqliteError::InvalidAuthorizerAction { action } => {
                 (atoms::invalid_authorizer_action(), *action).encode(env)
             }
@@ -1350,8 +1355,12 @@ pub(crate) unsafe fn prepare_failure(
 }
 
 fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteError {
-    let lower_msg = message_string.to_lowercase();
     let primary_code = ffi_err.extended_code & 0xFF;
+    // The four name arms read code 1's text only: another code can carry an older message.
+    let lower_msg = match primary_code {
+        ffi::SQLITE_ERROR => message_string.to_lowercase(),
+        _ => String::new(),
+    };
 
     match primary_code {
         ffi::SQLITE_READONLY => XqliteError::ReadOnlyDatabase {

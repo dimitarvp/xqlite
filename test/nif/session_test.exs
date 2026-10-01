@@ -1,5 +1,6 @@
 defmodule Xqlite.NIF.SessionTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.ConnCase
 
@@ -641,6 +642,94 @@ defmodule Xqlite.NIF.SessionTest do
 
       NIF.close(conn2)
     end
+
+    test "a later capture holds the net change since the attach", %{conn: conn} do
+      {:ok, source} = NIF.open_in_memory(":memory:")
+      ddl = "CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT);"
+      for db <- [source, conn], do: :ok = NIF.execute_batch(db, ddl)
+      {:ok, session} = NIF.session_new(source)
+      :ok = NIF.session_attach(session, "r")
+      :ok = NIF.execute_batch(source, "INSERT INTO r VALUES (9, 'z'); DELETE FROM r;")
+      assert {:ok, ""} = NIF.session_changeset(session)
+      assert {:ok, false} = NIF.session_is_empty(session)
+      :ok = NIF.execute_batch(source, "INSERT INTO r VALUES (1, 'a'), (2, 'b');")
+      {:ok, first} = NIF.session_changeset(session)
+      :ok = NIF.execute_batch(source, "UPDATE r SET v = 'a2' WHERE id = 1;")
+      :ok = NIF.execute_batch(source, "DELETE FROM r WHERE id = 2;")
+      :ok = NIF.execute_batch(source, "INSERT INTO r VALUES (3, 'c');")
+      {:ok, second} = NIF.session_changeset(session)
+      assert {:ok, false} = NIF.session_is_empty(session)
+      :ok = NIF.session_delete(session)
+      :ok = NIF.close(source)
+      for changeset <- [first, second], do: :ok = NIF.changeset_apply(conn, changeset, :omit)
+      read = fn -> NIF.query(conn, "SELECT * FROM r ORDER BY id", []) end
+      assert {:ok, %{rows: [[1, "a"], [2, "b"], [3, "c"]]}} = read.()
+      :ok = NIF.execute_batch(conn, "DELETE FROM r;")
+      :ok = NIF.changeset_apply(conn, second, :omit)
+      assert {:ok, %{rows: [[1, "a2"], [3, "c"]]}} = read.()
+    end
+
+    property "no strategy commits a changeset that leaves a foreign key broken", %{conn: conn} do
+      assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "MEMORY")
+      assert {:ok, _} = NIF.set_pragma(conn, "synchronous", "OFF")
+
+      check all(
+              parents <- list_of(integer(1..4), max_length: 8),
+              present <- list_of(integer(1..4), max_length: 4),
+              deferral <- member_of(["", "DEFERRABLE INITIALLY DEFERRED"]),
+              checks <- boolean(),
+              strategy <- member_of([:omit, :replace, :abort]),
+              max_runs: 2_000
+            ) do
+        children = Enum.with_index(parents, &[&2, &1])
+        :ok = fk_target(conn, deferral, present)
+        assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", checks)
+        answer = NIF.changeset_apply(conn, changeset_for("sess_fk_c", children), strategy)
+        {:ok, %{rows: rows}} = NIF.query(conn, "SELECT * FROM sess_fk_c ORDER BY id", [])
+        kind = with {:error, {:constraint_violation, kind, _}} <- answer, do: kind
+        holds = not checks or Enum.all?(parents, &(&1 in present))
+        expected = if holds, do: {:ok, children}, else: {:constraint_foreign_key, []}
+        assert {kind, rows} == expected
+      end
+    end
+
+    test "no strategy commits a broken key, a caller's pending one included", %{conn: conn} do
+      :ok = fk_target(conn, "DEFERRABLE INITIALLY DEFERRED", [])
+      answer = NIF.changeset_apply(conn, changeset_for("sess_fk_c", [[10, 1]]), :omit)
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = answer
+      assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT * FROM sess_fk_c", [])
+      :ok = NIF.execute_batch(conn, "BEGIN; INSERT INTO sess_fk_c VALUES (5, 99);")
+
+      for strategy <- [:omit, :replace, :abort] do
+        answer = NIF.changeset_apply(conn, changeset_for("sess_fk_u", [[1, 1]]), strategy)
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = answer
+      end
+
+      commit = NIF.execute_batch(conn, "COMMIT;")
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = commit
+      :ok = NIF.execute_batch(conn, "ROLLBACK;")
+    end
+  end
+
+  defp fk_target(conn, deferral, parents) do
+    NIF.execute_batch(conn, """
+    DROP TABLE IF EXISTS sess_fk_c; DROP TABLE IF EXISTS sess_fk_p; DROP TABLE IF EXISTS sess_fk_u;
+    CREATE TABLE sess_fk_p (id INTEGER PRIMARY KEY); CREATE TABLE sess_fk_u (id INTEGER PRIMARY KEY, pid);
+    CREATE TABLE sess_fk_c (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES sess_fk_p(id) #{deferral});
+    INSERT OR IGNORE INTO sess_fk_p SELECT value FROM json_each('[#{Enum.join(parents, ",")}]');
+    """)
+  end
+
+  defp changeset_for(table, rows) do
+    {:ok, src} = NIF.open_in_memory(":memory:")
+    :ok = NIF.execute_batch(src, "CREATE TABLE #{table} (id INTEGER PRIMARY KEY, pid);")
+    {:ok, session} = NIF.session_new(src)
+    :ok = NIF.session_attach(session, table)
+    for row <- rows, do: {:ok, 1} = NIF.execute(src, "INSERT INTO #{table} VALUES (?, ?)", row)
+    {:ok, changeset} = NIF.session_changeset(session)
+    :ok = NIF.session_delete(session)
+    :ok = NIF.close(src)
+    changeset
   end
 
   test "session_new on closed connection returns error" do

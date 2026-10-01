@@ -1,9 +1,18 @@
 defmodule Xqlite.NIF.BlobTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.ConnCase
 
   alias XqliteNIF, as: NIF
+
+  @sql_enders [
+    "UPDATE bl_end SET data = data WHERE id = 1",
+    "UPDATE bl_end SET other = 1 WHERE id = 1",
+    "DELETE FROM bl_end WHERE id = 1",
+    "INSERT OR REPLACE INTO bl_end VALUES (1, zeroblob(4), 9)",
+    "ROLLBACK"
+  ]
 
   for_each_opener "blob I/O" do
     test "open and close a blob handle", %{conn: conn} do
@@ -417,6 +426,68 @@ defmodule Xqlite.NIF.BlobTest do
       assert {:error, :connection_closed} = NIF.blob_size(blob)
       assert {:error, :connection_closed} = NIF.blob_reopen(blob, 1)
     end
+
+    property "an ended blob handle answers the abort from every later call", %{conn: conn} do
+      assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "MEMORY")
+      assert {:ok, _} = NIF.set_pragma(conn, "synchronous", "OFF")
+
+      check all(
+              length <- integer(0..48),
+              ender <- member_of(@sql_enders ++ [{:reopen, 3}, {:reopen, 4}, {:reopen, 99}]),
+              calls <- list_of(blob_call(), min_length: 1, max_length: 8),
+              max_runs: 2_000
+            ) do
+        blob = ended_blob(conn, length, ender)
+        calls = calls ++ [{:blob_reopen, [2]}]
+        answers = for {fun, args} <- calls, do: apply(NIF, fun, [blob | args])
+        assert :ok = NIF.blob_close(blob)
+        assert Enum.reject(answers, &match?({:error, {:sqlite_failure, 4, _, _}}, &1)) == []
+      end
+    end
+
+    test "a changed row ends the handle for each later call, reopen included", %{conn: conn} do
+      blob = ended_blob(conn, 4, "UPDATE bl_end SET other = 1 WHERE id = 1")
+      assert {:error, {:sqlite_failure, 4, 4, _}} = NIF.blob_write(blob, 0, "ab")
+      assert {:error, {:sqlite_failure, 4, 4, _}} = NIF.blob_write(blob, 0, "ab")
+      assert {:error, {:sqlite_failure, 4, 4, _}} = NIF.blob_size(blob)
+      assert {:error, {:sqlite_failure, 4, 4, _}} = NIF.blob_read(blob, 0, 2)
+      assert {:error, {:no_such_table, "nosuch"}} = NIF.query(conn, "SELECT * FROM nosuch", [])
+      assert {:error, {:sqlite_failure, 4, _, _}} = NIF.blob_reopen(blob, 2)
+      assert :ok = NIF.blob_close(blob)
+    end
+
+    test "a reopen as the first call still moves a handle whose row changed", %{conn: conn} do
+      blob = ended_blob(conn, 4, "DELETE FROM bl_end WHERE id = 1")
+      assert :ok = NIF.blob_reopen(blob, 2)
+      assert {:ok, 6} = NIF.blob_size(blob)
+      assert :ok = NIF.blob_close(blob)
+    end
+  end
+
+  defp blob_call do
+    one_of([
+      constant({:blob_size, []}),
+      tuple({constant(:blob_read), fixed_list([integer(0..56), integer(0..8)])}),
+      tuple({constant(:blob_write), fixed_list([integer(0..56), binary(max_length: 8)])})
+    ])
+  end
+
+  defp ended_blob(conn, length, ender) do
+    NIF.execute_batch(conn, """
+    CREATE TABLE IF NOT EXISTS bl_end (id INTEGER PRIMARY KEY, data BLOB, other INTEGER);
+    DELETE FROM bl_end;
+    INSERT INTO bl_end VALUES (1, zeroblob(#{length}), 0), (2, zeroblob(6), 0), (3, NULL, 0), (4, 42, 0);
+    #{if ender == "ROLLBACK", do: "BEGIN;"}
+    """)
+
+    {:ok, blob} = NIF.blob_open(conn, "main", "bl_end", "data", 1, false)
+
+    case ender do
+      {:reopen, row} -> {:error, {:sqlite_failure, 1, 1, _}} = NIF.blob_reopen(blob, row)
+      sql -> :ok = NIF.execute_batch(conn, sql)
+    end
+
+    blob
   end
 
   test "blob_open on closed connection returns error" do

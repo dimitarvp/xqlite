@@ -1,8 +1,12 @@
+use crate::atoms;
 use crate::connection::{self, XqliteConn};
 use crate::error::XqliteError;
-use rusqlite::session::Session;
+use rusqlite::Connection;
+use rusqlite::session::{ConflictAction, ConflictType, Session};
 use rustler::{Resource, ResourceArc, resource_impl};
-use std::sync::Mutex;
+use std::io::Cursor;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub(crate) struct XqliteSession {
     // SAFETY: the `Session<'static>` is sound because `conn_resource_arc`
@@ -145,4 +149,50 @@ pub(crate) fn to_owned_binary(
     })?;
     binary.as_mut_slice().copy_from_slice(bytes);
     Ok(binary)
+}
+
+pub(crate) fn apply_changeset(
+    conn: &Connection,
+    bytes: &[u8],
+    strategy: ConflictAction,
+) -> Result<(), XqliteError> {
+    let mut cursor = Cursor::new(bytes);
+    let strategy_code = strategy as i32;
+    let key_asked = Arc::new(AtomicBool::new(false));
+    let asked = Arc::clone(&key_asked);
+    let applied = conn.apply_strm(
+        &mut cursor,
+        None::<fn(&str) -> bool>,
+        move |conflict_type, _item| {
+            // Asked once, after the last change: OMIT here would commit the broken key.
+            if conflict_type == ConflictType::SQLITE_CHANGESET_FOREIGN_KEY {
+                asked.store(true, Ordering::Relaxed);
+                ConflictAction::SQLITE_CHANGESET_ABORT
+            } else if strategy_code == ConflictAction::SQLITE_CHANGESET_ABORT as i32 {
+                ConflictAction::SQLITE_CHANGESET_ABORT
+            } else if strategy_code == ConflictAction::SQLITE_CHANGESET_REPLACE as i32 {
+                // SQLITE_CHANGESET_REPLACE is a legal return ONLY for DATA and
+                // CONFLICT conflicts; returning it for NOTFOUND / CONSTRAINT makes
+                // sqlite3changeset_apply fail with SQLITE_MISUSE. A `:replace`
+                // request cannot overwrite in those cases, so abort the whole apply
+                // cleanly (rolled back) rather than surface an opaque misuse error.
+                match conflict_type {
+                    ConflictType::SQLITE_CHANGESET_DATA
+                    | ConflictType::SQLITE_CHANGESET_CONFLICT => {
+                        ConflictAction::SQLITE_CHANGESET_REPLACE
+                    }
+                    _ => ConflictAction::SQLITE_CHANGESET_ABORT,
+                }
+            } else {
+                ConflictAction::SQLITE_CHANGESET_OMIT
+            }
+        },
+    );
+    let mut result = applied.map_err(XqliteError::from);
+    if let Err(XqliteError::ConstraintViolation { kind, .. }) = &mut result
+        && key_asked.load(Ordering::Relaxed)
+    {
+        *kind = atoms::constraint_foreign_key();
+    }
+    result
 }

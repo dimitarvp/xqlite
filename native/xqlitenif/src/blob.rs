@@ -36,11 +36,6 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 /// blob first, under the connection Mutex, before the `sqlite3*` is freed (see
 /// `close`). ONLY the Rust `&Connection` wrapper was ever left dangling.
 ///
-/// A Miri pattern-model demonstrated the UB: a `&T` into an `Option<T>` slot,
-/// `.take()` drops the `T`, then a `Drop` derefs the stale `&T` — Miri reports
-/// "reading uninitialized memory". That interim repro crate has since been
-/// removed after serving its purpose.
-///
 /// MAINTAINER WARNING: never store a rusqlite `Blob` — or a `Session`, or ANY
 /// lifetime-erased wrapper whose `Drop` dereferences an `&Connection` — in a
 /// resource that can outlive an explicit connection close. Always own the raw C
@@ -145,17 +140,13 @@ pub(crate) fn read(
     offset: usize,
     length: usize,
 ) -> Result<rustler::OwnedBinary, XqliteError> {
-    with_live_blob(blob_handle, |ptr, db| {
-        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex.
-        let size = unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize;
+    with_sized_blob(blob_handle, |ptr, db, size| {
         let actual_len = if offset >= size {
             0
         } else {
             std::cmp::min(length, size - offset)
         };
         if actual_len == 0 {
-            // Nothing in range: return an empty binary WITHOUT touching SQLite,
-            // exactly as rusqlite's `raw_read_at` short-circuits `read_len == 0`.
             return to_owned_binary(&[], "blob read");
         }
         // `0 <= offset < size` and `offset + actual_len <= size`, and `size`
@@ -197,9 +188,7 @@ pub(crate) fn write(
     offset: usize,
     data: &[u8],
 ) -> Result<(), XqliteError> {
-    with_live_blob(blob_handle, |ptr, db| {
-        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex.
-        let size = unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize;
+    with_sized_blob(blob_handle, |ptr, db, size| {
         if data.len().saturating_add(offset) > size {
             return Err(XqliteError::BlobWriteOutOfBounds {
                 offset,
@@ -226,11 +215,7 @@ pub(crate) fn write(
 
 /// Current size of the blob in bytes.
 pub(crate) fn size(blob_handle: &ResourceArc<XqliteBlob>) -> Result<usize, XqliteError> {
-    with_live_blob(blob_handle, |ptr, _db| {
-        // SAFETY: `ptr` is a live `sqlite3_blob` held under the connection Mutex;
-        // `sqlite3_blob_bytes` returns the cached, non-negative byte count.
-        Ok(unsafe { ffi::sqlite3_blob_bytes(ptr) }.max(0) as usize)
-    })
+    with_sized_blob(blob_handle, |_ptr, _db, size| Ok(size))
 }
 
 /// Move this blob handle to a different row of the same table/column.
@@ -307,6 +292,25 @@ where
     // Connection alive (and exclusively ours) for the whole duration of `f`.
     let db = unsafe { conn.handle() };
     f(ptr, db)
+}
+
+/// `with_live_blob` plus the value's size, once a zero-length read shows the handle
+/// alive: `sqlite3_blob_bytes` reads 0 for an aborted handle, the old size after a rollback.
+fn with_sized_blob<F, R>(blob_handle: &ResourceArc<XqliteBlob>, f: F) -> Result<R, XqliteError>
+where
+    F: FnOnce(*mut ffi::sqlite3_blob, *mut ffi::sqlite3, usize) -> Result<R, XqliteError>,
+{
+    with_live_blob(blob_handle, |ptr, db| {
+        let mut probe = [0u8; 1];
+        // SAFETY: `ptr` and `db` are live under the held Mutex; a 0-byte read writes nothing.
+        let size = unsafe {
+            match ffi::sqlite3_blob_read(ptr, probe.as_mut_ptr().cast(), 0, 0) {
+                ffi::SQLITE_OK => Ok(ffi::sqlite3_blob_bytes(ptr).max(0) as usize),
+                rc => Err(blob_error(db, rc)),
+            }
+        }?;
+        f(ptr, db, size)
+    })
 }
 
 /// Builds an `XqliteError` from a non-OK blob result code, classified exactly as

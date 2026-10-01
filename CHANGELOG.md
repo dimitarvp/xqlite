@@ -21,6 +21,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The session capture docs say what a capture holds.**
+  `XqliteNIF.session_changeset/1` and `session_patchset/1` hold the net
+  change of every row since its table was attached, and a capture clears
+  nothing; the docs said a capture held only the changes since the last
+  one. They now say what shipping a later capture to a replica that took an
+  earlier one loses, how to ship changes in rounds with a new session per
+  capture, and that `session_is_empty/1` answers `{:ok, false}` once any
+  change was recorded, even when the changes cancel out.
+- **`changeset_apply/3` never commits a changeset that leaves a foreign key
+  broken.** Under `:omit` such a changeset was committed with `:ok`, and so
+  was a key violation the caller's own open transaction held. It is now
+  rolled back under every strategy, as `:replace` and `:abort` already did,
+  and answers `{:error, {:constraint_violation, :constraint_foreign_key,
+  details}}`. To commit such a changeset anyway, turn the target's key
+  checks off before the apply, outside a transaction.
+- **A blob handle SQLite has ended answers SQLite's error from every read,
+  write and size call.** Once a read or write call had met the handle's
+  changed row, a reopen had failed, or a transaction or savepoint had
+  rolled back while the handle was open (any rollback for a read-write
+  handle, even one opened before the `BEGIN` that wrote nothing; a rollback
+  that undid a schema change for a read-only one), `blob_size/1` answered a
+  size (0, or the old one after a rollback), and reads and writes could
+  answer an empty binary or a bounds error without asking SQLite; each now
+  answers `{:error, {:sqlite_failure, 4, _, _}}` until `blob_close/1`.
+- **`load_extension/3` reads the extension switch while it holds the
+  connection lock for the load.** A load racing a call that turns extension
+  loading on or off could answer SQLite's text error instead of
+  `{:error, :extension_loading_disabled}`, and a closed connection answered
+  `{:error, :extension_loading_disabled}` instead of
+  `{:error, :connection_closed}` while loading was off.
+- **`schema_foreign_keys/2` reads a foreign key whose REFERENCES clause
+  names no parent column.** One such key, `REFERENCES parent` being the
+  usual way to point at a parent's primary key, made the call fail for the
+  whole table with `{:error, {:invalid_column_type, 4, "to", nil}}`; its
+  `to_column` is now `nil`, and the docs say SQLite then uses the parent's
+  primary key.
+- **`blob_reopen/2` on a blob handle SQLite has ended answers SQLite's abort
+  code.** When an earlier statement on the connection had failed on a
+  missing or existing table or index, it answered that statement's error,
+  such as `{:error, {:no_such_table, _}}`, because SQLite sets no new
+  message there. `{:no_such_table, _}`, `{:no_such_index, _}`,
+  `{:table_exists, _}` and `{:index_exists, _}` are now answered only for
+  SQLite's primary code 1 (`SQLITE_ERROR`), so the reopen answers
+  `{:error, {:sqlite_failure, 4, 4, message}}`, the message still the
+  earlier statement's text.
+
 - **`open/2` keeps the `auto_vacuum` asked on a new file in WAL mode.** It
   applies `auto_vacuum` before `journal_mode`; a new file under the default
   WAL mode read `:none` whatever was asked.
@@ -522,6 +568,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **`changeset_apply/3` names the foreign key in its key error.** A
+  changeset SQLite rolls back for a broken foreign key answers
+  `{:error, {:constraint_violation, :constraint_foreign_key, details}}`
+  under every strategy, the kind an ordinary write's key error carries.
+  Under `:replace` and `:abort` it answered the kind
+  `:constraint_violation`.
+- **`blob_size/1` asks SQLite on every call.** On a handle whose row
+  changed, it now ends the handle as a read does and answers
+  `{:error, {:sqlite_failure, 4, _, _}}`, and so does a later
+  `blob_reopen/2`. It answered the size fixed at the open, and a later
+  reopen still moved the handle. A reopen made before any read, write or
+  size call still moves it.
 
 - **One `cancel_tokens:` option replaces the `_cancellable` functions.**
   `Xqlite.query/4`, `execute/4`, `execute_batch/3` and `multi_step/3` take

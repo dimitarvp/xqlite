@@ -402,6 +402,40 @@ This is the DX face of a lifecycle rule the [Security](security.md) guide covers
 in full under "Resource lifecycle: what close cleans up, and what it cannot" —
 see there for the mechanism and the surrounding trust model.
 
+### A session capture holds the net change since the attach
+
+A capture — `XqliteNIF.session_changeset/1` or `session_patchset/1` — clears
+nothing, so shipping every changeset of one session to the same replica ships
+again each earlier change that still has a net effect: `:abort` answers
+`{:error, {:sqlite_failure, 4, 4, _}}` and applies nothing when the later
+capture holds such a change, and `:ok` when it holds none; `:omit` skips a
+later update of a row shipped before; and a row inserted, shipped and then
+deleted is never deleted on the replica, since no capture holds a row with no
+net change. Ship changes in rounds with a new session per capture
+(`XqliteNIF.session_delete/1`, `XqliteNIF.session_new/1`,
+`XqliteNIF.session_attach/2`); a write made between the capture and the new
+attach reaches no capture.
+
+### An apply turns `defer_foreign_keys` off
+
+`XqliteNIF.changeset_apply/3` turns the connection's `defer_foreign_keys` off
+under every strategy, as SQLite does at the end of every apply. In a
+transaction that turned it on and holds a row breaking an immediate foreign
+key, an apply that answers the key error leaves a transaction that can only
+roll back: after the missing parent row is added, `COMMIT` still answers
+`{:error, {:constraint_violation, :constraint_foreign_key, _}}` while
+`PRAGMA foreign_key_check` lists nothing.
+
+### After a blob call answers code 4, close the handle
+
+Once SQLite has ended a blob handle — a read, write or size call met its
+changed row, a reopen failed, or a transaction or savepoint rolled back while
+it was open (any rollback for a read-write handle, even one opened before the
+`BEGIN` that wrote nothing; a rollback that undid a schema change for a
+read-only one) — every read, write, size and reopen answers
+`{:error, {:sqlite_failure, 4, _, _}}`. Close it with `XqliteNIF.blob_close/1`
+and open a new one.
+
 ## Concurrency and busy handling
 
 ### A busy policy's two ceilings are both per busy event

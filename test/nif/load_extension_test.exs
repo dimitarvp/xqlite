@@ -139,6 +139,19 @@ defmodule Xqlite.NIF.LoadExtensionTest do
       assert {:error, _} =
                NIF.query(conn, "SELECT xqlite_test_ext()", [])
     end
+
+    test "a load racing the switch is judged under the connection lock", %{conn: conn} do
+      path = test_extension_path()
+      loads = Task.async(fn -> for _ <- 1..500, do: NIF.load_extension(conn, path, nil) end)
+
+      {:ok, answers} =
+        Enum.find_value(Stream.cycle([true, false]), fn on ->
+          :ok = NIF.enable_load_extension(conn, on)
+          Task.yield(loads, 0)
+        end)
+
+      assert Enum.reject(answers, &(&1 in [:ok, {:error, :extension_loading_disabled}])) == []
+    end
   end
 
   # -------------------------------------------------------------------
@@ -154,7 +167,7 @@ defmodule Xqlite.NIF.LoadExtensionTest do
   test "load_extension on closed connection returns error" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     NIF.close(conn)
-    assert {:error, _} = NIF.load_extension(conn, test_extension_path(), nil)
+    assert {:error, :connection_closed} = NIF.load_extension(conn, test_extension_path(), nil)
   end
 
   test "extension loaded on one connection is not visible on another" do

@@ -402,6 +402,30 @@ defmodule Xqlite.SchemaIntrospectionTest do
         assert {:error, {:no_such_object, "tt"}} = NIF.get_create_sql(conn, "tt")
       end
 
+      test "a foreign key that names no parent column reads to_column nil", %{conn: conn} do
+        sql = "CREATE TABLE fk_mixed (pid REFERENCES users(user_id), qid REFERENCES users);"
+        assert :ok = NIF.execute_batch(conn, sql)
+        assert {:ok, fks} = NIF.schema_foreign_keys(conn, "fk_mixed")
+        pairs = fks |> Enum.map(&{&1.from_column, &1.to_column}) |> Enum.sort()
+        assert pairs == [{"pid", "user_id"}, {"qid", nil}]
+      end
+
+      property "a foreign key reads the parent columns it names, nil for none", %{conn: conn} do
+        assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "MEMORY")
+        assert {:ok, _} = NIF.set_pragma(conn, "synchronous", "OFF")
+        declarations = list_of(fk_declaration(), min_length: 1, max_length: 3)
+
+        check all(keys <- declarations, max_runs: 2000) do
+          keys = Enum.with_index(keys, &fk_key/2)
+          ddl = Enum.flat_map(keys, & &1.columns) ++ Enum.flat_map(keys, & &1.constraints)
+          sql = ~s|DROP TABLE IF EXISTS "f k"; CREATE TABLE "f k" (#{Enum.join(ddl, ", ")});|
+          assert :ok = NIF.execute_batch(conn, sql)
+          assert {:ok, fks} = NIF.schema_foreign_keys(conn, "f k")
+          read = for k <- fks, do: {k.target_table, k.from_column, k.to_column}
+          assert Enum.sort(read) == keys |> Enum.flat_map(& &1.rows) |> Enum.sort()
+        end
+      end
+
       property "a name answers rows when found and its tag when not", %{conn: conn} do
         indexes = ~w(idx_users_email_desc sqlite_autoindex_users_1 items tix aix)
         names = object_name(~w(users person_view sqlite_schema tt at) ++ indexes)
@@ -582,6 +606,26 @@ defmodule Xqlite.SchemaIntrospectionTest do
       Pragma.get(conn, :user_version, db_name: name)
     ]
   end
+
+  defp fk_declaration do
+    bind(integer(1..3), fn width ->
+      tos = one_of([constant(nil), list_of(fk_name(), length: width)])
+      tuple({fk_name(), constant(width), tos})
+    end)
+  end
+
+  defp fk_name, do: string([?", ?', ?\s, ?a..?z], min_length: 1, max_length: 5)
+
+  defp fk_key({parent, width, tos}, key) do
+    froms = for column <- 1..width, do: ~s(f"#{key}' #{column})
+    ref = "REFERENCES #{quote_name(parent)}" <> if(tos, do: "(#{quoted(tos)})", else: "")
+    inline = if width == 1, do: " " <> ref, else: ""
+    constraints = if width == 1, do: [], else: ["FOREIGN KEY(#{quoted(froms)}) #{ref}"]
+    rows = Enum.with_index(froms, &{parent, &1, tos && Enum.at(tos, &2)})
+    %{columns: [quoted(froms) <> inline], constraints: constraints, rows: rows}
+  end
+
+  defp quoted(names), do: Enum.map_join(names, ", ", &quote_name/1)
 
   defp unattached_answers(conn, name, path) do
     [

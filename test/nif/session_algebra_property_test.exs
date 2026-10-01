@@ -1,11 +1,11 @@
 defmodule Xqlite.NIF.SessionAlgebraPropertyTest do
   @moduledoc """
-  The four laws SQLite's session extension promises, checked with generated data.
+  The five laws SQLite's session extension promises, checked with generated data.
 
   A changeset is a recorded set of row changes. SQLite lets you glue two
   changesets together (`changeset_concat/2`), flip one so that it undoes itself
   (`changeset_invert/1`), and replay one onto another database
-  (`changeset_apply/3`). Four laws follow:
+  (`changeset_apply/3`). Five laws follow:
 
   1. Composition — applying `concat(a, b)` leaves a database exactly where
      applying `a` and then `b` would leave it.
@@ -16,6 +16,8 @@ defmodule Xqlite.NIF.SessionAlgebraPropertyTest do
   4. Identity — a changeset captured over a session in which nothing happened
      is empty: applying it changes nothing, and concatenating it onto either
      side of another changeset changes nothing.
+  5. Accumulation — a capture clears nothing: replayed onto the starting state,
+     a later capture lands where the session's own database is.
 
   Every law is judged by the resulting table contents (a full ordered SELECT
   of every column of every table), never by comparing changeset bytes: SQLite
@@ -183,6 +185,23 @@ defmodule Xqlite.NIF.SessionAlgebraPropertyTest do
         assert replay(scenario.base, [empty]) == untouched
         assert replay(scenario.base, [empty_then_a]) == only_a
         assert replay(scenario.base, [a_then_empty]) == only_a
+      end
+    end
+
+    property "a later capture holds every change since the attach", %{conn: conn} do
+      kinds = StreamData.member_of([:session_changeset, :session_patchset])
+
+      check all(scenario <- generated_scenario(), kind <- kinds, max_runs: @runs) do
+        assert :ok = NIF.execute_batch(conn, @reset_sql)
+        :ok = seed(conn, scenario.base)
+        assert {:ok, session} = NIF.session_new(conn)
+        assert :ok = NIF.session_attach(session, :all)
+        :ok = run_ops(conn, scenario.batches.a)
+        assert {:ok, _} = apply(NIF, kind, [session])
+        :ok = run_ops(conn, scenario.batches.b)
+        assert {:ok, later} = apply(NIF, kind, [session])
+        assert :ok = NIF.session_delete(session)
+        assert replay(scenario.base, [later]) == read_all(conn)
       end
     end
   end
