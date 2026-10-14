@@ -482,8 +482,9 @@ defmodule Xqlite.NIF.BackupTest do
   # The liveness bound is a count of commits, not a clock: 50_000 is far past
   # what a copy in one step lets through.
   defp commit_until_stopped(writer, cells, test_pid) do
-    {:ok, 1} = NIF.execute(writer, "INSERT INTO t (v) VALUES ('w')", [])
+    # Counted before the insert: another connection can see the row before execute returns.
     commits = :atomics.add_get(cells, 1, 1)
+    {:ok, 1} = NIF.execute(writer, "INSERT INTO t (v) VALUES ('w')", [])
     if commits == 1, do: send(test_pid, :first_commit)
 
     case :atomics.get(cells, 2) == 0 and commits < 50_000 do
