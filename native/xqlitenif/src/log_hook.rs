@@ -7,12 +7,12 @@
 
 use crate::error::XqliteError;
 use crate::hook_util::{self, HookList};
-use rusqlite::trace;
+use rusqlite::ffi;
 use rustler::sys::{
     enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
-use std::ffi::c_int;
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,7 +40,20 @@ static MASTER_INSTALLED: AtomicBool = AtomicBool::new(false);
 static MASTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// SQLite log callback. Fan-out to all registered subscribers.
-fn log_callback(err_code: c_int, msg: &str) {
+///
+/// # Safety
+///
+/// SQLite calls it with `msg` a NUL-terminated string that lives for the call.
+unsafe extern "C" fn log_callback(_arg: *mut c_void, err_code: c_int, msg: *const c_char) {
+    hook_util::guard_ffi_callback("log_callback", 0, move || {
+        // SAFETY: `msg` is valid for this call (fn contract).
+        let bytes = unsafe { hook_util::c_bytes(msg) }.unwrap_or_default();
+        fan_out(err_code, bytes);
+        0
+    });
+}
+
+fn fan_out(err_code: c_int, msg: &[u8]) {
     // Hold MASTER_LOCK while reading the subscriber list. This hook is
     // PROCESS-GLOBAL (installed via sqlite3_config) and fires from any thread
     // with no connection Mutex held, so — unlike the per-connection hooks —
@@ -67,7 +80,7 @@ fn log_callback(err_code: c_int, msg: &str) {
 /// # Safety
 ///
 /// See `busy_handler::send_busy_to_pid`.
-unsafe fn send_log_to_pid(pid: &LocalPid, err_code: c_int, msg: &str) {
+unsafe fn send_log_to_pid(pid: &LocalPid, err_code: c_int, msg: &[u8]) {
     // SAFETY: every enif_* call operates on a freshly allocated msg_env and no
     // references are retained across the send (see `send_busy_to_pid`).
     unsafe {
@@ -75,7 +88,7 @@ unsafe fn send_log_to_pid(pid: &LocalPid, err_code: c_int, msg: &str) {
 
         let tag = hook_util::make_atom(msg_env, b"xqlite_log");
         let code = enif_make_int64(msg_env, i64::from(err_code));
-        let message = hook_util::make_binary(msg_env, msg.as_bytes());
+        let message = hook_util::make_binary(msg_env, msg);
 
         let elements = [tag, code, message];
         let tuple = enif_make_tuple_from_array(msg_env, elements.as_ptr(), 3);
@@ -94,11 +107,18 @@ pub(crate) fn register(pid: LocalPid) -> Result<u64, XqliteError> {
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
 
     if !MASTER_INSTALLED.load(Ordering::Acquire) {
-        // SAFETY: we hold MASTER_LOCK, so no concurrent config_log.
+        // SAFETY: we hold MASTER_LOCK, so no concurrent sqlite3_config call.
         // The callback never invokes SQLite (it only sends Erlang
         // messages via raw enif_send).
-        unsafe {
-            trace::config_log(Some(log_callback)).map_err(XqliteError::from)?;
+        let rc = unsafe {
+            ffi::sqlite3_config(
+                ffi::SQLITE_CONFIG_LOG,
+                log_callback as unsafe extern "C" fn(_, _, _),
+                std::ptr::null_mut::<c_void>(),
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None).into());
         }
         MASTER_INSTALLED.store(true, Ordering::Release);
     }

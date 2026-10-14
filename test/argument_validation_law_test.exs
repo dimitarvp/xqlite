@@ -54,7 +54,8 @@ defmodule Xqlite.ArgumentValidationLawTest do
   defp non_timeout_term do
     StreamData.one_of([
       StreamData.filter(any_term(), fn term -> term not in 0..2_147_483_647 end),
-      StreamData.integer(2_147_483_648..(2 ** 70))
+      StreamData.integer(2_147_483_648..(2 ** 70)),
+      StreamData.integer(-(2 ** 70)..-1)
     ])
   end
 
@@ -158,14 +159,49 @@ defmodule Xqlite.ArgumentValidationLawTest do
       end
     end
 
-    property "put_busy_timeout/2 rejects every term that is not an integer from 0 to 2^31 - 1",
+    property "put_busy_timeout/2 and the raw set_pragma/3 reject every term that is not an integer from 0 to 2^31 - 1",
              %{conn: conn} do
-      check all(ms <- non_timeout_term(), max_runs: 2000) do
+      check all(
+              ms <- non_timeout_term(),
+              name <- StreamData.member_of(["busy_timeout", "BUSY_TIMEOUT", "Busy_Timeout"]),
+              max_runs: 2000
+            ) do
         rejected = {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}
         assert {:ok, before} = Xqlite.get_busy_timeout(conn)
         assert ^rejected = Xqlite.put_busy_timeout(conn, ms)
+        assert ^rejected = NIF.set_pragma(conn, name, ms)
         assert {:ok, ^before} = Xqlite.get_busy_timeout(conn)
       end
+    end
+
+    test "the raw set_pragma/3 takes for busy_timeout what put_busy_timeout/2 takes",
+         %{conn: conn} do
+      :ok = Xqlite.put_busy_timeout(conn, 1234)
+      refused = [-1, -(2 ** 31), 2 ** 31, 2 ** 64, -(2 ** 70), :infinity, true, nil, "abc"]
+
+      for v <- refused ++ ["5000", 1.5] do
+        assert {:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ^v}}} =
+                 NIF.set_pragma(conn, "busy_timeout", v)
+
+        assert {:ok, 1234} = NIF.get_pragma(conn, "busy_timeout")
+      end
+
+      assert {:ok, _} = NIF.set_pragma(conn, "busy_timeout", 0)
+      assert {:ok, _} = NIF.set_pragma(conn, "busy_timeout", 2_147_483_647)
+      {:ok, handle} = Xqlite.register_busy_observer(conn, self())
+      held = Enum.map([-1, :infinity, 100], &NIF.set_pragma(conn, "busy_timeout", &1))
+      tags = for {:error, {tag, _details}} <- held, do: tag
+
+      assert tags == [
+               :invalid_pragma_value,
+               :invalid_pragma_value,
+               :busy_timeout_write_refused
+             ]
+
+      :ok = Xqlite.unregister_busy_observer(conn, handle)
+      assert {:ok, size} = NIF.get_pragma(conn, "cache_size")
+      assert {:error, {:cannot_execute_pragma, _, _}} = NIF.set_pragma(conn, "cache_size", nil)
+      assert {:ok, ^size} = NIF.get_pragma(conn, "cache_size")
     end
 
     property "the raw setters reject a busy timeout past 2^31 - 1 and keep the wait",

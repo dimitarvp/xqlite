@@ -14,6 +14,7 @@ pub(crate) mod atoms {
         binary,
         bitstring,
         blob,
+        blob_closed,
         blob_size,
         blob_write_out_of_bounds,
         busy,

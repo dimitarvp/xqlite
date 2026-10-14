@@ -606,6 +606,47 @@ defmodule Xqlite.StrictTableTest do
         assert :ok = NIF.close(conn)
       end
     end
+
+    test "a trigger whose ON clause spells the table in another case survives", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TABLE t (a INTEGER); CREATE TABLE log (n TEXT);
+               CREATE TRIGGER tr AFTER INSERT ON T BEGIN INSERT INTO log VALUES ('tr'); END;
+               CREATE TEMP TRIGGER tt AFTER INSERT ON main.T BEGIN INSERT INTO log VALUES ('tt'); END;
+               ATTACH ':memory:' AS aux; CREATE TABLE aux.T (a INTEGER);
+               CREATE TEMP TRIGGER ta AFTER INSERT ON aux.T BEGIN INSERT INTO log VALUES ('ta'); END;
+               """)
+
+      before = trigger_rows(conn)
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+      assert strict?(conn, "t")
+      assert trigger_rows(conn) == before
+      logged = logged_after_inserts(conn, ["main.t", "aux.T"])
+      assert Enum.sort(logged) == [["ta"], ["tr"], ["tt"]]
+    end
+
+    property "triggers on any ASCII-case spelling of the name survive the rebuild" do
+      check all(
+              name <- hostile_name(),
+              on <- ascii_case_variant(name),
+              temp_on <- ascii_case_variant(name),
+              max_runs: 2000
+            ) do
+        assert {:ok, conn} = NIF.open_in_memory(":memory:")
+
+        assert :ok =
+                 NIF.execute_batch(conn, """
+                 CREATE TABLE #{quoted(name)} (a INTEGER);
+                 CREATE TRIGGER tr AFTER INSERT ON #{quoted(on)} BEGIN SELECT 1; END;
+                 CREATE TEMP TRIGGER tt AFTER INSERT ON main.#{quoted(temp_on)} BEGIN SELECT 1; END;
+                 """)
+
+        before = trigger_rows(conn)
+        assert :ok = Xqlite.enable_strict_table(conn, name)
+        assert trigger_rows(conn) == before
+        assert :ok = NIF.close(conn)
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -781,6 +822,32 @@ defmodule Xqlite.StrictTableTest do
         assert :ok = NIF.close(conn)
       end
     end
+
+    test "a TEMP trigger on a namesake in another schema stays on its table", %{conn: conn} do
+      assert :ok =
+               NIF.execute_batch(conn, """
+               ATTACH ':memory:' AS aux; CREATE TABLE aux.t (a INTEGER);
+               CREATE TABLE t (a INTEGER); CREATE TABLE log (n TEXT);
+               CREATE TEMP TRIGGER on_aux AFTER INSERT ON aux.t BEGIN INSERT INTO log VALUES ('aux'); END;
+               CREATE TEMP TRIGGER on_main AFTER INSERT ON main.t BEGIN INSERT INTO log VALUES ('main'); END;
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+      assert strict?(conn, "main", "t")
+
+      assert :ok =
+               NIF.execute_batch(conn, """
+               CREATE TEMP TABLE t (a INTEGER); CREATE INDEX temp.t_a ON t (a);
+               CREATE TEMP TRIGGER on_temp AFTER INSERT ON temp.t BEGIN INSERT INTO log VALUES ('temp'); END;
+               """)
+
+      assert :ok = Xqlite.enable_strict_table(conn, "t")
+      assert strict?(conn, "temp", "t")
+      index = "SELECT name FROM temp.sqlite_master WHERE type = 'index'"
+      assert {:ok, %{rows: [["t_a"]]}} = NIF.query(conn, index, [])
+      logged = logged_after_inserts(conn, ["aux.t", "main.t", "temp.t"])
+      assert logged == [["aux"], ["main"], ["temp"]]
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -866,7 +933,8 @@ defmodule Xqlite.StrictTableTest do
       end
     end
 
-    test "a statement left mid-run answers busy and keeps every row it writes", %{conn: conn} do
+    test "a statement left mid-run answers :statement_mid_run and keeps every row it writes",
+         %{conn: conn} do
       seed_shared(conn, 200)
       assert :ok = NIF.execute_batch(conn, "CREATE TABLE log (n INTEGER)")
       assert {:ok, stream} = NIF.stream_open(conn, "SELECT id FROM t", [])
@@ -877,7 +945,7 @@ defmodule Xqlite.StrictTableTest do
 
       assert {:row, [1]} = NIF.stmt_step(stmt)
 
-      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.enable_strict_table(conn, "t")
+      assert {:error, :statement_mid_run} = Xqlite.enable_strict_table(conn, "t")
 
       assert {:ok, %{rows: [_ | _]}} = NIF.stream_fetch(stream, 10)
       assert {:ok, %{rows: [[2]], done: true}} = NIF.stmt_multi_step(stmt, 10)
@@ -1323,6 +1391,22 @@ defmodule Xqlite.StrictTableTest do
   defp row_count(conn, table) do
     assert {:ok, %{rows: [[n]]}} = NIF.query(conn, "SELECT count(*) FROM #{quoted(table)}", [])
     n
+  end
+
+  defp logged_after_inserts(conn, tables) do
+    for table <- tables,
+        do: {:ok, 1} = NIF.execute(conn, "INSERT INTO #{table} VALUES (1)", [])
+
+    assert {:ok, %{rows: rows}} = NIF.query(conn, "SELECT n FROM log ORDER BY rowid", [])
+    rows
+  end
+
+  defp trigger_rows(conn) do
+    for schema <- ["main", "temp"] do
+      sql = "SELECT name, tbl_name, sql FROM #{schema}.sqlite_master WHERE type = 'trigger'"
+      assert {:ok, %{rows: rows}} = NIF.query(conn, sql <> " ORDER BY name", [])
+      rows
+    end
   end
 
   defp attach(conn) do

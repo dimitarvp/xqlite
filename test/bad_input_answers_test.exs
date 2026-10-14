@@ -44,20 +44,16 @@ defmodule Xqlite.BadInputAnswersTest do
       assert {:error, {:invalid_pragma_name, 42}} = P.get(conn, 42)
     end
 
-    test "open options that are not a list raise from a guard" do
+    test "open options that are not a list are an answer and create nothing" do
       path = Xqlite.TestUtil.tmp_db_path("bad_open_opts")
 
-      assert_raise FunctionClauseError, fn -> apply(Xqlite, :open, [path, :atom]) end
-
-      assert_raise FunctionClauseError, fn ->
-        apply(Xqlite, :open, [path, %{busy_timeout: 100}])
+      for term <- [:atom, %{busy_timeout: 100}, nil] do
+        expected = {:error, {:invalid_option, %{key: nil, value: term, reason: :not_a_pair}}}
+        assert apply(Xqlite, :open, [path, term]) == expected
+        assert apply(Xqlite, :open_in_memory, [term]) == expected
       end
 
-      assert_raise FunctionClauseError, fn -> apply(Xqlite, :open_in_memory, [:atom]) end
-
-      assert_raise FunctionClauseError, fn ->
-        apply(Xqlite, :open_in_memory, [%{busy_timeout: 100}])
-      end
+      refute File.exists?(path)
     end
 
     test "an option that is not a key-value pair is an answer" do

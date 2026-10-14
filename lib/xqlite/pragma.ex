@@ -332,15 +332,13 @@ defmodule Xqlite.Pragma do
       writable: true,
       valid_values: ~w(NORMAL EXCLUSIVE)
     },
-    # integrity_check and quick_check return "ok" (text) when no errors,
-    # or a list of error strings. Zero-arity GET uses the single-value path.
     integrity_check: %PragmaSpec{
-      return_type: :text,
+      return_type: :list,
       read_arities: [0, 1],
       schema_prefix: true
     },
     quick_check: %PragmaSpec{
-      return_type: :text,
+      return_type: :list,
       read_arities: [0, 1],
       schema_prefix: true
     },
@@ -697,11 +695,11 @@ defmodule Xqlite.Pragma do
   @spec returning_boolean() :: [atom()]
   def returning_boolean, do: @returning_boolean
 
-  @doc "Returns the names of all pragmas that return an integer."
+  @doc "Integer pragmas; `get/4` answers a mapped or coded one as a value, word or tagged count."
   @spec returning_int() :: [atom()]
   def returning_int, do: @returning_int
 
-  @doc "Returns the names of all pragmas that return text."
+  @doc "Returns the pragmas SQLite answers with a word, which `get/4` answers as an atom."
   @spec returning_text() :: [atom()]
   def returning_text, do: @returning_text
 
@@ -739,7 +737,9 @@ defmodule Xqlite.Pragma do
   `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
   reason: :invalid_options}}}` before a statement is built — `value` being
   the whole term when it is no keyword list and the `{key, value}` pair that
-  could not be read when it is one. `busy_timeout` and `wal_autocheckpoint`,
+  could not be read when it is one. A second `:db_name`, in one list or across the third
+  and the last argument, answers `value: {:db_name, second}` with `reason: :duplicate_option`,
+  after any pair that cannot be read. `busy_timeout` and `wal_autocheckpoint`,
   read from this library's own state, reject a `:db_name` other than `nil`.
 
   A PRAGMA the connection has no row for answers `{:ok, :no_value}`:
@@ -791,6 +791,8 @@ defmodule Xqlite.Pragma do
   `:integrity_check` and `:quick_check` answer SQLite's own
   `{:error, {:no_such_table, name}}`, and a number handed to
   `:foreign_key_check`, which reads a table name, is one of those names.
+  Every read of `:integrity_check` and `:quick_check` answers `{:ok, findings}`, SQLite's
+  rows as strings, `["ok"]` for a clean database, with or without a number or a `:db_name`.
   """
   @spec get(Xqlite.conn(), pragma_key(), term(), pragma_opts()) :: get_result()
   def get(db, key, arg_or_opts \\ [], opts \\ [])
@@ -835,9 +837,15 @@ defmodule Xqlite.Pragma do
   end
 
   defp judge_options(name, options) do
-    case Enum.find(options, &unreadable_option?/1) do
-      nil -> judge_option_text(name, options)
-      pair -> {:error, invalid_argument(name, pair, :invalid_options)}
+    case {Enum.find(options, &unreadable_option?/1), Keyword.get_values(options, :db_name)} do
+      {nil, [_first, second | _rest]} ->
+        {:error, invalid_argument(name, {:db_name, second}, :duplicate_option)}
+
+      {nil, _once} ->
+        judge_option_text(name, options)
+
+      {pair, _values} ->
+        {:error, invalid_argument(name, pair, :invalid_options)}
     end
   end
 
@@ -1050,7 +1058,8 @@ defmodule Xqlite.Pragma do
       that are no keyword list, another key, and a `:db_name` that is neither
       a string nor an atom are rejected with
       `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
-      reason: :invalid_options}}}`, as in `get/4`. A `:db_name` whose bytes
+      reason: :invalid_options}}}`, as in `get/4`. A second `:db_name` is rejected the
+      same way with `reason: :duplicate_option`, writing nothing. A `:db_name` whose bytes
       are not UTF-8 is rejected the same way with `reason: :invalid_utf8`, and
       one SQLite does not know with `{:error, {:no_such_schema, db_name}}`,
       also as in `get/4`. `busy_timeout` and `wal_autocheckpoint`, which this

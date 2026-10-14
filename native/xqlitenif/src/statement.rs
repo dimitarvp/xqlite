@@ -250,18 +250,18 @@ pub(crate) unsafe fn column_names(
                     true => Err(XqliteError::InternalEncodingError {
                         context: format!("SQLite returned null column name for index {index}"),
                     }),
-                    false => utf8_column_name(CStr::from_ptr(name).to_bytes(), index),
+                    false => utf8_column_name(CStr::from_ptr(name).to_bytes(), index as usize),
                 }
             })
             .collect()
     }
 }
 
-fn utf8_column_name(bytes: &[u8], index: c_int) -> Result<String, XqliteError> {
+pub(crate) fn utf8_column_name(bytes: &[u8], place: usize) -> Result<String, XqliteError> {
     std::str::from_utf8(bytes)
         .map(str::to_string)
         .map_err(|_not_utf8| XqliteError::ColumnNameNotUtf8 {
-            column: index as usize,
+            column: place,
             name: bytes.to_vec(),
         })
 }

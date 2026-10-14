@@ -7,7 +7,8 @@ defmodule Xqlite.PragmaSpec do
 
   ## Fields
 
-    * `return_type` — what GET returns: `:int`, `:text`, `:bool` or `:list`
+    * `return_type` — the type of SQLite's own answer, `:int`, `:text`, `:bool` or `:list`, which
+      `Xqlite.Pragma.get/4` answers in this library's terms where its moduledoc says so
     * `read_arities` — which arities support GET: `[0]`, `[1]`, `[0, 1]`, or `[]`
     * `schema_prefix` — whether `PRAGMA db_name.pragma_name` is allowed
     * `writable` — whether SET is supported

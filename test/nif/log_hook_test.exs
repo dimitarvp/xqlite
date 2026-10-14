@@ -79,6 +79,31 @@ defmodule Xqlite.NIF.LogHookTest do
         end)
       end
 
+      test "a message carries the bytes SQLite wrote, a name that is not UTF-8 included",
+           %{conn: conn} do
+        with_log_handle(fn ->
+          create = Base.encode16(~s|CREATE TABLE log_n("x\xE9")|)
+
+          update =
+            "UPDATE sqlite_schema SET sql = CAST(x'#{create}' AS TEXT) WHERE name = 'log_n'"
+
+          :ok = NIF.execute_batch(conn, "CREATE TABLE log_n(x); PRAGMA writable_schema = ON")
+          :ok = NIF.execute_batch(conn, "#{update}; PRAGMA writable_schema = RESET")
+
+          for i <- 1..30,
+              do: {:ok, 1} = NIF.execute(conn, "INSERT INTO log_n VALUES ('v#{i}')", [])
+
+          {:ok, h} = NIF.register_log_hook(self())
+          join = "SELECT count(*) FROM log_n AS a NATURAL JOIN log_n AS b"
+          {:ok, _} = NIF.query(conn, join, [])
+          {:messages, messages} = Process.info(self(), :messages)
+          assert [message | _] = for({:xqlite_log, 284, m} <- messages, m =~ "log_n(", do: m)
+          assert :binary.match(message, <<"x", 0xE9>>) != :nomatch
+          assert :binary.match(message, <<"x", 0xEF, 0xBF, 0xBD>>) == :nomatch
+          h
+        end)
+      end
+
       test "stops delivery after unregister_log_hook/1", %{conn: conn} do
         {:ok, h} = NIF.register_log_hook(self())
         :ok = NIF.unregister_log_hook(h)

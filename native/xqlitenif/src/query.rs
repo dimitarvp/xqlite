@@ -118,6 +118,9 @@ pub(crate) fn core_execute_batch(
     tokens: &[Arc<AtomicBool>],
 ) -> Result<(), XqliteError> {
     let autocommit_before = conn.is_autocommit();
+    if autocommit_before {
+        crate::progress_dispatch::require_idle(conn)?;
+    }
     // SAFETY: the caller holds the connection Mutex for the whole call, and
     // `handle()` is the live `sqlite3*` that Mutex guards.
     unsafe {
@@ -219,14 +222,14 @@ fn require_unchanged(
             row.get(0)
         })?;
     let own = format!(
-        "SELECT sql FROM {quoted}.sqlite_master WHERE tbl_name = ?1 AND sql IS NOT NULL \
-         AND type IN ('table', 'index', 'trigger')"
+        "SELECT sql FROM {quoted}.sqlite_master WHERE tbl_name = ?1 COLLATE NOCASE \
+         AND sql IS NOT NULL AND type IN ('table', 'index', 'trigger')"
     );
     let sql = match schema.eq_ignore_ascii_case("temp") {
         true => own,
         false => {
-            own + " UNION ALL SELECT sql FROM temp.sqlite_master WHERE tbl_name = ?1 \
-               AND sql IS NOT NULL AND type = 'trigger'"
+            own + " UNION ALL SELECT sql FROM temp.sqlite_master \
+               WHERE tbl_name = ?1 COLLATE NOCASE AND sql IS NOT NULL AND type = 'trigger'"
         }
     };
     let mut live = conn

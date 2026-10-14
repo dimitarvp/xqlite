@@ -27,8 +27,81 @@ defmodule Xqlite.NIF.ExecutionTest do
   INSERT INTO big SELECT randomblob(3000) FROM n; DELETE FROM big;
   """
 
+  @mid_run_tables """
+  DROP TABLE IF EXISTS log; DROP TABLE IF EXISTS src; DROP TABLE IF EXISTS other;
+  DROP TABLE IF EXISTS x; DROP TABLE IF EXISTS bl; CREATE TABLE log (n); CREATE TABLE other (a);
+  CREATE TABLE bl (b); INSERT INTO bl VALUES (zeroblob(8)); CREATE TABLE src (n);
+  WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 200)
+  INSERT INTO src SELECT i FROM c;
+  """
+  @insert_five "INSERT INTO log SELECT n FROM src WHERE n <= 5 RETURNING n"
+  @zeros <<0::64>>
+
+  # A child of the connection left mid-run, and what holds once it is finished: its
+  # remaining rows or its close's answer, the rows in `log` and the bytes of the blob.
+  @mid_run [
+    {{:stmt, @insert_five}, [4, 5, @zeros]},
+    {{:stream, @insert_five}, [4, 5, @zeros]},
+    {{:blob, :write}, [:ok, 0, "abcdefgh"]},
+    {{:stmt, "SELECT n FROM src"}, [199, 0, @zeros]},
+    {{:stream, "SELECT n FROM src"}, [199, 0, @zeros]},
+    {{:blob, :read}, [:ok, 0, @zeros]}
+  ]
+
+  # Each batch, and its answer inside the caller's transaction with its BEGIN and COMMIT taken out.
+  @mid_run_batches [
+    {"BEGIN; INSERT INTO other VALUES (1); COMMIT;", :ok},
+    {"BEGIN; CREATE TABLE x (a); SELECT * FROM nosuch;", {:error, {:no_such_table, "nosuch"}}},
+    {"INSERT INTO other VALUES (1);", :ok}
+  ]
+
   defp one_row(text), do: "INSERT INTO t VALUES ('#{String.replace(text, "'", "''")}');"
   defp count_t(conn), do: NIF.query(conn, "SELECT count(*) FROM t", [])
+
+  defp state(conn) do
+    sql = "SELECT count(*), (SELECT count(*) FROM sqlite_schema WHERE name = 'x'), "
+    tail = "(SELECT count(*) FROM log), (SELECT b FROM bl) FROM other"
+    {:ok, %{rows: [row]}} = NIF.query(conn, sql <> tail, [])
+    row
+  end
+
+  defp start_child(conn, {:stmt, sql}) do
+    {:ok, stmt} = NIF.stmt_prepare(conn, sql)
+    {:row, [1]} = NIF.stmt_step(stmt)
+    {:stmt, stmt}
+  end
+
+  defp start_child(conn, {:stream, sql}) do
+    {:ok, stream} = NIF.stream_open(conn, sql, [])
+    {:ok, %{rows: [[1]]}} = NIF.stream_fetch(stream, 1)
+    {:stream, stream}
+  end
+
+  defp start_child(conn, {:blob, :write}) do
+    {:ok, blob} = NIF.blob_open(conn, "main", "bl", "b", 1, false)
+    :ok = NIF.blob_write(blob, 0, "abcdefgh")
+    {:blob, blob}
+  end
+
+  defp start_child(conn, {:blob, :read}) do
+    {:ok, blob} = NIF.blob_open(conn, "main", "bl", "b", 1, true)
+    {:ok, _bytes} = NIF.blob_read(blob, 0, 4)
+    {:blob, blob}
+  end
+
+  defp finish_child({:stmt, stmt}) do
+    {:ok, %{rows: rows, done: true}} = NIF.stmt_multi_step(stmt, 1000)
+    :ok = NIF.stmt_finalize(stmt)
+    length(rows)
+  end
+
+  defp finish_child({:stream, stream}) do
+    {:ok, %{rows: rows}} = NIF.stream_fetch(stream, 1000)
+    :ok = NIF.stream_close(stream)
+    length(rows)
+  end
+
+  defp finish_child({:blob, blob}), do: NIF.blob_close(blob)
 
   # Creates a table with the standard test columns but allows specifying the name.
   defp setup_named_table(conn, table_name \\ "exec_test") do
@@ -478,6 +551,47 @@ defmodule Xqlite.NIF.ExecutionTest do
                  NIF.execute_batch(conn, "SAVEPOINT a; #{@one_then_nope}")
 
         assert {:ok, false} = NIF.autocommit(conn)
+      end
+
+      test "the anchor: a batch begun outside a transaction answers :statement_mid_run beside a write mid-run",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, @mid_run_tables)
+        insert = start_child(conn, {:stmt, @insert_five})
+        batch = "BEGIN; INSERT INTO other VALUES (1); COMMIT;"
+        assert {:error, :statement_mid_run} = NIF.execute_batch(conn, batch)
+        assert {{:ok, true}, [0, 0 | _]} = {NIF.autocommit(conn), state(conn)}
+        assert {finish_child(insert), state(conn)} == {4, [0, 0, 5, @zeros]}
+      end
+
+      test "beside a child mid-run a load and a restore run nothing, a batch runs only inside a transaction, and the child ends whole",
+           %{conn: conn} do
+        path = Xqlite.TestUtil.tmp_db_path("mid_run_src")
+        :ok = NIF.execute_batch(conn, @mid_run_tables)
+        {{:ok, image}, :ok} = {NIF.serialize(conn, "main"), NIF.backup(conn, "main", path)}
+        refused = {:error, :statement_mid_run}
+
+        for {child, ends} <- @mid_run,
+            {sql, inside} <- @mid_run_batches,
+            txn? <- [false, true] do
+          :ok = NIF.execute_batch(conn, @mid_run_tables <> if(txn?, do: "BEGIN;", else: ""))
+          running = start_child(conn, child)
+          copies = [Xqlite.deserialize(conn, image), Xqlite.restore(conn, path)]
+          assert copies == [refused, refused]
+
+          case txn? do
+            true ->
+              batch = String.replace(sql, ~w(BEGIN; COMMIT;), "")
+              assert NIF.execute_batch(conn, batch) == inside
+
+            false ->
+              assert NIF.execute_batch(conn, sql) == refused
+              assert [0, 0 | _] = state(conn)
+          end
+
+          finished = finish_child(running)
+          :ok = if txn?, do: NIF.execute_batch(conn, "COMMIT"), else: :ok
+          assert {child, sql, [finished | Enum.drop(state(conn), 2)]} == {child, sql, ends}
+        end
       end
 
       test "the anchor: a batch longer than the SQL length limit runs when each statement fits",

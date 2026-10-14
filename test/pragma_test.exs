@@ -601,6 +601,32 @@ defmodule XqlitePragmaTest do
                  P.get(db, :user_version, options)
       end
     end
+
+    test "the anchor: a second :db_name answers its own pair, after any pair that cannot be read",
+         %{db: db} do
+      assert {:error,
+              {:invalid_pragma_argument,
+               %{pragma: :user_version, value: {:db_name, "nope"}, reason: :duplicate_option}}} =
+               P.get(db, :user_version, [db_name: "main"], db_name: "nope")
+
+      assert {:error,
+              {:invalid_pragma_argument, %{value: {:foo, 1}, reason: :invalid_options}}} =
+               P.get(db, :user_version, db_name: "main", db_name: "nope", foo: 1)
+    end
+
+    property "a second :db_name answers the error naming it, wherever the two stand", %{db: db} do
+      assert :ok = Xqlite.set_authorizer(db, [:pragma])
+      name = one_of([string(:printable, max_length: 4), atom(:alphanumeric), constant(nil)])
+
+      check all(first <- name, second <- name, at <- integer(0..2), max_runs: 2000) do
+        {third, options} = Enum.split([db_name: first, db_name: second], at)
+        reason = %{value: {:db_name, second}, reason: :duplicate_option}
+        refused = &{:error, {:invalid_pragma_argument, Map.put(reason, :pragma, &1)}}
+        assert P.get(db, :user_version, third, options) == refused.(:user_version)
+        assert P.put(db, :user_version, 1, third ++ options) == refused.(:user_version)
+        assert P.table_info(db, "people", third ++ options) == refused.(:table_info)
+      end
+    end
   end
 
   # Every term a caller can put in the options position that is not a keyword
@@ -662,13 +688,27 @@ defmodule XqlitePragmaTest do
       on_exit(fn -> NIF.close(db) end)
 
       :ok =
-        NIF.execute_batch(db, "CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);")
+        NIF.execute_batch(db, """
+        CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE t (x CHECK (x > 0));
+        """)
 
       {:ok, db: db}
     end
 
     test "the anchor: a number reaches the PRAGMA that reads one", %{db: db} do
       assert {:ok, ["ok"]} = P.get(db, :integrity_check, 1)
+    end
+
+    test "the anchor: both checks answer every finding as a list, with or without a :db_name",
+         %{db: db} do
+      write_bad_rows(db, 2)
+
+      for name <- [:integrity_check, :quick_check] do
+        assert {:ok, %Xqlite.Result{rows: rows}} = Xqlite.query(db, "PRAGMA #{name}", [])
+        assert {:ok, List.flatten(rows)} == P.get(db, name)
+        assert {:ok, List.flatten(rows)} == P.get(db, name, db_name: "main")
+      end
     end
 
     test "the anchor: a name no table carries answers the tag", %{db: db} do
@@ -679,17 +719,24 @@ defmodule XqlitePragmaTest do
     property "a number-reading PRAGMA answers what the raw statement answers", %{db: db} do
       check all(
               name <- StreamData.member_of([:integrity_check, :quick_check]),
-              number <- StreamData.integer(1..8),
+              number <- StreamData.member_of([nil | Enum.to_list(1..8)]),
+              db_name <- StreamData.member_of([nil, "main", :main]),
+              bad <- StreamData.integer(0..4),
               max_runs: 2000
             ) do
-        assert {:ok, rows} = P.get(db, name, number)
-
-        assert {:ok, %Xqlite.Result{rows: raw_rows}} =
-                 Xqlite.query(db, "PRAGMA #{name}(#{number});", [])
-
-        assert List.flatten(rows) == List.flatten(raw_rows)
+        write_bad_rows(db, bad)
+        sql = "PRAGMA #{db_name && "main."}#{name}#{number && "(#{number})"};"
+        assert {:ok, %Xqlite.Result{rows: raw_rows}} = Xqlite.query(db, sql, [])
+        args = Enum.reject([number, [db_name: db_name]], &is_nil/1)
+        assert apply(P, :get, [db, name | args]) == {:ok, List.flatten(raw_rows)}
       end
     end
+  end
+
+  defp write_bad_rows(db, count) do
+    :ok = NIF.execute_batch(db, "DELETE FROM t; PRAGMA ignore_check_constraints = ON")
+    for x <- 1..count//1, do: {:ok, 1} = NIF.execute(db, "INSERT INTO t VALUES (?1)", [-x])
+    :ok = NIF.execute_batch(db, "PRAGMA ignore_check_constraints = OFF")
   end
 
   # The six shapes the argument position can take.
@@ -725,8 +772,12 @@ defmodule XqlitePragmaTest do
     |> StreamData.list_of(min_length: 1, max_length: 2)
   end
 
-  # The two reads this library answers from its own state take no `:db_name`.
+  # A second `:db_name` is refused first; the two reads this library answers from its own
+  # state take no `:db_name`.
   defp verdict(name, {:options, kw}, opts), do: verdict(name, :none, kw ++ opts)
+
+  defp verdict(name, :none, [{:db_name, _first}, {:db_name, second}]),
+    do: {:refused, name, :duplicate_option, {:db_name, second}}
 
   defp verdict(name, :none, [{:db_name, db_name} | _])
        when name in [:busy_timeout, :wal_autocheckpoint],

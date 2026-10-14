@@ -156,6 +156,25 @@ fn encode_list_refusal<'a>(
     }
 }
 
+pub(crate) fn invalid_pragma_value<'a>(
+    env: Env<'a>,
+    pragma: Atom,
+    value: Term<'a>,
+) -> Term<'a> {
+    let map_result = map_new(env)
+        .map_put(atoms::pragma(), pragma)
+        .and_then(|map| map.map_put(atoms::value(), value));
+    match map_result {
+        Ok(map) => (atoms::invalid_pragma_value(), map).encode(env),
+        Err(_) => {
+            let err = XqliteError::InternalEncodingError {
+                context: "Failed map create for InvalidPragmaValue".to_string(),
+            };
+            err.encode(env)
+        }
+    }
+}
+
 /// The map carries `position` only where the value came out of a list; a
 /// PRAGMA value is judged on its own and answers an empty map.
 fn encode_integer_out_of_range(env: Env<'_>, position: Option<usize>) -> Term<'_> {
@@ -448,6 +467,7 @@ pub(crate) enum XqliteError {
 
     ConnectionClosed,
     StatementFinalized,
+    BlobClosed,
     StatementMidRun,
 
     InternalEncodingError {
@@ -688,6 +708,7 @@ impl Display for XqliteError {
             XqliteError::StatementFinalized => {
                 write!(f, "Statement is already finalized")
             }
+            XqliteError::BlobClosed => write!(f, "Blob is closed"),
             XqliteError::StatementMidRun => {
                 write!(f, "Statement is mid-run: reset or finalize it first")
             }
@@ -975,6 +996,7 @@ impl Encoder for XqliteError {
             XqliteError::LockError(reason) => (atoms::lock_error(), reason).encode(env),
             XqliteError::ConnectionClosed => atoms::connection_closed().encode(env),
             XqliteError::StatementFinalized => atoms::statement_finalized().encode(env),
+            XqliteError::BlobClosed => atoms::blob_closed().encode(env),
             XqliteError::StatementMidRun => atoms::statement_mid_run().encode(env),
             XqliteError::InternalEncodingError { context } => {
                 (atoms::internal_encoding_error(), context).encode(env)
@@ -1094,18 +1116,7 @@ impl Encoder for XqliteError {
             }
             XqliteError::InvalidPragmaName(name) => encode_pragma_name(env, name),
             XqliteError::InvalidPragmaValue { pragma, value } => {
-                let map_result = map_new(env)
-                    .map_put(atoms::pragma(), *pragma)
-                    .and_then(|map| map.map_put(atoms::value(), value));
-                match map_result {
-                    Ok(map) => (atoms::invalid_pragma_value(), map).encode(env),
-                    Err(_) => {
-                        let err = XqliteError::InternalEncodingError {
-                            context: "Failed map create for InvalidPragmaValue".to_string(),
-                        };
-                        err.encode(env)
-                    }
-                }
+                invalid_pragma_value(env, *pragma, value.encode(env))
             }
             XqliteError::InvalidTransactionMode { mode } => {
                 (atoms::invalid_transaction_mode(), *mode).encode(env)

@@ -7,6 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+/// SQLite's step count for every remaining page in one step.
+pub(crate) const ALL_PAGES: c_int = -1;
+
 /// Copies `schema` of `conn` over the main database of the file at
 /// `dest_path`, `pages` pages a step. The tokens are read before the file is
 /// opened, so a signalled one creates no file, and between steps.
@@ -50,7 +53,7 @@ pub(crate) fn restore_from(
     }
     crate::progress_dispatch::require_idle(conn)?;
     let restore = Backup::new_with_names(&src, "main", conn, schema)?;
-    run(&restore, 100, &[], |_, _| ())
+    run(&restore, ALL_PAGES, &[], |_, _| ())
 }
 
 /// Opens the file at `path` with no busy wait, so a lock another connection

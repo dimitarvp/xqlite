@@ -134,6 +134,24 @@ fn execute_batch(
     singular_ok_or_error_tuple(env, execution_result)
 }
 
+/// The batch's `BEGIN IMMEDIATE` takes the write lock of every attached database, not only
+/// main's. A schema `deserialize/4` loaded read-only counts as writable here, since
+/// `sqlite3_db_readonly` answers 0 for it: it takes the batch, answering `SQLITE_READONLY`
+/// when SQLite refuses the write and `StatementMidRun` beside a running statement.
+#[rustler::nif(schedule = "DirtyIo")]
+fn optimize(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
+    let result = connection::with_conn(&handle, |conn| {
+        let query_only = || conn.pragma_query_value(None, "query_only", |row| row.get(0));
+        let locked = "BEGIN IMMEDIATE; PRAGMA optimize; COMMIT";
+        let no_params = rustler::types::atom::nil().to_term(env);
+        match conn.is_autocommit() && !conn.is_readonly(rusqlite::MAIN_DB)? && !query_only()? {
+            true => query::core_execute_batch(conn, locked, &[]),
+            false => query::core_execute(env, conn, "PRAGMA optimize", no_params).map(|_| ()),
+        }
+    });
+    singular_ok_or_error_tuple(env, result)
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn query_with_changes<'a>(
     env: Env<'a>,
@@ -568,12 +586,15 @@ fn set_pragma<'a>(
     handle: ResourceArc<XqliteConn>,
     pragma_name: rustler::Binary<'a>,
     value_term: Term<'a>,
-) -> Result<Term<'a>, XqliteError> {
+) -> Result<Term<'a>, Term<'a>> {
     // SQLite reads a busy_timeout past c_int::MAX as 0 and drops the wait.
+    let in_range = |ms: i64| (0..=i64::from(std::ffi::c_int::MAX)).contains(&ms);
     if pragma_name.as_slice().eq_ignore_ascii_case(b"busy_timeout")
-        && let Ok(ms) = value_term.decode::<u64>()
+        && !value_term.decode::<i64>().is_ok_and(in_range)
     {
-        busy_handler::busy_timeout_c_int(ms)?;
+        let refused =
+            crate::error::invalid_pragma_value(env, atoms::busy_timeout(), value_term);
+        return Err(refused);
     }
 
     connection::with_conn(&handle, |conn| {
@@ -603,6 +624,7 @@ fn set_pragma<'a>(
 
         Ok(result)
     })
+    .map_err(|e| e.encode(env))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -736,7 +758,8 @@ fn strict_rebuild<'a>(
     schema_version: i64,
     stored_texts: Term<'a>,
 ) -> Term<'a> {
-    let result = query::text_list(statements).and_then(|statements| {
+    let result = query::reject_interior_nul(&table).and_then(|()| {
+        let statements = query::text_list(statements)?;
         let stored = query::text_list(stored_texts)?;
         connection::with_conn(&handle, |conn| {
             query::strict_rebuild(conn, &statements, &schema, &table, schema_version, &stored)
@@ -1559,7 +1582,9 @@ fn serialize<'a>(
     schema: TextArg,
 ) -> Result<rustler::Binary<'a>, XqliteError> {
     connection::with_conn(&handle, |conn| {
-        crate::schema::require_schema(conn, &schema)?;
+        if crate::schema::require_schema(conn, &schema)? == ffi::SQLITE_TXN_WRITE {
+            return Err(XqliteError::TransactionInProgress);
+        }
         // Only the unused temp schema has no B-tree yet; the page_count read would create it.
         conn.is_readonly(schema.as_str())
             .map_err(|_no_btree| XqliteError::NoPages)?;
@@ -1775,7 +1800,8 @@ fn backup<'a>(
 ) -> Term<'a> {
     let result = connection::with_conn(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
-        crate::backup::backup_to(conn, &schema, &dest_path, 100, &[], |_, _| ())
+        let pages = crate::backup::ALL_PAGES;
+        crate::backup::backup_to(conn, &schema, &dest_path, pages, &[], |_, _| ())
     });
     singular_ok_or_error_tuple(env, result)
 }

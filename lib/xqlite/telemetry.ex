@@ -630,7 +630,7 @@ defmodule Xqlite.Telemetry do
   Any other key answers `{:error, {:invalid_option, _}}`.
   """
   @spec bridge_log(keyword()) :: {:ok, struct()} | {:error, term()}
-  def bridge_log(opts \\ []) when is_list(opts) do
+  def bridge_log(opts \\ []) do
     Xqlite.Telemetry.Bridge.bridge_log_global(opts)
   end
 

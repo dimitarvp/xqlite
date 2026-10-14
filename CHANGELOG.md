@@ -9,15 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cancel_tokens: nil` means no token**, as `[]` does, on `query/4`,
+  `execute/4`, `execute_batch/3`, `multi_step/3`, `stream/4` and
+  `backup_with_progress/4`, where it answered `{:error,
+  {:invalid_cancel_tokens, _}}`. A list holding `nil` is still rejected,
+  and so is `nil` on `cancel_operation/1` and on the raw functions.
+- **`XqliteNIF.optimize/1`**, the raw call behind `Xqlite.optimize/1`. In
+  one hold of the connection it runs `BEGIN IMMEDIATE`, `PRAGMA optimize`
+  and `COMMIT`, rolling back on any failure, when the connection is in
+  autocommit, can write and has `query_only` off, and `PRAGMA optimize`
+  alone otherwise.
+
 - **`XqliteNIF.strict_rebuild/6`**, the raw call behind
   `Xqlite.enable_strict_table/2`. It runs a list of statements, each
   exactly one, in one `BEGIN IMMEDIATE` transaction while it holds the
-  connection, with `foreign_keys` off and `legacy_alter_table` on, and
-  puts both back once the transaction has ended. Inside the transaction,
-  before any statement runs, it checks that the schema version of the
-  table's database and the stored definitions of the table, its indexes
-  and its triggers still equal the ones it is given. Any failure, a busy
-  `COMMIT` included, rolls the transaction back.
+  connection, with `foreign_keys` off and `legacy_alter_table` on, and puts
+  both back once the transaction has ended. Inside the transaction, before
+  any statement runs, it checks that the schema version of the table's
+  database and the stored definitions of the table, its indexes and its
+  triggers still equal the ones it is given. Any failure, a busy `COMMIT`
+  included, rolls the transaction back. A table name holding a NUL byte
+  answers `{:error, :null_byte_in_string}` before anything runs.
 
 - **A Known limitations guide.** `guides/known_limitations.md` lists every
   limitation the library documents, with what to do instead, among them
@@ -37,6 +49,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range and raises `ArgumentError` for an integer outside 64 bits.
 
 ### Fixed
+
+- **A busy observer's handle is never issued twice on one connection.**
+  Handles started again from 0 each time the last observer left with no
+  policy set, so a handle already unregistered could name a later
+  observer, and unregistering it again removed that observer and gave the
+  wait back to SQLite. Handles now start at 1 and are never reused while
+  the connection lives; unregistering an unknown handle still answers
+  `:ok`.
+- **A busy policy never sleeps past `max_elapsed_ms`.** The policy checked
+  the time spent before each sleep and then slept its whole `sleep_ms`, so
+  a busy event could run a whole sleep past its ceiling. A sleep that
+  would pass the ceiling is now cut to what is left of it, and the event
+  gives up there.
+- **`optimize/1` waits for a locked database as the busy timeout or the
+  busy policy says.** When SQLite found a single table to analyze while
+  another connection held the write lock, the call answered `{:error,
+  {:database_busy_or_locked, 5, _}}` at once and busy observers heard
+  nothing. In autocommit, on a connection that can write, it now takes the
+  write lock first and runs `PRAGMA optimize` in the same call, which
+  rolls back on any failure. So it also waits behind another connection's
+  write when there is nothing to analyze, a deny of `:transaction` stops
+  it, and it answers `{:error, :statement_mid_run}` while a statement,
+  stream or blob of the connection is mid-run. Inside a transaction, and
+  on a read-only connection or one with `query_only` on, it runs as
+  before.
+- **`backup/3` and `restore/3` finish while another connection writes to
+  the source.** Both copied in steps, and SQLite starts a stepped copy
+  again from the first page whenever another connection commits to the
+  source between two steps, so under a steady writer the copy ended only
+  when the writer stopped, or, in rollback-journal mode, `backup/3`
+  answered `{:error, {:database_busy_or_locked, 5, _}}` with nothing
+  copied. Both now copy in one step, inside one read transaction of the
+  source. In rollback-journal mode another connection's commit waits for
+  the whole copy and answers busy when its own busy timeout ends first; in
+  WAL mode the write-ahead log grows until the copy ends.
+  `backup_with_progress/4` still copies in steps, and `pages_per_step:
+  2_147_483_647` copies in one.
+- **`serialize/2` answers `{:error, :transaction_in_progress}` while the
+  connection holds a write transaction on that schema**, one it began or a
+  write still running in autocommit mode, and copies nothing. The image
+  held that transaction's uncommitted pages, and for a database
+  `deserialize/4` loaded it could hold a state no transaction ever had,
+  some rows old and some new. A read transaction still copies its
+  snapshot.
+- **A `:db_name` given twice to an `Xqlite.Pragma` function answers an
+  error.** The first pair won and the second was dropped without a word,
+  so a call could read or write a database the caller did not mean. A
+  second `:db_name`, in one option list or across the argument and the
+  options, now answers `{:error, {:invalid_pragma_argument, %{pragma:
+  name, value: {:db_name, second}, reason: :duplicate_option}}}`, and
+  `put/4` writes nothing.
+- **`Xqlite.enable_strict_table/2` keeps a trigger whose `ON` clause
+  spells the table's name in another case.** SQLite attaches such a
+  trigger to the table, ASCII case folded, while the conversion read the
+  table's triggers by the exact name, so the rebuild dropped them and
+  still answered `:ok`. It now matches the name as SQLite does.
+- **`Xqlite.enable_strict_table/2` converts a table while a TEMP trigger
+  sits on a table of the same name in another database.** The conversion
+  replayed that trigger, which the rebuild had not dropped, and failed
+  with `{:error, {:sql_input_error, _}}`, leaving the table as it was. A
+  TEMP object is now replayed only when it no longer exists, so such a
+  trigger stays as it was.
+- **The log hook sends SQLite's message as the bytes SQLite wrote.** Each
+  byte that was not UTF-8 reached every subscriber as U+FFFD, so a name
+  stored that way matched nothing in the schema. `message` is now a binary
+  holding SQLite's bytes, which need not be UTF-8.
 
 - **A garbage-collected handle no longer stalls a scheduler while its
   connection is busy.** When the garbage collector freed a statement,
@@ -86,15 +164,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off, and enforcement stayed off after the caller rolled back. The
   rebuild now rolls its transaction back on that answer, as on any other
   failure, and puts both pragmas back once the transaction has ended.
-- **A rebuild no longer erases the rows of a statement still running on
-  the connection.** A write another process had started but not finished,
-  such as an `INSERT … RETURNING` stepped once, keeps `autocommit/1`
-  reading `true`, so the rebuild's transaction took that write over. When
-  a later step failed, the rebuild's rollback erased the write's rows,
-  while the write still finished without an error; a stream left partly
-  read was ended the same way. While a statement, stream or blob handle of
-  the connection is running, the rebuild now answers
-  `{:error, {:database_busy_or_locked, 5, _}}` and changes nothing.
+- **A rebuild no longer erases the rows of a statement still running on the
+  connection.** A write another process had started but not finished, such
+  as an `INSERT … RETURNING` stepped once, keeps `autocommit/1` reading
+  `true`, so the rebuild's transaction took that write over. When a later
+  step failed, the rebuild's rollback erased the write's rows, while the
+  write still finished without an error; a stream left partly read was
+  ended the same way. While a statement, stream or blob handle of the
+  connection is running, the rebuild now answers `{:error,
+  :statement_mid_run}` and changes nothing.
 - **A rebuild notices a schema change made after it read the table.** The
   rebuild builds its statements from the stored definitions of the table,
   its indexes and its triggers, read before its transaction begins. A
@@ -385,15 +463,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prepared statement of the connection after a load, so SQLite prepares
   each again at its next step, against the loaded schema. A write prepared
   before loading an image with the same schema cookie used to step into
-  freed memory and take the VM down, and a query read whatever table sat
-  at its old root page. A statement or stream still running on any schema
-  of the connection, or an open blob, now makes the load answer
-  `{:error, {:database_busy_or_locked, 5, _}}` and replace nothing, where
-  before only one on the target did: the load drops every cached schema,
-  and a running statement may read a table definition on every row. The
-  schema re-read the load runs afterwards is not subject to the
-  connection's `:sql_length` limit, and the statements are marked to be
-  prepared again whatever that re-read answers.
+  freed memory and take the VM down, and a query read whatever table sat at
+  its old root page. A statement or stream still running on any schema of
+  the connection, or an open blob, now makes the load answer `{:error,
+  :statement_mid_run}` and replace nothing, where before only one on the
+  target stopped it, with `{:error, {:database_busy_or_locked, 5, _}}`: the
+  load drops every cached schema, and a running statement may read a table
+  definition on every row. The schema re-read the load runs afterwards is
+  not subject to the connection's `:sql_length` limit, and the statements
+  are marked to be prepared again whatever that re-read answers.
 - **A TEMP trigger on a loaded table works after `deserialize/4`.** After a
   load, a TEMP trigger on a table of the replaced schema stopped firing,
   and `DROP TRIGGER` on it could take the VM down: SQLite's reload left the
@@ -401,13 +479,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schemas after every load, so the trigger fires on the loaded table; one
   whose table the image lacks stays idle until a load brings the table
   back. A load now turns `PRAGMA writable_schema` off.
-- **`restore/3` answers busy while a statement runs.** SQLite's backup drops
-  every cached schema of the connection when the copy finishes, and a
-  statement running on another schema whose program reads a table
-  definition on every row (a STRICT table's VIRTUAL generated column) took
-  the VM down. `Xqlite.restore/3` and `XqliteNIF.restore/3` now answer
-  `{:error, {:database_busy_or_locked, 5, _}}` while any statement, stream
-  or blob of the connection is mid-run, and copy nothing.
+- **`restore/3` answers `:statement_mid_run` while a statement runs.**
+  SQLite's backup drops every cached schema of the connection when the copy
+  finishes, and a statement running on another schema whose program reads a
+  table definition on every row (a STRICT table's VIRTUAL generated column)
+  took the VM down. `Xqlite.restore/3` and `XqliteNIF.restore/3` now answer
+  `{:error, :statement_mid_run}` while any statement, stream or blob of the
+  connection is mid-run, and copy nothing.
 - **`serialize/2` answers what stopped it.** `Xqlite.serialize/2` and
   `XqliteNIF.serialize/2` answered `{:error, {:sqlite_failure, 7, 7, "out of
   memory"}}` for every failure. A lock another connection holds on a schema
@@ -762,6 +840,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading again, so the entries under it that are fixes read as fixes.
 
 ### Changed
+
+- **`Xqlite.Pragma.get/2,3,4` answers every finding of `integrity_check`
+  and `quick_check` as a list, on every form.** Without a number it
+  answered SQLite's first finding alone, as a string, and with a
+  `:db_name` it raised `CaseClauseError` once SQLite reported more than
+  one. A clean database now answers `{:ok, ["ok"]}` where it answered
+  `{:ok, "ok"}`.
+- **A blob handle closed by `blob_close/1` answers `{:error,
+  :blob_closed}`** from `blob_read/3`, `blob_write/3`, `blob_size/1` and
+  `blob_reopen/2` while its connection is open, where it answered
+  `{:error, :connection_closed}`. Once the connection is closed, every
+  blob call still answers `{:error, :connection_closed}`.
+- **A batch run outside a transaction answers `{:error,
+  :statement_mid_run}` while a statement, stream or blob of the connection
+  is mid-run, and runs nothing.** A write such a statement runs would join
+  a transaction the batch opens, and could be undone with it. Inside a
+  transaction a batch runs as before.
+- **The schema readers answer a stored column name that is not UTF-8 by
+  the column's place in its table.** `schema_columns/2`,
+  `schema_foreign_keys/2` and `schema_index_columns/2` answered `{:error,
+  {:utf8_error, n, message}}`, `n` naming a column of an internal query;
+  they now answer `{:error, {:column_name_not_utf8, %{column: place, name:
+  bytes}}}`, as the query functions do for such a name in a result. A
+  foreign key's parent table and column keep `{:utf8_error, _, _}`.
+- **An option argument that is no list is an answer on every function that
+  takes an option list.** `open/2`, `open_in_memory/1`,
+  `set_busy_policy/2`, `register_progress_hook/3`,
+  `Xqlite.Telemetry.bridge/2` and `Xqlite.Telemetry.bridge_log/1` raised
+  `FunctionClauseError` for a map, an atom or `nil` in that place; they
+  now answer `{:error, {:invalid_option, %{key: nil, value: term, reason:
+  :not_a_pair}}}`, as the other functions do, before any file is opened or
+  anything starts.
+- **The raw `XqliteNIF.set_pragma/3` takes for `busy_timeout` only an
+  integer from 0 to 2_147_483_647**, as `Xqlite.put_busy_timeout/2` does.
+  Any other value, the name in any case, answers `{:error,
+  {:invalid_pragma_value, %{pragma: :busy_timeout, value: value}}}` and
+  keeps the wait in force. SQLite read a negative number, `:infinity`, a
+  boolean or a string such as `"abc"` as no wait, and a string or a float
+  holding a number as that number, and an integer past 64 bits answered a
+  conversion error.
 
 - **Loading xqlite starts a release thread.** The NIF library starts an
   OS thread of its own when it loads. The thread releases the handles the

@@ -96,7 +96,7 @@ defmodule Xqlite.Telemetry.Bridge do
     @per_conn_hooks [:wal, :commit, :rollback, :update, :progress, :busy]
 
     @doc false
-    def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts) do
+    def bridge_per_conn(conn, opts) when is_reference(conn) do
       with :ok <- Xqlite.judge_options(opts, [:hooks, :tag, :progress]),
            hooks = Keyword.get(opts, :hooks, :all),
            :ok <- validate_hooks(hooks),
@@ -117,7 +117,7 @@ defmodule Xqlite.Telemetry.Bridge do
     end
 
     @doc false
-    def bridge_log_global(opts) when is_list(opts) do
+    def bridge_log_global(opts) do
       with :ok <- Xqlite.judge_options(opts, [:tag]),
            tag = Keyword.get(opts, :tag),
            {:ok, pid} <- start_link(:log, tag),
@@ -180,11 +180,10 @@ defmodule Xqlite.Telemetry.Bridge do
       do: Xqlite.register_progress_hook(conn, pid, opts)
   else
     @doc false
-    def bridge_per_conn(conn, opts) when is_reference(conn) and is_list(opts),
-      do: {:error, :telemetry_disabled}
+    def bridge_per_conn(conn, _opts) when is_reference(conn), do: {:error, :telemetry_disabled}
 
     @doc false
-    def bridge_log_global(opts) when is_list(opts), do: {:error, :telemetry_disabled}
+    def bridge_log_global(_opts), do: {:error, :telemetry_disabled}
   end
 
   @doc false

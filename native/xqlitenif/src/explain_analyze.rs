@@ -1,12 +1,7 @@
 use crate::atoms;
 use crate::error::XqliteError;
-use crate::stream::{
-    bind_named_params_ffi, bind_positional_params_ffi, require_parameter_count,
-};
-use crate::util::{Params, decode_exec_keyword_params, decode_plain_list_params, walk_params};
 use rusqlite::Connection;
 use rusqlite::ffi;
-use rusqlite::types::Value;
 use rustler::{Encoder, Env, Term, types::map::map_new};
 use std::ffi::CStr;
 use std::os::raw::c_int;
@@ -63,23 +58,20 @@ pub fn core_explain_analyze<'a>(
 ) -> Result<ExplainAnalyze, XqliteError> {
     // SAFETY: `with_conn` at the NIF boundary holds the connection Mutex for
     // the duration of this call. Every `sqlite3_*` FFI below operates on a
-    // db_handle and stmt_ptr that belong to this connection; the lock ensures
-    // no concurrent BEAM thread can step the same connection.
+    // db_handle and stmt_ptr that belong to this connection, and the holder
+    // finalizes the statement on every way out of this block.
     unsafe {
         let db_handle = conn.handle();
-        let stmt_ptr = crate::statement::prepare_one(db_handle, sql)?;
+        let stmt = crate::statement::prepare_one(db_handle, sql)?;
+        let held = crate::statement::PreparedStmt::new(stmt);
 
-        let result = match collect_query_plan(stmt_ptr.as_ptr(), db_handle) {
+        match collect_query_plan(held.as_ptr(), db_handle) {
             Ok(query_plan) => {
-                reset_stmt_counters(stmt_ptr.as_ptr());
-                run_and_collect(env, stmt_ptr.as_ptr(), db_handle, params_term, query_plan)
+                reset_stmt_counters(held.as_ptr());
+                run_and_collect(env, held.as_ptr(), db_handle, params_term, query_plan)
             }
             Err(e) => Err(e),
-        };
-
-        ffi::sqlite3_finalize(stmt_ptr.as_ptr());
-
-        result
+        }
     }
 }
 
@@ -94,7 +86,7 @@ unsafe fn run_and_collect<'a>(
     query_plan: Vec<QueryPlanRow>,
 ) -> Result<ExplainAnalyze, XqliteError> {
     // SAFETY: forwarded from this function's own contract.
-    unsafe { bind_params(env, stmt_ptr, db_handle, params_term) }?;
+    unsafe { crate::stream::bind_params(env, stmt_ptr, db_handle, params_term) }?;
 
     let start = Instant::now();
     let mut rows_produced: u64 = 0;
@@ -124,38 +116,6 @@ unsafe fn run_and_collect<'a>(
         scans,
         query_plan,
     })
-}
-
-/// # Safety
-///
-/// The caller holds the connection Mutex for the whole call, `stmt_ptr` is a
-/// live prepared statement of that connection and `db_handle` is the
-/// `sqlite3*` that owns it.
-unsafe fn bind_params<'a>(
-    env: Env<'a>,
-    stmt_ptr: *mut ffi::sqlite3_stmt,
-    db_handle: *mut ffi::sqlite3,
-    params_term: Term<'a>,
-) -> Result<(), XqliteError> {
-    match walk_params(params_term)? {
-        // SAFETY: forwarded from this function's own contract.
-        Params::Empty => unsafe { require_parameter_count(stmt_ptr, 0) },
-        Params::Named(items) => {
-            // SAFETY: forwarded from this function's own contract.
-            let count = unsafe { ffi::sqlite3_bind_parameter_count(stmt_ptr) };
-            let named_params_vec =
-                decode_exec_keyword_params(env, &items, count.max(0) as usize)?;
-            // SAFETY: forwarded from this function's own contract.
-            unsafe { bind_named_params_ffi(stmt_ptr, &named_params_vec, db_handle) }
-                .map_err(crate::stream::BindFailure::into_error)
-        }
-        Params::Positional(items) => {
-            let positional_values: Vec<Value> = decode_plain_list_params(env, &items)?;
-            // SAFETY: forwarded from this function's own contract.
-            unsafe { bind_positional_params_ffi(stmt_ptr, &positional_values, db_handle) }
-                .map_err(crate::stream::BindFailure::into_error)
-        }
-    }
 }
 
 // EXPLAIN QUERY PLAN is documented to return (id, parent, notused, detail).

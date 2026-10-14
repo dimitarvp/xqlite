@@ -11,7 +11,7 @@ defmodule Xqlite.Schema.DatabaseInfo do
   """
   @type t :: %__MODULE__{
           name: String.t(),
-          file: String.t() | nil
+          file: String.t()
         }
 
   @enforce_keys [:name]

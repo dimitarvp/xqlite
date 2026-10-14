@@ -1,5 +1,6 @@
 use crate::atoms;
 use crate::error::XqliteError;
+use crate::statement::utf8_column_name;
 use crate::util::quote_identifier;
 use rusqlite::{Connection, ffi};
 use rustler::types::atom::nil;
@@ -310,7 +311,7 @@ fn parse_float_literal(t: &str) -> Option<f64> {
 #[module = "Xqlite.Schema.DatabaseInfo"]
 pub(crate) struct DatabaseInfo {
     pub name: String,
-    pub file: Option<String>,
+    pub file: String,
 }
 
 #[derive(Debug, Clone, NifStruct)]
@@ -504,7 +505,7 @@ struct TempObjectInfo {
 #[derive(Debug)]
 struct TempColumnData {
     cid: i64,
-    name: String,
+    name: Vec<u8>,
     type_str: String,
     notnull_flag: i64,
     dflt_value: Option<String>,
@@ -517,7 +518,7 @@ struct TempForeignKeyData {
     id: i64,
     seq: i64,
     table: String,
-    from: String,
+    from: Vec<u8>,
     to: Option<String>,
     on_update_str: String,
     on_delete_str: String,
@@ -536,7 +537,7 @@ struct TempIndexData {
 struct TempIndexColumnData {
     seqno: i64,
     cid: i64,
-    name: Option<String>,
+    name: Option<Vec<u8>>,
     desc: i64,
     coll: String,
     key: i64,
@@ -635,6 +636,32 @@ pub(crate) fn list_objects(
     Ok(final_objects)
 }
 
+/// A named column's place in its table, as `PRAGMA table_xinfo` numbers it.
+fn place(cid: i64) -> Result<usize, XqliteError> {
+    usize::try_from(cid).map_err(|_negative| XqliteError::InternalEncodingError {
+        context: format!("SQLite answered column id {cid} for a named column"),
+    })
+}
+
+/// A key's `from` holds the stored name of one column of `table_name`, so a
+/// name that is not UTF-8 answers at the place of the column with those bytes.
+fn from_column(
+    conn: &Connection,
+    table_name: &str,
+    from: Vec<u8>,
+) -> Result<String, XqliteError> {
+    match String::from_utf8(from) {
+        Ok(name) => Ok(name),
+        Err(not_utf8) => {
+            let bytes = not_utf8.into_bytes();
+            let sql = "SELECT cid FROM pragma_table_xinfo(?1) WHERE CAST(name AS BLOB) = ?2";
+            let cid: i64 =
+                conn.query_row(sql, (table_name, bytes.as_slice()), |row| row.get(0))?;
+            utf8_column_name(&bytes, place(cid)?)
+        }
+    }
+}
+
 pub(crate) fn columns(
     conn: &Connection,
     table_name: &str,
@@ -647,7 +674,7 @@ pub(crate) fn columns(
         .query_map([], |row| {
             Ok(TempColumnData {
                 cid: row.get(0)?,
-                name: row.get(1)?,
+                name: row.get_ref(1)?.as_bytes()?.to_vec(),
                 type_str: row.get(2)?,
                 notnull_flag: row.get(3)?,
                 dflt_value: row.get(4)?,
@@ -661,14 +688,14 @@ pub(crate) fn columns(
     for temp_result in temp_results {
         match temp_result {
             Ok(temp_data) => {
+                let name = utf8_column_name(&temp_data.name, place(temp_data.cid)?)?;
                 let type_affinity_atom = type_affinity_to_atom(&temp_data.type_str);
 
                 let nullable =
                     notnull_to_nullable(temp_data.notnull_flag).map_err(|unexpected_val| {
                         XqliteError::SchemaParsingError {
                             context: format!(
-                                "Parsing 'notnull' flag for column '{}' in table '{}'",
-                                temp_data.name, table_name
+                                "Parsing 'notnull' flag for column '{name}' in table '{table_name}'"
                             ),
                             unexpected_value: unexpected_val,
                         }
@@ -678,27 +705,24 @@ pub(crate) fn columns(
                     pk_value_to_index(temp_data.pk_flag).map_err(|unexpected_val| {
                         XqliteError::SchemaParsingError {
                             context: format!(
-                                "Parsing 'pk' flag for column '{}' in table '{}'",
-                                temp_data.name, table_name
+                                "Parsing 'pk' flag for column '{name}' in table '{table_name}'"
                             ),
                             unexpected_value: unexpected_val,
                         }
                     })?;
 
-                let hidden_kind_atom =
-                    hidden_int_to_atom(temp_data.hidden).map_err(|unexpected_val| {
-                        XqliteError::SchemaParsingError {
-                            context: format!(
-                                "Parsing 'hidden' kind for column '{}' in table '{}'",
-                                temp_data.name, table_name
-                            ),
-                            unexpected_value: unexpected_val,
-                        }
-                    })?;
+                let hidden_kind_atom = hidden_int_to_atom(temp_data.hidden).map_err(
+                    |unexpected_val| XqliteError::SchemaParsingError {
+                        context: format!(
+                            "Parsing 'hidden' kind for column '{name}' in table '{table_name}'"
+                        ),
+                        unexpected_value: unexpected_val,
+                    },
+                )?;
 
                 final_columns.push(ColumnInfo {
                     column_id: temp_data.cid,
-                    name: temp_data.name,
+                    name,
                     type_affinity: type_affinity_atom,
                     declared_type: temp_data.type_str,
                     nullable,
@@ -737,7 +761,7 @@ pub(crate) fn foreign_keys(
                 id: row.get(0)?,
                 seq: row.get(1)?,
                 table: row.get(2)?,
-                from: row.get(3)?,
+                from: row.get_ref(3)?.as_bytes()?.to_vec(),
                 to: row.get(4)?,
                 on_update_str: row.get(5)?,
                 on_delete_str: row.get(6)?,
@@ -787,7 +811,7 @@ pub(crate) fn foreign_keys(
                     id: temp_data.id,
                     column_sequence: temp_data.seq,
                     target_table: temp_data.table,
-                    from_column: temp_data.from,
+                    from_column: from_column(conn, table_name, temp_data.from)?,
                     to_column: temp_data.to,
                     on_update: on_update_atom,
                     on_delete: on_delete_atom,
@@ -877,7 +901,7 @@ pub(crate) fn index_columns(
             Ok(TempIndexColumnData {
                 seqno: row.get(0)?,
                 cid: row.get(1)?,
-                name: row.get(2)?,
+                name: row.get_ref(2)?.as_bytes_or_null()?.map(<[u8]>::to_vec),
                 desc: row.get(3)?,
                 coll: row.get(4)?,
                 key: row.get(5)?,
@@ -907,7 +931,10 @@ pub(crate) fn index_columns(
                 final_cols.push(IndexColumnInfo {
                     index_column_sequence: temp_data.seqno,
                     table_column_id: temp_data.cid,
-                    name: temp_data.name,
+                    name: temp_data
+                        .name
+                        .map(|bytes| utf8_column_name(&bytes, place(temp_data.cid)?))
+                        .transpose()?,
                     sort_order: sort_order_atom,
                     collation: temp_data.coll,
                     is_key_column: is_key_bool,

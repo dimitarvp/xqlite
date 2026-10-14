@@ -65,6 +65,28 @@ defmodule Xqlite.NIF.ProgressHookTest do
           end
         end
       end
+
+      test "a busy observer's handle is never issued twice", %{conn: conn} do
+        {:ok, first} = NIF.register_busy_observer(conn, self())
+        :ok = NIF.unregister_busy_observer(conn, first)
+        {:ok, second} = NIF.register_busy_observer(conn, self())
+        assert {first, second} == {1, 2}
+      end
+
+      property "busy observer handles start at 1 and are never issued twice", %{conn: conn} do
+        draw = one_of([constant(:register), constant(:all), integer(0..12)])
+
+        check all(steps <- list_of(draw, max_length: 12), max_runs: 2000) do
+          Enum.reduce(steps ++ [:all], {[], []}, fn step, model ->
+            {live, _issued} = next = observe(conn, step, model)
+            held = %{policy: false, observers: length(live)}
+            answer = NIF.execute(conn, "PRAGMA busy_timeout = 100", [])
+            assert answer == {:error, {:busy_timeout_write_refused, held}} or live == []
+            assert match?({:ok, _}, answer) or live != []
+            next
+          end)
+        end
+      end
     end
 
     describe "#{prefix}: tick delivery" do
@@ -444,6 +466,25 @@ defmodule Xqlite.NIF.ProgressHookTest do
                  Xqlite.register_progress_hook(conn, self(), [{key, value}])
       end
     end
+  end
+
+  # The model is the live handles and every one issued in the run, newest first.
+  defp observe(conn, :register, {live, issued}) do
+    assert {:ok, handle} = NIF.register_busy_observer(conn, self())
+    assert handle >= 1 and handle not in issued
+    {[handle | live], [handle | issued]}
+  end
+
+  defp observe(conn, :all, {live, issued}) do
+    Enum.each(live, &(:ok = NIF.unregister_busy_observer(conn, &1)))
+    {[], issued}
+  end
+
+  # A live or an already removed handle, or past the ones issued a number never issued.
+  defp observe(conn, pick, {live, issued}) do
+    handle = Enum.at(issued, pick, 2 ** 64 - 1)
+    assert :ok = NIF.unregister_busy_observer(conn, handle)
+    {List.delete(live, handle), issued}
   end
 
   # `:tag` takes an atom, `:every_n` an integer from 1 to 2^32 - 1; everything

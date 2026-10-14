@@ -562,6 +562,10 @@ defmodule XqliteNIF do
   committing the caller's (`COMMIT; BEGIN; ...`). When that `ROLLBACK`
   itself fails, the transaction stays open and `autocommit/1` says so.
 
+  Outside a transaction, beside a statement, stream or blob of the connection mid-run, the
+  batch answers `{:error, :statement_mid_run}` and runs nothing: that statement's write would
+  join the batch's transaction, and a failed batch's rollback would undo it or end its read.
+
   Returns `:ok` if all statements in the batch execute successfully.
   Returns `{:error, reason}` if any statement fails.
   """
@@ -592,6 +596,14 @@ defmodule XqliteNIF do
         ) ::
           :ok | Xqlite.error()
   def execute_batch_cancellable(_conn, _sql_batch, _cancel_tokens), do: err()
+
+  @doc """
+  Runs `PRAGMA optimize`, deciding in one hold of the connection: in autocommit, with the
+  main database writable and `query_only` off, inside `BEGIN IMMEDIATE` and `COMMIT` as one
+  batch, otherwise alone. See `Xqlite.optimize/1`.
+  """
+  @spec optimize(conn :: Xqlite.conn()) :: :ok | Xqlite.error()
+  def optimize(_conn), do: err()
 
   @doc """
   Closes the database connection and frees its SQLite handle.
@@ -720,11 +732,13 @@ defmodule XqliteNIF do
   autocheckpoint (see `register_wal_hook/2`). Raw-SQL `PRAGMA` statements
   get no such repair.
 
-  This function checks two things only. An integer `busy_timeout` above
-  `2_147_483_647`, which SQLite would read as `0`, returns
-  `{:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: ms}}}`,
-  and `foreign_keys` written inside a transaction, which SQLite would
-  ignore, returns `{:error, :transaction_in_progress}`.
+  This function checks two things only. A `busy_timeout`, the name in any ASCII case,
+  that is no integer from 0 to `2_147_483_647` (past it at any size, negative, an atom, a
+  float, a string, `nil` or a boolean), which SQLite would read as no wait or as another
+  number, returns `{:error, {:invalid_pragma_value, %{pragma: :busy_timeout, value: value}}}`
+  with the wait kept, and `foreign_keys` written inside a transaction, which SQLite would
+  ignore, returns `{:error, :transaction_in_progress}`. `nil` is written as `NULL`, which
+  SQLite's PRAGMA grammar does not take: `{:error, {:cannot_execute_pragma, name, _}}`.
   Any other value is formatted and handed to SQLite, which parses what it can
   of it and reports success even when it stored its own fallback instead. `Xqlite.Pragma.put/4`
   checks the value against the PRAGMA's definition first and rejects what it
@@ -925,6 +939,8 @@ defmodule XqliteNIF do
     - `:primary_key_index` (non_neg_integer()): 1-based index within the PK if part of it, else `0`.
     - `:hidden_kind` (atom): Indicates if/how a column is hidden/generated
       (e.g., `:normal`, `:stored_generated`, `:virtual_generated`).
+  The first name that is not UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: column_id, name: bytes}}}`.
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_columns(conn :: Xqlite.conn(), table_name :: String.t()) ::
@@ -958,6 +974,10 @@ defmodule XqliteNIF do
     - `:on_update` (atom): Action on update (e.g., `:cascade`, `:set_null`).
     - `:on_delete` (atom): Action on delete (e.g., `:restrict`, `:no_action`).
     - `:match_clause` (atom): The `MATCH` clause type (e.g., `:none`, `:simple`).
+  The first `:from_column` that is not UTF-8 answers `{:error, {:column_name_not_utf8,
+  %{column: place, name: bytes}}}`, `place` being its `schema_columns/2` column ID, and
+  a `:target_table` or `:to_column` that is not UTF-8 `{:error, {:utf8_error, _, _}}`. On a
+  table with no keys, a column name that is not UTF-8 answers as in `schema_columns/2`.
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_foreign_keys(conn :: Xqlite.conn(), table_name :: String.t()) ::
@@ -1016,6 +1036,8 @@ defmodule XqliteNIF do
     - `:collation` (String.t()): Name of the collation sequence used.
     - `:is_key_column` (boolean()): `true` if part of the primary index key, `false` if an
       "included" column (SQLite >= 3.9.0).
+  The first `:name` that is not UTF-8 answers
+  `{:error, {:column_name_not_utf8, %{column: table_column_id, name: bytes}}}`.
   Returns `{:error, reason}` for other failures.
   """
   @spec schema_index_columns(conn :: Xqlite.conn(), index_name :: String.t()) ::
@@ -1051,14 +1073,15 @@ defmodule XqliteNIF do
   rolls the transaction back and returns its error.
   `Xqlite.enable_strict_table/2` builds the statements and calls it.
 
-  Before anything is switched it returns `{:error, :transaction_in_progress}`
-  while a transaction is open, `{:error, {:database_busy_or_locked, 5, _}}`
+  A `table` holding a NUL byte returns `{:error, :null_byte_in_string}` before
+  anything runs. Before anything is switched it returns `{:error, :transaction_in_progress}`
+  while a transaction is open, `{:error, :statement_mid_run}`
   while a statement, stream or blob of the connection is mid-run, and
   `{:error, {:no_such_schema, schema}}` for a schema the connection lacks.
   Inside the transaction it returns `{:error, {:table_changed, %{table: table}}}`
   when `PRAGMA schema_version` of `schema` is no longer `schema_version`, or
   when the stored `sqlite_master` text of `table`, its indexes and its
-  triggers, the `TEMP` triggers on its name included when `schema` is not
+  triggers, the `TEMP` triggers on its name in any ASCII case included when `schema` is not
   `"temp"`, differs from `stored_texts`, in any order.
 
   An element of either list that is no binary returns
@@ -1299,7 +1322,8 @@ defmodule XqliteNIF do
       see `SQLITE_BUSY`.
     * `max_elapsed_ms` — the wall-time ceiling in milliseconds for a
       single busy event; the clock resets at the first callback of each
-      fresh contention, like `max_retries`.
+      fresh contention, like `max_retries`. A sleep that would pass it is
+      cut to what is left, so the event gives up at the ceiling.
     * `sleep_ms` — milliseconds to sleep between retries. Zero disables
       the pause.
 
@@ -1839,7 +1863,9 @@ defmodule XqliteNIF do
   SQLite's global log callback (`sqlite3_config(SQLITE_CONFIG_LOG)`) sends
   diagnostic messages for events like auto-index creation, schema changes,
   and warnings that don't surface as errors. Each registered PID receives
-  messages in the form `{:xqlite_log, error_code, message}`.
+  messages in the form `{:xqlite_log, error_code, message}`. `message` is a
+  binary holding the bytes SQLite wrote, which need not be UTF-8, a name stored
+  that way included.
 
   This is a **global, per-process** subscription — but multiple PIDs can
   subscribe independently. The first call installs the master callback;
@@ -2054,7 +2080,8 @@ defmodule XqliteNIF do
 
   Returns `{:ok, binary}` on success or `{:error, reason}` on failure, as
   `Xqlite.serialize/2` describes: `:no_pages` for an empty schema whose first
-  page SQLite cannot write, and for the unused temp schema.
+  page SQLite cannot write, and for the unused temp schema; `:transaction_in_progress`
+  while the connection holds a write transaction on the schema.
   """
   @spec serialize(conn :: Xqlite.conn(), schema :: String.t()) ::
           {:ok, binary()} | Xqlite.error()
@@ -2074,7 +2101,7 @@ defmodule XqliteNIF do
   new database entirely in memory, and statements and streams prepared before
   the load run against it; a statement or stream still running on any schema
   of the connection, or a blob open on one, makes the load answer
-  `{:error, {:database_busy_or_locked, 5, _}}` and replace nothing.
+  `{:error, :statement_mid_run}` and replace nothing.
 
   When `read_only` is `true`, write operations on the schema fail with
   `{:error, {:read_only_database, _, _}}`. When `false` it is writable and
@@ -2122,8 +2149,8 @@ defmodule XqliteNIF do
   @doc """
   Backs up the named schema to a file at `dest_path`.
 
-  The destination file is created or overwritten. The source database
-  remains readable during the backup. `Xqlite.backup/3` says which locks
+  The destination file is created or overwritten, in one step inside one read transaction
+  of the source; `Xqlite.backup/3` says what that lets other connections do, which locks
   answer at once, which destinations are rejected and what a failed copy
   leaves.
 
@@ -2141,10 +2168,11 @@ defmodule XqliteNIF do
 
   The connection's existing data in that schema is overwritten. A statement
   or stream still running on any schema of the connection, or a blob open on
-  one, answers `{:error, {:database_busy_or_locked, 5, _}}` and copies
+  one, answers `{:error, :statement_mid_run}` and copies
   nothing; a source with no pages answers `{:error, :no_pages}` and a
   read-only connection `{:error, {:cannot_restore, :read_only_connection}}`,
-  both changing nothing (see `Xqlite.restore/3`).
+  both changing nothing (see `Xqlite.restore/3`). The copy runs in one step inside one read
+  transaction of the source file; `Xqlite.backup/3` says what that lets other connections do.
 
   Use `Xqlite.restore/2` for a defaulted `"main"` schema.
   """
@@ -2167,6 +2195,11 @@ defmodule XqliteNIF do
   destination is opened and between steps, all of `cancel_tokens` are polled —
   if *any* is signalled, returns `{:error, :operation_cancelled}`
   (OR-semantics). Pass an empty list for no-cancellation.
+
+  SQLite starts a stepped copy again from the first page whenever another connection
+  commits to the source between two steps (`remaining` grows again in the messages), so
+  under a steady writer it may never end; a `pages_per_step` of 2_147_483_647 copies every
+  page in one step and sends one progress message.
 
   Use `create_cancel_token/0` to create tokens and `cancel_operation/1`
   from another process to signal one.
@@ -2375,7 +2408,10 @@ defmodule XqliteNIF do
   def blob_reopen(_blob, _row_id), do: err()
 
   @doc """
-  Closes the blob handle, releasing its resources.
+  Closes the blob handle, releasing its resources; a second close answers `:ok`. After a
+  close, `blob_read/3`, `blob_write/3`, `blob_size/1` and `blob_reopen/2` answer
+  `{:error, :blob_closed}` while the connection is open and `{:error, :connection_closed}`
+  once it is closed; `close/1` closes every blob of the connection.
   """
   @spec blob_close(blob :: reference()) :: :ok | Xqlite.error()
   def blob_close(_blob), do: err()

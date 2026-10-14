@@ -118,6 +118,48 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
+  test "a policy's sleep is cut at max_elapsed_ms", %{path: path} do
+    {holder, probe} =
+      prime_contention(path, max_retries: 1_000, max_elapsed_ms: 50, sleep_ms: 5_000)
+
+    assert {:error, {:database_busy_or_locked, 5, _}} =
+             NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+
+    {:messages, messages} = Process.info(self(), :messages)
+    assert {:xqlite_busy, 1, elapsed_ms} = List.last(messages)
+    assert elapsed_ms < 5_000
+
+    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+  end
+
+  test "optimize waits for the write lock as the busy settings say", %{path: path} do
+    {:ok, holder} = NIF.open(path)
+    {:ok, probe} = NIF.open(path)
+
+    :ok =
+      NIF.execute_batch(holder, """
+      CREATE TABLE t(a INTEGER, b TEXT); CREATE INDEX t_a ON t(a);
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500)
+      INSERT INTO t SELECT i, 'x' FROM n;
+      """)
+
+    :ok = Xqlite.put_busy_timeout(probe, 0)
+    {:ok, _handle} = Xqlite.register_busy_observer(probe, self())
+    {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.optimize(probe)
+    assert_received {:xqlite_busy, 0, _}
+    assert {:ok, true} = Xqlite.autocommit(probe)
+    {:ok, 0} = NIF.execute(holder, "ROLLBACK", [])
+    assert :ok = Xqlite.optimize(probe)
+    stat = "SELECT DISTINCT tbl FROM sqlite_stat1"
+    assert {:ok, %{rows: [["t"]]}} = Xqlite.query(probe, stat)
+    :ok = NIF.close(holder)
+    :ok = NIF.close(probe)
+    assert {:error, :connection_closed} = Xqlite.optimize(probe)
+  end
+
   test "observers fire over a zero busy timeout; caller sees immediate busy",
        %{path: path} do
     test_pid = self()

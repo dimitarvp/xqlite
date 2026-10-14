@@ -431,4 +431,78 @@ defmodule Xqlite.NIF.BackupTest do
 
     NIF.close(dst)
   end
+
+  for journal <- [:wal, :delete] do
+    test "a copy in one step ends while another connection writes, #{journal} journal" do
+      path = tmp_db_path("one_step")
+      {src, cells, ref} = source_with_writer(path, unquote(journal))
+      [dest, dest2] = [tmp_db_path("one_step_dest"), tmp_db_path("one_step_dest")]
+      assert :ok = Xqlite.backup(src, dest)
+      assert_copied(cells, dest)
+      assert :ok = Xqlite.backup_with_progress(src, dest2, self(), pages_per_step: 2 ** 31 - 1)
+      assert_copied(cells, dest2)
+      assert_received {:xqlite_backup_progress, %{status: :copied, remaining: 0}}
+      refute_received {:xqlite_backup_progress, _}
+      if unquote(journal) == :wal, do: assert_restored(path, cells)
+      :atomics.put(cells, 2, 1)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 60_000
+      :ok = Xqlite.close(src)
+    end
+  end
+
+  defp assert_restored(path, cells) do
+    {:ok, conn} = Xqlite.open_in_memory()
+    assert :ok = Xqlite.restore(conn, path)
+    assert_copied(cells, conn)
+  end
+
+  defp source_with_writer(path, journal) do
+    {:ok, src} = Xqlite.open(path, journal_mode: journal, busy_timeout: 60_000)
+
+    :ok =
+      NIF.execute_batch(src, """
+      CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+      WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 3000)
+      INSERT INTO t SELECT i, hex(randomblob(1800)) FROM c;
+      """)
+
+    cells = :atomics.new(2, [])
+    test_pid = self()
+
+    {_pid, ref} =
+      spawn_monitor(fn ->
+        {:ok, writer} = Xqlite.open(path, journal_mode: journal, busy_timeout: 60_000)
+        commit_until_stopped(writer, cells, test_pid)
+      end)
+
+    assert_receive :first_commit, 60_000
+    {src, cells, ref}
+  end
+
+  # The liveness bound is a count of commits, not a clock: 50_000 is far past
+  # what a copy in one step lets through.
+  defp commit_until_stopped(writer, cells, test_pid) do
+    {:ok, 1} = NIF.execute(writer, "INSERT INTO t (v) VALUES ('w')", [])
+    commits = :atomics.add_get(cells, 1, 1)
+    if commits == 1, do: send(test_pid, :first_commit)
+
+    case :atomics.get(cells, 2) == 0 and commits < 50_000 do
+      true -> commit_until_stopped(writer, cells, test_pid)
+      false -> Xqlite.close(writer)
+    end
+  end
+
+  defp assert_copied(cells, dest) when is_binary(dest) do
+    {:ok, copy} = NIF.open(dest)
+    assert_copied(cells, copy)
+    :ok = NIF.close(copy)
+  end
+
+  defp assert_copied(cells, copy) do
+    commits = :atomics.get(cells, 1)
+    assert commits < 50_000
+    assert {:ok, %{rows: [["ok"]]}} = NIF.query(copy, "PRAGMA integrity_check", [])
+    assert {:ok, %{rows: [[rows]]}} = NIF.query(copy, "SELECT count(*) FROM t", [])
+    assert rows in 3000..(3000 + commits)
+  end
 end

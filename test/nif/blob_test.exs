@@ -419,12 +419,14 @@ defmodule Xqlite.NIF.BlobTest do
         """)
 
       {:ok, blob} = NIF.blob_open(conn, "main", "bl_closed", "data", 1, false)
-      NIF.blob_close(blob)
+      assert :ok = NIF.blob_close(blob)
 
-      assert {:error, :connection_closed} = NIF.blob_read(blob, 0, 10)
-      assert {:error, :connection_closed} = NIF.blob_write(blob, 0, <<1>>)
-      assert {:error, :connection_closed} = NIF.blob_size(blob)
-      assert {:error, :connection_closed} = NIF.blob_reopen(blob, 1)
+      assert {:error, :blob_closed} = NIF.blob_read(blob, 0, 10)
+      assert {:error, :blob_closed} = NIF.blob_write(blob, 0, <<1>>)
+      assert {:error, :blob_closed} = NIF.blob_size(blob)
+      assert {:error, :blob_closed} = NIF.blob_reopen(blob, 1)
+      assert {:ok, %{rows: [[1]]}} = NIF.query(conn, "SELECT id FROM bl_closed", [])
+      assert :ok = NIF.blob_close(blob)
     end
 
     property "an ended blob handle answers the abort from every later call", %{conn: conn} do
@@ -484,7 +486,7 @@ defmodule Xqlite.NIF.BlobTest do
 
     case ender do
       {:reopen, row} -> {:error, {:sqlite_failure, 1, 1, _}} = NIF.blob_reopen(blob, row)
-      sql -> :ok = NIF.execute_batch(conn, sql)
+      sql -> {:ok, _} = NIF.execute(conn, sql, [])
     end
 
     blob

@@ -10,7 +10,7 @@ use rustler::sys::{
 use rustler::types::LocalPid;
 use std::cell::Cell;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// What the busy slot holds and whether xqlite runs a PRAGMA of its own, shared
@@ -24,6 +24,7 @@ pub(crate) struct BusySlotFlags {
     write_refused: AtomicBool,
     policy: AtomicBool,
     observers: AtomicUsize,
+    observer_handles: AtomicU64,
 }
 
 impl BusySlotFlags {
@@ -67,6 +68,12 @@ impl BusySlotFlags {
         self.observers.load(Ordering::Relaxed)
     }
 
+    fn next_observer_handle(&self) -> u64 {
+        self.observer_handles
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
     fn set_slot_held(&self, held: bool) {
         self.slot_held.store(held, Ordering::Relaxed);
     }
@@ -103,7 +110,6 @@ pub(crate) struct BusyPolicy {
 pub(crate) struct BusySlotState {
     policy: Option<BusyPolicy>,
     observers: Vec<(u64, LocalPid)>,
-    next_handle: u64,
     start: Cell<Instant>,
     /// The `busy_timeout` the slot keeps: the one it displaced on taking SQLite's
     /// busy callback (which zeroes it), or the one `set_timeout` set since; 0 for none.
@@ -161,27 +167,25 @@ unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_in
             }
         }
 
-        match &state.policy {
-            None => match fallback_delay_ms(retries, state.fallback_timeout_ms) {
-                None => 0,
-                Some(delay_ms) => {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    1
-                }
-            },
-            Some(policy) => {
-                if retries >= policy.max_retries || elapsed_ms >= policy.max_elapsed_ms {
-                    return 0; // surface SQLITE_BUSY to the caller
-                }
-
-                if policy.sleep_ms > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(policy.sleep_ms));
-                }
-
-                1 // retry
+        let delay = match &state.policy {
+            None => fallback_delay_ms(retries, state.fallback_timeout_ms),
+            Some(policy) => policy_delay_ms(policy, retries, elapsed_ms),
+        };
+        match delay {
+            None => 0,
+            Some(delay_ms) => {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                1
             }
         }
     })
+}
+
+fn policy_delay_ms(policy: &BusyPolicy, retries: u32, elapsed_ms: u64) -> Option<u64> {
+    match retries >= policy.max_retries || elapsed_ms >= policy.max_elapsed_ms {
+        true => None,
+        false => Some(policy.sleep_ms.min(policy.max_elapsed_ms - elapsed_ms)),
+    }
 }
 
 /// The sleep before retry `retries`, or `None` once `timeout_ms` is spent:
@@ -342,8 +346,7 @@ pub(crate) fn register_observer(
     pid: LocalPid,
 ) -> Result<u64, XqliteError> {
     let mut next = snapshot(&handle.callback_boxes.busy);
-    let observer_handle = next.next_handle;
-    next.next_handle += 1;
+    let observer_handle = handle.busy_flags.next_observer_handle();
     next.observers.push((observer_handle, pid));
     swap_in(conn, handle, next)?;
     Ok(observer_handle)
@@ -363,7 +366,7 @@ pub(crate) fn unregister_observer(
 }
 
 /// Clone the current slot contents (or a fresh empty state), preserving
-/// the current `start` instant and handle counter across mutations. The
+/// the current `start` instant across mutations. The
 /// callback resets `start` at each busy event's first callback, so a
 /// mutation mid-contention keeps that event's clock rather than restarting
 /// it.
@@ -378,7 +381,6 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
         BusySlotState {
             policy: None,
             observers: Vec::new(),
-            next_handle: 0,
             start: Cell::new(Instant::now()),
             fallback_timeout_ms: 0,
         }
@@ -389,7 +391,6 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
         BusySlotState {
             policy: state.policy.clone(),
             observers: state.observers.clone(),
-            next_handle: state.next_handle,
             start: Cell::new(state.start.get()),
             fallback_timeout_ms: state.fallback_timeout_ms,
         }
@@ -512,7 +513,7 @@ pub(crate) fn ffi_rc_to_error(conn: &Connection, what: &str, rc: c_int) -> Xqlit
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_delay_ms;
+    use super::{BusyPolicy, fallback_delay_ms, policy_delay_ms};
 
     fn schedule(timeout_ms: u64) -> Vec<u64> {
         let mut delays = Vec::new();
@@ -546,6 +547,35 @@ mod tests {
         for timeout_ms in [1, 2, 3, 7, 40, 228, 229, 300, 1_000, 5_000] {
             let total: u64 = schedule(timeout_ms).iter().sum();
             assert_eq!(total, timeout_ms, "timeout {timeout_ms}");
+        }
+    }
+
+    #[test]
+    fn a_policy_sleeps_up_to_its_ceiling_and_never_past_it() {
+        for max_retries in [0, 1, 3, 50] {
+            for max_elapsed_ms in [0, 1, 7, 50, 400] {
+                for sleep_ms in [0, 1, 10, 49, 50, 51, 400, 5_000] {
+                    let policy = BusyPolicy {
+                        max_retries,
+                        max_elapsed_ms,
+                        sleep_ms,
+                    };
+                    let (mut retries, mut clock_ms) = (0, 0);
+                    while let Some(delay) = policy_delay_ms(&policy, retries, clock_ms) {
+                        assert!(
+                            delay <= sleep_ms,
+                            "{max_retries} {max_elapsed_ms} {sleep_ms}"
+                        );
+                        clock_ms += delay;
+                        retries += 1;
+                    }
+                    let ceiling = max_elapsed_ms.min(sleep_ms * u64::from(max_retries));
+                    assert_eq!(
+                        clock_ms, ceiling,
+                        "{max_retries} {max_elapsed_ms} {sleep_ms}"
+                    );
+                }
+            }
         }
     }
 

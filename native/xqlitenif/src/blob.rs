@@ -270,7 +270,7 @@ where
 
     let ptr = blob_handle.blob.load(Ordering::Acquire);
     if ptr.is_null() {
-        return Err(XqliteError::ConnectionClosed);
+        return Err(XqliteError::BlobClosed);
     }
     // SAFETY: `handle()` only extracts the raw `sqlite3*`; `guard` keeps the
     // Connection alive (and exclusively ours) for the whole duration of `f`.

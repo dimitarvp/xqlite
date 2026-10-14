@@ -729,6 +729,18 @@ defmodule Xqlite.NIF.StrictModeTest do
         end
       end
 
+      test "strict_rebuild answers a NUL in the table name before anything runs",
+           %{conn: conn} do
+        assert :ok = NIF.execute_batch(conn, @aux_t)
+        before = rebuild_state(conn)
+        version = aux_version(conn)
+
+        answer =
+          NIF.strict_rebuild(conn, ["DROP TABLE aux.t"], "aux", "t\0", version, [@t_sql])
+
+        assert {answer, rebuild_state(conn)} == {{:error, :null_byte_in_string}, before}
+      end
+
       test "strict_rebuild rolls back a statement that fails", %{conn: conn} do
         assert :ok = NIF.execute_batch(conn, @aux_t)
         statements = ["CREATE TABLE aux.n (a INT) STRICT", "INSERT INTO aux.n VALUES ('x')"]

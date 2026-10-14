@@ -17,9 +17,9 @@ defmodule Xqlite do
   `{:error, {:invalid_cancel_tokens, _}}`. How a schema name of the right
   type is judged is in `XqliteNIF`'s moduledoc.
 
-  An option list is judged whole before anything runs, and anything wrong in it
-  is an answer whatever its type: `{:error, {:invalid_option, _}}`, unless the
-  option has a reason of its own (see `t:error_reason/0`).
+  An option argument is judged whole before anything runs, and anything wrong in it is an
+  answer whatever its type, a term that is no list included: `{:error, {:invalid_option, _}}`,
+  unless the option has a reason of its own (see `t:error_reason/0`).
   """
 
   import Xqlite.Telemetry, only: [emit: 3, span_with_stop_metadata: 3]
@@ -197,7 +197,9 @@ defmodule Xqlite do
   the PRAGMA, the argument and one of `:not_a_scalar` (a term no PRAGMA
   argument can be, a list included), `:missing` (a PRAGMA that reads only
   with an argument, called without one), `:takes_no_argument` (a PRAGMA
-  with no one-argument read form, called with one) and `:invalid_utf8` (a
+  with no one-argument read form, called with one), `:invalid_options` (options that are
+  no keyword list, or a pair they cannot read), `:duplicate_option` (a second `:db_name`,
+  value `{:db_name, second}`) and `:invalid_utf8` (a
   binary whose bytes are not UTF-8, in the argument or in a `:db_name`).
 
   `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
@@ -285,7 +287,8 @@ defmodule Xqlite do
   bytes that are not UTF-8: `:column` is its zero-based place and `:name`
   those bytes. Every function that reads result column names answers it for
   the first such column before anything is bound or stepped, with or without
-  an authorizer on the connection. A statement the authorizer denies, such as
+  an authorizer on the connection; the schema readers answer it for a stored name, `:column`
+  being its `PRAGMA table_xinfo` place. A statement the authorizer denies, such as
   a `SELECT` of that column under a deny of `:read` or `:select`, answers
   `{:authorization_denied, 23, message}` first.
   `:columns_changed` is a statement whose result columns changed between the
@@ -297,7 +300,8 @@ defmodule Xqlite do
   statement has run by then.
   """
   @type error_reason ::
-          :connection_closed
+          :blob_closed
+          | :connection_closed
           | :extension_loading_disabled
           | :invalid_utf8_in_string
           | :multiple_statements
@@ -369,7 +373,8 @@ defmodule Xqlite do
                pragma: atom(),
                value: term(),
                reason:
-                 :invalid_options
+                 :duplicate_option
+                 | :invalid_options
                  | :invalid_utf8
                  | :missing
                  | :not_a_scalar
@@ -436,7 +441,7 @@ defmodule Xqlite do
   about the parameters. For a token argument that is no list at all the reason
   differs by function, on purpose: a raw `XqliteNIF` function takes a list and
   nothing else, so it answers `:not_a_list`, while the `Xqlite` function takes
-  one token or a list of them and reads a bare term as one token, so it
+  `nil` for none, one token or a list of them, and reads any other bare term as one token, so it
   answers `:bad_element` at position 1.
   """
   @type list_refusal :: %{
@@ -479,7 +484,7 @@ defmodule Xqlite do
 
   """
   @spec open(String.t(), keyword()) :: {:ok, conn()} | error()
-  def open(path, opts \\ []) when is_list(opts) do
+  def open(path, opts \\ []) do
     start_md = %{path: path, mode: :file}
 
     span_with_stop_metadata [:xqlite, :open], start_md do
@@ -501,7 +506,7 @@ defmodule Xqlite do
   Accepts the same options as `open/2`.
   """
   @spec open_in_memory(keyword()) :: {:ok, conn()} | error()
-  def open_in_memory(opts \\ []) when is_list(opts) do
+  def open_in_memory(opts \\ []) do
     start_md = %{path: ":memory:", mode: :memory}
 
     span_with_stop_metadata [:xqlite, :open], start_md do
@@ -946,7 +951,7 @@ defmodule Xqlite do
   has begun. A statement of the connection that has started and not finished,
   such as a prepared statement stepped and not reset, a stream partly read or
   an open blob handle, makes it return
-  `{:error, {:database_busy_or_locked, 5, _}}` and change nothing, since the
+  `{:error, :statement_mid_run}` and change nothing, since the
   rebuild's rollback could undo that statement's write: finish, reset or close
   it first. Two more rejections come before any statement runs: an existing
   `<table>_xqlite_strict_rebuild` in the same schema returns
@@ -1283,15 +1288,15 @@ defmodule Xqlite do
     end
   end
 
-  # A `CREATE TEMP TRIGGER ... ON main.t` lives in `temp`, not in the table's
-  # own schema, and the DROP deletes it there without a word.
+  # A TEMP trigger on the name lives in `temp`, and the DROP deletes only the
+  # table's own, so a replay into `temp` skips one it left (`IF NOT EXISTS`).
   defp temp_trigger_sqls(_conn, "temp", _table), do: {:ok, []}
   defp temp_trigger_sqls(conn, _schema, table), do: object_sqls(conn, "temp", table, "trigger")
 
   defp object_sqls(conn, schema, table, type) do
     sql =
       "SELECT sql FROM #{Xqlite.Pragma.quote_name(schema)}.sqlite_master " <>
-        "WHERE type=? AND tbl_name=? AND sql IS NOT NULL"
+        "WHERE type=? AND tbl_name=? COLLATE NOCASE AND sql IS NOT NULL"
 
     case XqliteNIF.query(conn, sql, [type, table]) do
       {:ok, %{rows: rows}} -> saved_sqls(rows, schema, [])
@@ -1325,6 +1330,9 @@ defmodule Xqlite do
       _no_match -> {:error, {:schema_parsing_error, "sqlite_master", {:unexpected_value, sql}}}
     end
   end
+
+  defp insert_schema_qualifier(sql, prefix, "temp"),
+    do: String.replace_prefix(sql, prefix, prefix <> ~s|IF NOT EXISTS "temp".|)
 
   defp insert_schema_qualifier(sql, prefix, schema) do
     qualified = prefix <> Xqlite.Pragma.quote_name(schema) <> "."
@@ -1433,10 +1441,10 @@ defmodule Xqlite do
       for none; anything else returns
       `{:error, {:invalid_type_extensions, rejection}}` before anything
       runs, as in `stream/4`.
-    * `:cancel_tokens` — a token from `create_cancel_token/0` or a list of
-      them, default `[]`. Signalling any one of them ends the call with
+    * `:cancel_tokens` — a token from `create_cancel_token/0`, a list of them, or `nil`
+      for none, like `[]`, the default. Signalling any one of them ends the call with
       `{:error, :operation_cancelled}`, and a write cancelled while it runs
-      rolls back the whole transaction, as `create_cancel_token/0` describes. A value that
+      rolls back the whole transaction, as `create_cancel_token/0` describes. Any other value that
       is no live token, or a list holding one, returns
       `{:error, {:invalid_cancel_tokens, _}}` before the statement runs.
   """
@@ -1625,6 +1633,10 @@ defmodule Xqlite do
   committing the caller's (`COMMIT; BEGIN; ...`). When that `ROLLBACK`
   itself fails, the transaction stays open and `autocommit/1` says so.
 
+  Outside a transaction, beside a statement, stream or blob of the connection mid-run, the
+  batch answers `{:error, :statement_mid_run}` and runs nothing: that statement's write would
+  join the batch's transaction, and a failed batch's rollback would undo it or end its read.
+
   ## Options
 
     * `:cancel_tokens` — as in `query/4`. The tokens are read after each
@@ -1792,7 +1804,7 @@ defmodule Xqlite do
           each row, followed by a terminal `{:error, reason}` on failure.
       An unsupported value returns `{:error, {:invalid_on_error, value}}` at
       stream open.
-    * `:cancel_tokens` (a token or a list of them, default: `[]`) - Tokens
+    * `:cancel_tokens` (a token, a list of them or `nil` for none, default: `[]`) - Tokens
       from `create_cancel_token/0`, handed to *every* fetch this stream
       makes. A signal from any one of them takes effect when SQLite next
       checks the token while the statement still runs (see
@@ -2282,11 +2294,11 @@ defmodule Xqlite do
 
   Returns a binary snapshot of the entire database — an atomic, point-in-time
   copy of every page the connection reads, taken inside one read transaction:
-  a WAL database's image holds what its WAL file holds, and an image taken
-  inside the connection's own write transaction holds its uncommitted changes.
-  A schema `deserialize/4` loaded answers its last committed state instead,
-  whatever transaction is open: SQLite copies that memory directly, and the
-  binary can run past the last page when a write transaction spilled pages.
+  a WAL database's image holds what its WAL file holds. While the connection holds a write
+  transaction on `schema`, one it began or a write still running in autocommit mode, the
+  call answers `{:error, :transaction_in_progress}` and copies nothing: such a transaction
+  can already have written uncommitted pages into the memory a loaded schema is copied
+  from. Inside a read transaction the image is that transaction's snapshot.
 
   `schema` identifies which attached database to serialize. Defaults to
   `"main"`. Use `"temp"` for the temp database or the name of an attached
@@ -2363,8 +2375,7 @@ defmodule Xqlite do
   re-read drops every cached schema of the connection, and a running
   statement may read a table definition on every row, so a statement or
   stream still running on any schema, or a blob open on one, makes the load
-  answer `{:error, {:database_busy_or_locked, 5, message}}` and replace
-  nothing.
+  answer `{:error, :statement_mid_run}` and replace nothing.
 
   `schema` identifies which attached database to replace (default `"main"`).
   SQLite cannot load an image into `"temp"`: that name, in any ASCII case,
@@ -2407,8 +2418,10 @@ defmodule Xqlite do
   Backs up a schema to a file.
 
   Copies the named schema (default `"main"`) to the file at `dest_path`. The
-  destination is created or overwritten. The source remains readable during
-  the backup.
+  destination is created or overwritten, in one step inside one read transaction of the
+  source, which no other connection's commit restarts: in rollback-journal mode a commit
+  waits for the whole copy, answering `{:error, {:database_busy_or_locked, 5, _}}` if its
+  busy timeout ends first; in WAL mode others read and write, and the WAL grows meanwhile.
 
   A lock another connection holds on this connection's database waits as
   this connection's `busy_timeout` or busy policy says. A lock on the
@@ -2470,7 +2483,7 @@ defmodule Xqlite do
   every cached schema of the connection, and a running statement may read a
   table definition on every row, so a statement or stream still running on
   any schema, or a blob open on one, answers
-  `{:error, {:database_busy_or_locked, 5, message}}` and copies nothing.
+  `{:error, :statement_mid_run}` and copies nothing. It copies in one step, as `backup/3` does.
 
   A source with no pages, such as the empty file a failed `backup/3` leaves,
   answers `{:error, :no_pages}`, and a connection `open_readonly/1` or
@@ -2626,9 +2639,21 @@ defmodule Xqlite do
   Runs `PRAGMA optimize`, which lets SQLite analyze the tables whose statistics
   the planner would use, answering `:ok`; `query/4` runs it with a mask. A
   `:pragma` deny answers `{:error, {:authorization_denied, code, message}}`.
+
+  In autocommit, on a connection that can write, it takes the write lock of every attached
+  database first, not only main's, even with nothing to analyze, and rolls back on any
+  failure: a lock another connection holds waits as `put_busy_timeout/2` or the busy policy
+  says, observers hear it, then it answers `{:error, {:database_busy_or_locked, 5, message}}`;
+  a statement, stream or blob of the connection mid-run answers `{:error, :statement_mid_run}`.
+  A schema `deserialize/4` loaded with `read_only: true` counts as writable, since SQLite's
+  `sqlite3_db_readonly` answers 0 for it: the call takes that path there, answering
+  `{:error, {:read_only_database, _, _}}` when SQLite refuses the write and
+  `{:error, :statement_mid_run}` beside a running statement. Inside a transaction you opened,
+  and on a read-only connection or one with `query_only` on, it runs the PRAGMA alone; open
+  the transaction with `begin(conn, :immediate)` to take the lock first.
   """
   @spec optimize(conn()) :: :ok | error()
-  def optimize(conn), do: exec(conn, "PRAGMA optimize")
+  def optimize(conn), do: XqliteNIF.optimize(conn)
 
   @doc """
   Runs `PRAGMA shrink_memory`, which frees the cache memory the connection
@@ -2656,7 +2681,8 @@ defmodule Xqlite do
       many retries and let the caller see `SQLITE_BUSY`.
     * `:max_elapsed_ms` (non-negative integer, default `5_000`) — wall-time
       ceiling in milliseconds for a single busy event; the clock resets at the
-      start of each fresh contention, like `:max_retries`.
+      start of each fresh contention, like `:max_retries`. A sleep that would
+      pass it is cut to what is left, so the event gives up at the ceiling.
     * `:sleep_ms` (non-negative integer, default `10`) — milliseconds to
       sleep between retries. Zero disables the pause (tight spin; rarely
       what you want).
@@ -2688,7 +2714,7 @@ defmodule Xqlite do
   > held; `get_busy_timeout/1` and `put_busy_timeout/2` read and set the wait.
   """
   @spec set_busy_policy(conn(), keyword()) :: :ok | error()
-  def set_busy_policy(conn, opts \\ []) when is_list(opts) do
+  def set_busy_policy(conn, opts \\ []) do
     with :ok <- judge_options(opts, [:max_retries, :max_elapsed_ms, :sleep_ms]),
          {:ok, max_retries} <- bounded_option(opts, :max_retries, 50, 0..4_294_967_295),
          {:ok, max_elapsed_ms} <- bounded_option(opts, :max_elapsed_ms, 5_000, @u64),
@@ -2937,7 +2963,7 @@ defmodule Xqlite do
   """
   @spec register_progress_hook(conn(), pid(), keyword()) ::
           {:ok, non_neg_integer()} | error()
-  def register_progress_hook(conn, pid, opts \\ []) when is_pid(pid) and is_list(opts) do
+  def register_progress_hook(conn, pid, opts \\ []) when is_pid(pid) do
     with :ok <- judge_options(opts, [:every_n, :tag]),
          {:ok, every_n} <- bounded_option(opts, :every_n, 1000, 1..4_294_967_295),
          {:ok, tag} <- hook_tag(Keyword.get(opts, :tag)) do
@@ -3109,11 +3135,16 @@ defmodule Xqlite do
   and a failed copy leaves what `backup/3` says.
 
   The `:schema` option (default `"main"`) names the schema to copy, as in
-  `backup/3`, and `:pages_per_step` (default 100, as in `backup/3`) is an
+  `backup/3`, and `:pages_per_step` (default 100) is an
   integer from 1 to 2_147_483_647, the count SQLite
   takes. Any other term returns `{:error, {:invalid_pages_per_step, value}}`
   once the tokens are judged, before any file is created — `0` would make
   SQLite copy no pages while reporting "more", forever.
+
+  SQLite starts a stepped copy again from the first page whenever another connection
+  commits to the source between two steps (`remaining` grows again in the messages), so
+  under a steady writer it may never end; `pages_per_step: 2_147_483_647` copies every
+  page in one step, as `backup/3` does, and sends one progress message.
   """
   @spec backup_with_progress(conn(), String.t(), pid(), keyword()) :: :ok | error()
   def backup_with_progress(conn, dest_path, pid, opts \\ []) do
@@ -3541,6 +3572,7 @@ defmodule Xqlite do
   # Public so the stream callbacks module validates through the same helper.
   @spec validate_cancel_tokens(term()) :: :ok | error()
   def validate_cancel_tokens(tokens) when is_list(tokens), do: walk_cancel_tokens(tokens, 1)
+  def validate_cancel_tokens(nil), do: :ok
 
   def validate_cancel_tokens(token) do
     case XqliteNIF.is_cancel_token(token) do

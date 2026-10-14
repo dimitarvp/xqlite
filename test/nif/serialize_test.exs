@@ -94,6 +94,52 @@ defmodule Xqlite.NIF.SerializeTest do
       NIF.close(conn2)
     end
 
+    test "serialize answers :transaction_in_progress inside a write transaction on its schema",
+         %{conn: conn} do
+      in_progress = {:error, :transaction_in_progress}
+      :ok = NIF.execute_batch(conn, "CREATE TABLE t (a); INSERT INTO t VALUES (1), (2), (3);")
+      {:ok, first} = NIF.serialize(conn, "main")
+      :ok = NIF.execute_batch(conn, "BEGIN; SELECT * FROM t;")
+      assert {:ok, ^first} = NIF.serialize(conn, "main")
+      :ok = NIF.execute_batch(conn, "ROLLBACK; BEGIN IMMEDIATE; INSERT INTO t VALUES (4);")
+      assert NIF.serialize(conn, "main") == in_progress
+      :ok = NIF.execute_batch(conn, "ROLLBACK")
+      assert {:ok, ^first} = NIF.serialize(conn, "main")
+
+      {:ok, insert} = NIF.stmt_prepare(conn, "INSERT INTO t SELECT a FROM t RETURNING a")
+      {:row, _} = NIF.stmt_step(insert)
+      assert NIF.serialize(conn, "main") == in_progress
+      assert {:ok, %{done: true}} = NIF.stmt_multi_step(insert, 10)
+      assert :ok = NIF.stmt_finalize(insert)
+      assert {:ok, _image} = NIF.serialize(conn, "main")
+
+      :ok = NIF.execute_batch(conn, "ATTACH ':memory:' AS aux; CREATE TABLE aux.u (a);")
+      :ok = NIF.execute_batch(conn, "BEGIN; INSERT INTO aux.u VALUES (1);")
+
+      assert {{:ok, _image}, ^in_progress} =
+               {NIF.serialize(conn, "main"), NIF.serialize(conn, "aux")}
+
+      :ok = NIF.execute_batch(conn, "ROLLBACK")
+    end
+
+    test "serialize of a loaded schema answers :transaction_in_progress while a write spills pages",
+         %{conn: conn} do
+      image =
+        image_of("""
+        CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+        WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 3000)
+        INSERT INTO t SELECT i, 'old' || hex(randomblob(500)) FROM c;
+        """)
+
+      :ok = NIF.deserialize(conn, "main", image, false)
+      {:ok, first} = NIF.serialize(conn, "main")
+      {:ok, _} = NIF.set_pragma(conn, "cache_size", 2)
+      :ok = NIF.execute_batch(conn, "BEGIN; UPDATE t SET v = 'new' || substr(v, 4);")
+      assert {:error, :transaction_in_progress} = NIF.serialize(conn, "main")
+      :ok = NIF.execute_batch(conn, "ROLLBACK")
+      assert {:ok, ^first} = NIF.serialize(conn, "main")
+    end
+
     test "deserialize replaces existing database content", %{conn: conn} do
       :ok = NIF.execute_batch(conn, "CREATE TABLE old_t (x INTEGER);")
       {:ok, 1} = NIF.execute(conn, "INSERT INTO old_t (x) VALUES (?1)", [999])
@@ -561,7 +607,7 @@ defmodule Xqlite.NIF.SerializeTest do
       assert rows == Enum.map(18..29, &[&1])
     end
 
-    test "a load or a restore while a statement runs on another schema answers busy, and the statement finishes with its types",
+    test "a load or a restore while a statement runs on another schema answers :statement_mid_run, and the statement finishes with its types",
          %{conn: conn} do
       path = Xqlite.TestUtil.tmp_db_path("restore_src")
       {:ok, src} = Xqlite.open(path, journal_mode: :delete)
@@ -579,10 +625,10 @@ defmodule Xqlite.NIF.SerializeTest do
       {:ok, select} = NIF.stmt_prepare(conn, "SELECT a, v FROM aux.st")
       assert {:row, [1, 2]} = NIF.stmt_step(select)
 
-      assert {:error, {:database_busy_or_locked, 5, _}} =
+      assert {:error, :statement_mid_run} =
                Xqlite.deserialize(conn, image_of("CREATE TABLE t (a);"))
 
-      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.restore(conn, path)
+      assert {:error, :statement_mid_run} = Xqlite.restore(conn, path)
       assert {:ok, %{rows: rows}} = NIF.stmt_multi_step(select, 1000)
       assert rows == Enum.map(2..200, &[&1, &1 * 2])
       :ok = NIF.stmt_finalize(select)

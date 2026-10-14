@@ -16,8 +16,8 @@
 //!   handle for unregistration; the C callback walks a snapshot
 //!   without locks.
 //! * Raw-FFI callback unwind guard (`guard_ffi_callback`) — wraps the
-//!   body of the five callbacks we register directly through
-//!   `ffi::sqlite3_*` (progress / wal / busy / update / authorizer) in
+//!   body of the six callbacks we register directly through
+//!   `ffi::sqlite3_*` (progress / wal / busy / update / authorizer / log) in
 //!   `catch_unwind`, so a panic can never unwind across `extern "C"`
 //!   into SQLite's C stack and crash the BEAM. Those that receive text
 //!   read it as bytes (`c_bytes`) and never decode it as UTF-8.
@@ -92,9 +92,9 @@ pub(crate) unsafe fn c_bytes<'a>(ptr: *const c_char) -> Option<&'a [u8]> {
 /// Run the body of a raw-FFI-registered SQLite C callback under
 /// `catch_unwind`, returning `fallback` if it panics.
 ///
-/// xqlite registers five callbacks directly through `ffi::sqlite3_*`
+/// xqlite registers six callbacks directly through `ffi::sqlite3_*`
 /// (`progress_dispatch_callback`, `wal_hook_callback`, `busy_callback`,
-/// `update_callback`, `authorizer_callback`) instead of rusqlite's safe
+/// `update_callback`, `authorizer_callback`, `log_callback`) instead of rusqlite's safe
 /// wrappers. rusqlite guards its OWN
 /// callbacks with `catch_unwind` trampolines; a raw registration has no
 /// such guard, so a panic escaping the body would unwind across the
@@ -106,8 +106,8 @@ pub(crate) unsafe fn c_bytes<'a>(ptr: *const c_char) -> Option<&'a [u8]> {
 ///
 /// `fallback` must be the callback's safe-on-panic return: a value that
 /// neither changes normal behavior nor corrupts SQLite state (0 for the
-/// progress and busy handlers, `SQLITE_OK` for the WAL hook; the update
-/// hook returns nothing, so its 0 is never read). The authorizer's is
+/// progress and busy handlers, `SQLITE_OK` for the WAL hook; the update and
+/// log callbacks return nothing, so their 0 is never read). The authorizer's is
 /// `SQLITE_DENY`: a panic stops the statement rather than let through an
 /// action nothing judged.
 #[inline]

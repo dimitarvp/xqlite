@@ -3,7 +3,8 @@ defmodule Xqlite.ColumnNameLawTest do
   The law: every function that reads result column names answers
   `{:column_name_not_utf8, %{column: index, name: bytes}}` for the first name SQLite hands
   back that is not UTF-8, before it binds or steps, and any other name byte for byte, with or
-  without an authorizer on the connection.
+  without an authorizer on the connection. The schema readers answer it for a stored column name
+  of the table, at the column's place in it.
   """
 
   use ExUnit.Case, async: true
@@ -20,6 +21,12 @@ defmodule Xqlite.ColumnNameLawTest do
   @stored "SELECT hex(name) FROM pragma_table_info('t')"
   # Latin-1, never valid, lone continuation, overlong, surrogate, past U+10FFFF, truncated.
   @not_utf8 Enum.map(~w(E9 FF 80 C080 E08080 EDA080 F4908080 E282), &Base.decode16!/1)
+  @table_names "SELECT cid, hex(name) FROM pragma_table_xinfo('t')"
+  @index_names "SELECT cid, iif(name ISNULL, NULL, hex(name)) FROM pragma_index_xinfo('ti')"
+  @key_names """
+  SELECT (SELECT cid FROM pragma_table_xinfo('t') WHERE name = k."from"), hex(k."from")
+  FROM pragma_foreign_key_list('t') AS k
+  """
 
   for_each_opener "a column name" do
     test "the anchor: a Latin-1 name answers the error before the write", %{conn: conn} do
@@ -60,6 +67,54 @@ defmodule Xqlite.ColumnNameLawTest do
         assert readers(conn, early) == names |> expected() |> List.duplicate(4)
         assert :done = Xqlite.step(early)
         assert {:ok, %{rows: []}} = Xqlite.query(conn, "SELECT 1 FROM (#{@sql})")
+        assert :ok = Xqlite.close(conn)
+      end
+    end
+
+    test "the anchor: the schema readers answer a stored name by its place in the table",
+         %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE p(id); CREATE TABLE t(a AS (1), b, c); CREATE INDEX ti ON t(c);
+        CREATE TABLE v(a); CREATE TABLE y(a);
+        """)
+
+      :ok =
+        rewrite_schema(conn, [
+          {"t", ~s|CREATE TABLE t(a AS (1), "b\xFE" REFERENCES p(id), "c\xFF")|},
+          {"ti", ~s|CREATE INDEX ti ON t("c\xFF")|},
+          {"v", ~s|CREATE TABLE v(a REFERENCES q("k\xE9"))|},
+          {"y", ~s|CREATE TABLE y(a REFERENCES "q\xE9"(k))|}
+        ])
+
+      b = {:error, {:column_name_not_utf8, %{column: 1, name: "b\xFE"}}}
+      assert {NIF.schema_columns(conn, "t"), NIF.schema_foreign_keys(conn, "t")} == {b, b}
+      c = {:error, {:column_name_not_utf8, %{column: 2, name: "c\xFF"}}}
+      assert NIF.schema_index_columns(conn, "ti") == c
+      assert {:error, {:utf8_error, 4, _}} = NIF.schema_foreign_keys(conn, "v")
+      assert {:error, {:utf8_error, 2, _}} = NIF.schema_foreign_keys(conn, "y")
+    end
+
+    property "the schema readers answer the first stored name that is not UTF-8 at its place",
+             context do
+      {mod, fun, args} = Xqlite.TestUtil.find_opener_mfa!(context)
+
+      check all(
+              names <- names(),
+              keyed <- list_of(boolean(), length: length(names)),
+              sort_keys <- list_of(integer(), length: length(names)),
+              count <- integer(1..length(names)),
+              max_runs: 2000
+            ) do
+        assert {:ok, conn} = apply(mod, fun, args)
+        positions = sort_keys |> Enum.with_index() |> Enum.sort() |> Enum.take(count)
+        :ok = plant_keyed_table(conn, names, keyed, for({_key, at} <- positions, do: at))
+        [columns, index] = Enum.map([@table_names, @index_names], &oracle(conn, &1))
+        # With no key, the reader answers what the table's columns answer, or no key.
+        keys = with {:ok, []} <- oracle(conn, @key_names), {:ok, _} <- columns, do: {:ok, []}
+        assert names_read(NIF.schema_columns(conn, "t"), :name) == columns
+        assert names_read(NIF.schema_index_columns(conn, "ti"), :name) == index
+        assert names_read(NIF.schema_foreign_keys(conn, "t"), :from_column) == keys
         assert :ok = Xqlite.close(conn)
       end
     end
@@ -108,13 +163,59 @@ defmodule Xqlite.ColumnNameLawTest do
     ]
   end
 
-  # SQL text must be UTF-8, so the CREATE text goes in as hex; RESET reloads it.
   defp rewrite_columns(conn, names) do
-    create = Base.encode16("CREATE TABLE t(#{Enum.map_join(names, ", ", &quote_name/1)})")
-    update = "UPDATE sqlite_schema SET sql = CAST(x'#{create}' AS TEXT) WHERE name = 't'"
-    :ok = NIF.execute_batch(conn, "PRAGMA writable_schema = ON; #{update}")
+    columns = Enum.map_join(names, ", ", &quote_name/1)
+    rewrite_schema(conn, [{"t", "CREATE TABLE t(#{columns})"}])
+  end
+
+  # SQL text must be UTF-8, so each CREATE text goes in as hex; RESET reloads it.
+  defp rewrite_schema(conn, objects) do
+    updates =
+      Enum.map_join(objects, "; ", fn {name, sql} ->
+        "UPDATE sqlite_schema SET sql = CAST(x'#{Base.encode16(sql)}' AS TEXT) WHERE name = '#{name}'"
+      end)
+
+    :ok = NIF.execute_batch(conn, "PRAGMA writable_schema = ON; #{updates}")
     NIF.execute_batch(conn, "PRAGMA writable_schema = RESET")
   end
+
+  # A table `t` whose columns are `names`, those `keyed` declared `REFERENCES p(id)`, and an
+  # index `ti` over the columns at `positions`, written with placeholders first.
+  defp plant_keyed_table(conn, names, keyed, positions) do
+    slots = Enum.map(0..(length(names) - 1), &"c#{&1}")
+    pick = fn list -> Enum.map_join(positions, ", ", &Enum.at(list, &1)) end
+
+    columns =
+      Enum.zip_with(names, keyed, &"#{quote_name(&1)}#{if &2, do: " REFERENCES p(id)"}")
+
+    :ok =
+      NIF.execute_batch(conn, """
+      PRAGMA journal_mode = MEMORY; PRAGMA synchronous = OFF; CREATE TABLE p(id);
+      CREATE TABLE t(#{Enum.join(slots, ", ")}); CREATE INDEX ti ON t(#{pick.(slots)});
+      """)
+
+    rewrite_schema(conn, [
+      {"t", "CREATE TABLE t(#{Enum.join(columns, ", ")})"},
+      {"ti", "CREATE INDEX ti ON t(#{pick.(Enum.map(names, &quote_name/1))})"}
+    ])
+  end
+
+  # SQLite as the oracle: the first name that is not UTF-8, at its place, or every name.
+  defp oracle(conn, sql) do
+    assert {:ok, %{rows: rows}} = NIF.query(conn, sql, [])
+    named = for [place, hex] <- rows, do: {place, hex && Base.decode16!(hex)}
+
+    bad =
+      for {place, name} <- named, is_binary(name), not String.valid?(name), do: {place, name}
+
+    case bad do
+      [] -> {:ok, Enum.map(named, fn {_place, name} -> name end)}
+      [{place, name} | _] -> {:error, {:column_name_not_utf8, %{column: place, name: name}}}
+    end
+  end
+
+  defp names_read({:ok, structs}, key), do: {:ok, Enum.map(structs, &Map.fetch!(&1, key))}
+  defp names_read(error, _key), do: error
 
   defp quote_name(name), do: "\"" <> String.replace(name, "\"", "\"\"") <> "\""
 end

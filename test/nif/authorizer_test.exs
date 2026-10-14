@@ -121,6 +121,42 @@ defmodule Xqlite.NIF.AuthorizerTest do
       end
     end
 
+    test "optimize runs the PRAGMA alone with query_only on", %{conn: conn} do
+      {:ok, _} = NIF.execute(conn, "PRAGMA query_only = 1", [])
+      assert :ok = Xqlite.optimize(conn)
+    end
+
+    test "optimize takes the write lock only in autocommit and rolls back what it began",
+         %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE o(a INTEGER, b TEXT); CREATE INDEX o_a ON o(a); CREATE TABLE log(n);
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500)
+        INSERT INTO o SELECT i, 'x' FROM n;
+        """)
+
+      :ok = Xqlite.begin(conn, :deferred)
+      assert {:ok, {:ok, false}} = {Xqlite.optimize(conn), Xqlite.autocommit(conn)}
+      :ok = Xqlite.rollback(conn)
+
+      :ok = Xqlite.set_authorizer(conn, [:analyze])
+      assert {:error, {:authorization_denied, 23, _}} = Xqlite.optimize(conn)
+      assert {:ok, true} = Xqlite.autocommit(conn)
+      :ok = Xqlite.remove_authorizer(conn)
+
+      {:ok, write} =
+        NIF.stmt_prepare(conn, "INSERT INTO log VALUES (1),(2),(3),(4),(5) RETURNING n")
+
+      {:row, [1]} = NIF.stmt_step(write)
+      assert {:error, :statement_mid_run} = Xqlite.optimize(conn)
+
+      assert [{:row, [2]}, {:row, [3]}, {:row, [4]}, {:row, [5]}, :done] =
+               Enum.map(1..5, fn _step -> NIF.stmt_step(write) end)
+
+      assert :ok = NIF.stmt_finalize(write)
+      assert {:ok, %{rows: [[5]]}} = NIF.query(conn, "SELECT count(*) FROM log", [])
+    end
+
     test "get_create_sql survives a :pragma deny and falls to :read and :select",
          %{conn: conn} do
       :ok = Xqlite.set_authorizer(conn, [:pragma])
@@ -261,5 +297,14 @@ defmodule Xqlite.NIF.AuthorizerTest do
 
     assert {:error, :connection_closed} = Xqlite.set_authorizer(conn, [:delete])
     assert {:error, :connection_closed} = Xqlite.remove_authorizer(conn)
+  end
+
+  test "optimize on a read-only connection runs the PRAGMA alone beside a statement mid-run" do
+    {:ok, conn} = Xqlite.open_in_memory_readonly()
+    {:ok, read} = NIF.stmt_prepare(conn, "VALUES (1), (2)")
+    {:row, [1]} = NIF.stmt_step(read)
+    assert :ok = Xqlite.optimize(conn)
+    assert [{:row, [2]}, :done] = [NIF.stmt_step(read), NIF.stmt_step(read)]
+    assert :ok = NIF.stmt_finalize(read)
   end
 end

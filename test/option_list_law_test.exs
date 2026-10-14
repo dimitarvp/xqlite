@@ -1,8 +1,9 @@
 defmodule Xqlite.OptionListLawTest do
   @moduledoc """
   Every function that takes an option list walks it whole before it reads a
-  value: an unknown key, a key given twice, an element that is no pair, a tail
-  that is not `[]` and a value the option cannot take each answer
+  value: an argument that is no list, an unknown key, a key given twice, an
+  element that is no pair, a tail that is not `[]` and a value the option cannot
+  take each answer
   `{:invalid_option, %{key, value, reason}}`, and nothing has changed.
   """
 
@@ -122,7 +123,8 @@ defmodule Xqlite.OptionListLawTest do
           key <- filter(atom(:alphanumeric), &(&1 not in @keys[function])),
           value <- scale(term(), &min(&1, 6)),
           bad <- filter(scale(term(), &min(&1, 6)), &(not (is_list(&1) or match?({_, _}, &1)))),
-          fault <- member_of([:unknown_key, :duplicate_key, :not_a_pair, :broken_tail])
+          fault <-
+            member_of([:unknown_key, :duplicate_key, :not_a_pair, :broken_tail, :bare_term])
         ) do
       case fault do
         :unknown_key ->
@@ -140,6 +142,9 @@ defmodule Xqlite.OptionListLawTest do
         :broken_tail ->
           {function, List.foldr(prefix, bad, &[&1 | &2]),
            %{key: nil, value: bad, reason: :not_a_pair}}
+
+        :bare_term ->
+          {function, bad, %{key: nil, value: bad, reason: :not_a_pair}}
       end
     end
   end

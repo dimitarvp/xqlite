@@ -8,7 +8,8 @@ defmodule Xqlite.CancelTokenLawTest do
 
   The law: an entry point that takes tokens answers
   `{:error, {:invalid_cancel_tokens, refusal}}` for anything that is not a
-  live token, and never raises. The refusal is the same map the other list
+  live token, and never raises; an `Xqlite` function reads `nil` as no token,
+  as it reads `[]`. The refusal is the same map the other list
   refusals carry: `%{reason: :bad_element, position: n, value_type: type}`
   names the one-based position of the element that is no token and the kind
   of term it is, and `%{reason: :improper_tail, value_type: type}` a list
@@ -159,6 +160,20 @@ defmodule Xqlite.CancelTokenLawTest do
       detach(handler)
     end
 
+    test "the anchor: nil means no token, as [] does", %{conn: conn, doors: doors, stmt: stmt} do
+      handler = attach_capture([[:xqlite, :query, :start], [:xqlite, :query, :stop]])
+      assert {:ok, %{rows: [[1]]}} = Xqlite.query(conn, @select, [], cancel_tokens: nil)
+      assert {%{cancellable?: false}, _stop_md} = assert_span([:xqlite, :query])
+      detach(handler)
+
+      assert {:ok, %{changes: 1}} = Xqlite.execute(conn, @insert, [], cancel_tokens: nil)
+      assert :ok = Xqlite.execute_batch(conn, @insert, cancel_tokens: nil)
+      assert [%{"1" => 1}] = Enum.to_list(Xqlite.stream(conn, @select, [], cancel_tokens: nil))
+      assert :ok = Xqlite.backup_with_progress(conn, doors.dest, self(), cancel_tokens: nil)
+      assert {:ok, %{rows: [[1]]}} = Xqlite.multi_step(stmt, 1, cancel_tokens: nil)
+      assert :ok = Xqlite.finalize(stmt)
+    end
+
     property "every door names the position and kind of the element that is no token",
              %{doors: doors} do
       check all(
@@ -183,7 +198,7 @@ defmodule Xqlite.CancelTokenLawTest do
              %{doors: doors} do
       check all(
               door <- StreamData.member_of(@elixir_doors),
-              alien <- alien_term(),
+              alien <- StreamData.filter(alien_term(), &(&1 != nil)),
               max_runs: 2000
             ) do
         type = type_of(alien)
@@ -248,7 +263,8 @@ defmodule Xqlite.CancelTokenLawTest do
       end
     end
 
-    property "a value made only of live tokens is taken", %{conn: conn, stmt: stmt} do
+    property "a value made only of live tokens, or nil for none, is taken",
+             %{conn: conn, stmt: stmt} do
       check all(shape <- shape(), count <- StreamData.integer(0..3), max_runs: 2000) do
         value = token_value(shape, count)
 
@@ -346,13 +362,14 @@ defmodule Xqlite.CancelTokenLawTest do
 
   defp token_value(:bare, _count), do: new_token()
   defp token_value(:list, count), do: live_tokens(count)
+  defp token_value(:none, _count), do: nil
 
   defp new_token do
     assert {:ok, token} = Xqlite.create_cancel_token()
     token
   end
 
-  defp shape, do: StreamData.member_of([:bare, :list])
+  defp shape, do: StreamData.member_of([:bare, :list, :none])
 
   # The same names the NIF gives a term's kind, so both sides of every door
   # can be read against one table.
