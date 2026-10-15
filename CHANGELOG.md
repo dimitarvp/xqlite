@@ -11,15 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`cancel_tokens: nil` means no token**, as `[]` does, on `query/4`,
   `execute/4`, `execute_batch/3`, `multi_step/3`, `stream/4` and
-  `backup_with_progress/4`, where it answered `{:error,
+  `backup_with_progress/4`, where it returned `{:error,
   {:invalid_cancel_tokens, _}}`. A list holding `nil` is still rejected,
   and so is `nil` on `cancel_operation/1` and on the raw functions.
-- **`XqliteNIF.optimize/1`**, the raw call behind `Xqlite.optimize/1`. In
-  one hold of the connection it runs `BEGIN IMMEDIATE`, `PRAGMA optimize`
-  and `COMMIT`, rolling back on any failure, when the connection is in
-  autocommit, can write and has `query_only` off, and `PRAGMA optimize`
-  alone otherwise.
-
+- **`Xqlite.optimize/1` and `Xqlite.shrink_memory/1`** run the PRAGMAs of
+  those names (see Changed), and the raw `XqliteNIF.optimize/1` is the
+  call behind `optimize/1`. In autocommit, on a connection that can write
+  and has `query_only` off, `optimize/1` runs `BEGIN IMMEDIATE`,
+  `PRAGMA optimize` and `COMMIT` in one call that holds the connection,
+  and rolls back on any failure. So it waits for a write lock another
+  connection holds as the busy timeout or the busy policy says, and busy
+  observers hear the wait, even when there is nothing to analyze; a deny
+  of `:transaction` stops it; and it returns
+  `{:error, :statement_mid_run}` while a statement, stream or blob of the
+  connection is mid-run. Inside a transaction, and on a read-only
+  connection or one with `query_only` on, it runs `PRAGMA optimize` alone.
 - **`XqliteNIF.strict_rebuild/6`**, the raw call behind
   `Xqlite.enable_strict_table/2`. It runs a list of statements, each
   exactly one, in one `BEGIN IMMEDIATE` transaction while it holds the
@@ -29,24 +35,665 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database and the stored definitions of the table, its indexes and its
   triggers still equal the ones it is given. Any failure, a busy `COMMIT`
   included, rolls the transaction back. A table name holding a NUL byte
-  answers `{:error, :null_byte_in_string}` before anything runs.
-
+  returns `{:error, :null_byte_in_string}` before anything runs.
 - **A Known limitations guide.** `guides/known_limitations.md` lists every
   limitation the library documents, with what to do instead, among them
   four ways a read-only connection can still write: through `ATTACH`,
   through `VACUUM INTO`, through `PRAGMA query_only = 0` or a
   journal-mode change, and through a `mode=ro&cache=shared` URI on
   `Xqlite.open/2` or `XqliteNIF.open/1`.
-
 - **`Xqlite.get_limit/2` and `Xqlite.put_limit/3`**, and the raw
-  `XqliteNIF.get_limit/2` and `XqliteNIF.put_limit/3` — SQLite's
+  `XqliteNIF.get_limit/2` and `XqliteNIF.put_limit/3`: SQLite's
   per-connection limits (`sqlite3_limit`), thirteen categories.
-  `put_limit/3` answers the value now in force, read back under the same
+  `put_limit/3` returns the value now in force, read back under the same
   lock: SQLite lowers a value to its compile-time ceiling for the category
   and raises `:length` to 30. On `Xqlite.put_limit/3` any integer outside
   `0..2_147_483_647` is `{:error, {:invalid_limit_value, %{category: _,
-  value: _}}}`, judged before the category; the raw stub judges the same
-  range and raises `ArgumentError` for an integer outside 64 bits.
+  value: _}}}`, checked before the category; the raw function checks the
+  same range and raises `ArgumentError` for an integer outside 64 bits.
+
+### Changed
+
+- **`Xqlite.Pragma.get/2,3,4` returns every row of `integrity_check` and
+  `quick_check` as a list, on every form.** Without a number it returned
+  SQLite's first row alone, as a string, and with a `:db_name` it raised
+  `CaseClauseError` once SQLite reported more than one. A clean database
+  now returns `{:ok, ["ok"]}` where it returned `{:ok, "ok"}`.
+- **A blob handle closed by `blob_close/1` returns `{:error,
+  :blob_closed}`** from `blob_read/3`, `blob_write/3`, `blob_size/1` and
+  `blob_reopen/2` while its connection is open, where it returned
+  `{:error, :connection_closed}`. Once the connection is closed, every
+  blob call still returns `{:error, :connection_closed}`.
+- **A batch run outside a transaction returns `{:error,
+  :statement_mid_run}` while a statement, stream or blob of the connection
+  is mid-run, and runs nothing.** A write such a statement runs would join
+  a transaction the batch opens, and could be undone with it. Inside a
+  transaction a batch runs as before.
+- **The schema readers report a stored column name that is not UTF-8 by
+  the column's place in its table.** `schema_columns/2`,
+  `schema_foreign_keys/2` and `schema_index_columns/2` returned `{:error,
+  {:utf8_error, n, message}}`, `n` naming a column of an internal query;
+  they now return `{:error, {:column_name_not_utf8, %{column: place, name:
+  bytes}}}`, as the query functions do for such a name in a result. A
+  foreign key's parent table and column keep `{:utf8_error, _, _}`.
+- **An option argument that is not a list returns an error on every
+  function that takes an option list.** `open/2`, `open_in_memory/1`,
+  `set_busy_policy/2`, `register_progress_hook/3`,
+  `Xqlite.Telemetry.bridge/2` and `Xqlite.Telemetry.bridge_log/1` raised
+  `FunctionClauseError` for a map, an atom or `nil` in that place; they
+  now return `{:error, {:invalid_option, %{key: nil, value: term, reason:
+  :not_a_pair}}}`, as the other functions do, before any file is opened or
+  anything starts.
+- **The raw `XqliteNIF.set_pragma/3` takes for `busy_timeout` only an
+  integer from 0 to 2_147_483_647**, as `Xqlite.put_busy_timeout/2` does.
+  Any other value, the name in any case, returns `{:error,
+  {:invalid_pragma_value, %{pragma: :busy_timeout, value: value}}}` and
+  keeps the wait in force. SQLite read a negative number, `:infinity`, a
+  boolean or a string such as `"abc"` as no wait, a string or a float
+  holding a number as that number, and an integer above 2_147_483_647 as
+  0; an integer past 64 bits returned a conversion error.
+- **Handles the garbage collector frees are released by a thread of
+  xqlite's own, not by their destructors.** The NIF library starts an OS
+  thread when it loads, and fails to load if the thread cannot start. The
+  thread releases the statements, streams, blobs and sessions the garbage
+  collector frees while their connection is idle, and closes the
+  connections dropped without `close/1`; a handle collected while a call
+  holds its connection is released by that call before it returns, so
+  that call can wait for the commit the release makes. The docs of
+  `Xqlite.prepare/2`, `XqliteNIF.stmt_prepare/2` and
+  `XqliteNIF.stmt_finalize/1` say so. The thread serves every connection,
+  one release after another, so a release that waits in its connection's
+  busy handler, or the close of a dropped connection, delays the releases
+  of the others. A release is no longer finished when the collection
+  returns: another connection that meets the handle's lock right after it,
+  with no busy timeout, gets a busy error. Where that matters, finalize,
+  close and delete handles yourself, and close connections with
+  `close/1`, as the Known limitations guide says. From the first
+  connection it opens, the NIF library keeps a resource of its own alive,
+  so that the BEAM never unloads the code the thread runs, even after the
+  module is purged: the library stays loaded until the node stops.
+- **A transaction another process opens while
+  `Xqlite.enable_strict_table/2` is starting returns `{:error,
+  :transaction_in_progress}`.** The rebuild checked for an open
+  transaction before it read the table. A transaction opened between that
+  check and the rebuild's own `BEGIN` made the call return
+  `{:error, {:sqlite_failure, 1, 1, "cannot start a transaction within a transaction"}}`.
+  The rebuild now checks again inside its call, before anything is
+  switched, and returns what it returns for the caller's own transaction.
+- **`:unknown` in a deny list no longer matches an `ATTACH` or `DETACH`.**
+  An `ATTACH` whose file name was a bound parameter or an expression, and
+  such a `DETACH`, counted as `:unknown`, so a deny list naming `:unknown`
+  stopped them where one naming `:attach` or `:detach` did not. They now
+  count as `:attach` and `:detach` (see Fixed), and no action of the
+  bundled SQLite counts as `:unknown`.
+- **More strings that hold a second statement return `{:error,
+  :multiple_statements}`, with nothing changed.** The text after the
+  first statement is no longer compiled (see Fixed), so the authorizer is
+  no longer asked about a second statement either. These return the new
+  error:
+  - text after the first statement that holds anything but whitespace,
+    comments and semicolons, where it returned its own compile error when
+    it was no valid statement or did not compile: `"SELECT 1; garbage"`,
+    `"SELECT 1; SELECT * FROM missing"`, or a lone vertical tab or `/*`
+    after the first statement;
+  - a string holding a second statement the authorizer denies, and, under
+    a `:pragma` deny, a string whose first statement is a PRAGMA and that
+    holds a second, where it returned `{:error, {:authorization_denied,
+    23, _}}`;
+  - with a busy policy or observer installed, a string holding a
+    `busy_timeout` write and a second statement, where it returned the
+    error a `busy_timeout` write gets then, whichever statement held the
+    write; a `busy_timeout` write on its own still gets that error;
+  - a string whose first statement is a PRAGMA, which is now checked
+    before SQLite reads it: one that holds more and is longer than the
+    connection's SQL length limit, which returned
+    `{:error, {:too_big, 18, _}}`; `"PRAGMA foreign_keys = OFF $a(;x)"`,
+    whose semicolon SQLite reads inside a variable, which returned a
+    syntax error with foreign-key enforcement turned off; and
+    `"EXPLAIN ; PRAGMA foreign_keys = OFF; SELECT 1"`, which returned a
+    syntax error.
+- **One vocabulary in the docs.** The README, the guides and the module
+  docs say "reject" and "rejection" for an input the library turns away,
+  where they mixed in other words for it, and use one word, "function",
+  for the library's public functions.
+- **`changeset_apply/3` names the foreign key in its key error.** A
+  changeset SQLite rolls back for a broken foreign key returns
+  `{:error, {:constraint_violation, :constraint_foreign_key, details}}`
+  under every strategy, the kind an ordinary write's key error carries.
+  Under `:replace` and `:abort` it returned the kind
+  `:constraint_violation`.
+- **`blob_size/1` asks SQLite on every call.** On a handle whose row
+  changed, it now ends the handle as a read does and returns
+  `{:error, {:sqlite_failure, 4, _, _}}`, and so does a later
+  `blob_reopen/2`. It returned the size fixed at the open, and a later
+  reopen still moved the handle. A reopen made before any read, write or
+  size call still moves it.
+- **One `cancel_tokens:` option replaces the `_cancellable` functions.**
+  `Xqlite.query/4`, `execute/4`, `execute_batch/3` and `multi_step/3` take
+  one token or a list (default `[]`) and keep their return values:
+  `query/4` and `execute/4` return `%Xqlite.Result{}` with or without
+  tokens, where the removed `query_cancellable/5` and
+  `query_with_changes_cancellable/5` returned a plain map and
+  `execute_cancellable/5` returned `{:ok, count}`. The raw `XqliteNIF`
+  cancellable functions stay. Removed lists the functions this replaces.
+- **`Xqlite.Pragma.get` no longer runs the PRAGMAs that act**: `optimize`,
+  `shrink_memory`, `wal_checkpoint` and `incremental_vacuum` return
+  `{:error, {:unknown_pragma, name}}` there. `Xqlite.optimize/1`,
+  `Xqlite.shrink_memory/1` and `Xqlite.wal_checkpoint/3` run them, and
+  `Xqlite.query/4` runs `incremental_vacuum`, or `optimize` with a mask.
+- **`journal_mode`, `locking_mode` and `encoding` read back as atoms** from
+  `Xqlite.Pragma.get` (`:wal`, `:exclusive`, `:utf8`, `:utf16le`,
+  `:utf16be`), and a write takes the atom, or the text in any case.
+- **`Xqlite.enable_load_extension/1` and `disable_load_extension/1`
+  replace `enable_load_extension/2`**, each with its own event:
+  `[:xqlite, :extension, :enable]` and the new
+  `[:xqlite, :extension, :disable]`, both with metadata `%{conn}` (the
+  `:enabled` key is gone).
+- **`load_extension/3` and `deserialize/4` take options.** `entry_point:`
+  replaces the positional entry point (leave it out to let SQLite find the
+  init function), and `read_only:` replaces the boolean of `deserialize/4`,
+  whose schema stays positional; options given in the schema's place load
+  into `"main"`, as in `deserialize(conn, data, read_only: true)`. A value
+  of the wrong kind returns `{:error, {:invalid_option, _}}`, and so does a
+  call in the old positional form.
+- **`backup_with_progress/6` becomes
+  `backup_with_progress(conn, dest_path, pid, opts)`**, the destination
+  first as in `backup/3`, with `schema:` (default `"main"`),
+  `pages_per_step:` (default 100; a bad value returns
+  `{:error, {:invalid_pages_per_step, value}}`) and `cancel_tokens:`.
+- **A PRAGMA write through `Xqlite.Pragma.put/3,4` returns `:ok`, or
+  `{:error, {:pragma_not_applied, %{pragma: name, asked: value, in_force:
+  value}}}` when SQLite reports another value**, with or without
+  `db_name:`: `journal_mode: :wal` on an in-memory database,
+  `max_page_count` below the page count, a heap limit SQLite will not
+  raise. No write returns `{:ok, value}` any more. The error can follow a
+  change, since `in_force` is what holds after the write:
+  `max_page_count: 1` sets the limit to the page count, so the next insert
+  that needs a page fails with "database or disk is full"; a
+  `soft_heap_limit` above the hard one is set to the hard one; and in
+  memory a `locking_mode: :normal` write returns `in_force: :exclusive`,
+  which `get(conn, :locking_mode, db_name: "main")` also reads, while a
+  plain `get` returns `:normal`. A write SQLite answers with no row, such
+  as `page_size` on a database with content, returns `:ok`;
+  `Xqlite.Pragma.get` tells what holds. `Xqlite.Pragma.put/4` rejects
+  `db_name:` for `busy_timeout` and `wal_autocheckpoint`, as `get` does, so
+  such a write no longer stops the WAL hook messages.
+  `enable_foreign_key_enforcement/1` and
+  `disable_foreign_key_enforcement/1` return `:ok`.
+- **`open/2` and `open_in_memory/1` return `{:error, {:invalid_option,
+  %{key: key, value: value, reason: :invalid_value}}}` for an option value
+  outside what SQLite stores**, with the value as given: the shape an
+  option already returns when its value has the wrong type. They returned
+  `{:error, {:invalid_pragma_value, %{pragma: key, value: value}}}`.
+  `Xqlite.Pragma.put/3,4` keeps `:invalid_pragma_value`.
+- **`backup/3` and `backup_with_progress/4` return
+  `{:error, {:cannot_open_database, dest_path, code, message}}` for a
+  destination SQLite cannot open**, such as a path in a missing directory,
+  as `restore/3` does for its source. They returned
+  `{:error, {:sqlite_failure, 14, 14, message}}`.
+- **`XqliteNIF.stream_close/1` raises `ArgumentError` for a term that is
+  not a stream handle**, like `stream_fetch/2`, `stmt_finalize/1`,
+  `blob_close/1` and the other handle functions. It returned
+  `{:error, {:invalid_stream_handle, text}}`; that shape is gone from
+  `Xqlite.error_reason/0`.
+- **SQL text longer than 2 147 483 647 bytes returns
+  `{:error, {:too_big, 18, message}}` on every function that compiles one
+  statement** (the query, execute, prepare, stream and `explain_analyze`
+  functions). `stmt_prepare/2`, `stream_open/3`, `explain_analyze/3` and
+  the `Xqlite` functions built on them returned
+  `{:error, {:cannot_execute, "SQL string length exceeds c_int range"}}`
+  after copying the whole text; they now check the length before any copy
+  and return what the others return. SQL over the connection's SQL length
+  limit (`:sql_length`, at most 1 000 000 000 bytes) returns the same tag,
+  as it did. A text holding a NUL byte returns
+  `{:error, :null_byte_in_string}` first, whatever its length.
+- **`:execute_returned_results` is gone: the execute functions run a
+  statement that returns rows to its end, drop the rows and return the
+  count.** This holds for `Xqlite.execute/4` and the raw
+  `XqliteNIF.execute/3` and `execute_cancellable/4`; `query/4` reads the
+  rows. An `INSERT`, `UPDATE` or `DELETE ... RETURNING` through them
+  returns its count, where it made the write and then returned that error.
+  A `SELECT` returns a count of 0. A PRAGMA that returns a row,
+  `journal_mode = WAL` for one, takes effect and returns 0, where it took
+  effect and then returned the error. `PRAGMA incremental_vacuum` frees
+  every page it is asked to, where it freed one page and returned the
+  error. Since a statement that returns rows, through the execute
+  functions or a batch, now reads every row, one that never ends never
+  returns: a `SELECT` that never ends, such as a recursive CTE without a
+  limit, used to return after its first row (the execute functions with
+  `:execute_returned_results`, `execute_batch/3` with `:ok`), and now runs
+  until a cancel token stops it, given to `execute/4` or `execute_batch/3`
+  through `:cancel_tokens`, or to the raw `execute_cancellable/4` or
+  `execute_batch_cancellable/3`. Reading a million rows costs about
+  100 ms.
+- **The SQL length limit (`:sql_length`) applies to each statement of a
+  batch, a trailing comment included.** A batch longer than a lowered limit
+  used to run nothing even when every statement fit; it now runs, and a
+  trailing comment longer than the limit fails after every statement ran.
+- **A batch that fails or is cancelled inside a transaction it opened
+  itself (`BEGIN` or `SAVEPOINT`) rolls that transaction back, a `COMMIT`
+  that failed as busy included**, so the next `commit/1` no longer commits
+  the statements that ran before the failure. Run the whole batch again
+  rather than retrying the `COMMIT`. A transaction open before the call
+  stays open with the batch's earlier statements in it, and so does one the
+  batch opens after committing the caller's (`COMMIT; BEGIN; ...`). A
+  `ROLLBACK` that fails leaves the transaction open under the batch's own
+  error, and `autocommit/1` says so.
+- **`commit/1` and `rollback/1` return `{:error, :no_transaction}` when no
+  transaction is open**, on `Xqlite` and `XqliteNIF` alike, before any
+  statement runs. They returned `{:error, {:sqlite_failure, 1, 1,
+  message}}` before. `@type error_reason` gains `:no_transaction`.
+- **`commit/1`, `savepoint/2` and `release_savepoint/2` return
+  `{:error, :statement_mid_run}` while a write of the same connection is
+  mid-run**, on both modules: a write stepped but not yet run to its end or
+  reset, or a blob open for writing. SQLite rejects them with `SQLITE_BUSY`
+  then, which came back as `{:database_busy_or_locked, 5, _}`, the error a
+  lock held by another connection gives, so code that retries on busy
+  retried against its own statement. A lock still returns
+  `{:database_busy_or_locked, 5, _}`; `rollback/1` and
+  `rollback_to_savepoint/2` run whatever is mid-run.
+- **The query functions read rows through the code statements and streams
+  use.** `XqliteNIF.query/3`, `query_cancellable/4`,
+  `query_with_changes/3` and `query_with_changes_cancellable/4` no longer
+  read rows through rusqlite: mixed rows read 11-12 % faster. An
+  unreadable value or a failed step still returns the error with no rows.
+  A BLOB larger than 64 bytes now comes back as a resource binary from
+  step, multi_step and stream too, as it did from query; the bytes are
+  unchanged.
+- **Backup progress messages are
+  `{:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}}`.**
+  A `:busy` message sent before any step copied pages carries
+  `remaining: nil, total: nil` (was `0` and `0`); a `:busy` after a copied
+  step carries that step's counts.
+- **A cancel token already signalled comes before an SQL or parameter
+  error** on the one-shot calls that take tokens: `query/4`, `execute/4`
+  and `execute_batch/3` given `:cancel_tokens`, and the raw
+  `XqliteNIF.query_cancellable/4`, `query_with_changes_cancellable/4`,
+  `execute_cancellable/4` and `execute_batch_cancellable/3` return
+  `{:error, :operation_cancelled}`, since the tokens are read before the
+  SQL is prepared. With `:type_extensions` set, a parameter list that is
+  not a proper list returns its error first, because the extension check
+  runs in Elixir before the native call reads the tokens.
+- **`Xqlite.put_busy_timeout/2` replaces `Xqlite.busy_timeout/2`, and it
+  no longer removes the retry policy:** while a policy is set it decides
+  the wait, and the timeout written applies once `remove_busy_policy/1`
+  runs. The new `Xqlite.get_busy_timeout/1` returns the timeout the
+  connection keeps; `Xqlite.Pragma.get/2` and `XqliteNIF.get_pragma/2`
+  return it too while a busy policy or observer is installed, where they
+  returned SQLite's 0. `Xqlite.Pragma.get/3` rejects `:db_name` for
+  `busy_timeout` and `wal_autocheckpoint`.
+- **One tag for a bad option list everywhere:** `{:invalid_option, %{key,
+  value, reason: :unknown_key | :duplicate_key | :invalid_value |
+  :not_a_pair}}` (with `allowed` on `:unknown_key`) replaces
+  `:invalid_open_option`, `:invalid_hook_option` and the telemetry bridge's
+  `{:invalid_hook, _, valid: _}`. `set_busy_policy/2`,
+  `register_progress_hook/3`, `stream/4`, the `:type_extensions`
+  functions, `Xqlite.Telemetry.bridge/2` (its `:progress` list included)
+  and `bridge_log/1` now reject a misspelled key instead of installing the
+  default, reject a key given twice instead of using its first value, and
+  return an error instead of raising for an out-of-range number or a
+  malformed list.
+- **`Xqlite.open/2` and `Xqlite.open_readonly/1` reject `""` and
+  `":memory:"` with `{:invalid_path, %{path}}`;** use `open_temporary/0`
+  and `open_in_memory/1`. `file:` URIs pass as written.
+- **`XqliteNIF.open_in_memory/1` opens any name but `":memory:"`, `file:`
+  URIs included, with `SQLITE_OPEN_MEMORY` and ATTACHes a plain path in
+  memory;** a plain file name no longer creates a file, while an ATTACH by
+  a URI naming a `mode=` still reaches the file. `":memory:"`, the name
+  `Xqlite.open_in_memory/1` passes, is unchanged.
+- **`backup_with_progress/4` returns `{:error, {:database_busy_or_locked,
+  code, message}}` for a blocked step,** as `backup/3` does, instead of
+  retrying every 100 ms until a token fires.
+- **Seven PRAGMAs take and return typed values instead of coded
+  numbers:** `cache_size` `{:pages, n}` or `{:kib, n}` (the open default
+  is now `{:kib, 64_000}`), `wal_autocheckpoint` and `cache_spill` `:off`
+  or a count, `journal_size_limit`, `analysis_limit`, `soft_heap_limit`
+  and `hard_heap_limit` `:unlimited` or a count. A bare coded number is
+  rejected.
+- **`txn_state/2` and `schema_list_objects/2` default to `"main"` and take
+  `:all` for every attached database;** `nil` no longer means every
+  database. `XqliteNIF.txn_state/2`, `wal_checkpoint/3` and
+  `schema_list_objects/2` lose their defaults (see Removed), and
+  `session_attach/2` takes `:all` instead of `nil`.
+- **A schema name that is not attached returns `{:error, {:no_such_schema,
+  name}}`** on every function that takes one, before anything is opened or
+  changed; `""` returns `{:error, {:invalid_schema_name, ""}}` (SQLite read
+  it as every database, so `wal_checkpoint(conn, mode, "")` checkpointed
+  all of them).
+- **A table or index name that names nothing returns `{:error,
+  {:no_such_table, name}}` or `{:error, {:no_such_index, name}}`** instead
+  of `{:ok, []}` on `schema_columns/2`, `schema_foreign_keys/2`,
+  `schema_indexes/2`, `schema_index_columns/2` and the Pragma functions
+  `table_info`, `table_xinfo`, `index_list`, `index_info`, `index_xinfo`
+  and `foreign_key_list`.
+- **`get_create_sql/2` returns `{:error, {:no_such_object, name}}`**
+  instead of `{:ok, nil}` for a name nothing carries; `{:ok, nil}` now
+  means an automatic index.
+- **`schema_list_objects(conn, "MAIN")` lists main's objects;** the listing
+  compared the name byte for byte and returned `{:ok, []}`.
+- **`restore/3` from a path that does not exist, or from a name SQLite
+  gives no file for (`""`, `":memory:"`, `"file::memory:"`, a
+  `mode=memory` or `vfs=memdb` URI), returns `{:error,
+  {:cannot_open_database, path, code, message}}` and changes nothing;** it
+  created an empty file and copied it over the schema.
+- **SQL holding no statement returns `{:error, :no_statement}`** instead of
+  `{:error, {:cannot_execute, "SQL contains no statement"}}`.
+- **`wal_checkpoint/3` on a named database not in WAL mode returns
+  `{:error, :not_in_wal_mode}`** instead of `-1` page counts, and a
+  checkpoint lock another connection holds returns
+  `{:error, {:database_busy_or_locked, 5, _}}`.
+- **`connection_stats/1` reports the half SQLite defines for each
+  counter.** `lookaside_hit`, `lookaside_miss_size` and
+  `lookaside_miss_full` report SQLite's running totals (they read 0
+  before); `deferred_fks` is now `deferred_fks?`, a boolean; every counter
+  is read as 64 bits.
+- **Tagged errors carry the rejected term.** `{:invalid_checkpoint_mode,
+  mode}`, `{:invalid_schema_name, term}` (`wal_checkpoint/3`,
+  `txn_state/2`), `{:invalid_transaction_mode, mode}` and
+  `{:invalid_conflict_strategy, strategy}` (were bare atoms),
+  `{:blob_write_out_of_bounds, %{offset, byte_size, blob_size}}`,
+  `{:invalid_option, _}` from the raw progress-hook NIF, and
+  `{:invalid_pragma_value, %{pragma: :busy_timeout, value}}` from
+  `put_busy_timeout/2` and the raw setters.
+- **`put_busy_timeout/2` returns its error for 2^64 and above instead of
+  raising**, and so does `register_progress_hook/3` for `every_n` above
+  4_294_967_295.
+- **A keyword list binds through a map of the statement's names, and is
+  taken only on a statement of at most 2 048 parameters.** Each key was
+  resolved by walking the statement's whole list of parameter names, one
+  string comparison per name, and the functions going through rusqlite let
+  it resolve every name a second time. Both binding paths now read the
+  statement's own names once into a map built per call and bind by index,
+  so the connection lock is held for less time. Above 2 048 parameters,
+  every function that takes a keyword list returns `{:error,
+  {:too_many_named_parameters, %{count: n, limit: 2048}}}` before a value
+  is read; a positional list binds at any count. The map costs 7.1 ms at
+  2 048 parameters on one machine and grows faster than the count:
+  reading the name at one index is itself a walk of SQLite's parameter
+  list, and its C interface offers no way to read them all in one pass.
+  SQLite's own prepare of SQL with that many names costs about twice the
+  map, grows the same way, and no parameter list avoids it: 14, 193 and
+  3 023 ms at 2 048, 8 192 and 32 766 names. Written with bare `?` the
+  same statement prepares in 1.0, 4.7 and 20.7 ms, so a statement with
+  thousands of parameters is written with `?` and bound with a positional
+  list.
+- **A type extension's `decode/1` can reject a stored value, and a callback
+  result outside the three shapes returns an error instead of raising.** A
+  `decode/1` that claims a value but cannot read it returns
+  `{:error, reason}`, and every function that decodes rows returns
+  `{:error, {:type_extension_refused, %{column: n, extension: module,
+  reason: reason}}}`, `n` being the value's one-based place in its row.
+  `stream/4` hands over the rows decoded before it, then returns the error
+  under its `:on_error` mode. The query functions decode after the
+  statement ran, so its changes stand. An `encode/1` or `decode/1`
+  returning anything but `{:ok, value}`, `:skip` or `{:error, reason}`
+  raised `CaseClauseError`; it is now the same error with
+  `reason: {:bad_return, answer}`.
+- **`Xqlite.TypeExtension.decode_value/2` returns `{:ok, decoded}` or
+  `{:error, %{extension: module, reason: reason}}`**, as `encode_value/2`
+  does, where it returned the bare decoded value: an error can no longer be
+  mistaken for a value that decoded to an error tuple.
+- **`{:value_too_large, _}` is now returned by every function that
+  binds**, where the functions going through rusqlite returned
+  `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw
+  functions rejected only values above two gigabytes. The limit in the
+  error is the connection's own, which `Xqlite.get_limit/2` reads and
+  `Xqlite.put_limit/3` sets.
+- **`SQLITE_TOOBIG` is classified as `{:too_big, code, message}`**
+  wherever SQLite returns it. It no longer comes from a bind, but it still
+  comes from a step: SQLite checks the same limit against the row it
+  builds, a concatenation and a column read.
+- **`Xqlite.TypeExtension.encode_params/2` and `decode_rows/2` check their
+  extension list.** Both are public and are what the raw-statement docs
+  recommend for the rows `step/1` and `multi_step/2` return, and both took
+  the list as given: a list that was no proper list of extension modules
+  raised from the chain, and a module such as `Jason`, which exports both
+  callback names without being an extension, silently rewrote values.
+  Both now check the list the way every function that takes
+  `:type_extensions` does and return
+  `{:error, {:invalid_type_extensions, rejection}}` for one that fails; and
+  `decode_rows/2` returns `{:ok, rows}` where it returned the bare rows.
+  `encode_value/2` and `decode_value/2` still take the list as given: they
+  run once per value, and the caller vouches for it.
+- **`:type_extensions` is checked before anything else runs.** A term that
+  is no proper list of extension modules reached `length/1` or the encode
+  chain and raised: `Xqlite.stream(conn, sql, params, type_extensions:
+  [JSON | :x])` raised `ArgumentError`, and `query/4`, `execute/4` and
+  `bind/3` raised `FunctionClauseError`. Any atom passed, so
+  `type_extensions: [Xqlite.TypeExtension.JSON, :nope]` (`:nope` standing
+  for a misspelled module name, or for an empty variable holding `nil` or
+  `false`) ran until the first value was encoded and then raised
+  `UndefinedFunctionError`. Every function that takes the option now
+  returns `{:error, {:invalid_type_extensions, rejection}}` before its
+  telemetry and before the NIF, `rejection` naming what stopped the check
+  (`:not_a_list`, `:improper_tail`, or `:bad_element` with the element's
+  one-based position) and the kind of term it was: an element that is no
+  extension module is
+  `%{reason: :bad_element, position: n, value_type: :atom}`.
+  `nil` and an absent option both mean no extensions. An element counts
+  as an extension module when three things hold: the atom names a module
+  that can be loaded, the module declares `@behaviour Xqlite.TypeExtension`,
+  and it exports both `encode/1` and `decode/1`. Two kinds of list that
+  worked before now stop. A module that exports `encode/1` and `decode/1`
+  without declaring the behaviour: `Jason` and OTP's `:json` both do, and
+  `type_extensions: [Jason]` silently stored the integer `1` as the text
+  `"1"`. And a module that exports `encode/1` but not `decode/1`, on the
+  functions that never decode (`execute/4`, `explain_analyze/4` and
+  `bind/3`), which ran it to completion. A module written to the shape the
+  `Xqlite.TypeExtension` moduledoc shows is unaffected. Only the behaviour
+  declaration is remembered per module: both callbacks are checked on
+  every call, and a false there runs the whole check again, so a module
+  recompiled without `encode/1` or `decode/1`, or purged, fails the check
+  at the next call, and a module merely unloaded is loaded again and
+  passes.
+- **An integer SQLite has no room for returns a structured error.** A
+  number past the signed 64-bit range returned
+  `{:cannot_convert_to_sqlite_value, "9223372036854775808", "{error, badarg}"}`,
+  a tag carrying two debug strings, which four different causes shared.
+  The tag is gone. A parameter outside the range is now
+  `{:error, {:integer_out_of_range, %{position: n}}}`, `n` being the
+  value's one-based place in the list; `XqliteNIF.set_pragma/3` checks one
+  value with no list around it and returns
+  `{:error, {:integer_out_of_range, %{}}}`. A TEXT or BLOB parameter longer
+  than SQLite's C interface can be told about returns
+  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}`.
+- **A key named twice in a parameter list is rejected.** `[a: 1, a: 2]`
+  bound the second value, where every `Keyword` function reads the first.
+  Two keys that name the same parameter (`[{:a, 1}, {:":a", 2}]` included,
+  since both name `:a`) now return
+  `{:error, {:duplicate_parameter_name, name}}`, with the second key's name
+  as it resolved, whatever the values.
+- **A rejected batch size reports the caller's own term.** The raw stream
+  fetch functions tagged it (`{:integer, 0}`, `{:float, 1.0}`,
+  `{:atom, :ten}`) while the statement functions put the bare number, so
+  `{:invalid_batch_size, %{provided: _, minimum: 1}}` had two shapes.
+  `provided` is now the term as the caller wrote it on both:
+  `XqliteNIF.stream_fetch(s, 1.0)` returns `provided: 1.0`. The stream
+  fetch functions are the only ones that return an error for a wrong type,
+  because they take the term and check it; the statement functions take an
+  integer argument, so Rustler raises `ArgumentError` for anything else
+  before the function runs, which is what keeps a huge batch size out.
+- **`Xqlite.stream/4` checks its batch size at the call.** The option is
+  checked beside `:on_error` and `:cancel_tokens`, so a value that is not
+  an integer in `1..9223372036854775807` returns
+  `{:error, {:invalid_batch_size, %{provided: value, minimum: 1}}}` from
+  `stream/4` itself. `batch_size: 0` opened the stream and raised
+  `Xqlite.StreamError` on the first element taken out of it, and
+  `batch_size: 2 ** 63`, which the native fetch cannot read as a signed
+  64-bit integer, opened a stream that died on its first batch; under
+  `on_error: :halt` that was an empty stream with no error at all.
+  `Xqlite.multi_step/2` keeps its integer guard.
+- **Six raw-statement helpers in the native crate are `unsafe fn`.** The
+  helpers that take a raw `sqlite3_stmt` pointer (the parameter-count
+  check, the check that a keyword list names every parameter, the two
+  binders, the value binder and the stream's parameter binding) were
+  ordinary safe functions whose contract lived in a comment. Each now
+  carries a `# Safety` section naming it (the caller holds the connection
+  Mutex; the pointer is a live prepared statement of that connection), and
+  every caller says which lock it holds. No behaviour changes.
+- **The check that the NIF library unwinds on a panic reads every
+  platform's library, and the release workflow runs it.**
+  `scripts/panic_strategy.exs` looked for `_Unwind_RaiseException` with
+  `nm` whatever the library was. An MSVC-built `.dll` keeps no symbol
+  table `nm` can read and unwinds through Windows exceptions instead, so
+  the check reported an abort build on every Windows runner. A `.dll` is
+  now read with `objdump -p` (or `llvm-objdump`) and passes when its
+  import table names `_CxxThrowException` or `__CxxFrameHandler3`; every
+  other library is read with `nm -u` (or `llvm-nm`) as before. Both
+  families look for their tool on `PATH` and in the rustup sysroot where
+  `rustup component add llvm-tools` puts the LLVM ones, and
+  `XQLITE_SYMBOL_TOOL` names a tool to use instead. A failed check names
+  the tool, the library and every line of the tool's output that mentions
+  unwinding, so one CI log is enough to tell a wrong marker from a real
+  abort build. The script used to glob for libraries and read the newest
+  file it found, which could be the crate's own build under
+  `native/xqlitenif/target`, a file nothing loads; it now takes the
+  libraries to read as arguments and checks each one, and `mix verify`
+  hands it `priv/native/xqlitenif.{so,dll}`. It also fails, instead of
+  passing with a notice, when no tool that lists symbols is on the
+  machine. Every build job of the release workflow unpacks the library it
+  produced and, before the upload, reads it for the same markers with the
+  same two tools (`llvm-nm -u` for an ELF or Mach-O library,
+  `llvm-objdump -p` for a DLL). A missing marker, or a library the job
+  cannot find or read, fails the job, so that target ships no asset; the
+  job summary names the library, the tool and the marker lines it found.
+- **`{:expected_keyword_tuple, _}` carries the same map as its siblings.**
+  An element of a keyword parameter list that is not an `{atom, value}`
+  pair came back as the Rust debug text of the caller's own element, which
+  put the caller's data, a password in a named parameter included, inside
+  an error term, and threw away the position the decoder had in hand. It is
+  now `%{reason: :bad_element, position: n, value_type: type}`, the map
+  `{:expected_list, _}` and `{:expected_keyword_list, _}` already carry,
+  with `n` the one-based position of the element and `type` its kind.
+- **`{:invalid_cancel_tokens, _}` holds the same map on every function,
+  and a raw cancellable NIF says which of its two lists it rejected.** The
+  `Xqlite` functions returned the caller's own value and the raw NIFs
+  `%{position: n}`; both now return
+  `%{reason: :bad_element, position: n, value_type: type}` for an element
+  that is not a live token. The `Xqlite` functions, which take one token
+  or a list of them, return position 1 for a single term that is not a
+  token and `%{reason: :improper_tail, value_type: type}` for a list whose
+  tail is not `[]`. `Xqlite.cancel_operation/1` takes one token and
+  rejects a list, an empty one and a list of live tokens included, as the
+  one element it was handed. On the raw NIFs a token argument that is not
+  a list, or a list with a broken tail, returned
+  `{:error, {:expected_list, _}}`, byte for byte what a bad parameter list
+  returns, on `execute_batch_cancellable/3` too, which has no parameters.
+  Every rejected token argument is now
+  `{:error, {:invalid_cancel_tokens, rejection}}` with `:not_a_list`,
+  `:improper_tail` or `:bad_element` as the reason, so `{:expected_list,
+  _}` on a cancellable call is always about the parameters. The reason
+  still differs for a term that is not a list: the raw NIF takes a list
+  and nothing else and returns `%{reason: :not_a_list, value_type: type}`,
+  while the `Xqlite` function reads a bare term as one token and returns
+  `:bad_element` at position 1.
+- **`XqliteNIF.stmt_bind/2` reads `nil` as no parameters, like its
+  siblings.** `query`, `execute`, `query_with_changes`, `explain_analyze`
+  and `stream_open` all took a parameter term of `nil` as "no parameters"
+  while `stmt_bind` returned `{:expected_list, _}` for it. One rule now, in
+  one place: `stmt_bind(stmt, nil)` means zero parameters, so it returns
+  `:ok` on a statement that takes none and `{:invalid_parameter_count, _}`
+  on one that takes any (see the parameter-count fix under Fixed).
+  `Xqlite.bind/2,3` reads `nil` the same way and returns
+  `{:expected_list, %{reason: :not_a_list, value_type: type}}` for any
+  other term that is not a list.
+- **`Xqlite.Pragma` checks its options.** The options position (the last
+  argument of `get/4` and `put/4`, and the third argument of `get/4` when
+  it is a keyword list, the two being merged) reached `Keyword.get/3`
+  unchecked: a term that is not a list raised `FunctionClauseError`
+  several calls deep, and `[1]`, `[:db_name]` and `[foo: 1]` were silently
+  ignored. Options are now a keyword list whose only key is `:db_name`,
+  whose value is a string, an atom or `nil`; anything else returns
+  `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
+  reason: :invalid_options}}}` before a statement is built, `value` being
+  the whole term when it is not a keyword list and the `{key, value}` pair
+  that could not be read when it is one. The named accessors
+  (`table_info/3` and its siblings) reach `get/4` and inherit it.
+- **`Xqlite.Pragma.get_result/0` names `:no_value`.** The atom is what
+  every read function returns for a PRAGMA the connection has no row for
+  (`mmap_size` on a database that is not a file, and `legacy_file_format`
+  and `incremental_vacuum` on any database), and it was hidden inside
+  `atom()` with nothing saying when it comes. The type names it, the
+  `get/3,4` doc says when it comes, and no write function takes it back.
+- **A binary that is not UTF-8 where text was meant returns an error
+  instead of raising.** Every argument the native side reads as text (the
+  SQL of the six query functions and their cancellable counterparts, the
+  paths and URIs of the openers, savepoint names, table and index names,
+  `get_create_sql/2`'s object name, the schema and path of `serialize`,
+  `deserialize`, `load_extension`, `backup` and `restore`,
+  `blob_open/6`'s three names, a progress hook's tag and a session's
+  table) raised `ArgumentError` for a binary holding bytes that are not
+  UTF-8, out of functions whose specs promise `{:ok, _} | {:error, _}`.
+  They now return `{:error, :invalid_utf8_in_string}`, beside
+  `{:error, :null_byte_in_string}`. A term that is not a binary at all
+  still raises, the documented kind for a wrong type on a raw function. On
+  the typed PRAGMA functions a `:db_name` or an argument whose bytes are
+  not UTF-8 returns `{:error, {:invalid_pragma_argument, %{pragma: name,
+  value: value, reason: :invalid_utf8}}}`, and a raw PRAGMA name returns
+  `{:error, {:invalid_pragma_name, name}}` with the bytes as they were
+  given. `XqliteNIF.set_pragma/3` returns `{:error,
+  :invalid_utf8_in_string}` for such a value, where it returned
+  `{:error, {:cannot_execute_pragma, name, _}}`; `Xqlite.Pragma.put/3,4`
+  returns `{:error, {:invalid_pragma_value, _}}`, a value that PRAGMA
+  cannot take.
+- **`mmap_size` takes the values this build keeps.** Its domain was the
+  shared 32-bit range, while the bundled SQLite is built with
+  `MAX_MMAP_SIZE=0x7fff0000`: it stored the maximum for anything above
+  that and 0 for anything negative, and both were accepted as written. The
+  domain is now `0..0x7FFF0000`, so a negative size and one past the
+  ceiling return `{:error, {:invalid_pragma_value, %{pragma: :mmap_size,
+  value: value}}}`; `0`, which turns memory mapping off, stays legal.
+- **A rejected parameter list reports its own length on every function.**
+  The `provided` number of `{:invalid_parameter_count, %{expected: _,
+  provided: _}}` differed by function for a list two or more elements too
+  long: `Xqlite.query/4`, `Xqlite.execute/4`, `XqliteNIF.query/3`,
+  `XqliteNIF.execute/3`, `XqliteNIF.query_with_changes/3` and the raw
+  cancellable functions behind them bind through rusqlite, which stops at
+  the first index the statement does not have and reports that index, so
+  a one-parameter statement handed three values returned `provided: 2`
+  while `stream/4`, `bind/3` and `explain_analyze/4` returned
+  `provided: 3`. Those functions now count the list before binding
+  anything, so `provided` is the list's own length everywhere. The error
+  itself, and the `expected` number, are unchanged.
+
+### Removed
+
+- **`Xqlite.query_cancellable/4,5`, `query_with_changes_cancellable/4,5`,
+  `execute_cancellable/4,5`, `execute_batch_cancellable/3` and
+  `multi_step_cancellable/3`.** Use `query/4`, `execute/4`,
+  `execute_batch/3` and `multi_step/3` with the `:cancel_tokens` option
+  (see Changed). The raw `XqliteNIF` cancellable functions stay.
+- **`Xqlite.transaction_status/1`.** `Xqlite.autocommit/1` answers the
+  same question the other way round: `{:ok, true}` while no transaction is
+  open.
+- **`Xqlite.get_pragma/2` and `Xqlite.set_pragma/3`.** `Xqlite.Pragma.get`
+  and `put` are the PRAGMA functions; a PRAGMA that `Xqlite.Pragma` does
+  not model is reached with `Xqlite.query/4` or the raw
+  `XqliteNIF.get_pragma/2` and `set_pragma/3`. The
+  `[:xqlite, :pragma, :get]` and `[:xqlite, :pragma, :set]` events went
+  with them.
+- **`Xqlite.Pragma.returning_nothing/0`.** It listed the PRAGMAs that
+  return nothing, and no PRAGMA left in the typed schema does now that the
+  PRAGMAs that act are functions (see Changed).
+- **`Xqlite.enable_load_extension/2`.** Use `enable_load_extension/1` and
+  `disable_load_extension/1` (see Changed).
+- **`Xqlite.backup_with_progress/6`.** Use `backup_with_progress/4`, which
+  takes the destination first and the rest as options (see Changed).
+- **`Xqlite.busy_timeout/2`.** It is `Xqlite.put_busy_timeout/2` now (see
+  Changed).
+- **`XqliteNIF.stream_open/4` is `XqliteNIF.stream_open/3`.** The fourth
+  argument was reserved for stream options that never arrived, and nothing
+  read it: `stream_open(conn, sql, [], :garbage)` opened a stream. A raw
+  caller passing four arguments has to drop the last one. `Xqlite.stream/4`
+  is unaffected.
+- **`XqliteNIF.txn_state/1`, `wal_checkpoint/1,2` and
+  `schema_list_objects/1`.** The raw `txn_state/2`, `wal_checkpoint/3` and
+  `schema_list_objects/2` lost their defaults, so pass every argument; the
+  `Xqlite` functions keep theirs (see Changed).
+- **The `[:xqlite, :query_with_changes, :start | :stop | :exception]`
+  span.** `[:xqlite, :cancel, :honored]` no longer reports
+  `operation: :query_with_changes`: a cancelled `query/4` reports
+  `operation: :query`.
 
 ### Fixed
 
@@ -55,56 +702,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy set, so a handle already unregistered could name a later
   observer, and unregistering it again removed that observer and gave the
   wait back to SQLite. Handles now start at 1 and are never reused while
-  the connection lives; unregistering an unknown handle still answers
+  the connection lives; unregistering an unknown handle still returns
   `:ok`.
 - **A busy policy never sleeps past `max_elapsed_ms`.** The policy checked
   the time spent before each sleep and then slept its whole `sleep_ms`, so
   a busy event could run a whole sleep past its ceiling. A sleep that
   would pass the ceiling is now cut to what is left of it, and the event
   gives up there.
-- **`optimize/1` waits for a locked database as the busy timeout or the
-  busy policy says.** When SQLite found a single table to analyze while
-  another connection held the write lock, the call answered `{:error,
-  {:database_busy_or_locked, 5, _}}` at once and busy observers heard
-  nothing. In autocommit, on a connection that can write, it now takes the
-  write lock first and runs `PRAGMA optimize` in the same call, which
-  rolls back on any failure. So it also waits behind another connection's
-  write when there is nothing to analyze, a deny of `:transaction` stops
-  it, and it answers `{:error, :statement_mid_run}` while a statement,
-  stream or blob of the connection is mid-run. Inside a transaction, and
-  on a read-only connection or one with `query_only` on, it runs as
-  before.
 - **`backup/3` and `restore/3` finish while another connection writes to
   the source.** Both copied in steps, and SQLite starts a stepped copy
   again from the first page whenever another connection commits to the
   source between two steps, so under a steady writer the copy ended only
   when the writer stopped, or, in rollback-journal mode, `backup/3`
-  answered `{:error, {:database_busy_or_locked, 5, _}}` with nothing
+  returned `{:error, {:database_busy_or_locked, 5, _}}` with nothing
   copied. Both now copy in one step, inside one read transaction of the
   source. In rollback-journal mode another connection's commit waits for
-  the whole copy and answers busy when its own busy timeout ends first; in
-  WAL mode the write-ahead log grows until the copy ends.
-  `backup_with_progress/4` still copies in steps, and `pages_per_step:
-  2_147_483_647` copies in one.
-- **`serialize/2` answers `{:error, :transaction_in_progress}` while the
+  the whole copy and gets a busy error when its own busy timeout ends
+  first; in WAL mode the write-ahead log grows until the copy ends.
+  `backup_with_progress/4` still copies in steps, and
+  `pages_per_step: 2_147_483_647` copies in one.
+- **`serialize/2` returns `{:error, :transaction_in_progress}` while the
   connection holds a write transaction on that schema**, one it began or a
   write still running in autocommit mode, and copies nothing. The image
   held that transaction's uncommitted pages, and for a database
   `deserialize/4` loaded it could hold a state no transaction ever had,
   some rows old and some new. A read transaction still copies its
   snapshot.
-- **A `:db_name` given twice to an `Xqlite.Pragma` function answers an
+- **A `:db_name` given twice to an `Xqlite.Pragma` function returns an
   error.** The first pair won and the second was dropped without a word,
   so a call could read or write a database the caller did not mean. A
   second `:db_name`, in one option list or across the argument and the
-  options, now answers `{:error, {:invalid_pragma_argument, %{pragma:
+  options, now returns `{:error, {:invalid_pragma_argument, %{pragma:
   name, value: {:db_name, second}, reason: :duplicate_option}}}`, and
   `put/4` writes nothing.
 - **`Xqlite.enable_strict_table/2` keeps a trigger whose `ON` clause
   spells the table's name in another case.** SQLite attaches such a
   trigger to the table, ASCII case folded, while the conversion read the
   table's triggers by the exact name, so the rebuild dropped them and
-  still answered `:ok`. It now matches the name as SQLite does.
+  still returned `:ok`. It now matches the name as SQLite does.
 - **`Xqlite.enable_strict_table/2` converts a table while a TEMP trigger
   sits on a table of the same name in another database.** The conversion
   replayed that trigger, which the rebuild had not dropped, and failed
@@ -115,34 +750,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte that was not UTF-8 reached every subscriber as U+FFFD, so a name
   stored that way matched nothing in the schema. `message` is now a binary
   holding SQLite's bytes, which need not be UTF-8.
-
 - **A garbage-collected handle no longer stalls a scheduler while its
   connection is busy.** When the garbage collector freed a statement,
   stream, blob or session while another call held its connection, the
   handle's destructor waited for that call on one of the BEAM's normal
   schedulers, and every process queued on that scheduler waited with it.
   A connection waiting for a database lock held by one of those processes
-  then answered a busy error at its busy timeout, and under a busy policy
+  then returned a busy error at its busy timeout, and under a busy policy
   that kept retrying, the node could hang. Such a handle is now queued on
   its connection, and the call that holds the connection releases it
-  before returning.
+  before returning (see Changed).
 - **A garbage-collected write no longer commits on a scheduler.**
   Releasing a write statement stopped after a step, or a read-write blob,
-  commits the write when the connection is in autocommit mode. That
-  commit ran inside the destructor on a normal scheduler. In
-  rollback-journal mode, while another connection read, it waited there
-  in the busy handler and held up every process on that scheduler; when
-  the reader's process was one of them, the wait ran to its timeout and
-  the write was rolled back. Every release now runs on xqlite's release
-  thread or in the call that holds the connection.
+  commits the write when the connection is in autocommit mode. That commit
+  ran inside the destructor on a normal scheduler. In rollback-journal
+  mode, while another connection read, it waited there in the busy handler
+  and held up every process on that scheduler; when the reader's process
+  was one of them, the wait ran to its timeout and the write was rolled
+  back. Every release now runs on xqlite's release thread or in the call
+  that holds the connection.
 - **A connection dropped without `close/1` no longer closes on a
   scheduler.** Its destructor closed the SQLite handle on the normal
-  scheduler where the garbage collector freed it. The last connection to
-  a WAL database runs a checkpoint as it closes, which takes longer the
+  scheduler where the garbage collector freed it. The last connection to a
+  WAL database runs a checkpoint as it closes, which takes longer the
   larger the WAL is, and every process on that scheduler waited for it.
   The destructor now hands the connection to xqlite's release thread,
   which closes it there.
-
 - **`Xqlite.enable_strict_table/2` runs the whole rebuild in one call, so
   another process sharing the connection can no longer act inside it.**
   The rebuild sent each of its statements as a call of its own, and
@@ -157,48 +790,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until it ends. A process sharing the connection waits for the whole
   rebuild, including any wait for another connection's lock up to
   `busy_timeout`, and no cancel token stops it.
-- **A rebuild whose `COMMIT` answers busy is rolled back.** With another
+- **A rebuild whose `COMMIT` returns busy is rolled back.** With another
   connection reading the database in rollback-journal mode, the `COMMIT`
-  answered `{:error, {:database_busy_or_locked, 5, _}}`. It left the
+  returned `{:error, {:database_busy_or_locked, 5, _}}`. It left the
   caller inside the rebuild's transaction with foreign-key enforcement
   off, and enforcement stayed off after the caller rolled back. The
-  rebuild now rolls its transaction back on that answer, as on any other
+  rebuild now rolls its transaction back on that error, as on any other
   failure, and puts both pragmas back once the transaction has ended.
-- **A rebuild no longer erases the rows of a statement still running on the
-  connection.** A write another process had started but not finished, such
-  as an `INSERT … RETURNING` stepped once, keeps `autocommit/1` reading
-  `true`, so the rebuild's transaction took that write over. When a later
-  step failed, the rebuild's rollback erased the write's rows, while the
-  write still finished without an error; a stream left partly read was
-  ended the same way. While a statement, stream or blob handle of the
-  connection is running, the rebuild now answers `{:error,
-  :statement_mid_run}` and changes nothing.
+- **A rebuild no longer erases the rows of a statement still running on
+  the connection.** A write another process had started but not finished,
+  such as an `INSERT … RETURNING` stepped once, keeps `autocommit/1`
+  reading `true`, so the rebuild's transaction took that write over. When
+  a later step failed, the rebuild's rollback erased the write's rows,
+  while the write still finished without an error; a stream left partly
+  read was ended the same way. While a statement, stream or blob handle of
+  the connection is running, the rebuild now returns
+  `{:error, :statement_mid_run}` and changes nothing.
 - **A rebuild notices a schema change made after it read the table.** The
   rebuild builds its statements from the stored definitions of the table,
   its indexes and its triggers, read before its transaction begins. A
   column another process or connection added in that time was dropped with
   its values, and a column dropped or renamed came back holding its own
   name as text in every row. An index or trigger created then was dropped,
-  and the call still answered `:ok`. The rebuild now reads those
+  and the call still returned `:ok`. The rebuild now reads those
   definitions and the schema version of the table's database again inside
-  its transaction. When one differs or the table is gone, it answers
+  its transaction. When one differs or the table is gone, it returns
   `{:error, {:table_changed, %{table: name}}}` with nothing changed. Any
-  other schema change in that database in between answers the same; run
+  other schema change in that database in between returns the same; run
   the call again.
-
 - **An authorizer no longer denies statements over names that are not
   UTF-8.** A deny list from `set_authorizer/2`, a busy policy and a busy
   observer each put an authorizer on the connection. With one there, a
   statement that touched a table, column, trigger, view or attached
-  database whose stored name is not UTF-8 answered
+  database whose stored name is not UTF-8 returned
   `{:error, {:authorization_denied, 23, message}}`, whatever the deny list
   held, and wrote a panic message to standard error. The authorizer now
   decides by the kind of action alone and reads only a PRAGMA's name and
-  value, so such a statement answers as it does with no authorizer: a
-  result column whose name is not UTF-8 answers
+  value, so such a statement returns what it returns with no authorizer: a
+  result column whose name is not UTF-8 returns
   `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}`, and a
-  CTE column list renames it. A statement that does an action the deny list
-  names is still denied.
+  CTE column list renames it. A statement that does an action the deny
+  list names is still denied.
 - **A deny of `:attach` stops every `ATTACH`, and a deny of `:detach` every
   `DETACH`.** An `ATTACH` whose file name was anything but a string literal
   (a bound parameter, a blob literal, a concatenation, a function call such
@@ -225,46 +857,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQL waiting on a lock while the connection closed could have read freed
   memory. The authorizer's state, now the library's own, is freed the same
   way, after the close.
-
 - **A string rejected for holding a second statement changes nothing.**
-  The functions that run one statement answer such a string with
-  `{:error, :multiple_statements}`, but to find the second statement they
-  compiled the text after the first, and `XqliteNIF.execute/3`,
-  `execute_cancellable/4` and `Xqlite.execute/4` compiled every statement
-  in the string. SQLite applies many PRAGMAs while it compiles them,
-  `foreign_keys`, `query_only`, `defer_foreign_keys`, `temp_store`,
-  `busy_timeout` and `wal_autocheckpoint` among them, so a rejected string
-  could turn foreign-key enforcement off, let a connection kept read-only
-  write, let a row that breaks a foreign key be committed, drop every TEMP
-  table, or take the WAL hook from the library. The text after the first
-  statement is now read without compiling it, and a string whose first
-  statement is a PRAGMA is judged before anything is compiled. The docs
-  say again that nothing in such a string runs and no setting changes,
-  and the Known limitations guide keeps the one case SQLite itself
-  causes: a PRAGMA stays applied when a syntax error follows it in the
-  same statement.
+  The functions that run one statement return
+  `{:error, :multiple_statements}` for such a string, but to find the
+  second statement they compiled the text after the first, and
+  `XqliteNIF.execute/3`, `XqliteNIF.execute_cancellable/4` and
+  `Xqlite.execute/4` compiled every statement in the string. SQLite
+  applies many PRAGMAs while it compiles them, `foreign_keys`,
+  `query_only`, `defer_foreign_keys`, `temp_store`, `busy_timeout` and
+  `wal_autocheckpoint` among them, so a rejected string could turn
+  foreign-key enforcement off, let a connection kept read-only write, let a
+  row that breaks a foreign key be committed, drop every TEMP table, or
+  take the WAL hook from the library. The text after the first statement
+  is now read without compiling it, and a string whose first statement is
+  a PRAGMA is checked before anything is compiled (see Changed for the
+  strings that now return `:multiple_statements`). The docs say again that
+  nothing in such a string runs and no setting changes, and the Known
+  limitations guide keeps the one case SQLite itself causes: a PRAGMA stays
+  applied when a syntax error follows it in the same statement.
 - **`execute/3` no longer crashes the VM on a string of many statements.**
-  `XqliteNIF.execute/3`, `execute_cancellable/4` and `Xqlite.execute/4`
-  handed the string to rusqlite, which compiles each remaining statement
-  by calling itself once per statement, so a long enough run of short
-  statements overflowed its thread's stack and took the whole VM down.
-  They now compile the way `query/3` does, reading the first statement
-  only, and answer `{:error, :multiple_statements}`.
+  `XqliteNIF.execute/3`, `XqliteNIF.execute_cancellable/4` and
+  `Xqlite.execute/4` handed the string to rusqlite, which compiles each
+  remaining statement by calling itself once per statement, so a long
+  enough run of short statements overflowed its thread's stack and took the
+  whole VM down. They now compile the way `query/3` does, reading the first
+  statement only, and return `{:error, :multiple_statements}`.
 - **`XqliteNIF.set_pragma/3` writes an atom value as a quoted string.** An
   atom other than `true`, `false` and `nil` went into the statement as
   written, so an atom could end the PRAGMA and add a second statement, and
-  an atom holding a NUL byte answered `{:ok, nil}` with the value cut at
-  the NUL; it now answers `{:error, :null_byte_in_string}`. SQLite strips
+  an atom holding a NUL byte returned `{:ok, nil}` with the value cut at
+  the NUL; it now returns `{:error, :null_byte_in_string}`. SQLite strips
   the quotes before it reads the value, so an atom such as `:wal` sets
   what it set before, and an atom such as `:"0 garbage"` is read as that
-  text in quotes, where it answered a syntax error.
-
-- **The docs say what the code answers.** `stream/4` states that a stream
+  text in quotes, where it returned a syntax error.
+- **The docs say what the code returns.** `stream/4` states that a stream
   over a `RETURNING` write keeps the whole write when it ends before its
   last row (an early stop, a value that is not UTF-8, a decode rejection),
   that a cancel rolls the write back only when SQLite checks the token
   before the statement finishes, and that a later enumeration halted
-  before reading closes the first pass, whose next fetch answers
+  before reading closes the first pass, whose next fetch returns
   `:stream_consumed`. A cancel token already signalled stops a call before
   its statement runs, unless that statement is already mid-run. A
   `CREATE VIRTUAL TABLE` with `rtree` or `fts5` reports one change, and a
@@ -279,42 +910,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `open_in_memory/1` take it. `column_names/1` changes only at the step
   that re-prepares the statement. An ATTACH by a URI naming a `mode=`
   reaches the file from `XqliteNIF.open_in_memory/1`. The telemetry guide
-  lists every error answered with no event, and the `:conn` key of the
-  bridged update and WAL events. Function names in the docs that named no
-  existing function now name the right one.
-- **The README's numbers and lists match the code.** It counts 53 typed
-  PRAGMAs in both places (one said 57), lists the precompiled targets per
+  lists every error returned with no event, where it said every operation
+  emits events (a `:type_extensions` option that is no proper list of
+  extension modules, for one, is rejected before the span opens, so the
+  call emits neither a start nor a stop), names `explain_analyze/4` in its
+  event table where it said `/3`, and lists the `:conn` key of the bridged
+  update and WAL events. Function names in the docs that named no existing
+  function now name the right one.
+- **The README is rewritten, and its numbers and lists match the code.** It
+  counts 53 typed PRAGMAs in both places, four fewer than before now that
+  the PRAGMAs that act are functions, lists the precompiled targets per
   platform (RISC-V on glibc only, Windows on x86_64 only), and gives a
   generated column's `default_value` as `:none`.
-
 - **The session capture docs say what a capture holds.**
   `XqliteNIF.session_changeset/1` and `session_patchset/1` hold the net
   change of every row since its table was attached, and a capture clears
   nothing; the docs said a capture held only the changes since the last
   one. They now say what shipping a later capture to a replica that took an
   earlier one loses, how to ship changes in rounds with a new session per
-  capture, and that `session_is_empty/1` answers `{:ok, false}` once any
+  capture, and that `session_is_empty/1` returns `{:ok, false}` once any
   change was recorded, even when the changes cancel out.
 - **`changeset_apply/3` never commits a changeset that leaves a foreign key
   broken.** Under `:omit` such a changeset was committed with `:ok`, and so
   was a key violation the caller's own open transaction held. It is now
   rolled back under every strategy, as `:replace` and `:abort` already did,
-  and answers `{:error, {:constraint_violation, :constraint_foreign_key,
+  and returns `{:error, {:constraint_violation, :constraint_foreign_key,
   details}}`. To commit such a changeset anyway, turn the target's key
   checks off before the apply, outside a transaction.
-- **A blob handle SQLite has ended answers SQLite's error from every read,
+- **A blob handle SQLite has ended returns SQLite's error from every read,
   write and size call.** Once a read or write call had met the handle's
   changed row, a reopen had failed, or a transaction or savepoint had
   rolled back while the handle was open (any rollback for a read-write
   handle, even one opened before the `BEGIN` that wrote nothing; a rollback
-  that undid a schema change for a read-only one), `blob_size/1` answered a
+  that undid a schema change for a read-only one), `blob_size/1` returned a
   size (0, or the old one after a rollback), and reads and writes could
-  answer an empty binary or a bounds error without asking SQLite; each now
-  answers `{:error, {:sqlite_failure, 4, _, _}}` until `blob_close/1`.
+  return an empty binary or a bounds error without asking SQLite; each now
+  returns `{:error, {:sqlite_failure, 4, _, _}}` until `blob_close/1`.
 - **`load_extension/3` reads the extension switch while it holds the
   connection lock for the load.** A load racing a call that turns extension
-  loading on or off could answer SQLite's text error instead of
-  `{:error, :extension_loading_disabled}`, and a closed connection answered
+  loading on or off could return SQLite's text error instead of
+  `{:error, :extension_loading_disabled}`, and a closed connection returned
   `{:error, :extension_loading_disabled}` instead of
   `{:error, :connection_closed}` while loading was off.
 - **`schema_foreign_keys/2` reads a foreign key whose REFERENCES clause
@@ -323,141 +958,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole table with `{:error, {:invalid_column_type, 4, "to", nil}}`; its
   `to_column` is now `nil`, and the docs say SQLite then uses the parent's
   primary key.
-- **`blob_reopen/2` on a blob handle SQLite has ended answers SQLite's abort
-  code.** When an earlier statement on the connection had failed on a
-  missing or existing table or index, it answered that statement's error,
+- **`blob_reopen/2` on a blob handle SQLite has ended returns SQLite's
+  abort code.** When an earlier statement on the connection had failed on a
+  missing or existing table or index, it returned that statement's error,
   such as `{:error, {:no_such_table, _}}`, because SQLite sets no new
   message there. `{:no_such_table, _}`, `{:no_such_index, _}`,
-  `{:table_exists, _}` and `{:index_exists, _}` are now answered only for
-  SQLite's primary code 1 (`SQLITE_ERROR`), so the reopen answers
+  `{:table_exists, _}` and `{:index_exists, _}` are now returned only for
+  SQLite's primary code 1 (`SQLITE_ERROR`), so the reopen returns
   `{:error, {:sqlite_failure, 4, 4, message}}`, the message still the
   earlier statement's text.
-
 - **`open/2` keeps the `auto_vacuum` asked on a new file in WAL mode.** It
   applies `auto_vacuum` before `journal_mode`; a new file under the default
   WAL mode read `:none` whatever was asked.
 - **`Xqlite.error_reason/0` lists `{:strict_violations, _}` and
   `{:unexpected_value, _}`**, which `Xqlite.enable_strict_table/2` and
-  `Xqlite.Pragma.get/2` already answered, beside the new
+  `Xqlite.Pragma.get/2` already returned, beside the new
   `{:pragma_not_applied, _}`.
-
-- **`backup/3`, `backup_with_progress/6` and `restore/3` no longer wait on a
-  lock the caller did not ask to wait on.** A lock another connection holds
-  on the file the library opens itself (a backup's destination, the file a
-  restore reads) answers `{:error, {:database_busy_or_locked, 5, message}}`
-  at once, where it waited rusqlite's 5 000 ms busy timeout first. A lock on
-  the caller's own database still waits as the connection's `busy_timeout`
-  or busy policy says, except in the two cases the gotchas guide describes.
-  `restore/3` no longer sleeps 200 ms on a blocked step, and its busy answer
-  carries SQLite's own text for the code, as the backup functions' does (it
-  read "Error code 5: …"). `backup_with_progress/6` now also sends its
-  `:busy` message for a lock SQLite reports with an extended code, such as
-  262 when another connection of a shared cache uses the destination; it
-  answered the same error with no message.
-- **`backup/3` and `backup_with_progress/6` reject a destination SQLite
-  gives no file for** — `""`, `":memory:"`, `"file::memory:"`, a
-  `mode=memory` or `vfs=memdb` URI — with `{:error, {:cannot_open_database,
-  dest_path, 14, message}}`; they answered `:ok` and wrote nothing.
-- **`backup_with_progress/6` reads its cancel tokens before the destination
-  is opened**: a token signalled before the call creates no file (it left
-  an empty one).
-- **`restore/3` rejects a source with no pages** — a zero-byte file, such as
-  the empty file a failed copy to a new path leaves — with
-  `{:error, :no_pages}`; it answered `:ok` and emptied the schema.
+- **`backup/3`, `backup_with_progress/4` and `restore/3` no longer wait on
+  a lock the caller did not ask to wait on.** A lock another connection
+  holds on the file the library opens itself (a backup's destination, the
+  file a restore reads) returns `{:error, {:database_busy_or_locked, 5,
+  message}}` at once, where it waited rusqlite's 5 000 ms busy timeout
+  first. A lock on the caller's own database still waits as the
+  connection's `busy_timeout` or busy policy says, except in the two cases
+  the gotchas guide describes. `restore/3` no longer sleeps 200 ms on a
+  blocked step, and its busy error carries SQLite's own text for the code,
+  as the backup functions' does (it read "Error code 5: …").
+  `backup_with_progress/4` now also sends its `:busy` message for a lock
+  SQLite reports with an extended code, such as 262 when another connection
+  of a shared cache uses the destination; it returned the same error with
+  no message.
+- **`backup/3` and `backup_with_progress/4` reject a destination SQLite
+  gives no file for** (`""`, `":memory:"`, `"file::memory:"`, a
+  `mode=memory` or `vfs=memdb` URI) with `{:error, {:cannot_open_database,
+  dest_path, 14, message}}`; they returned `:ok` and wrote nothing.
+- **`backup_with_progress/4` reads its cancel tokens before the
+  destination is opened**: a token signalled before the call creates no
+  file (it left an empty one).
+- **`restore/3` rejects a source with no pages** (a zero-byte file, such as
+  the empty file a failed copy to a new path leaves) with
+  `{:error, :no_pages}`; it returned `:ok` and emptied the schema.
 - **`restore/3` rejects a connection `open_readonly/1` or
   `open_in_memory_readonly/1` opened** with
   `{:error, {:cannot_restore, :read_only_connection}}`, on every schema,
   `temp` included. On a shared cache another connection opened read-write,
   `query_only` does not stop the backup API, so the restore overwrote the
   shared database. `@type error_reason` gains that reason.
-- **`open/2` and `open_in_memory/1` judge every option value before the file
-  is opened.** A value outside what SQLite stores (`busy_timeout`,
+- **`open/2` and `open_in_memory/1` check every option value before the
+  file is opened.** A value outside what SQLite stores (`busy_timeout`,
   `cache_size`, `wal_autocheckpoint`, `mmap_size`) is rejected with nothing
   opened or created; it was rejected after the file was created and, for an
-  existing file, after `journal_mode = WAL` had switched it for good.
-
+  existing file, after `journal_mode = WAL` had switched it for good. See
+  Changed for the error it returns now.
 - **`deserialize/4` rejects the `temp` schema by name.** `"temp"`, in any
-  ASCII case, answers `{:error, {:invalid_schema_name, name}}` with the name
-  as given, before the image is judged, on `Xqlite.deserialize/4` and
-  `XqliteNIF.deserialize/4`. SQLite cannot load an image into the temp
-  database, and the call answered its bare
+  ASCII case, returns `{:error, {:invalid_schema_name, name}}` with the
+  name as given, before the image is checked, on `Xqlite.deserialize/4`
+  and `XqliteNIF.deserialize/4`. SQLite cannot load an image into the temp
+  database, and the call returned its bare
   `{:error, {:sqlite_failure, 1, 1, "SQL logic error"}}`.
-- **A table, index or savepoint name holding a NUL byte answers
+- **A table, index or savepoint name holding a NUL byte returns
   `{:error, :null_byte_in_string}`** on `schema_columns/2`,
   `schema_foreign_keys/2`, `schema_indexes/2`, `schema_index_columns/2`,
   `savepoint/2`, `release_savepoint/2` and `rollback_to_savepoint/2`, in
-  `Xqlite` and `XqliteNIF` alike, before any SQL is built. They answered a
+  `Xqlite` and `XqliteNIF` alike, before any SQL is built. They returned a
   `{:sql_input_error, _}` about the library's own statement, because
   SQLite's tokenizer stopped at the NUL.
-
-- **`execute_batch/2` and `execute_batch_cancellable/3` take time linear in
-  the batch's length.** Each statement used to be compiled from a copy of
-  the rest of the batch, so the time grew with the square of the length,
-  with the connection locked throughout: 80 000 statements took about
-  10 s, and take about 0.1 s now.
+- **`execute_batch/3`, and the raw `XqliteNIF.execute_batch/2` and
+  `execute_batch_cancellable/3`, take time linear in the batch's
+  length.** Each statement used to be compiled from a copy of the rest of
+  the batch, so the time grew with the square of the length, with the
+  connection locked throughout: 80 000 statements took about 10 s, and
+  take about 0.1 s now.
 - **A batch runs each statement to its end.** A statement that works one
   row at a time, such as `PRAGMA incremental_vacuum`, used to stop after
-  its first row, and a `SELECT` whose second row fails answered `:ok` while
+  its first row, and a `SELECT` whose second row fails returned `:ok` while
   the batch went on. A `SELECT` inside a batch now reads and drops all its
   rows, and a row that fails stops the batch with its error.
-- **`execute_batch_cancellable/3` reads its tokens between statements.** A
-  batch of short statements used to run to its end after a signal; it now
-  stops before the next statement starts.
-- **The next `commit/1` after a failed batch no longer commits the
-  statements that ran before the failure** when the batch opened the
-  transaction itself: the batch now rolls that transaction back.
+- **A cancelled batch stops before its next statement.**
+  `execute_batch/3` given `:cancel_tokens`, and the raw
+  `XqliteNIF.execute_batch_cancellable/3`, read the tokens between
+  statements: a batch of short statements used to run to its end after a
+  signal.
 - **The query docs say what happens to a `RETURNING` write when one of its
   rows cannot be read.** SQLite makes every change of the write before it
   hands back the first row, so `{:error, {:utf8_error, column, message}}`
   leaves the write in place: committed in autocommit mode, pending inside a
   transaction, where `rollback/1` undoes it.
-
-- **The foreign-key switch inside a transaction answers
+- **The foreign-key switch inside a transaction returns
   `{:error, :transaction_in_progress}` instead of `{:ok, nil}`.** SQLite
   ignores a `PRAGMA foreign_keys` write while a transaction or a savepoint
   is open, and still reports success. `XqliteNIF.set_pragma/3` now rejects
   that write before it runs, whatever the letter case of the name, so
-  `Xqlite.set_pragma/3`, `Xqlite.Pragma.put/3,4` (with or without
-  `:db_name`), `Xqlite.enable_foreign_key_enforcement/1` and
-  `Xqlite.disable_foreign_key_enforcement/1` answer alike and never report
-  a change SQLite did not make. Every other PRAGMA is written as before, and
-  a `PRAGMA foreign_keys` statement sent as SQL still reaches SQLite
-  unchanged.
-- **The docs say what a failed commit leaves behind.** A `COMMIT` that fails
-  on a deferred foreign key, on another connection's lock or on a write of
-  the same connection still running keeps the transaction open: repair and
-  call `commit/1` again, or call `rollback/1`; `autocommit/1` tells whether
-  a transaction is open. A constraint error under the default `ABORT` undoes
-  only its own statement. None of these sends `{:xqlite_rollback}`, and
-  neither does `close/1` when it rolls an open transaction back. The docs of
-  `Xqlite.rollback/1` and `XqliteNIF.register_rollback_hook/2` said a
-  constraint error or a failed commit was rolled back and sent that message,
-  and the 0.7.0 entry's "after each rollback" left `close/1` out.
-  `XqliteNIF.rollback/1`, `savepoint/2` and `release_savepoint/2` no longer
-  state wrong rules: a rollback discards the whole transaction, a savepoint
-  with no transaction open starts one, and releasing the savepoint that
-  started a transaction commits it.
-
-- **A result column name that is not UTF-8 answers an error.** A table
-  whose stored CREATE text names a column with bytes that are not UTF-8 made
-  the query functions panic inside rusqlite with the connection lock held,
-  so the connection could no longer be used or closed; `prepare/2`,
+  `Xqlite.Pragma.put/3,4` (with or without `:db_name`),
+  `Xqlite.enable_foreign_key_enforcement/1` and
+  `Xqlite.disable_foreign_key_enforcement/1` return the same and never
+  report a change SQLite did not make. Every other PRAGMA is written as
+  before, and a `PRAGMA foreign_keys` statement sent as SQL still reaches
+  SQLite unchanged.
+- **The docs say what a failed commit leaves behind.** A `COMMIT` that
+  fails on a deferred foreign key, on another connection's lock or on a
+  write of the same connection still running keeps the transaction open:
+  repair and call `commit/1` again, or call `rollback/1`; `autocommit/1`
+  tells whether a transaction is open. A constraint error under the default
+  `ABORT` undoes only its own statement. None of these sends
+  `{:xqlite_rollback}`, and neither does `close/1` when it rolls an open
+  transaction back. The docs of `Xqlite.rollback/1` and
+  `XqliteNIF.register_rollback_hook/2` said a constraint error or a failed
+  commit was rolled back and sent that message, and the 0.7.0 entry's
+  "after each rollback" left `close/1` out. `XqliteNIF.rollback/1`,
+  `savepoint/2` and `release_savepoint/2` no longer state wrong rules: a
+  rollback discards the whole transaction, a savepoint with no transaction
+  open starts one, and releasing the savepoint that started a transaction
+  commits it.
+- **A result column name that is not UTF-8 returns an error.** A table
+  whose stored CREATE text names a column with bytes that are not UTF-8
+  made the query functions panic inside rusqlite with the connection lock
+  held, so the connection could no longer be used or closed; `prepare/2`,
   `column_names/1` and `stream_open/3` replaced the bad bytes with U+FFFD,
   so two different names could come back equal. Every function that reads
-  result column names now answers
+  result column names now returns
   `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` for the
   first such column, before anything is bound or run, and leaves nothing
-  prepared; a live `column_names/1` answers it on every call and the
+  prepared; a live `column_names/1` returns it on every call and the
   statement stays usable. A CTE column list renames such columns:
   `WITH s(a, b) AS (SELECT * FROM t) SELECT * FROM s`.
-- **A schema change between reading the names and the first step answers
+- **A schema change between reading the names and the first step returns
   `{:error, {:columns_changed, %{expected: names, live: names}}}`.** When
   another connection changed a table after `stream/4` opened, the rows came
   back under the old names (`DROP COLUMN b` gave `%{"a" => 1, "b" => 3}`);
-  the query functions answered `{:invalid_column_index, _}` in the same
-  window. The stream's first fetch and the query's first step now answer the
-  new error; a write in the statement has run by then.
-
+  the query functions returned `{:invalid_column_index, _}` in the same
+  window. The stream's first fetch and the query's first step now return
+  the new error; a write in the statement has run by then.
 - **A statement prepared before `deserialize/4` no longer crashes the VM.**
   `Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` now expire every
   prepared statement of the connection after a load, so SQLite prepares
@@ -465,13 +1096,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before loading an image with the same schema cookie used to step into
   freed memory and take the VM down, and a query read whatever table sat at
   its old root page. A statement or stream still running on any schema of
-  the connection, or an open blob, now makes the load answer `{:error,
-  :statement_mid_run}` and replace nothing, where before only one on the
-  target stopped it, with `{:error, {:database_busy_or_locked, 5, _}}`: the
-  load drops every cached schema, and a running statement may read a table
-  definition on every row. The schema re-read the load runs afterwards is
-  not subject to the connection's `:sql_length` limit, and the statements
-  are marked to be prepared again whatever that re-read answers.
+  the connection, or an open blob, now makes the load return
+  `{:error, :statement_mid_run}` and replace nothing, where before only one
+  on the target stopped it, with `{:error, {:database_busy_or_locked, 5,
+  _}}`: the load drops every cached schema, and a running statement may
+  read a table definition on every row. The schema re-read the load runs
+  afterwards is not subject to the connection's `:sql_length` limit, and
+  the statements are marked to be prepared again whatever that re-read
+  returns.
 - **A TEMP trigger on a loaded table works after `deserialize/4`.** After a
   load, a TEMP trigger on a table of the replaced schema stopped firing,
   and `DROP TRIGGER` on it could take the VM down: SQLite's reload left the
@@ -479,1017 +1111,342 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schemas after every load, so the trigger fires on the loaded table; one
   whose table the image lacks stays idle until a load brings the table
   back. A load now turns `PRAGMA writable_schema` off.
-- **`restore/3` answers `:statement_mid_run` while a statement runs.**
+- **`restore/3` returns `:statement_mid_run` while a statement runs.**
   SQLite's backup drops every cached schema of the connection when the copy
-  finishes, and a statement running on another schema whose program reads a
-  table definition on every row (a STRICT table's VIRTUAL generated column)
-  took the VM down. `Xqlite.restore/3` and `XqliteNIF.restore/3` now answer
-  `{:error, :statement_mid_run}` while any statement, stream or blob of the
-  connection is mid-run, and copy nothing.
-- **`serialize/2` answers what stopped it.** `Xqlite.serialize/2` and
-  `XqliteNIF.serialize/2` answered `{:error, {:sqlite_failure, 7, 7, "out of
-  memory"}}` for every failure. A lock another connection holds on a schema
-  with pages now answers `{:error, {:database_busy_or_locked, 5, _}}` after
-  one busy timeout where it waited two, and any other cause SQLite records
-  answers its own classified error. An empty schema whose first page SQLite
-  cannot write (a zero-byte file opened read-only, a `:transaction` deny, a
-  write lock on any attached database) and the unused temp schema answer
-  `{:error, :no_pages}`; the unused temp schema no longer writes anything.
-  A `:pragma` deny no longer stops it.
+  finishes, and a statement running on another schema whose program reads
+  a table definition on every row (a STRICT table's VIRTUAL generated
+  column) took the VM down. `Xqlite.restore/3` and `XqliteNIF.restore/3`
+  now return `{:error, :statement_mid_run}` while any statement, stream or
+  blob of the connection is mid-run, and copy nothing.
+- **`serialize/2` returns what stopped it.** `Xqlite.serialize/2` and
+  `XqliteNIF.serialize/2` returned `{:error, {:sqlite_failure, 7, 7, "out
+  of memory"}}` for every failure. A lock another connection holds on a
+  schema with pages now returns `{:error, {:database_busy_or_locked, 5,
+  _}}` after one busy timeout where it waited two, and any other cause
+  SQLite records returns its own classified error. An empty schema whose
+  first page SQLite cannot write (a zero-byte file opened read-only, a
+  `:transaction` deny, a write lock on any attached database) and the
+  unused temp schema return `{:error, :no_pages}`; the unused temp schema
+  no longer writes anything. A `:pragma` deny no longer stops it.
 - **A writable load of a read-only image is rejected.** An image whose
   header byte 18, the write version, is above 2 loaded read-only even with
-  `read_only: false`. `deserialize/4` now answers
+  `read_only: false`. `deserialize/4` now returns
   `{:error, {:invalid_image, %{reason: :read_only_image, code: 8}}}` and
   replaces nothing; with `read_only: true` it loads.
 - **The image docs promise less.** `deserialize/4` no longer offers the
   bytes of a database in use as an image: a database file's bytes are one
-  only while no connection has it open and no `-wal` or `-journal` file lies
-  beside it, and loading does not catch a torn copy. `serialize/2` says a
-  schema `deserialize/4` loaded answers its last committed state, whatever
-  transaction is open.
-
-- **`Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` judge an image
-  before it replaces anything.** A rejected image answers
+  only while no connection has it open and no `-wal` or `-journal` file
+  lies beside it, and loading does not catch a torn copy. `serialize/2`
+  says that for a schema `deserialize/4` loaded it returns the last
+  committed state, whatever transaction is open.
+- **`Xqlite.deserialize/4` and `XqliteNIF.deserialize/4` check an image
+  before it replaces anything.** A rejected image returns
   `{:error, {:invalid_image, %{reason: reason, code: code}}}` and leaves the
   schema's contents alone. `reason` is `:not_a_database` (code 26) for bytes
-  that do not start with SQLite's 16-byte header, the empty binary included.
-  It is `:malformed` or `:not_a_database`, with SQLite's own code, for an
-  image whose header and schema SQLite cannot read on a scratch in-memory
-  connection. It is `:encoding_mismatch` (code 1) for an image in a text
-  encoding the target does not take. An attached schema takes only the
-  connection's text encoding; `main` takes only a UTF-8 image, and only on a
-  UTF-8 connection. To load a UTF-16 database, deserialize it into an
+  that do not start with SQLite's 16-byte header, the empty binary
+  included. It is `:malformed` or `:not_a_database`, with SQLite's own code,
+  for an image whose header and schema SQLite cannot read on a scratch
+  in-memory connection. It is `:encoding_mismatch` (code 1) for an image in
+  a text encoding the target does not take. An attached schema takes only
+  the connection's text encoding; `main` takes only a UTF-8 image, and only
+  on a UTF-8 connection. To load a UTF-16 database, deserialize it into an
   attached schema of a connection with the same encoding, or open its file
   directly. These images used to load. The next statement then failed with
   code 26, 11, 14 or 1, and into an attached schema that took the whole
   connection down. A UTF-8 image into `main` of a UTF-16 connection
   switched the connection to UTF-8, so later writes put UTF-8 bytes into
-  its attached UTF-16 databases, silently. The empty binary used to answer
+  its attached UTF-16 databases, silently. The empty binary used to return
   a false out-of-memory error. The scratch read costs a second copy of the
-  image; running out of memory for it still answers the out-of-memory
+  image; running out of memory for it still returns the out-of-memory
   error. Deserialize's own encoding read passes a `:pragma` deny list.
-- **An image of a WAL database now loads.** `serialize/2` of a WAL database,
-  and the file of a closed WAL database, carry header bytes 18 and 19 set to 2,
-  which SQLite's memory storage cannot open (code 14 on every later
-  statement). `deserialize/4` now sets them to 1 in its own copy, as SQLite
-  documents.
+- **An image of a WAL database now loads.** `serialize/2` of a WAL
+  database, and the file of a closed WAL database, carry header bytes 18
+  and 19 set to 2, which SQLite's memory storage cannot open (code 14 on
+  every later statement). `deserialize/4` now sets them to 1 in its own
+  copy, as SQLite documents.
 - **A read-only open stays read-only on a shared cache and with a
   `mode=memory` URI.** SQLite dropped the read-only flag of an
   `open_readonly/1` or `open_in_memory_readonly/1` connection that joined a
   shared cache another connection opened read-write, and of any URI with
-  `mode=memory`, so the connection wrote. Those connections now get `PRAGMA
-  query_only = 1` at open; `PRAGMA query_only = 0` and a `journal_mode`
-  change still pass it; `restore/3` answers
+  `mode=memory`, so the connection wrote. Those connections now get
+  `PRAGMA query_only = 1` at open; `PRAGMA query_only = 0` and a
+  `journal_mode` change still get past it; `restore/3` returns
   `{:error, {:cannot_restore, :read_only_connection}}` (see the openers'
   docs). A private read-only connection still creates TEMP tables. Such an
   open now returns `{:error, {:cannot_open_database, uri, 262, _}}` while
   the shared cache's writer holds an uncommitted schema change, because
   `query_only` cannot be set then; it opens once the writer commits.
 - **The execute functions report the statement's own count.**
-  `XqliteNIF.execute/3`, `execute_cancellable/4`, `Xqlite.execute/4` and
-  `execute_cancellable/5` answered SQLite's sticky `sqlite3_changes()`, so
+  `Xqlite.execute/4` and the raw `XqliteNIF.execute/3` and
+  `execute_cancellable/4` returned SQLite's sticky `sqlite3_changes()`, so
   CREATE, BEGIN, COMMIT, PRAGMA, VACUUM and DROP reported the previous
-  write's count; they now answer 0 for a statement that changed no row, as
+  write's count; they now return 0 for a statement that changed no row, as
   `query_with_changes` does, except `CREATE VIRTUAL TABLE` with a module
   that writes rows of its own while it creates them, such as `rtree` and
-  `fts5`, which answers 1.
+  `fts5`, which returns 1.
 - **A `Stream.zip` cleanup no longer leaves an `Xqlite.stream/4` statement
   open.** A raise on the first pair of a zip holding the stream (from the
   consumer, the other enumerable, or `Enum.zip_reduce`) left the first
   pass's statement open until garbage collection, so writes to its tables
   failed meanwhile. The fresh start the cleanup halts now closes the first
-  pass and sends its close event, with that pass's outcome and row count;
-  a first pass closed that way answers `:stream_consumed` on its next
-  fetch instead of ending early.
+  pass and sends its close event, with that pass's outcome and row count; a
+  first pass closed that way returns `:stream_consumed` on its next fetch
+  instead of ending early.
 - **`Xqlite.unregister_busy_observer/2` and `unregister_progress_hook/2`
-  take any non-negative integer**, one past 64 bits too (it answered
+  take any non-negative integer**, one past 64 bits too (it raised
   `ArgumentError`); `unregister_progress_hook/2` now raises
-  `FunctionClauseError` for a negative handle, as its twin does.
-  **`Xqlite.backup_with_progress/6` answers `{:error,
+  `FunctionClauseError` for a negative handle, as
+  `unregister_busy_observer/2` does.
+- **`Xqlite.backup_with_progress/4` returns `{:error,
   {:invalid_pages_per_step, value}}` for any `pages_per_step` outside
-  `1..2_147_483_647`** — bignums, floats and atoms included — after the
-  cancel tokens and before any file is created (it raised `ArgumentError`).
-
-- **A cancel token already signalled when a cancellable call starts now
-  cancels it before its statement runs.** `execute_cancellable`,
-  `query_cancellable`, `query_with_changes_cancellable`,
-  `execute_batch_cancellable`, `multi_step_cancellable` on a statement that
-  has not started, and a stream's first fetch used to commit a one-row write
-  and still answer `{:error, :operation_cancelled}`.
+  `1..2_147_483_647`** (bignums, floats and atoms included) after the
+  cancel tokens are checked and before any file is created; it raised
+  `ArgumentError`.
+- **A call whose cancel token is already signalled now stops before its
+  statement runs.** A one-row write through a cancellable call (now
+  `query/4`, `execute/4`, `execute_batch/3`, or `multi_step/3` on a
+  statement that has not started, given `:cancel_tokens`, and the raw
+  `_cancellable` functions) or through a stream's first fetch used to
+  commit and still return `{:error, :operation_cancelled}`.
 - **A cancel that reaches SQLite's progress check after a statement's last
-  step no longer turns a finished write into `{:error, :operation_cancelled}`;**
-  the call answers its normal result. A cancelled answer now always means the
-  run was stopped. A write cancelled while it runs rolls back the whole
-  transaction, an explicit one included; a token already signalled before a
-  write starts stops it before its first step, writes nothing and leaves an
-  open transaction as it was. The gotchas guide states what a cancelled
-  answer means and when SQLite checks for a cancel, replacing "checked
-  every 8 VM instructions".
-
+  step no longer turns a finished write into
+  `{:error, :operation_cancelled}`;** the call returns its normal result. A
+  cancelled result now always means the run was stopped. A write cancelled
+  while it runs rolls back the whole transaction, an explicit one included;
+  a token already signalled before a write starts stops it before its first
+  step, writes nothing and leaves an open transaction as it was. The gotchas
+  guide states what a cancelled result means and when SQLite checks for a
+  cancel, replacing "checked every 8 VM instructions".
 - **A second enumeration of an `Xqlite.stream/4` stream read on where the
-  first stopped, or looked like an empty table.** The statement opens at the
-  call, so a second `Enum.to_list/1`, the rest after an `Enum.take/2`, or a
-  retry after a rescued `Xqlite.StreamError` answered `[]`, and a pass started
-  while the first still ran — `Stream.zip(s, Stream.drop(s, 1))`, a nested
-  `Enum.take/2`, a pass after the first consumer was killed — handed out rows
-  from the wrong batches with no error. The stream now runs once: every
-  enumeration after the first answers `:stream_consumed` through `:on_error` —
-  `:raise` raises `Xqlite.StreamError` with it, `:emit_error` yields
-  `{:error, :stream_consumed}` alone, `:halt` logs it and yields nothing —
-  without fetching, closing or sending a telemetry event of its own. Call
-  `stream/4` again for a second pass.
-- **A bind on a statement that had already stepped answered SQLite's bare
-  misuse tuple.** Mid-run, `bind/3` answered
-  `{:error, {:sqlite_failure, 21, 21, _}}` after walking the whole parameter
-  list under the connection lock, while `clear_bindings/1` answered
-  `{:error, :statement_mid_run}`. A bind on a statement that takes parameters
-  and is mid-run now answers `{:error, :statement_mid_run}` before it reads the
-  list, and keeps the values bound before. After the run has ended — `:done`
-  or a failed step — the bind resets the statement itself, so the next step
-  reruns with the new values; `reset/1` is no longer needed first.
-- **Docs: a step refused as busy keeps its run, and what a closed connection
-  leaves behind.** A step SQLite refused as busy while taking or committing its
-  lock keeps its run for a retry — the statement stays mid-run and the retry
-  writes once — where the docs said every failed step ended the run. After the
-  connection is closed, every step, bind, reset, clear and fetch answers
-  `{:error, :connection_closed}`, finalize and `stream_close/1` answer `:ok`,
-  and the column-name calls answer the names captured at prepare or open;
-  `XqliteNIF.stmt_finalize/1` said the SQLite handle stayed alive and
-  `XqliteNIF.stream_fetch/2` said the error repeated until `stream_close/1`.
-
+  first stopped, or looked like an empty table.** The statement opens at
+  the call, so a second `Enum.to_list/1`, the rest after an `Enum.take/2`,
+  or a retry after a rescued `Xqlite.StreamError` returned `[]`, and a pass
+  started while the first still ran (`Stream.zip(s, Stream.drop(s, 1))`, a
+  nested `Enum.take/2`, a pass after the first consumer was killed) handed
+  out rows from the wrong batches with no error. The stream now runs once:
+  every enumeration after the first gets `:stream_consumed` through
+  `:on_error` (`:raise` raises `Xqlite.StreamError` with it, `:emit_error`
+  emits `{:error, :stream_consumed}` as its only element, `:halt` logs it
+  and emits nothing) without fetching, closing or sending a telemetry event
+  of its own. Call `stream/4` again for a second pass.
+- **A bind on a statement that had already stepped returned SQLite's bare
+  misuse error.** Mid-run, `bind/3` returned
+  `{:error, {:sqlite_failure, 21, 21, _}}` after walking the whole
+  parameter list under the connection lock, while `clear_bindings/1`
+  returned `{:error, :statement_mid_run}`. A bind on a statement that takes
+  parameters and is mid-run now returns `{:error, :statement_mid_run}`
+  before it reads the list, and keeps the values bound before. After the
+  run has ended (`:done` or a failed step) the bind resets the statement
+  itself, so the next step reruns with the new values; `reset/1` is no
+  longer needed first.
+- **Docs: a step rejected as busy keeps its run, and what a closed
+  connection leaves behind.** A step SQLite rejected as busy while taking
+  or committing its lock keeps its run for a retry (the statement stays
+  mid-run and the retry writes once), where the docs said every failed step
+  ended the run. After the connection is closed, every step, bind, reset,
+  clear and fetch returns `{:error, :connection_closed}`, finalize and
+  `stream_close/1` return `:ok`, and the column-name calls return the names
+  captured at prepare or open; `XqliteNIF.stmt_finalize/1` said the SQLite
+  handle stayed alive and `XqliteNIF.stream_fetch/2` said the error
+  repeated until `stream_close/1`.
 - **`Xqlite.clear_bindings/1` mid-run nulled the rest of the read.**
-  `sqlite3_clear_bindings` has no mid-run check where every `sqlite3_bind_*`
-  answers `SQLITE_MISUSE`, so a clear between two rows released the values in
-  place and every row left in the run read NULL: `SELECT rowid, ? FROM t`
-  handed back `[1, "P"]`, then `[2, nil]`. A statement that takes parameters
-  and has been stepped without a `reset/1` since now answers
-  `{:error, :statement_mid_run}` and keeps its values. A statement that takes
-  none has nothing to release and still answers `:ok`, and so does a clear
-  after `:done`, where a bind is refused instead — a finished run has no rows
-  left to change.
-- **`Xqlite.TypeExtension.encode_params/2` skipped its own walk when there
-  were no extensions.** With `[]` or `nil` extensions the call handed the term
-  straight back, answering `{:ok, term}` for every list its own documentation
-  says it refuses: a term that is no list, and a list whose tail is not `[]`.
-  It walks the list's spine whatever the extension list now, and answers the
-  same `{:expected_list, _}` and `{:expected_keyword_list, _}` refusals it
-  answers with an extension on. A keyword element that is no `{key, value}`
-  pair still travels on to the NIF, which refuses it, and a key of any kind is
-  still a key.
-- **`Xqlite.TypeExtension.decode_rows/2` raised where its write-side twin
-  refused.** A rows term that is no list of lists — `:done`, `{:row, values}`,
-  `nil`, a list whose tail is not `[]`, a row that is no list — raised
-  `Protocol.UndefinedError` or `FunctionClauseError` from inside the chain,
-  and this is the function four `Xqlite` doc blocks recommend for the rows
-  `step/1` and `multi_step/2` hand back. It now answers the write side's
-  refusals: `{:error, {:expected_list, %{reason: :not_a_list, value_type:
-  kind}}}`, the same tag with `:improper_tail` for a tail that is not `[]`,
-  and with `:bad_element` and the row's one-based position for a row that is
-  no list. A row whose own tail is not `[]` is refused where a walk reads it,
+  `sqlite3_clear_bindings` has no mid-run check where every
+  `sqlite3_bind_*` returns `SQLITE_MISUSE`, so a clear between two rows
+  released the values in place and every row left in the run read NULL:
+  `SELECT rowid, ? FROM t` handed back `[1, "P"]`, then `[2, nil]`. A
+  statement that takes parameters and has been stepped without a `reset/1`
+  since now returns `{:error, :statement_mid_run}` and keeps its values. A
+  statement that takes none has nothing to release and still returns `:ok`,
+  and so does a clear once the run is over, as a bind does: a finished run
+  has no rows left to change.
+- **`Xqlite.TypeExtension.encode_params/2` skipped its own check when there
+  were no extensions.** With `[]` or `nil` extensions the call handed the
+  term straight back, returning `{:ok, term}` for every list its own
+  documentation says it rejects: a term that is no list, and a list whose
+  tail is not `[]`. It now walks the list's spine whatever the extension
+  list, and returns the same `{:expected_list, _}` and
+  `{:expected_keyword_list, _}` errors it returns with an extension on. A
+  keyword element that is not a `{key, value}` pair still travels on to the
+  NIF, which rejects it, and a key of any kind is still a key.
+- **`Xqlite.TypeExtension.decode_rows/2` raised where its encoding
+  counterpart returned an error.** A rows term that is no list of lists
+  (`:done`, `{:row, values}`, `nil`, a list whose tail is not `[]`, a row
+  that is no list) raised `Protocol.UndefinedError` or
+  `FunctionClauseError` from inside the chain, and this is the function
+  four `Xqlite` doc blocks recommend for the rows `step/1` and
+  `multi_step/2` hand back. It now returns the encoding side's errors:
+  `{:error, {:expected_list, %{reason: :not_a_list, value_type: kind}}}`,
+  the same tag with `:improper_tail` for a tail that is not `[]`, and with
+  `:bad_element` and the row's one-based position for a row that is no
+  list. A row whose own tail is not `[]` is rejected where a walk reads it,
   which is when an extension is on. A map row, which used to be turned
-  silently into a list of its pairs, is refused as a row that is no list.
-- **A bind SQLite refused before taking a value marked the statement
-  unrunnable.** A bind on a statement mid-run is refused by SQLite with
-  `SQLITE_MISUSE` before it touches the first parameter, but the bind path
-  tagged it as partly bound and cleared the flag that lets a statement step,
-  so `reset/1` then `step/1` answered `{:error, {:parameters_unbound, _}}`
-  with the earlier bind still in place. Only a failure after at least one
-  value was taken clears the flag now; a refusal that took nothing leaves
-  the statement as it was.
+  silently into a list of its pairs, is rejected as a row that is no list.
 - **`SAVEPOINT`, `RELEASE`, `ROLLBACK TO` and a read-only statement with a
   long comment read as "SQL contains no statement" under a lowered
   `:length`.** The check that tells an empty text from a statement now
   reads SQLite's own null statement, which no length limit hides, so the
   check is exact at any limit.
-- **`XqliteNIF.get_create_sql/2` judges its name against the length limit**
-  like every door that binds a value, answering
-  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` where it used to
-  answer `{:too_big, code, message}`.
-- **The telemetry guide names the one refusal answered without an event.**
-  A `:type_extensions` option that is no proper list of extension modules is
-  refused before the span opens, so the call emits neither a start nor a
-  stop; the guide said every operation emits events. Its event table also
-  named `query_cancellable/4`, `query_with_changes_cancellable/4` and
-  `explain_analyze/3` where the doors are `/5`, `/5` and `/4`.
-- **A bind SQLite refused part-way through the list left a half-written row.**
-  A value longer than the connection's length limit was refused only once
-  SQLite met it, with the values before it already bound and the failing
-  parameter left NULL — and the statement still runnable, so a step after the
-  error wrote a half-updated row. Every door now judges every TEXT and BLOB
-  parameter against that limit before it binds anything, and answers
+- **`XqliteNIF.get_create_sql/2` checks its name against the length
+  limit** like every function that binds a value, returning
+  `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` where it
+  returned `{:too_big, code, message}`.
+- **A bind SQLite rejected part-way through the list left a half-written
+  row.** A value longer than the connection's length limit was rejected
+  only once SQLite met it, with the values before it already bound and the
+  failing parameter left NULL, and the statement still runnable, so a step
+  after the error wrote a half-updated row. Every function that binds now
+  checks every TEXT and BLOB parameter against that limit before it binds
+  anything, and returns
   `{:error, {:value_too_large, %{byte_size: _, limit: _}}}` with nothing
-  bound; a bind SQLite refuses for any other reason leaves the statement
-  unrunnable until a bind succeeds or `clear_bindings/1` runs.
-- **A keyword list of many names bound more slowly than it had to.** Each key
-  was resolved by walking the statement's whole list of parameter names, one
-  string comparison per name. Both binding paths now read the statement's own
-  names once into a map and bind by index, and the doors going through
-  rusqlite no longer let it resolve every name a second time. On one machine a
-  bind of 32 766 names went from 3.48 to 1.46 seconds, and the connection lock
-  is held for that much less. The cost still grows faster than the number of
-  names: reading the name at one index is itself a walk of SQLite's parameter
-  list, and its C interface offers no way to read them all in one pass.
-
-- **A bind the library refused left the statement runnable.** Every one of
-  the six refusals binds nothing at all, and SQLite reads a parameter nothing
-  was bound to as NULL, so `Xqlite.bind(stmt, [1, 2, {:no}])` followed by
-  `Xqlite.step(stmt)` ran the statement with NULL in every parameter and
-  answered success — an `UPDATE` written that way wrote NULL over its
-  columns. A statement that takes parameters now refuses `step/1`,
-  `multi_step/2` and `multi_step_cancellable/3` with
+  bound; a bind SQLite rejects for any other reason after taking a value
+  leaves the statement unrunnable until a bind succeeds or
+  `clear_bindings/1` runs.
+- **A bind the library rejected left the statement runnable.** None of the
+  six errors the library returns for a parameter list binds anything, and
+  SQLite reads a parameter nothing was bound to as NULL, so
+  `Xqlite.bind(stmt, [1, 2, {:no}])` followed by `Xqlite.step(stmt)` ran
+  the statement with NULL in every parameter and returned success: an
+  `UPDATE` written that way wrote NULL over its columns. A statement that
+  takes parameters now rejects `step/1` and `multi_step/2,3` with
   `{:error, {:parameters_unbound, %{expected: n}}}` until a bind succeeds,
-  and the same refusal covers a statement stepped straight after `prepare/2`.
-  An earlier successful bind stays in force, `reset/1` keeps it, and
-  `clear_bindings/1` is how a caller asks for a run with NULL in every
-  parameter. The refusal sits behind the lifecycle checks, so a finalized
-  statement still answers `:statement_finalized` and one on a closed
-  connection `:connection_closed`.
-- **`Xqlite.stream/4` took a batch size the fetch door cannot read.** The gate
-  accepted any integer at or above 1, while the fetch door reads the number as
-  a signed 64-bit integer, so `batch_size: 2 ** 63` opened a stream that died
-  on its first batch — and under `on_error: :halt` that was an empty stream
-  with no error at all. The gate now bounds the number to
-  `1..9223372036854775807` and answers
-  `{:error, {:invalid_batch_size, %{provided: _, minimum: 1}}}` at the call,
-  as it already did for `0` and for a term that is no integer.
-
+  and the same error covers a statement stepped straight after
+  `prepare/2`. An earlier successful bind stays in force, `reset/1` keeps
+  it, and `clear_bindings/1` is how a caller asks for a run with NULL in
+  every parameter. A bind SQLite rejects before taking any value leaves
+  the statement as it was. This check comes after the checks for a
+  finalized statement and a closed connection, so a finalized statement
+  still returns `:statement_finalized` and one on a closed connection
+  `:connection_closed`.
 - **A keyword list that left a name out wrote NULL over that column.** A
   named parameter nothing was bound to reads as NULL, so
   `Xqlite.query(conn, "UPDATE t SET a = :a, b = :b WHERE id = 1", a: "new_a")`
-  wrote NULL over `b` and answered `changes: 1`; the raw doors
+  wrote NULL over `b` and returned `changes: 1`; the raw functions
   (`XqliteNIF.stmt_bind/2`, `stream_open/3`, `explain_analyze/3`) lost the
   column the same way. A keyword list must now name every parameter of the
-  statement, each exactly once, on every door that takes parameters, and the
-  whole list is judged before a single value is bound: a parameter no key
-  named is `{:error, {:missing_parameter, %{index: i, name: name}}}` for the
-  lowest such index, `name` being SQLite's own spelling of it (`":b"`, `"@b"`,
-  `"$c"`, `"?3"`) and `nil` for a bare `?`, which no keyword list can name —
-  use a positional list for such a statement. A key the statement does not
-  have is still `{:error, {:invalid_parameter_name, key}}`, and it is still
-  the answer when the list both names something unknown and leaves something
-  out: every key is resolved first. A name used twice in the SQL is one
-  parameter with one value and passes, as before.
+  statement, each exactly once, on every function that takes parameters,
+  and the whole list is checked before a single value is bound: a
+  parameter no key named is `{:error, {:missing_parameter, %{index: i,
+  name: name}}}` for the lowest such index, `name` being SQLite's own
+  spelling of it (`":b"`, `"@b"`, `"$c"`, `"?3"`) and `nil` for a bare `?`,
+  which no keyword list can name; use a positional list for such a
+  statement. A key the statement does not have is still
+  `{:error, {:invalid_parameter_name, key}}`, and it is still the error when
+  the list both names something unknown and leaves something out: every
+  key is resolved first. A name used twice in the SQL is one parameter with
+  one value and passes, as before.
   **Two partial keyword binds in a row no longer add up.**
   `Xqlite.bind(stmt, a: 1)` followed by `Xqlite.bind(stmt, b: 2)` worked
   because SQLite keeps a binding until it is overwritten; each call now has
   to hand over a complete list. Where that pattern was in use, call
   `reset/1` and bind the whole list once.
 - **A keyword list can now name an `@` or `$` parameter.** Every key used to
-  get a `:` prefix, so `SELECT @b` was unreachable by name — `[b: 1]` and
-  `[{:"@b", 1}]` both answered `{:invalid_parameter_name, _}`. A key whose
+  get a `:` prefix, so `SELECT @b` was unreachable by name: `[b: 1]` and
+  `[{:"@b", 1}]` both returned `{:invalid_parameter_name, _}`. A key whose
   own text starts with `:`, `@` or `$` is now used as written
   (`[{:"@b", 1}]` binds `@b`, `[{:"$c", 1}]` binds `$c`) and every other key
   still gets the `:` prefix, so `[a: 1]` binds `:a` as before.
-- **An improper parameter list raised at six doors.** `Xqlite.query/4`,
-  `execute/4`, `explain_analyze/4` and the three `*_cancellable` doors count
-  the list for their telemetry metadata before the NIF runs, with `length/1`,
-  which raises `ArgumentError` on a list whose tail is not a list. They now
-  count the list's proper prefix by hand and let the NIF answer, so
+- **An improper parameter list no longer raises in `Xqlite.query/4`,
+  `execute/4` and `explain_analyze/4`.** They counted the list for their
+  telemetry metadata before the NIF ran, with `length/1`, which raises
+  `ArgumentError` on a list whose tail is not a list. They now count the
+  list's proper prefix by hand and let the NIF return its error, so
   `[1 | :tail]` is `{:error, {:expected_list, %{reason: :improper_tail,
-  value_type: :atom}}}` there too, the same as at every other door. `nil` and
-  a term that is no list are unchanged.
-- **`secure_delete` refused the words SQLite takes.** Its spec maps `0`, `1`
-  and `2` to `false`, `true` and `:fast`, and the mapped path looked a word up
-  in those three alone, so `:on`, `"off"`, `:yes` and `"NO"` were
+  value_type: :atom}}}` there too, the same as at every other function.
+  `nil` and a term that is no list are unchanged.
+- **`secure_delete` rejected the words SQLite takes.** Its spec maps `0`,
+  `1` and `2` to `false`, `true` and `:fast`, and the mapped path looked a
+  word up in those three alone, so `:on`, `"off"`, `:yes` and `"NO"` were
   `{:error, {:invalid_pragma_value, _}}` while SQLite itself stores 1, 0, 1
-  and 0 for them. A PRAGMA whose mapping gives both booleans a word of their
-  own now takes the whole boolean vocabulary and writes the mapping's own word
-  (`:on` writes `TRUE`), in any case, as an atom or a string. A mapping of
-  three modes, such as `auto_vacuum`'s, gives a boolean no meaning and keeps
-  refusing the words; `secure_delete = 2` stays refused, because SQLite reads
-  the integer as the boolean true and would store 1.
+  and 0 for them. A PRAGMA whose mapping gives both booleans a word of
+  their own now takes the whole boolean vocabulary and writes the mapping's
+  own word (`:on` writes `TRUE`), in any case, as an atom or a string. A
+  mapping of three modes, such as `auto_vacuum`'s, gives a boolean no
+  meaning and still rejects the words; `secure_delete = 2` stays rejected,
+  because SQLite reads the integer as the boolean true and would store 1.
 - **A parameter list one element short wrote NULL through `stream/4`.** The
-  three doors that bind through SQLite's C API directly — `stream/4` and
-  `XqliteNIF.stream_open/3`, `explain_analyze/4`, and `bind/3` — never
+  three functions that bind through SQLite's C API directly (`stream/4`
+  and `XqliteNIF.stream_open/3`, `explain_analyze/4`, and `bind/3`) never
   counted the list they were handed, and SQLite reads a parameter nothing
-  was bound to as NULL. `Xqlite.stream(conn, "UPDATE t SET v = ?2 WHERE id
-  = ?1", [1])` therefore wrote NULL over the stored text and reported
-  success, where `query/4` refuses the same call; `[]` and `nil` did it to
-  every row of the table. All three now answer
+  was bound to as NULL.
+  `Xqlite.stream(conn, "UPDATE t SET v = ?2 WHERE id = ?1", [1])` therefore
+  wrote NULL over the stored text and reported success, where `query/4`
+  rejects the same call; `[]` and `nil` did it to every row of the table.
+  All three now return
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before
-  a value is bound, the too-long list included — that one used to leak
-  SQLite's own "column index out of range". `[]` and `nil` count as zero
-  parameters, so they pass only on a statement that takes none:
+  a value is bound, the too-long list included, which used to leak SQLite's
+  own "column index out of range". `[]` and `nil` count as zero parameters,
+  so they pass only on a statement that takes none:
   `XqliteNIF.stmt_bind(stmt, nil)` on a statement with a parameter is now
-  refused instead of leaving it NULL. A keyword list is judged by the
-  coverage rule above.
-
+  rejected instead of leaving it NULL. A keyword list is checked by the
+  keyword-list rule above.
 - **`multi_step/2` no longer throws away the rows it had already read.** A
-  value SQLite hands back that cannot be read — a TEXT column holding bytes
-  that are not valid UTF-8 — used to lose every row the same batch had read
-  before it: four rows with the unreadable one second answered the error and
-  row one never reached the caller. The statement door now does what the
-  stream door has done for a while: it hands back the rows it read, with
-  `done: false`, holds the error, and answers it on the next call; the
-  statement then carries on at the row after the bad one. `reset/1` starts
-  the statement over and drops a held-back error. A cancellation still
-  discards the rows of the batch it lands in. `multi_step_cancellable/3`
-  shares all of it. Two corrections since: the error a batch holds back is
-  answered by the next call that reads a row, whichever door makes it —
-  `step/1` used to walk straight past it, so the bad row vanished with no
-  error at all and, when it was the last row, `finalize/1` swallowed the
-  error for good. And a `sqlite3_step` that fails outright — a locked
-  database, an I/O error, a runtime error in the SQL such as
-  `abs(-9223372036854775808)`, a trigger's `RAISE` — is answered at once
-  instead of being held back: no row was stepped past, so there is nothing
-  to continue at. Such a failure discards the batch's rows, exactly as a
-  cancellation does, so a result set that fails part-way now hands back no
-  rows at all through `multi_step/2` (`step/1` and `stream/4` still deliver
-  the rows before the failure). It used to hold the error back and then
-  alternate for ever between the rows from the top and the error, never
-  reaching `done: true`. After such a failure the statement is left where
-  SQLite left it: the next step is SQLite's own rerun from the top, which
-  meets the same failure, and `reset/1` changes nothing.
+  value SQLite hands back that cannot be read, such as a TEXT column holding
+  bytes that are not valid UTF-8, used to lose every row the same batch had
+  read before it: four rows with the unreadable one second returned the
+  error and row one never reached the caller. `multi_step/2` now does what
+  a stream fetch has done for a while: it hands back the rows it read, with
+  `done: false`, holds the error, and returns it on the next call that
+  reads a row, `step/1` included; the statement then carries on at the row
+  after the bad one. `reset/1` starts the statement over and drops a
+  held-back error. A cancellation still discards the rows of the batch it
+  lands in, and `multi_step/3` given `:cancel_tokens` shares all of it. A
+  `sqlite3_step` that fails outright (a locked database, an I/O error, a
+  runtime error in the SQL such as `abs(-9223372036854775808)`, a trigger's
+  `RAISE`) is returned at once instead of being held back: no row was
+  stepped past, so there is nothing to continue at. Such a failure discards
+  the batch's rows, as a cancellation does, so a result set that fails
+  part-way hands back no rows through `multi_step/2` (`step/1` and
+  `stream/4` still deliver the rows before the failure). After such a
+  failure the statement is left where SQLite left it: the next step is
+  SQLite's own rerun from the top, which meets the same failure, and
+  `reset/1` changes nothing.
 - **`Xqlite.stream/4` silently dropped every column whose name repeated.** A
-  stream row is a map keyed by column name, and a map cannot hold two entries
-  under one key, so a join of two tables sharing a column —
-  `SELECT ta.v, tb.v FROM ta, tb` — came back as `%{"v" => 2}`, the first
-  value gone with nothing said about it, where `Xqlite.query/4` over the same
-  SQL keeps both. SQLite also names a column that has no name of its own
-  after the text that produced it, so `SELECT 1, 1` and `SELECT ?, ?` lost
-  values the same way, in every `:on_error` mode. Such a statement is now
-  refused at stream open with
-  `{:error, {:duplicate_column_name, name}}`, `name` being the first name
-  that repeats in SQLite's order; alias the columns
-  (`SELECT ta.v AS x, tb.v AS y`) to stream it. `query/4` and the raw stream
-  doors answer lists and are unchanged.
-- **An improper parameter list raised once a type extension was on.** With no
-  extension the list travelled untouched to the native walk, which refuses a
-  tail that is not a list with
+  stream row is a map keyed by column name, and a map cannot hold two
+  entries under one key, so a join of two tables sharing a column
+  (`SELECT ta.v, tb.v FROM ta, tb`) came back as `%{"v" => 2}`, the first
+  value gone with nothing said about it, where `Xqlite.query/4` over the
+  same SQL keeps both. SQLite also names a column that has no name of its
+  own after the text that produced it, so `SELECT 1, 1` and `SELECT ?, ?`
+  lost values the same way, in every `:on_error` mode. Such a statement is
+  now rejected at stream open with `{:error, {:duplicate_column_name,
+  name}}`, `name` being the first name that repeats in SQLite's order;
+  alias the columns (`SELECT ta.v AS x, tb.v AS y`) to stream it. `query/4`
+  and the raw stream functions return lists and are unchanged.
+- **An improper parameter list raised once a type extension was on.** With
+  no extension the list travelled untouched to the native check, which
+  rejects a tail that is not a list with
   `{:error, {:expected_list, %{reason: :improper_tail, value_type: _}}}`;
-  with one, the encode chain walked the list itself and `[1 | :tail]` raised
-  `FunctionClauseError` on all eight parameter doors and on the public
-  `Xqlite.TypeExtension.encode_params/2`. The chain now answers what the
-  native walk answers for the same term: both improper-tail shapes, and
+  with one, the encode chain walked the list itself and `[1 | :tail]`
+  raised `FunctionClauseError` on every `Xqlite` function that takes
+  parameters and on the public `Xqlite.TypeExtension.encode_params/2`. The
+  chain now returns what the native check returns for the same term: both
+  improper-tail shapes, and
   `{:error, {:expected_list, %{reason: :not_a_list, value_type: _}}}` for a
   parameter term that is no list and not `nil`, which raised too.
   `Xqlite.bind/2,3` lost its own `is_list` guard with it, so
-  `Xqlite.bind(stmt, :foo)` answers that refusal instead of raising and
+  `Xqlite.bind(stmt, :foo)` returns that error instead of raising and
   `Xqlite.bind(stmt, nil)` means no parameters, as it does at every other
-  parameter door.
-- **Documentation.** The seven `:type_extensions` paragraphs say "extension
-  modules" rather than "module names"; the four places that recommend
-  `Xqlite.TypeExtension.decode_rows/2` say it answers `{:ok, rows}`; the
-  `:too_big` docs write its code as `code` rather than the literal 18, SQLite
-  defining no extended code for that result today; the telemetry guide names
-  the limit functions beside `backup_with_progress/6` as the doors that emit
-  nothing; the gotchas guide, this file and the architecture map carry the
-  one measured figure for the named bind; the architecture map names the
-  functions the stream data flow really goes through and all of the checks
-  the open makes; and this file's Unreleased section has one `### Changed`
-  heading again, so the entries under it that are fixes read as fixes.
-
-### Changed
-
-- **`Xqlite.Pragma.get/2,3,4` answers every finding of `integrity_check`
-  and `quick_check` as a list, on every form.** Without a number it
-  answered SQLite's first finding alone, as a string, and with a
-  `:db_name` it raised `CaseClauseError` once SQLite reported more than
-  one. A clean database now answers `{:ok, ["ok"]}` where it answered
-  `{:ok, "ok"}`.
-- **A blob handle closed by `blob_close/1` answers `{:error,
-  :blob_closed}`** from `blob_read/3`, `blob_write/3`, `blob_size/1` and
-  `blob_reopen/2` while its connection is open, where it answered
-  `{:error, :connection_closed}`. Once the connection is closed, every
-  blob call still answers `{:error, :connection_closed}`.
-- **A batch run outside a transaction answers `{:error,
-  :statement_mid_run}` while a statement, stream or blob of the connection
-  is mid-run, and runs nothing.** A write such a statement runs would join
-  a transaction the batch opens, and could be undone with it. Inside a
-  transaction a batch runs as before.
-- **The schema readers answer a stored column name that is not UTF-8 by
-  the column's place in its table.** `schema_columns/2`,
-  `schema_foreign_keys/2` and `schema_index_columns/2` answered `{:error,
-  {:utf8_error, n, message}}`, `n` naming a column of an internal query;
-  they now answer `{:error, {:column_name_not_utf8, %{column: place, name:
-  bytes}}}`, as the query functions do for such a name in a result. A
-  foreign key's parent table and column keep `{:utf8_error, _, _}`.
-- **An option argument that is no list is an answer on every function that
-  takes an option list.** `open/2`, `open_in_memory/1`,
-  `set_busy_policy/2`, `register_progress_hook/3`,
-  `Xqlite.Telemetry.bridge/2` and `Xqlite.Telemetry.bridge_log/1` raised
-  `FunctionClauseError` for a map, an atom or `nil` in that place; they
-  now answer `{:error, {:invalid_option, %{key: nil, value: term, reason:
-  :not_a_pair}}}`, as the other functions do, before any file is opened or
-  anything starts.
-- **The raw `XqliteNIF.set_pragma/3` takes for `busy_timeout` only an
-  integer from 0 to 2_147_483_647**, as `Xqlite.put_busy_timeout/2` does.
-  Any other value, the name in any case, answers `{:error,
-  {:invalid_pragma_value, %{pragma: :busy_timeout, value: value}}}` and
-  keeps the wait in force. SQLite read a negative number, `:infinity`, a
-  boolean or a string such as `"abc"` as no wait, and a string or a float
-  holding a number as that number, and an integer past 64 bits answered a
-  conversion error.
-
-- **Loading xqlite starts a release thread.** The NIF library starts an
-  OS thread of its own when it loads. The thread releases the handles the
-  garbage collector frees while their connection is idle, and closes the
-  connections dropped without `close/1`. If the thread cannot start, the
-  library fails to load.
-- **A handle the garbage collector frees is released after the
-  collection, not by its destructor.** A statement, stream, blob or
-  session is released by xqlite's release thread, or by the call that
-  holds its connection before that call returns, and the docs of
-  `Xqlite.prepare/2`, `XqliteNIF.stmt_prepare/2` and
-  `XqliteNIF.stmt_finalize/1` say so. The release thread serves every
-  connection, one release after another, so a release that waits in its
-  connection's busy handler, or the close of a dropped connection, delays
-  the releases of the others. A release is no longer finished when the
-  collection returns: another connection that meets the handle's lock
-  right after it, with no busy timeout, answers a busy error. A handle
-  collected while a call holds its connection is released by that call
-  before it returns, so that call can wait for the commit the release
-  makes. Where that matters, finalize, close and delete handles yourself,
-  and close connections with `close/1`, as the Known limitations guide
-  says.
-- **After its first connection opens, the NIF library stays loaded until
-  the node stops.** From the first connection it opens, it keeps a
-  resource of its own alive, so that the BEAM never unloads the code its
-  release thread runs, even after the module is purged.
-
-- **A transaction another process opens while the rebuild is starting
-  answers `{:error, :transaction_in_progress}`.** The rebuild checked for
-  an open transaction before it read the table. A transaction opened
-  between that check and the rebuild's own `BEGIN` made the call answer
-  `{:error, {:sqlite_failure, 1, 1, "cannot start a transaction within a transaction"}}`.
-  The rebuild now checks again inside its call, before anything is
-  switched, and answers as it does for the caller's own transaction.
-
-- **`:unknown` in a deny list no longer matches an `ATTACH` or `DETACH`.**
-  An `ATTACH` whose file name was a bound parameter or an expression, and
-  such a `DETACH`, counted as `:unknown`, so a deny list naming `:unknown`
-  stopped them where one naming `:attach` or `:detach` did not. They now
-  count as `:attach` and `:detach`, and no action of the bundled SQLite
-  counts as `:unknown`.
-
-- **Text after the first statement answers
-  `{:error, :multiple_statements}` whenever it holds anything but
-  whitespace, comments and semicolons.** Such text answered its own
-  compile error when it was no valid statement or did not compile, as in
-  `"SELECT 1; garbage"`, `"SELECT 1; SELECT * FROM missing"`, or a lone
-  vertical tab or `/*` after the first statement.
-- **The authorizer is not asked about a string's second statement.** A
-  string holding a second statement the authorizer denies, and under a
-  `:pragma` deny a string whose first statement is a PRAGMA and that holds
-  a second, answered `{:error, {:authorization_denied, 23, _}}`. The
-  statement the authorizer would deny is no longer compiled, so such a
-  string answers `{:error, :multiple_statements}`.
-- **With a busy policy or observer installed, a string holding a
-  `busy_timeout` write and a second statement answers
-  `{:error, :multiple_statements}`.** It answered the error a
-  `busy_timeout` write gets while a busy policy or observer is installed,
-  whichever statement held the write. A `busy_timeout` write on its own
-  still gets that error.
-- **A string whose first statement is a PRAGMA is judged before SQLite
-  reads it.** Three answers change to `{:error, :multiple_statements}`,
-  with nothing changed: such a string that holds more and is longer than
-  the connection's SQL length limit, which answered
-  `{:error, {:too_big, 18, _}}`; `"PRAGMA foreign_keys = OFF $a(;x)"`,
-  whose semicolon SQLite reads inside a variable, which answered a syntax
-  error with foreign-key enforcement turned off; and
-  `"EXPLAIN ; PRAGMA foreign_keys = OFF; SELECT 1"`, which answered a
-  syntax error.
-
-- **One vocabulary in the docs.** The README, the guides and the module
-  docs say "reject" and "rejection" where they said "refuse" and
-  "refusal", and use one word, "function", for the library's public
-  functions.
-
-- **`changeset_apply/3` names the foreign key in its key error.** A
-  changeset SQLite rolls back for a broken foreign key answers
-  `{:error, {:constraint_violation, :constraint_foreign_key, details}}`
-  under every strategy, the kind an ordinary write's key error carries.
-  Under `:replace` and `:abort` it answered the kind
-  `:constraint_violation`.
-- **`blob_size/1` asks SQLite on every call.** On a handle whose row
-  changed, it now ends the handle as a read does and answers
-  `{:error, {:sqlite_failure, 4, _, _}}`, and so does a later
-  `blob_reopen/2`. It answered the size fixed at the open, and a later
-  reopen still moved the handle. A reopen made before any read, write or
-  size call still moves it.
-
-- **One `cancel_tokens:` option replaces the `_cancellable` functions.**
-  `Xqlite.query/4`, `execute/4`, `execute_batch/3` and `multi_step/3` take
-  one token or a list (default `[]`) and keep their answers: `query/4` and
-  `execute/4` answer `%Xqlite.Result{}` with or without tokens. The removed
-  `query_cancellable/5` and `query_with_changes_cancellable/5` answered a
-  plain map, and `execute_cancellable/5` answered `{:ok, count}`; use
-  `query/4` and `execute/4` with the option. `execute_batch_cancellable/3`
-  and `multi_step_cancellable/3` became `execute_batch/3` and
-  `multi_step/3` with the option. The raw `XqliteNIF` cancellable functions
-  stay.
-- **The `[:xqlite, :query_with_changes, :start | :stop | :exception]` span
-  is gone**, and `[:xqlite, :cancel, :honored]` no longer reports
-  `operation: :query_with_changes`: a cancelled `query/4` reports
-  `operation: :query`.
-- **`Xqlite.transaction_status/1` is removed.** `Xqlite.autocommit/1`
-  answers the same question the other way round: `{:ok, true}` while no
-  transaction is open.
-- **`Xqlite.get_pragma/2` and `Xqlite.set_pragma/3` are removed.**
-  `Xqlite.Pragma.get` and `put` are the PRAGMA functions; a PRAGMA that
-  `Xqlite.Pragma` does not model is reached with `Xqlite.query/4` or the
-  raw `XqliteNIF.get_pragma/2` and `set_pragma/3`. The
-  `[:xqlite, :pragma, :get]` and `[:xqlite, :pragma, :set]` events went
-  with them.
-- **`Xqlite.optimize/1` and `Xqlite.shrink_memory/1` are added, and
-  `Xqlite.Pragma.get` no longer runs the PRAGMAs that act**: `optimize`,
-  `shrink_memory`, `wal_checkpoint` and `incremental_vacuum` answer
-  `{:error, {:unknown_pragma, name}}` there. `Xqlite.wal_checkpoint/3` runs
-  a checkpoint, and `Xqlite.query/4` runs `incremental_vacuum`, or
-  `optimize` with a mask. `Xqlite.Pragma.returning_nothing/0` is gone.
-- **`journal_mode`, `locking_mode` and `encoding` read back as atoms** from
-  `Xqlite.Pragma.get` — `:wal`, `:exclusive`, `:utf8`, `:utf16le`,
-  `:utf16be` — and take the atom, or the text in any case, on a write.
-- **`enable_load_extension/2` is split into `enable_load_extension/1` and
-  `disable_load_extension/1`**, each with its own event:
-  `[:xqlite, :extension, :enable]` and the new
-  `[:xqlite, :extension, :disable]`, both with metadata `%{conn}` (the
-  `:enabled` key is gone).
-- **`load_extension/3` and `deserialize/4` take options.** `entry_point:`
-  replaces the positional entry point (leave it out to let SQLite find the
-  init function), and `read_only:` replaces the boolean of `deserialize/4`,
-  whose schema stays positional; options given in the schema's place load
-  into `"main"`, as in `deserialize(conn, data, read_only: true)`. A value
-  of the wrong kind answers `{:error, {:invalid_option, _}}`, and so does a
-  call in the old positional form.
-- **`backup_with_progress/6` becomes
-  `backup_with_progress(conn, dest_path, pid, opts)`**, the destination
-  first as in `backup/3`, with `schema:` (default `"main"`),
-  `pages_per_step:` (default 100, as in `backup/3`; a bad value still
-  answers `{:error, {:invalid_pages_per_step, value}}`) and
-  `cancel_tokens:`.
-- **A PRAGMA write through `Xqlite.Pragma.put/3,4` answers `:ok`, or
-  `{:error, {:pragma_not_applied, %{pragma: name, asked: value, in_force:
-  value}}}` when SQLite answers it with another value** —
-  `journal_mode: :wal` on an in-memory database, `max_page_count` below the
-  page count, a heap limit SQLite will not raise — with or without
-  `db_name:`; no write answers `{:ok, value}` any more. The error can
-  follow a change, since `in_force` is what holds after the write:
-  `max_page_count: 1` sets the limit to the page count, so the next insert
-  that needs a page fails with "database or disk is full"; a
-  `soft_heap_limit` above the hard one is set to the hard one; and in
-  memory a `locking_mode: :normal` write answers `in_force: :exclusive`,
-  which `get(conn, :locking_mode, db_name: "main")` also reads, while a
-  plain `get` answers `:normal`. A write SQLite answers with no row, such
-  as `page_size` on a database with content, answers `:ok`;
-  `Xqlite.Pragma.get` tells what holds. `Xqlite.Pragma.put/4` rejects
-  `db_name:` for `busy_timeout` and `wal_autocheckpoint`, as `get` does, so
-  such a write no longer stops the WAL hook messages.
-  `enable_foreign_key_enforcement/1` and
-  `disable_foreign_key_enforcement/1` answer `:ok`.
-
-- **`open/2` and `open_in_memory/1` answer `{:error, {:invalid_option,
-  %{key: key, value: value, reason: :invalid_value}}}` for an option value
-  outside what SQLite stores**, with the value as given: the shape an option
-  already answers when its value has the wrong type. They answered
-  `{:error, {:invalid_pragma_value, %{pragma: key, value: value}}}`.
-  `Xqlite.set_pragma/3` and `Xqlite.Pragma.put/4` keep
-  `:invalid_pragma_value`.
-- **`backup/3` and `backup_with_progress/6` answer
-  `{:error, {:cannot_open_database, dest_path, code, message}}` for a
-  destination SQLite cannot open**, such as a path in a missing directory,
-  as `restore/3` does for its source. They answered
-  `{:error, {:sqlite_failure, 14, 14, message}}`.
-
-- **`XqliteNIF.stream_close/1` raises `ArgumentError` for a term that is no
-  stream handle**, like `stream_fetch/2`, `stmt_finalize/1`, `blob_close/1`
-  and the other handle functions. It used to answer
-  `{:error, {:invalid_stream_handle, text}}`; that shape is gone from
-  `Xqlite.error_reason/0`.
-- **SQL text longer than 2 147 483 647 bytes answers
-  `{:error, {:too_big, 18, message}}` on every function that compiles one
-  statement** (the query, execute, prepare, stream and `explain_analyze`
-  functions). `stmt_prepare/2`, `stream_open/3`, `explain_analyze/3` and
-  the `Xqlite` functions built on them answered
-  `{:error, {:cannot_execute, "SQL string length exceeds c_int range"}}`
-  after copying the whole text; they now judge the length before any copy
-  and answer what the others answer. SQL over the connection's SQL length
-  limit (`:sql_length`, at most 1 000 000 000 bytes) answers the same tag,
-  as it did. A text holding a NUL byte answers
-  `{:error, :null_byte_in_string}` first, whatever its length.
-
-- **`:execute_returned_results` is retired: the execute functions run a
-  statement that returns rows to its end, drop the rows and answer the
-  count.** This holds for `XqliteNIF.execute/3`, `execute_cancellable/4`,
-  `Xqlite.execute/4` and `execute_cancellable/5`; `query/4` reads the rows.
-  An `INSERT`, `UPDATE` or `DELETE ... RETURNING` through them answers its
-  count, where it made the write and then answered that error. A `SELECT`
-  answers a count of 0. A PRAGMA that answers a row, `journal_mode = WAL`
-  for one, takes effect and answers 0, where it took effect and then
-  answered the error. `PRAGMA incremental_vacuum` frees every page it is
-  asked to, where it freed one page and answered the error.
-- **A statement that returns rows, through the execute functions or a
-  batch, reads every row, so one that never ends never returns.** Reading
-  a million rows costs about 100 ms. A `SELECT` that never ends, such as a
-  recursive CTE without a limit, used to return after its first row (the
-  execute functions with `:execute_returned_results`, `execute_batch/2`
-  with `:ok`); it now runs until something stops it, and only the
-  cancellable functions (`execute_cancellable` and
-  `execute_batch_cancellable`) can stop it.
-- **The SQL length limit (`:sql_length`) applies to each statement of a
-  batch, a trailing comment included.** A batch longer than a lowered limit
-  used to run nothing even when every statement fit; it now runs, and a
-  trailing comment longer than the limit fails after every statement ran.
-- **A batch that fails or is cancelled inside a transaction it opened
-  itself (`BEGIN` or `SAVEPOINT`) rolls that transaction back, a `COMMIT`
-  that failed as busy included:** run the whole batch again rather than
-  retrying the `COMMIT`. A transaction open before the call stays open
-  with the batch's earlier statements in it, and so does one the batch
-  opens after committing the caller's (`COMMIT; BEGIN; ...`). A `ROLLBACK`
-  that fails leaves the transaction open under the batch's own error, and
-  `autocommit/1` says so.
-
-- **`commit/1` and `rollback/1` answer `{:error, :no_transaction}` when no
-  transaction is open**, on `Xqlite` and `XqliteNIF` alike, before any
-  statement runs. They answered `{:error, {:sqlite_failure, 1, 1, message}}`
-  before. `@type error_reason` gains `:no_transaction`.
-- **`commit/1`, `savepoint/2` and `release_savepoint/2` answer
-  `{:error, :statement_mid_run}` while a write of the same connection is
-  mid-run**, on both modules: a write stepped but not yet run to its end or
-  reset, or a blob open for writing. SQLite rejects them with `SQLITE_BUSY`
-  then, which came back as `{:database_busy_or_locked, 5, _}`, the answer a
-  lock held by another connection gives, so code that retries on busy
-  retried against its own statement. A lock still answers
-  `{:database_busy_or_locked, 5, _}`; `rollback/1` and
-  `rollback_to_savepoint/2` run whatever is mid-run.
-
-- **The query functions read rows through the code statements and streams
-  use.** `query/3`, `query_cancellable/4`, `query_with_changes/3` and
-  `query_with_changes_cancellable/4` no longer iterate rows through
-  rusqlite: mixed rows read 11-12 % faster. An unreadable value or a failed
-  step still answers the error with no rows. A BLOB larger than 64 bytes
-  now comes back as a resource binary from step, multi_step and stream
-  too, as it did from query; the bytes are unchanged.
-
-- **A `:busy` backup progress message sent before any step copied pages
-  carries `remaining: nil, total: nil`** (was `0` and `0`); a `:busy` after
-  a copied step carries that step's counts.
-
-- **On the four one-shot cancellable calls a signalled token answers
-  `{:error, :operation_cancelled}` before an SQL or parameter error,** since
-  the tokens are read before the SQL is prepared. With `:type_extensions`
-  set, a parameter list that is no proper list answers first, because the
-  extension walk runs in Elixir before the native call reads the tokens.
-
-- **`Xqlite.busy_timeout/2` is now `Xqlite.put_busy_timeout/2`, and it no
-  longer removes the retry policy:** while a policy is set it decides the wait,
-  and the timeout written applies once `remove_busy_policy/1` runs. New
-  `Xqlite.get_busy_timeout/1` answers the timeout the connection keeps;
-  `get_pragma/2`, `Xqlite.Pragma.get/2` and `XqliteNIF.get_pragma/2` answer it
-  too while a policy or an observer holds the busy slot, where they used to
-  answer SQLite's 0. `Xqlite.Pragma.get/3` rejects `:db_name` for
-  `busy_timeout` and `wal_autocheckpoint`.
-- **One tag for a bad option list everywhere:** `{:invalid_option, %{key,
-  value, reason: :unknown_key | :duplicate_key | :invalid_value |
-  :not_a_pair}}` (with `allowed` on `:unknown_key`) replaces
-  `:invalid_open_option`, `:invalid_hook_option` and the telemetry bridge's
-  `{:invalid_hook, _, valid: _}`. `set_busy_policy/2`,
-  `register_progress_hook/3`, `stream/4`, the `:type_extensions` functions,
-  `Xqlite.Telemetry.bridge/2` (its `:progress` list included) and
-  `bridge_log/1` now reject a misspelled key instead of installing the
-  default, reject a key given twice instead of using its first value, and
-  answer instead of raising for an out-of-range number or a malformed list.
-- **`Xqlite.open/2` and `Xqlite.open_readonly/1` reject `""` and `":memory:"`
-  with `{:invalid_path, %{path}}`;** use `open_temporary/0` and
-  `open_in_memory/1`. `file:` URIs pass as written.
-- **`XqliteNIF.open_in_memory/1` opens any name but `":memory:"`, `file:` URIs
-  included, with `SQLITE_OPEN_MEMORY` and ATTACHes a plain path in memory;**
-  a plain file name no longer creates a file, while an ATTACH by a URI
-  naming a `mode=` still reaches the file. `":memory:"`, the name
-  `Xqlite.open_in_memory/1` passes, is unchanged.
-- **`backup_with_progress/6` answers a blocked step with `{:error,
-  {:database_busy_or_locked, code, message}}`,** as `backup/3` does, instead of
-  retrying every 100 ms until a token fires.
-- **Seven PRAGMAs take and answer typed values instead of coded numbers:**
-  `cache_size` `{:pages, n}` or `{:kib, n}` (the open default is now
-  `{:kib, 64_000}`), `wal_autocheckpoint` and `cache_spill` `:off` or a
-  count, `journal_size_limit`, `analysis_limit`, `soft_heap_limit` and
-  `hard_heap_limit` `:unlimited` or a count. A bare coded number is
-  rejected.
-
-- **`txn_state/2` and `schema_list_objects/2` default to `"main"` and take
-  `:all` for every attached database;** `nil` no longer means every database.
-  `XqliteNIF.txn_state/2`, `wal_checkpoint/3` and `schema_list_objects/2` lose
-  their defaults, and `session_attach/2` takes `:all` instead of `nil`.
-- **A schema name that is not attached answers `{:error, {:no_such_schema,
-  name}}`** on every function that takes one, before anything is opened or
-  changed; `""` answers `{:error, {:invalid_schema_name, ""}}` (SQLite read it
-  as every database, so `wal_checkpoint(conn, mode, "")` checkpointed all of
-  them).
-- **A table or index name that names nothing answers `{:error,
-  {:no_such_table, name}}` or `{:error, {:no_such_index, name}}`** instead of
-  `{:ok, []}` on `schema_columns/2`, `schema_foreign_keys/2`,
-  `schema_indexes/2`, `schema_index_columns/2` and the Pragma functions
-  `table_info`, `table_xinfo`, `index_list`, `index_info`, `index_xinfo` and
-  `foreign_key_list`.
-- **`get_create_sql/2` answers `{:error, {:no_such_object, name}}`** instead of
-  `{:ok, nil}` for a name nothing carries; `{:ok, nil}` now means an automatic
-  index.
-- **`schema_list_objects(conn, "MAIN")` lists main's objects;** the listing
-  used to compare the name byte for byte and answer `{:ok, []}`.
-- **`restore/3` from a path that does not exist, or from a name SQLite gives
-  no file for (`""`, `":memory:"`, `"file::memory:"`, a `mode=memory` or
-  `vfs=memdb` URI), answers `{:error, {:cannot_open_database, path, code,
-  message}}` and changes nothing;** it used to create an empty file and copy
-  it over the schema.
-
-- **SQL holding no statement answers `{:error, :no_statement}`** instead of
-  `{:error, {:cannot_execute, "SQL contains no statement"}}`.
-- **`wal_checkpoint/3` on a named database not in WAL mode answers
-  `{:error, :not_in_wal_mode}`** instead of `-1` page counts, and a checkpoint
-  lock another connection holds answers
-  `{:error, {:database_busy_or_locked, 5, _}}`.
-- **Backup progress messages are
-  `{:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}}`.**
-- **`connection_stats/1` reports the half SQLite defines for each counter.**
-  `lookaside_hit`, `lookaside_miss_size` and `lookaside_miss_full` report
-  SQLite's running totals (they read 0 before); `deferred_fks` is now
-  `deferred_fks?`, a boolean; every counter is read as 64 bits.
-- **Tagged errors carry the rejected term.** `{:invalid_checkpoint_mode, mode}`,
-  `{:invalid_schema_name, term}` (`wal_checkpoint/3`, `txn_state/2`),
-  `{:invalid_transaction_mode, mode}` and `{:invalid_conflict_strategy,
-  strategy}` (were bare atoms), `{:blob_write_out_of_bounds, %{offset,
-  byte_size, blob_size}}`, `{:invalid_option, _}` from the raw
-  progress-hook NIF, and `{:invalid_pragma_value, %{pragma: :busy_timeout,
-  value}}` from `put_busy_timeout/2` and the raw setters.
-- **`XqliteNIF.set_pragma(conn, "busy_timeout", n)` rejects an integer above
-  2_147_483_647** instead of storing 0.
-- **`put_busy_timeout/2` answers the rejection for 2^64 and above instead of
-  raising**; `register_progress_hook/3` does for `every_n` above
-  4_294_967_295.
-
-- **A keyword list is taken only on a statement of at most 2 048
-  parameters.** Above that, every door that takes a keyword list answers
-  `{:error, {:too_many_named_parameters, %{count: n, limit: 2048}}}` before a
-  value is read; a positional list binds at any count. The names of an
-  accepted list resolve through one map built per call, which costs 7.1 ms at
-  2 048 parameters on one machine and grows faster than the count. SQLite's
-  own prepare of SQL with that many names costs about twice the map, grows
-  the same way, and no parameter list avoids it: 14, 193 and 3 023 ms at
-  2 048, 8 192 and 32 766 names. Written with bare `?` the same statement
-  prepares in 1.0, 4.7 and 20.7 ms, so a statement with thousands of
-  parameters is written with `?` and bound with a positional list.
-- **A type extension's `decode/1` can refuse a stored value, and a callback
-  answer outside the three shapes is refused, not raised.** A `decode/1`
-  that claims a value but cannot read it answers `{:error, reason}`, and
-  every function that decodes rows answers `{:error,
-  {:type_extension_refused, %{column: n, extension: module, reason:
-  reason}}}`, `n` being the value's one-based place in its row. `stream/4`
-  hands over the rows decoded before it, then answers the error under its
-  `:on_error` mode. The query functions decode after the statement ran, so
-  its changes stand. An `encode/1` or `decode/1` answering anything but
-  `{:ok, value}`, `:skip` or `{:error, reason}` raised `CaseClauseError`; it
-  is now the same refusal with `reason: {:bad_return, answer}`.
-- **`Xqlite.TypeExtension.decode_value/2` answers `{:ok, decoded}` or
-  `{:error, %{extension: module, reason: reason}}`**, as `encode_value/2`
-  does, where it answered the bare decoded value: a refusal can no longer be
-  mistaken for a value that decoded to an error tuple.
-- **`{:value_too_large, _}` is now answered by every door that binds**, where
-  the doors going through rusqlite used to answer
-  `{:sqlite_failure, 18, 18, "string or blob too big"}` and the raw doors only
-  refused values above two gigabytes. The limit in the error is the
-  connection's own, which `Xqlite.get_limit/2` reads and
-  `Xqlite.put_limit/3` sets.
-- **`SQLITE_TOOBIG` is classified as `{:too_big, code, message}`** wherever
-  SQLite answers it. It no longer comes from a bind, but it still comes from a
-  step: SQLite checks the same limit against the row it builds, a
-  concatenation and a column read.
-- **`Xqlite.TypeExtension.encode_params/2` and `decode_rows/2` judge their
-  extension list.** Both are public and are what the raw-statement docs
-  recommend for the rows `step/1` and `multi_step/2` return, and both took
-  the list as given: a list that was no proper list of extension modules
-  raised from the chain, and a module such as `Jason`, which exports both
-  callback names without being an extension, silently rewrote values. Both
-  now walk the list the way every door does and answer
-  `{:error, {:invalid_type_extensions, refusal}}` for one that fails; and
-  `decode_rows/2` answers `{:ok, rows}` where it used to answer the bare
-  rows. `encode_value/2` and `decode_value/2` still take the list as given:
-  they run once per value, and the caller vouches for it.
-- **A module that passed the extension check is asked for its callbacks on
-  every call.** The check remembered a module for the life of the node, so
-  one recompiled without `encode/1` or `decode/1`, or purged, kept passing
-  and every door raised `UndefinedFunctionError`. Both callbacks are checked
-  on every call now — a false there runs the whole check again, so a module
-  merely unloaded is reloaded and passes — and only the behaviour
-  declaration is remembered.
-- **`:type_extensions` is judged before anything else runs.** A term that is
-  no proper list of module names reached `length/1` or the encode chain and
-  raised: `Xqlite.stream(conn, sql, params, type_extensions: [JSON | :x])`
-  raised `ArgumentError`, and `query/4`, `execute/4`, `bind/3` and the
-  cancellable doors raised `FunctionClauseError`. Every door that takes the
-  option now answers `{:error, {:invalid_type_extensions, refusal}}` before
-  its telemetry and before the NIF, the refusal naming what stopped the walk
-  (`:not_a_list`, `:improper_tail`, or `:bad_element` with the element's
-  one-based position) and the kind of term it was. `nil` and an absent option
-  both mean no extensions.
-- **An element of `:type_extensions` that is no extension module is refused.**
-  Any atom used to pass the walk, so
-  `type_extensions: [Xqlite.TypeExtension.JSON, :nope]` — a misspelled module
-  name, or an empty variable holding `nil` or `false` — ran until the first
-  value was encoded and then raised `UndefinedFunctionError`. Every door that
-  takes the option now answers
-  `{:error, {:invalid_type_extensions, %{reason: :bad_element, position: n,
-  value_type: :atom}}}` before anything runs. An element counts as an
-  extension module when three things hold: the atom names a module that can
-  be loaded, the module declares `@behaviour Xqlite.TypeExtension`, and it
-  exports both `encode/1` and `decode/1`. Two kinds of list that worked
-  before now stop. A module that exports `encode/1` and `decode/1` without
-  declaring the behaviour: `Jason` and OTP's `:json` both do, and
-  `type_extensions: [Jason]` silently stored the integer `1` as the text
-  `"1"`. And a module that exports `encode/1` but not `decode/1`, on the four
-  doors that never decode — `execute/4`, `explain_analyze/4`, `bind/3` and
-  `execute_cancellable/5` — which ran it to completion. A module written to
-  the shape the `Xqlite.TypeExtension` moduledoc shows is unaffected. The
-  check runs once per module for the life of the node: a module that passed
-  is remembered, one that was refused is asked again on the next call.
-- **An integer SQLite has no room for answers a structured error.** A number
-  past the signed 64-bit range used to answer
-  `{:cannot_convert_to_sqlite_value, "9223372036854775808", "{error, badarg}"}`
-  — a tag carrying two debug strings, which four different causes shared. The
-  tag is gone. A parameter outside the range is now
-  `{:error, {:integer_out_of_range, %{position: n}}}`, `n` being the value's
-  one-based place in the list; `XqliteNIF.set_pragma/3` judges one value with
-  no list around it and answers `{:error, {:integer_out_of_range, %{}}}`. A
-  TEXT or BLOB parameter longer than SQLite's C interface can be told about
-  answers `{:error, {:value_too_large, %{byte_size: _, limit: _}}}`.
-- **A key named twice in a parameter list is refused.** `[a: 1, a: 2]` used to
-  bind the second value, where every `Keyword` function reads the first. Two
-  keys that name the same parameter — `[{:a, 1}, {:":a", 2}]` included, since
-  both name `:a` — are now
-  `{:error, {:duplicate_parameter_name, name}}`, with the second key's name as
-  it resolved, whatever the values.
-- **A refused batch size reports the caller's own term.** The stream fetch
-  doors used to tag it — `{:integer, 0}`, `{:float, 1.0}`, `{:atom, :ten}` —
-  while the statement doors put the bare number, so
-  `{:invalid_batch_size, %{provided: _, minimum: 1}}` had two shapes.
-  `provided` is now the term as the caller wrote it on both:
-  `XqliteNIF.stream_fetch(s, 1.0)` answers `provided: 1.0`. The stream fetch
-  doors are the ones that answer for a wrong type at all, because they take
-  the term and judge it; the statement doors take an integer argument, so
-  rustler refuses anything else with `ArgumentError` before the function runs
-  — that is their protection against a huge batch size.
-- **`Xqlite.stream/4` refuses a bad batch size at the call.** `batch_size: 0`
-  used to open the stream and raise `Xqlite.StreamError` on the first element
-  taken out of it. The option is now judged beside `:on_error` and
-  `:cancel_tokens`, so a value that is not a positive integer answers
-  `{:error, {:invalid_batch_size, %{provided: value, minimum: 1}}}` from
-  `stream/4` itself. `Xqlite.multi_step/2` keeps its integer guard.
-- **Six raw-statement helpers in the native crate are `unsafe fn`.** The
-  helpers that take a raw `sqlite3_stmt` pointer — the parameter-count check,
-  the coverage check, the two binders, the value binder and the stream's
-  parameter binding — were ordinary safe functions whose contract lived in a
-  comment. Each now carries a `# Safety` section naming it (the caller holds
-  the connection Mutex; the pointer is a live prepared statement of that
-  connection) and every caller says which lock it holds. No behaviour changes.
-- **The panic-strategy check reads a Windows DLL the right way.**
-  `scripts/panic_strategy.exs` looked for `_Unwind_RaiseException` with `nm`
-  whatever the library was. An MSVC-built `.dll` keeps no symbol table `nm`
-  can read and unwinds through Windows exceptions instead, so the check
-  reported an abort build on every Windows runner. A `.dll` is now read with
-  `objdump -p` (or `llvm-objdump`) and passes when its import table names
-  `_CxxThrowException` or `__CxxFrameHandler3`; every other library is read
-  with `nm -u` (or `llvm-nm`) as before. Both families look for their tool on
-  `PATH` and in the rustup sysroot where `rustup component add llvm-tools`
-  puts the LLVM ones, `XQLITE_SYMBOL_TOOL` still names a tool to use instead,
-  and a failed verdict now names the tool, the library and every readout line
-  mentioning unwinding, so one CI log is enough to tell a wrong marker from a
-  real abort build. The release workflow reads the same markers with the
-  same two tools.
-- **`XqliteNIF.stream_open/4` is `XqliteNIF.stream_open/3`.** The fourth
-  argument was reserved for stream options that never arrived, and nothing
-  read it — `stream_open(conn, sql, [], :garbage)` opened a stream. It is
-  gone, so a raw caller passing four arguments has to drop the last one.
-  `Xqlite.stream/4` is unaffected.
-- **`{:expected_keyword_tuple, _}` carries the same map as its siblings.** An
-  element of a keyword parameter list that is not an `{atom, value}` pair used
-  to come back as the Rust debug text of the caller's own element — which put
-  the caller's data, a password in a named parameter included, inside an error
-  term, and threw away the position the decoder had in hand. It is now
-  `%{reason: :bad_element, position: n, value_type: type}`, the map
-  `{:expected_list, _}` and `{:expected_keyword_list, _}` already carry, with
-  `n` the one-based position of the element and `type` its kind.
-- **`{:invalid_cancel_tokens, _}` holds the same map on every door.** The
-  Elixir doors used to answer with the caller's own value and the raw NIFs
-  with `%{position: n}`. Both now answer
-  `%{reason: :bad_element, position: n, value_type: type}` for an element that
-  is no live token; the Elixir doors, which take one token or a list of them,
-  answer position 1 for a single term that is no token and
-  `%{reason: :improper_tail, value_type: type}` for a list whose tail is not
-  `[]`. `Xqlite.cancel_operation/1` takes one token and refuses a list, an
-  empty one and a list of live tokens included, as the one element it was
-  handed. The raw NIFs answer `%{reason: :not_a_list, value_type: type}` for
-  a term that is no list.
-- **`XqliteNIF.stmt_bind/2` reads `nil` as no parameters, like its siblings.**
-  `query`, `execute`, `query_with_changes`, `explain_analyze` and
-  `stream_open` all took a parameter term of `nil` as "no parameters" while
-  `stmt_bind` answered `{:expected_list, _}` for it. One rule now, in one
-  place: `stmt_bind(stmt, nil)` means zero parameters, so it answers `:ok` on
-  a statement that takes none and `{:invalid_parameter_count, _}` on one that
-  takes any (see the parameter-count fix above). `Xqlite.bind/2,3` reads
-  `nil` the same way and answers
-  `{:expected_list, %{reason: :not_a_list, value_type: type}}` for any other
-  term that is no list.
-- **`Xqlite.Pragma` judges its options.** The options position — the last
-  argument of `get/4` and `put/4`, and the third argument of `get/4` when it
-  is a keyword list, the two being merged — used to reach `Keyword.get/3`
-  unjudged: a term that is no list raised `FunctionClauseError` several calls
-  deep, and `[1]`, `[:db_name]` and `[foo: 1]` were silently ignored. Options
-  are now a keyword list whose only key is `:db_name`, whose value is a
-  string, an atom or `nil`; anything else answers
-  `{:error, {:invalid_pragma_argument, %{pragma: name, value: value, reason:
-  :invalid_options}}}` before a statement is built, `value` being the whole
-  term when it is no keyword list and the `{key, value}` pair that could not
-  be read when it is one. The named accessors (`table_info/3` and its
-  siblings) reach `get/4` and inherit it.
-- **`nil` is not a PRAGMA name.** `Xqlite.get_pragma/2` and
-  `Xqlite.set_pragma/3` turned it into the empty string on their way to
-  SQLite and answered `{:error, {:invalid_pragma_name, ""}}`, replacing the
-  caller's key with a string it never wrote. They now answer
-  `{:error, {:invalid_pragma_name, nil}}`. `true` and `false` stay names of
-  PRAGMAs SQLite parses and ignores.
-- **`Xqlite.Pragma.get_result/0` names `:no_value`.** The atom is what every
-  read door answers for a PRAGMA the connection has no row for — `mmap_size`
-  on a database that is not a file, and `legacy_file_format` and
-  `incremental_vacuum` on any database — and it was hidden inside `atom()`
-  with nothing saying when it comes. The type names it, the `get/3,4` doc says
-  when it comes, and no write door takes it back.
-- **`mix verify`'s panic step checks the library the VM loads, by path.**
-  `scripts/panic_strategy.exs` used to glob for libraries and read the newest
-  file it found, which could be the crate's own build under
-  `native/xqlitenif/target` — a file nothing loads. It now takes the
-  libraries to read as arguments and checks each one, and `mix verify` hands
-  it `priv/native/xqlitenif.{so,dll}`. It also fails, instead of passing with
-  a notice, when no tool that lists symbols is on the machine; name one in
-  `XQLITE_SYMBOL_TOOL` to override the search for `nm` and `llvm-nm`.
-- **The release workflow fails a target whose library does not unwind.**
-  Every build job unpacks the library it produced and, before the upload,
-  reads it for the marker `scripts/panic_strategy.exs` reads:
-  `_Unwind_RaiseException` among an ELF or Mach-O library's undefined symbols
-  (`llvm-nm -u`), `_CxxThrowException` or `__CxxFrameHandler3` in a DLL's
-  import table (`llvm-objdump -p`). A missing marker, or a library the job
-  cannot find or read, fails the job, so that target ships no asset; the job
-  summary names the library, the tool and the marker lines it found.
-- **A binary that is not UTF-8 where text was meant is an answer, not a
-  raise.** Every argument the native side reads as text — the SQL of the six
-  query doors and their cancellable twins, the paths and URIs of the openers,
-  savepoint names, table and index names, `get_create_sql/2`'s object name,
-  the schema and path of `serialize`, `deserialize`, `load_extension`,
-  `backup` and `restore`, `blob_open/6`'s three names, a progress hook's tag
-  and a session's table — used to raise `ArgumentError` for a binary holding
-  bytes that are no UTF-8, out of functions whose specs promise
-  `{:ok, _} | {:error, _}`. They now answer
-  `{:error, :invalid_utf8_in_string}`, the neighbour of
-  `{:error, :null_byte_in_string}` one byte away. A term that is no binary at
-  all still raises, the documented kind for a wrong type on a raw stub. At the
-  typed PRAGMA doors a `:db_name` or an argument whose bytes are not UTF-8
-  answers `{:error, {:invalid_pragma_argument, %{pragma: name, value: value,
-  reason: :invalid_utf8}}}`, and a raw PRAGMA name answers
-  `{:error, {:invalid_pragma_name, name}}` with the bytes as they were given.
-  `XqliteNIF.set_pragma/3` answers `{:error, :invalid_utf8_in_string}` for
-  such a value, where it used to answer
-  `{:error, {:cannot_execute_pragma, name, _}}`; `Xqlite.set_pragma/3` keeps
-  `{:error, {:invalid_pragma_value, _}}`, a value that PRAGMA cannot take.
-- **A raw cancellable NIF says which of its two lists it refused.** A token
-  argument that is no list, or a list with a broken tail, answered
-  `{:error, {:expected_list, _}}` on the raw NIFs — byte for byte what a bad
-  PARAMETER list answers, on `execute_batch_cancellable/3` too, which has no
-  parameters. Every refusal of a token argument is now
-  `{:error, {:invalid_cancel_tokens, refusal}}` with `:not_a_list`,
-  `:improper_tail` or `:bad_element` as the reason, so `{:expected_list, _}`
-  on a cancellable call is always about the parameters. The reason still
-  differs across the door for a term that is no list: the raw NIF takes a list
-  and nothing else and answers `:not_a_list`, while the `Xqlite` function
-  reads a bare term as one token and answers `:bad_element` at position 1.
-- **`mmap_size` takes the values this build keeps.** Its domain was the shared
-  32-bit range, while the bundled SQLite is built with
-  `MAX_MMAP_SIZE=0x7fff0000`: it stored the maximum for anything above that
-  and 0 for anything negative, and both were accepted as written. The domain
-  is now `0..0x7FFF0000`, so a negative size and one past the ceiling answer
-  `{:error, {:invalid_pragma_value, %{pragma: :mmap_size, value: value}}}`;
-  `0`, which turns memory mapping off, stays legal.
-- **A refused parameter list reports its own length on every door.** The
-  `provided` number of `{:invalid_parameter_count, %{expected: _, provided:
-  _}}` used to differ by door for a list two or more elements too long:
-  `Xqlite.query/4`, `Xqlite.execute/4`, `XqliteNIF.query/3`,
-  `XqliteNIF.execute/3`, `XqliteNIF.query_with_changes/3` and the cancellable
-  twins of all of them (`Xqlite.query_cancellable/5`,
-  `Xqlite.execute_cancellable/5`, `Xqlite.query_with_changes_cancellable/5`
-  and the `XqliteNIF` stubs behind them) bind through rusqlite, which stops
-  at the first index the statement does not have and reports that index, so a
-  one-parameter statement handed three values answered `provided: 2` while
-  `stream/4`, `bind/3` and `explain_analyze/4` answered `provided: 3`. Those
-  doors now count the list before binding anything, so `provided` is the
-  list's own length everywhere. The refusal itself, and the `expected`
-  number, are unchanged.
+  function that takes parameters.
+- **Documentation.** The seven `:type_extensions` paragraphs say
+  "extension modules" rather than "module names"; the four places that
+  recommend `Xqlite.TypeExtension.decode_rows/2` say it returns
+  `{:ok, rows}`; the `:too_big` docs write its code as `code` rather than
+  the literal 18, SQLite defining no extended code for that result today;
+  the telemetry guide names the limit functions beside
+  `backup_with_progress/4` as the functions that emit nothing; the gotchas
+  guide, this changelog and ARCHITECTURE.md carry the one measured figure
+  for a named bind; and ARCHITECTURE.md names the functions the stream
+  data flow really goes through and all of the checks the open makes.
 
 ### Internal
 
-- **Every public function is fuzzed in a second VM.** `test/fuzz_law_test.exs`
-  calls each public function of `Xqlite`, `XqliteNIF`, `Xqlite.Pragma` and
-  `Xqlite.TypeExtension` 2000 times with values of its `@spec` types and
-  hostile terms, in a child VM, so a crash in native code cannot take the
-  suite down. The law fails on a crash, on a call that never returns, or on
-  an answer outside the documented shapes, and names the call that caused it.
+- **Every public function is fuzzed in a second VM.**
+  `test/fuzz_law_test.exs` calls each public function of `Xqlite`,
+  `XqliteNIF`, `Xqlite.Pragma` and `Xqlite.TypeExtension` 2000 times with
+  values of its `@spec` types and hostile terms, in a child VM, so a crash
+  in native code cannot take the suite down. The test fails on a crash, on
+  a call that never returns, or on a result outside the documented shapes,
+  and names the call that caused it.
 
 ## [0.15.0] - 2026-09-18
 

@@ -3,7 +3,7 @@ defmodule Xqlite.Result do
   A struct representing the result of a query.
 
   Implements the `Table.Reader` protocol, making results directly
-  consumable by libraries like Explorer, Kino, VegaLite, etc.
+  consumable by libraries like Explorer and Kino.
 
   ## Fields
 
