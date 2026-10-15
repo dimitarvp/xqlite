@@ -222,6 +222,22 @@ defmodule Xqlite.NIF.TransactionTest do
         assert :ok = NIF.rollback(conn)
       end
 
+      test "a transaction outlives the process that began it", %{conn: conn} do
+        {pid, ref} =
+          spawn_monitor(fn ->
+            :ok = Xqlite.begin(conn, :immediate)
+            {:ok, _} = Xqlite.execute(conn, "INSERT INTO tx_test (id) VALUES (1)")
+            Process.exit(self(), :kill)
+          end)
+
+        assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 5_000
+        assert {:ok, false} = Xqlite.autocommit(conn)
+        assert {:ok, %{changes: 1}} = Xqlite.execute(conn, "INSERT INTO tx_test VALUES (2, 0)")
+        assert {:ok, false} = Xqlite.autocommit(conn)
+        assert :ok = Xqlite.rollback(conn)
+        assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT id FROM tx_test", [])
+      end
+
       test "transaction_status returns false after commit", %{conn: conn} do
         assert :ok = NIF.begin(conn)
         assert {:ok, true} = NIF.transaction_status(conn)

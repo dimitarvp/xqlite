@@ -17,6 +17,7 @@ defmodule Xqlite.SqliteValueLawTest do
   bare `:ok`. Every one of them shares the encoder that turns a failure into
   `{:error, reason}`, so the Elixir spec of each must say both; the list of
   those functions is read out of the Rust source rather than written here.
+  The converse holds too, `cancel_operation/1` aside: it cannot fail and encodes `:ok` itself.
   """
 
   use ExUnit.Case, async: true
@@ -54,6 +55,11 @@ defmodule Xqlite.SqliteValueLawTest do
     assert names != []
     assert Enum.reject(names, &Map.has_key?(returns, &1)) == []
     assert Enum.reject(names, &ok_or_error_spec?(&1, returns)) == []
+  end
+
+  test "every stub specced :ok or an error is a NIF that encodes through the shared helper" do
+    specced = for {name, forms} <- stub_returns(), Enum.all?(forms, &ok_or_error?/1), do: name
+    assert Enum.sort(specced) -- [:cancel_operation] == bare_ok_nif_names()
   end
 
   test "the close wrapper declares the same union as its stub" do
@@ -145,8 +151,6 @@ defmodule Xqlite.SqliteValueLawTest do
       StreamData.constant(nil)
     ])
   end
-
-  # ---- the bare-ok family ----------------------------------------------------
 
   defp bare_ok_nif_names do
     "native/xqlitenif/src/nif.rs"

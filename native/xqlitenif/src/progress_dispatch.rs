@@ -300,8 +300,8 @@ unsafe extern "C" fn progress_dispatch_callback(user_data: *mut c_void) -> c_int
 ///
 /// # Safety
 ///
-/// See `busy_handler::send_busy_to_pid` for the OTP 26.1 NULL-env
-/// invariant.
+/// Sends with a NULL `caller_env`, as "Sending from a callback" in
+/// `hook_util`'s module doc covers.
 unsafe fn send_tick_to_pid(
     pid: &LocalPid,
     tag_bytes: Option<&[u8]>,

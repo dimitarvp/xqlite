@@ -14,7 +14,7 @@ defmodule Xqlite.NIF.BuiltinApiArmorTest do
     NIF.close(conn)
   end
 
-  test "the build has no SQLITE_DEBUG, which the full lock ladder would need" do
+  test "the build has no SQLITE_DEBUG" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     assert {:ok, options} = NIF.compile_options(conn)
     refute "DEBUG" in options

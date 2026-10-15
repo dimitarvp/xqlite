@@ -600,11 +600,11 @@ fn set_pragma<'a>(
     connection::with_conn(&handle, |conn| {
         let result = pragma::set(env, conn, pragma_name.as_slice(), value_term)?;
 
-        // `PRAGMA wal_autocheckpoint` installs SQLite's internal
-        // autocheckpoint wal_hook, evicting our master callback from
-        // the shared slot. Take the slot back and mirror the threshold
-        // SQLite reports, so our callback both notifies subscribers and
-        // emulates the autocheckpoint the caller just configured.
+        // `PRAGMA wal_autocheckpoint` puts SQLite's own autocheckpoint wal_hook
+        // in the slot, or empties it for 0 or less, evicting our master callback.
+        // Take the slot back and mirror the threshold SQLite reports, so our
+        // callback both notifies subscribers and emulates the autocheckpoint the
+        // caller just configured.
         if pragma_name
             .as_slice()
             .eq_ignore_ascii_case(b"wal_autocheckpoint")
@@ -1850,8 +1850,8 @@ fn backup_with_progress<'a>(
     let result = connection::with_conn(&handle, |conn| {
         crate::schema::require_schema(conn, &schema)?;
         let send = |counts, status: &[u8]| {
-            // SAFETY: enif_send with NULL caller_env is valid from dirty
-            // scheduler threads (OTP 26.1+). All data is copied into msg_env.
+            // SAFETY: a NULL caller_env inside this DirtyIo NIF, the case "Sending from a
+            // callback" in hook_util's module doc covers; all data is copied into msg_env.
             unsafe { send_backup_progress(&pid, counts, status) }
         };
         crate::backup::backup_to(

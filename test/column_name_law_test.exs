@@ -130,11 +130,12 @@ defmodule Xqlite.ColumnNameLawTest do
     stream = Xqlite.stream(a, @sql, [], on_error: :emit_error)
     {:ok, _observer} = NIF.register_busy_observer(a, self())
     :ok = NIF.execute_batch(b, "BEGIN EXCLUSIVE;")
-    query = Task.async(fn -> Xqlite.query(a, @sql) end)
+    query = Task.async(fn -> Xqlite.query(a, "INSERT INTO t VALUES (7, 8, 9) RETURNING *") end)
     assert_receive {:xqlite_busy, _retries, _elapsed_ms}, 5_000
     :ok = NIF.execute_batch(b, "ALTER TABLE t RENAME COLUMN b TO z; COMMIT;")
     changed = {:columns_changed, %{expected: ["a", "b", "c"], live: ["a", "z", "c"]}}
     assert {:error, ^changed} = Task.await(query)
+    assert {:ok, %{rows: [[7, 8, 9]]}} = Xqlite.query(b, "SELECT * FROM t WHERE a = 7")
     assert [{:error, ^changed}] = Enum.to_list(stream)
   end
 

@@ -231,7 +231,7 @@ defmodule XqliteNIF do
   `{:error, {:authorization_denied, 23, message}}` first), and a table
   another connection changed before the first step answers
   `{:error, {:columns_changed, %{expected: names, live: names}}}` after that
-  step; see `Xqlite.query/4`.
+  step, a write in it having run (and committed, in autocommit mode); see `Xqlite.query/4`.
 
   Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
@@ -627,9 +627,10 @@ defmodule XqliteNIF do
   `{:error, {:database_busy_or_locked, code, message}}`. The children are
   finalized before the handle is freed, so that answer never means "nothing
   happened": every statement, stream and blob is gone, and the connection —
-  still open — can be closed again. No state this library can reach makes
-  SQLite keep the handle today; the answer is SQLite's own, passed on rather
-  than discarded.
+  still open — can be closed again, and should be: it has lost its update, commit and rollback
+  hooks, its progress handler and its authorizer, while its WAL hook and busy handler stay (see
+  `Xqlite.close/1`). Only a statement or backup a loaded extension keeps open makes SQLite
+  decline; the answer is SQLite's own, passed on rather than discarded.
 
   The other error is `{:error, {:lock_error, message}}`, after a thread panicked inside the NIF
   while holding a lock the close needs (Rust marks such a lock broken for
@@ -690,6 +691,8 @@ defmodule XqliteNIF do
   holds (see `register_wal_hook/2`). A raw `PRAGMA wal_autocheckpoint;`
   query would always report `0` on an xqlite connection; `busy_timeout` reads
   the timeout a held busy slot keeps, for the same reason.
+  After a raw `PRAGMA wal_autocheckpoint = N`, this read and `Xqlite.Pragma.get/2` keep answering
+  xqlite's threshold while SQLite checkpoints at N, or never for N of 0 or less.
   """
   @spec get_pragma(conn :: Xqlite.conn(), name :: String.t()) ::
           {:ok, term() | :no_value} | Xqlite.error()
@@ -726,8 +729,8 @@ defmodule XqliteNIF do
   callback. `Xqlite.put_busy_timeout/2` sets the timeout instead.
 
   Setting `wal_autocheckpoint` through this function additionally repairs
-  the WAL hook slot: the PRAGMA installs SQLite's internal autocheckpoint
-  callback in place of xqlite's master WAL callback, so this NIF
+  the WAL hook slot: the PRAGMA puts SQLite's own autocheckpoint callback, or for 0 or less
+  nothing, in place of xqlite's master WAL callback, so this NIF
   re-installs the master and mirrors the new threshold into its emulated
   autocheckpoint (see `register_wal_hook/2`). Raw-SQL `PRAGMA` statements
   get no such repair.
@@ -1100,7 +1103,8 @@ defmodule XqliteNIF do
     do: err()
 
   @doc """
-  Retrieves the rowid of the most recent successful `INSERT` into a rowid table.
+  Retrieves the rowid of the last row an `INSERT` put into a rowid table on this connection (a
+  trigger's inserts count only until the trigger ends).
 
   This function calls SQLite's `sqlite3_last_insert_rowid()` for the given
   connection. The value returned is the rowid of the last row inserted by an
@@ -1108,13 +1112,11 @@ defmodule XqliteNIF do
 
   Important Considerations:
     - The value is connection-specific. Inserts on other connections do not affect it.
-    - It is only updated by successful `INSERT` statements. Failed inserts, updates,
-      deletes, or other SQL statements do not change its value.
+    - It is SQLite's own value, kept through a rollback; see `Xqlite.last_insert_rowid/1`.
     - **It does not work for `WITHOUT ROWID` tables.** For such tables, you must
       use the `INSERT ... RETURNING` clause to get the primary key values of
       inserted rows.
-    - If no successful `INSERT`s have occurred on the connection since it was
-      opened, this function typically returns `0`.
+    - It answers `0` until a row has been inserted on the connection.
     - The rowid can be an alias for the `INTEGER PRIMARY KEY` column if one exists.
 
   `conn` is the database connection resource.
@@ -1140,6 +1142,7 @@ defmodule XqliteNIF do
   Returns the total number of rows modified, inserted, or deleted by all
   `INSERT`, `UPDATE`, or `DELETE` statements since the connection was
   opened, including changes from triggers.
+  A statement's rows count only once it ends; see `Xqlite.total_changes/1`.
   """
   @spec total_changes(conn :: Xqlite.conn()) :: {:ok, non_neg_integer()} | Xqlite.error()
   def total_changes(_conn), do: err()
@@ -1213,17 +1216,14 @@ defmodule XqliteNIF do
   Possible values:
 
     * `:none` — no transaction active on this schema.
-    * `:read` — a read transaction is active (SHARED lock).
-    * `:write` — a write transaction is active (RESERVED+ lock).
+    * `:read` — a read transaction is active.
+    * `:write` — a write transaction is active.
     * `:unknown` — future variants (SQLite added a state we don't map yet).
 
-  ## Why not a full 5-state lock ladder?
+  ## The file lock
 
-  `sqlite3_file_control(SQLITE_FCNTL_LOCKSTATE)` would give the full
-  NONE / SHARED / RESERVED / PENDING / EXCLUSIVE picture, but it requires
-  SQLite compiled with `SQLITE_DEBUG` — a build flag that enables every
-  `assert()` inside SQLite with a real performance cost. We do not compile
-  with it. `txn_state` is the honest production-safe substitute.
+  `txn_state` answers the transaction state SQLite keeps per schema (none, read or write), not
+  the file lock (none, shared, reserved, pending or exclusive), which xqlite does not offer.
   """
   @spec txn_state(Xqlite.conn(), String.t() | :all) ::
           {:ok, :none | :read | :write | :unknown} | Xqlite.error()
@@ -1354,8 +1354,7 @@ defmodule XqliteNIF do
   Removes the busy retry policy from the connection.
 
   Observers keep receiving `{:xqlite_busy, …}` messages; without a
-  policy the connection waits up to the `busy_timeout` that was in
-  effect when the busy slot was taken, then surfaces `SQLITE_BUSY`.
+  policy the connection waits up to the busy timeout the slot keeps, then surfaces `SQLITE_BUSY`.
   Safe to call when no policy is installed.
 
   Returns `:ok`.
@@ -1373,9 +1372,8 @@ defmodule XqliteNIF do
   to `pid`. Any number of observers can be registered; each returns a
   handle for `unregister_busy_observer/2`. Observers fire whether or
   not a retry policy is installed. With no policy, the connection waits
-  up to the `busy_timeout` that was in effect when the busy slot was
-  taken (5000 ms unless you set it) before surfacing `SQLITE_BUSY`;
-  unregistering the last observer puts that timeout back. While the
+  up to the busy timeout the slot keeps before surfacing `SQLITE_BUSY`, and unregistering the
+  last observer hands that timeout back to SQLite's own handler. While the
   slot is held, a statement writing `busy_timeout` is rejected with
   `{:error, {:busy_timeout_write_refused, %{policy: boolean, observers:
   count}}}`. See `Xqlite.register_busy_observer/2` for the full slot
@@ -1410,8 +1408,9 @@ defmodule XqliteNIF do
   handler takes the slot. `0` disables waiting.
 
   This is the one way to change the wait while the slot is held: it
-  calls `sqlite3_busy_timeout` directly, so no authorizer is consulted,
-  while a `busy_timeout` write in SQL is rejected (see
+  runs no SQL, so no authorizer is consulted; while the slot is held it changes the busy timeout
+  the slot keeps, and with the slot empty it calls `sqlite3_busy_timeout`. A `busy_timeout` write
+  in SQL is rejected while the slot is held (see
   `set_busy_policy/4`).
 
   Returns `:ok`. A value above `2_147_483_647`, which SQLite cannot store,
@@ -1430,9 +1429,11 @@ defmodule XqliteNIF do
   SQLite consults the authorizer while *preparing* every statement.
   `denied_actions` is a list of action-kind atoms (e.g. `[:delete,
   :drop_table]`); any statement whose action kind is in the list fails at
-  preparation with `{:error, {:authorization_denied, extended_code, message}}`.
+  preparation with `{:error, {:authorization_denied, extended_code, message}}` (a denied
+  `:function` answers code 1 instead; see `Xqlite.set_authorizer/2`).
   Everything else is allowed. Granularity is the action kind only (table/column
   arguments are ignored) and the only disposition is deny.
+  A deny of `:attach` also stops `VACUUM`, which attaches a temporary database of its own.
 
   The list is validated in full before anything is installed: an
   unrecognized atom returns `{:error, {:invalid_authorizer_action, atom}}`
@@ -1452,8 +1453,8 @@ defmodule XqliteNIF do
   @doc """
   Removes any authorizer from the connection (raw NIF).
 
-  Safe to call when none is installed (no-op). After removal, statement
-  preparation is unrestricted again.
+  Safe to call when none is installed (no-op). After removal no action kind is denied, but while
+  a busy policy or observer is set, a statement writing `busy_timeout` is still rejected.
 
   Returns `:ok`.
   """
@@ -1574,7 +1575,8 @@ defmodule XqliteNIF do
       the first fetch, when a schema change by any connection, this one
       included, made SQLite prepare the statement again with other names than
       `stream_get_columns/1` reports, or with one that is not UTF-8; a write
-      in the statement has run by then, and the statement is finalized.
+      in the statement has run by then, and the statement is finalized, which commits the write
+      in autocommit mode.
 
   `Xqlite.stream/4` drives all of this; use it unless you are stepping the
   stream by hand.
@@ -1904,8 +1906,12 @@ defmodule XqliteNIF do
   delivered like any other.
 
   Multiple subscribers can coexist on the same connection — each gets a
-  unique handle. The callback fires for every subscriber on every
-  update. Use the returned handle to unregister via
+  unique handle. The callback fires for every subscriber on every row change SQLite reports to
+  the update hook: none for a `WITHOUT ROWID` table, none for a row a `REPLACE` conflict deletes
+  (`INSERT OR REPLACE`, `UPDATE OR REPLACE`), and none for the rows of a `DELETE` without a
+  `WHERE` that SQLite runs as one truncate, which it does unless the statement has a `RETURNING`
+  clause, the table has a trigger, `foreign_keys` is on and a foreign key involves the table, or
+  a session exists on the connection. Use the returned handle to unregister via
   `unregister_update_hook/2`.
 
   The callback fires before the change is committed — if the enclosing
@@ -1951,9 +1957,9 @@ defmodule XqliteNIF do
   > #### Warning — raw-SQL `PRAGMA wal_autocheckpoint` {: .warning}
   >
   > Issuing `PRAGMA wal_autocheckpoint = N` through `query/3`,
-  > `execute/3`, or `execute_batch/2` installs SQLite's internal WAL
-  > hook in place of ours: subscribers silently stop receiving events
-  > (no memory is leaked). Only `set_pragma/3` repairs the slot —
+  > `execute/3`, or `execute_batch/2` puts SQLite's own WAL hook in place of ours, or for an N
+  > of 0 or less empties the slot so that nothing checkpoints: subscribers silently stop
+  > receiving events (no memory is leaked). Only `set_pragma/3` repairs the slot —
   > always set this PRAGMA through it.
 
   Returns `{:ok, handle}` on success or `{:error, reason}` on failure.

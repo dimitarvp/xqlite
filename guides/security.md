@@ -48,7 +48,7 @@ attempts; and in WAL mode xqlite runs the emulated autocheckpoint — a
 passive checkpoint, i.e. real file I/O — inside its WAL hook on the
 committing thread while the mutex is held. Neither is a bug (it is simply
 where SQLite invokes the callback), but both make other operations on the
-*same* connection wait. Other connections are never affected.
+*same* connection wait.
 
 Prepared statements, streams, and incremental-blob handles all hold a
 pointer into their connection's SQLite state, and closing the connection
@@ -119,7 +119,8 @@ When you must run SQL you did not write — a reporting console, a
 user-supplied filter — install a deny-list authorizer. SQLite consults it
 while *preparing* every statement, before any row is touched, and xqlite
 turns a denied action into a structured `{:error, {:authorization_denied,
-extended_code, message}}`:
+extended_code, message}}`, except a denied `:function`, which SQLite reports
+as an error with code 1 (see `Xqlite.set_authorizer/2`):
 
 ```elixir
 {:ok, conn} = Xqlite.open_in_memory()
@@ -155,7 +156,9 @@ One caveat with security relevance: denying `:pragma` also disables
 `Xqlite.Pragma.get/2`, `Xqlite.Pragma.put/3`, `Xqlite.optimize/1`,
 `Xqlite.shrink_memory/1` and the schema-introspection helpers, since those
 run `PRAGMA` statements. Deny it only when you intend to lock those paths
-out too.
+out too. `Xqlite.optimize/1` is stopped by more kinds than `:pragma`, since
+the `ANALYZE` it runs is authorized too; its doc lists them. A deny of
+`:attach` also stops `VACUUM`, which attaches a temporary database of its own.
 
 Three reads slip past a `:pragma` deny, because none runs a `PRAGMA`
 statement for SQLite to reject:

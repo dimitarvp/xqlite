@@ -30,7 +30,6 @@ defmodule Xqlite.NIF.LastInsertRowidTest do
       test "returns the auto-generated rowid", %{conn: conn} do
         insert_sql = "INSERT INTO rowid_test (data) VALUES (?1);"
         assert {:ok, 1} = NIF.execute(conn, insert_sql, ["auto data 1"])
-        # First auto-generated rowid is typically 1
         assert {:ok, 1} = NIF.last_insert_rowid(conn)
         assert {:ok, 1} = NIF.execute(conn, insert_sql, ["auto data 2"])
         assert {:ok, 2} = NIF.last_insert_rowid(conn)
@@ -49,7 +48,7 @@ defmodule Xqlite.NIF.LastInsertRowidTest do
                  )
 
         assert {:ok, 55} = NIF.last_insert_rowid(conn)
-        # Attempt a failing insert
+
         assert {:error, _} =
                  NIF.execute(
                    conn,
@@ -57,8 +56,15 @@ defmodule Xqlite.NIF.LastInsertRowidTest do
                    []
                  )
 
-        # Verify last_insert_rowid still returns the ID from the *last successful* insert
         assert {:ok, 55} = NIF.last_insert_rowid(conn)
+      end
+
+      test "a failed multi-row insert leaves the value at a row it removed", %{conn: conn} do
+        {:ok, 1} = NIF.execute(conn, "INSERT INTO rowid_test (id) VALUES (55)", [])
+        failed = NIF.execute(conn, "INSERT INTO rowid_test (id) VALUES (10), (11), (55)", [])
+        assert {:error, {:constraint_violation, :constraint_primary_key, _}} = failed
+        assert {:ok, 11} = NIF.last_insert_rowid(conn)
+        assert {:ok, %{rows: [[55]]}} = NIF.query(conn, "SELECT id FROM rowid_test", [])
       end
     end
   end

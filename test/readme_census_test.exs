@@ -1,10 +1,10 @@
 defmodule Xqlite.ReadmeCensusTest do
   @moduledoc """
-  Every number the README counts is read back out of the code.
+  Every number the README counts, and its SQLite version, is read back out of the code.
 
   The README states four counts — typed error reasons, constraint subtypes,
-  typed and writable PRAGMAs, and built-in type extensions. Each of them
-  drifts the moment a member is added, and a reader has no way to tell. This
+  typed and writable PRAGMAs, and built-in type extensions — and repeats two of them.
+  Each of them drifts the moment a member is added, and a reader has no way to tell. This
   test extracts each number from the README's own sentence and compares it
   with the source it describes: the two unions through `Code.Typespec`, the
   two PRAGMA lists through `Xqlite.Pragma`, and the extension modules by
@@ -50,6 +50,7 @@ defmodule Xqlite.ReadmeCensusTest do
                readme()
              )
 
+    assert [[_whole, ^stated]] = Regex.scan(~r/all (\w+) SQLite constraint subtypes/, readme())
     members = union_members(:constraint_kind)
 
     assert :constraint_violation in members
@@ -60,6 +61,8 @@ defmodule Xqlite.ReadmeCensusTest do
     assert [[_whole, typed, writable]] =
              Regex.scan(~r/validation for (\d+) PRAGMAs, (\d+) of them writable/, readme())
 
+    copy = ~r|(\d+) typed PRAGMAs\*\* with validated get/set; (\d+) of them are writable|
+    assert [[_whole, ^typed, ^writable]] = Regex.scan(copy, readme())
     assert String.to_integer(typed) == length(Xqlite.Pragma.all())
     assert String.to_integer(writable) == length(Xqlite.Pragma.writable())
   end
@@ -75,6 +78,13 @@ defmodule Xqlite.ReadmeCensusTest do
     assert [[_whole, stated]] = Regex.scan(~r/needs Rust (\d+\.\d+) or newer/, readme())
     assert {:ok, cargo} = File.read(Path.join(__DIR__, "../native/xqlitenif/Cargo.toml"))
     assert [[_line, ^stated]] = Regex.scan(~r/^rust-version = "([\d.]+)"/m, cargo)
+  end
+
+  test "the README's SQLite version is the bundled library's" do
+    assert {:ok, version} = Xqlite.sqlite_version()
+    copies = ~r{(?:badge/SQLite-|releaselog/|Bundled SQLite |Currently: SQLite )([\d._]+\d)}
+    stated = copies |> Regex.scan(readme(), capture: :all_but_first) |> List.flatten()
+    assert Enum.map(stated, &String.replace(&1, "_", ".")) == List.duplicate(version, 4)
   end
 
   test "decimal is an optional dependency and no OpenTelemetry package is one" do

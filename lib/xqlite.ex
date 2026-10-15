@@ -297,7 +297,7 @@ defmodule Xqlite do
   fetch — made SQLite prepare it again. `query/4` and `stream/4` answer it
   with both lists, or `:column_name_not_utf8` when a new name is not UTF-8,
   rather than put a value under another column's name; a write in the
-  statement has run by then.
+  statement has run by then and, in autocommit mode, is committed: the error does not undo it.
   """
   @type error_reason ::
           :blob_closed
@@ -620,8 +620,10 @@ defmodule Xqlite do
   `{:error, {:database_busy_or_locked, code, message}}`. The drain has
   already run by then, so that answer never means "nothing happened": every
   prepared statement, stream and blob is finalized, and the connection —
-  still open — can be closed again. Nothing this library opens is left behind
-  by the drain, so no measured state reaches that answer today; it is
+  still open — can be closed again, and should be: rusqlite removed its update, commit and
+  rollback hooks, its progress handler (progress hooks, cancel tokens) and its authorizer (your
+  deny list, the rejection of `busy_timeout` writes) before asking SQLite to close. Only a
+  statement or backup a loaded extension keeps open makes SQLite decline; it is
   SQLite's own report, passed on rather than discarded.
 
   The other error is `{:error, {:lock_error, message}}`, after a
@@ -1421,7 +1423,8 @@ defmodule Xqlite do
   `:read` or `:select` does for a `SELECT` of such a column, that CTE
   included. When
   another connection changes the table between the read and the first step,
-  the answer comes after that step, a write in the statement having run:
+  the answer comes after that step, a write in the statement having run and, in autocommit
+  mode, been committed (the error does not undo it):
   `{:error, {:columns_changed, %{expected: names, live: names}}}` when the
   names differ, the name error when a new name is not UTF-8.
 
@@ -1447,6 +1450,7 @@ defmodule Xqlite do
       rolls back the whole transaction, as `create_cancel_token/0` describes. Any other value that
       is no live token, or a list holding one, returns
       `{:error, {:invalid_cancel_tokens, _}}` before the statement runs.
+      A call waiting for another connection's lock reads its tokens only once that wait ends.
   """
   @spec query(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
@@ -1850,7 +1854,7 @@ defmodule Xqlite do
   answer `{:columns_changed, %{expected: names, live: names}}` through
   `:on_error` when the names differ, or `{:column_name_not_utf8, _}` when a
   new name is not UTF-8, never a row under the wrong names; a write in the
-  statement has run by then.
+  statement has run by then and, in autocommit mode, is committed: the error does not undo it.
 
   Returns an `Enumerable.t()` on success or `{:error, reason}` on setup failure.
   Callers must pattern-match the result before piping — this is intentional,
@@ -2639,9 +2643,14 @@ defmodule Xqlite do
   Runs `PRAGMA optimize`, which lets SQLite analyze the tables whose statistics
   the planner would use, answering `:ok`; `query/4` runs it with a mask. A
   `:pragma` deny answers `{:error, {:authorization_denied, code, message}}`.
+  So does a deny of `:transaction` where the call takes the write lock (below) and, when SQLite
+  finds a table to analyze, of an action its `ANALYZE` needs: `:analyze`, `:read`, `:select`;
+  `:insert`, `:update`, `:create_table` while the database has no `sqlite_stat1` table; `:delete`
+  once it has one. A `:function` deny then answers `{:error, {:sqlite_failure, 1, 1, message}}`.
 
   In autocommit, on a connection that can write, it takes the write lock of every attached
-  database first, not only main's, even with nothing to analyze, and rolls back on any
+  database first, not only main's (a file attached with `mode=ro` gets only a read lock), even
+  with nothing to analyze, and rolls back on any
   failure: a lock another connection holds waits as `put_busy_timeout/2` or the busy policy
   says, observers hear it, then it answers `{:error, {:database_busy_or_locked, 5, message}}`;
   a statement, stream or blob of the connection mid-run answers `{:error, :statement_mid_run}`.
@@ -2657,7 +2666,8 @@ defmodule Xqlite do
 
   @doc """
   Runs `PRAGMA shrink_memory`, which frees the cache memory the connection
-  can give back, and answers `:ok`, or the errors `optimize/1` answers.
+  can give back, and answers `:ok`. A `:pragma` deny, the only deny that stops it, answers
+  `{:error, {:authorization_denied, 23, message}}`.
   """
   @spec shrink_memory(conn()) :: :ok | error()
   def shrink_memory(conn), do: exec(conn, "PRAGMA shrink_memory")
@@ -2695,9 +2705,14 @@ defmodule Xqlite do
   >
   > `sleep_ms` sleeps on the thread holding the connection mutex, so while
   > a retry waits, that connection is pinned: other operations on the
-  > *same* connection block until the sleep-and-retry resolves. Different
-  > connections are unaffected. Budget `sleep_ms` × `max_retries`
-  > accordingly.
+  > *same* connection block until the sleep-and-retry resolves. Every call on a connection holds
+  > one of the VM's dirty I/O threads (10 by default, set with the `+SDio` emulator flag) while
+  > it waits for the connection's mutex or another connection's lock; every other connection and
+  > the VM's file operations share them, so once that many calls wait at once those wait too, the
+  > lock holder's commit waits for a thread, and the waits run out their budget and answer
+  > `{:error, {:database_busy_or_locked, 5, _}}`. Keep the calls that can wait at once (every
+  > pooled connection, plus every process sharing one) below that count, or raise it. Budget
+  > `sleep_ms` × `max_retries` accordingly.
 
   > #### Note — a raw PRAGMA busy_timeout write is rejected here {: .info}
   >
@@ -2751,10 +2766,10 @@ defmodule Xqlite do
   >
   > SQLite gives a connection one busy callback, and an observer takes
   > it. Observing does not change how long the connection waits: with
-  > no policy installed, the callback keeps waiting up to the
-  > `busy_timeout` that was in effect when the slot was taken (5000 ms
-  > on a connection whose timeout you never set), and unregistering the
-  > last observer puts that timeout back. The value is read through
+  > no policy installed, the callback keeps waiting up to the busy timeout the slot keeps: the
+  > one in effect when the slot was taken (5000 ms on a connection whose timeout you never set)
+  > or the one `put_busy_timeout/2` set since, and unregistering the last observer hands that
+  > timeout back to SQLite's own handler. The value is read through
   > `PRAGMA busy_timeout` as the slot is taken; that read is xqlite's
   > own and passes even an authorizer that denies `:pragma`. While the
   > slot is held, `PRAGMA busy_timeout` reads `0` — SQLite zeroes it
@@ -2809,7 +2824,9 @@ defmodule Xqlite do
   the timeout as a 32-bit integer, so anything but an integer from `0` to
   `2_147_483_647` (about 24.8 days) returns `{:error, {:invalid_pragma_value,
   %{pragma: :busy_timeout, value: ms}}}` before anything reaches SQLite, the
-  answer `open/2` and `Xqlite.Pragma.put/3` give for the same value.
+  answer `Xqlite.Pragma.put/3` gives for the same value; the `:busy_timeout` option of `open/2`
+  and `open_in_memory/1` answers `{:error, {:invalid_option, %{key: :busy_timeout, value: ms,
+  reason: :invalid_value}}}` for it, except `:infinity`, which they take as 2_147_483_647.
 
   This function always works, slot held or not, and no authorizer is
   consulted. A raw
@@ -2875,6 +2892,12 @@ defmodule Xqlite do
     * **Deny-only.** An action is allowed or denied (SQLite's `DENY`). The
       `IGNORE` disposition (silently treat the access as a NULL/no-op) is not
       exposed.
+    * **A denied function answers code 1.** SQLite reports a function call the authorizer denies
+      as an error in the statement, not as `SQLITE_AUTH`. Under a deny of `:function`, a statement
+      calling one answers `{:error, {:sql_input_error, %{code: 1, ...}}}`, and where SQLite calls
+      its own (`ANALYZE`, `VACUUM`, `optimize/1` when it runs an `ANALYZE`, a `CREATE VIRTUAL
+      TABLE` whose module calls one) the answer is `{:error, {:sqlite_failure, 1, 1, message}}`;
+      xqlite reads no message text, so it cannot answer `{:authorization_denied, _, _}` there.
 
   ## Caveat — denying `:pragma` disables the PRAGMA functions
 
@@ -2884,6 +2907,8 @@ defmodule Xqlite do
   lean on PRAGMAs too. Denying `:pragma` therefore makes all of them fail with
   `{:error, {:authorization_denied, _, _}}`. Deny it only when you intend to lock
   those paths out as well.
+  `optimize/1` is stopped by more kinds than `:pragma`, since its `ANALYZE` is authorized too (its
+  doc lists them); an `:attach` deny also stops `VACUUM`, which attaches a temporary database.
 
   Three reads slip past that deny, because none runs a `PRAGMA` statement for
   SQLite to deny: `Xqlite.Pragma.get(conn, :busy_timeout)` while a busy policy or
@@ -2921,8 +2946,8 @@ defmodule Xqlite do
   @doc """
   Removes any authorizer installed on the connection.
 
-  Safe to call when none is installed (no-op). After removal, statement
-  preparation is unrestricted again.
+  Safe to call when none is installed (no-op). After removal no action kind is denied, but while
+  a busy policy or observer is set, a statement writing `busy_timeout` is still rejected.
 
   No telemetry is emitted.
   """
@@ -3020,7 +3045,10 @@ defmodule Xqlite do
   runs. A write cancelled while it runs rolls back the whole transaction, an
   explicit one included, and turns autocommit back on; a cancelled read rolls
   back nothing. See "A write cancelled while it runs rolls back the whole
-  transaction" in the Gotchas guide.
+  transaction" in the Gotchas guide. A signal does not end a wait for a lock another connection
+  holds: SQLite makes no check while it waits, so the wait lasts until the lock frees or
+  `put_busy_timeout/2` or the busy policy gives up, and the call then answers the busy error. When
+  the lock frees first, the statement runs and the signal takes effect at SQLite's next check.
   """
   @spec create_cancel_token() :: {:ok, reference()} | error()
   def create_cancel_token do
@@ -3170,6 +3198,11 @@ defmodule Xqlite do
 
   Any other term in the `mode` position returns
   `{:error, {:invalid_transaction_mode, mode}}` and starts nothing.
+
+  The transaction belongs to the connection, not to the process that began it: if that process
+  dies it stays open, every later statement on the connection, from any process, runs inside it,
+  a write answering as it would in autocommit mode; `close/1` rolls it all back; `autocommit/1`
+  answers `{:ok, false}` until a process sharing the connection commits it or rolls it back.
   """
   @spec begin(conn(), term()) :: :ok | error()
   def begin(conn, mode \\ :deferred)
@@ -3388,8 +3421,8 @@ defmodule Xqlite do
   `:write`, or `:unknown` (a future SQLite state not mapped yet).
 
   `schema` defaults to `"main"`; `:all` answers the highest state over every
-  attached database. Wraps `XqliteNIF.txn_state/2` (see it for why there is
-  no full five-state lock ladder). No telemetry is emitted.
+  attached database. Wraps `XqliteNIF.txn_state/2` (see it on the file lock). No telemetry is
+  emitted.
 
   A `schema` that is neither a string nor `:all`, `nil` included, returns
   `{:error, {:invalid_schema_name, schema}}`.
@@ -3404,10 +3437,14 @@ defmodule Xqlite do
   def txn_state(_conn, schema), do: {:error, {:invalid_schema_name, schema}}
 
   @doc """
-  Returns the rowid of the most recent successful `INSERT` on this
-  connection.
+  Returns the rowid of the last row an `INSERT` put into a rowid table on this connection, the
+  value SQL's `last_insert_rowid()` reads (a trigger's inserts count only until the trigger ends).
 
-  Connection-specific and only updated by successful `INSERT`s. Does
+  SQLite sets it as each row is inserted and keeps it through a rollback: a statement that fails
+  after it inserted a row (a one-row insert whose trigger then fails included), or a rolled-back
+  transaction, can leave a rowid the table no longer holds; an insert refused before it writes a
+  row, such as one breaking a constraint of its table, and an `INSERT OR IGNORE` that ignores its
+  row leave it as it was. Does
   not work for `WITHOUT ROWID` tables — use `INSERT ... RETURNING`
   there. Wraps `XqliteNIF.last_insert_rowid/1`. No telemetry is
   emitted.
@@ -3434,6 +3471,8 @@ defmodule Xqlite do
   and `DELETE` statements since the connection was opened, including
   changes made by triggers. Wraps `XqliteNIF.total_changes/1`. No
   telemetry is emitted.
+  SQLite adds a statement's rows when it ends, so a write still mid-run (a `RETURNING` write
+  stepped part way) is not counted until it runs to its end or is reset or finalized.
   """
   @spec total_changes(conn()) :: {:ok, non_neg_integer()} | error()
   def total_changes(conn), do: XqliteNIF.total_changes(conn)

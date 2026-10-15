@@ -35,8 +35,7 @@ impl LogSubscriber {
 
 static LOG_SUBSCRIBERS: HookList<LogSubscriber> = HookList::new();
 static MASTER_INSTALLED: AtomicBool = AtomicBool::new(false);
-/// Serialises `sqlite3_config` calls — that API is itself not
-/// thread-safe.
+/// Guards the log callback's one install and the subscriber list (see `fan_out`).
 static MASTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// SQLite log callback. Fan-out to all registered subscribers.
@@ -107,9 +106,10 @@ pub(crate) fn register(pid: LocalPid) -> Result<u64, XqliteError> {
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
 
     if !MASTER_INSTALLED.load(Ordering::Acquire) {
-        // SAFETY: we hold MASTER_LOCK, so no concurrent sqlite3_config call.
-        // The callback never invokes SQLite (it only sends Erlang
-        // messages via raw enif_send).
+        // SAFETY: SQLite 3.53.2 takes SQLITE_CONFIG_LOG at any time, as two word stores
+        // that `sqlite3_log` reads on any thread without a lock; MASTER_INSTALLED makes this
+        // the one install, from no callback to ours with a NULL argument, so a reader sees
+        // none or ours. The callback calls no SQLite function; it only sends Erlang messages.
         let rc = unsafe {
             ffi::sqlite3_config(
                 ffi::SQLITE_CONFIG_LOG,

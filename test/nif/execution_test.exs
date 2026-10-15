@@ -6,7 +6,6 @@ defmodule Xqlite.NIF.ExecutionTest do
 
   alias XqliteNIF, as: NIF
 
-  # Standard column definitions for reusable test table setup
   @exec_test_columns_sql """
   (
     id INTEGER PRIMARY KEY,
@@ -103,14 +102,12 @@ defmodule Xqlite.NIF.ExecutionTest do
 
   defp finish_child({:blob, blob}), do: NIF.blob_close(blob)
 
-  # Creates a table with the standard test columns but allows specifying the name.
   defp setup_named_table(conn, table_name \\ "exec_test") do
     create_sql = "CREATE TABLE #{table_name} #{@exec_test_columns_sql};"
     {:ok, 0} = NIF.execute(conn, create_sql, [])
     conn
   end
 
-  # --- Shared test code (generated via `for` loop for different DB types) ---
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "using #{prefix}" do
       @describetag type_tag
@@ -297,10 +294,8 @@ defmodule Xqlite.NIF.ExecutionTest do
         INSERT INTO ok_table VALUES (2); -- This won't run
         """
 
-        # Expect :no_such_table error from the SELECT statement
         assert {:error, {:no_such_table, _msg}} = NIF.execute_batch(conn, bad_sql)
 
-        # Verify statements before the error might have executed
         assert {:ok, %{rows: [[1]], num_rows: 1}} =
                  NIF.query(conn, "SELECT * FROM ok_table;", [])
       end
@@ -314,7 +309,6 @@ defmodule Xqlite.NIF.ExecutionTest do
       end
 
       test "execute/3 returns error for NoSuchTable on INSERT", %{conn: conn} do
-        # Try inserting into a table that doesn't exist
         sql = "INSERT INTO non_existent_table (col) VALUES (1);"
         assert {:error, {:no_such_table, "non_existent_table"}} = NIF.execute(conn, sql, [])
       end
@@ -353,12 +347,16 @@ defmodule Xqlite.NIF.ExecutionTest do
                    []
                  )
 
-        assert {:error, {:constraint_violation, :constraint_unique, _msg}} =
+        assert {:error, {:constraint_violation, :constraint_unique, details}} =
                  NIF.execute(
                    conn,
                    "INSERT INTO #{table_name} (id, name) VALUES (2, 'UniqueName');",
                    []
                  )
+
+        keys = ~w(columns constraint_name index_name message source_type table target_type)a
+        assert details |> Map.keys() |> Enum.sort() == keys
+        assert is_binary(details.message)
       end
 
       test "execute/3 returns error for constraint violation (NOT NULL)", %{conn: conn} do
@@ -472,7 +470,6 @@ defmodule Xqlite.NIF.ExecutionTest do
 
         assert {:ok, 1} = NIF.execute(conn, sql_insert, insert_params)
 
-        # Verify that the stored string, when retrieved, contains the NUL byte
         sql_select = "SELECT name FROM exec_test WHERE id = ?1;"
         select_params = [10]
 

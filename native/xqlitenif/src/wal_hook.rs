@@ -128,8 +128,8 @@ unsafe extern "C" fn wal_hook_callback(
 ///
 /// # Safety
 ///
-/// See `busy_handler::send_busy_to_pid` for the OTP 26.1 NULL-env
-/// invariant.
+/// Sends with a NULL `caller_env`, as "Sending from a callback" in
+/// `hook_util`'s module doc covers.
 unsafe fn send_wal_to_pid(pid: &LocalPid, db_name: &[u8], pages: c_int) {
     // SAFETY: all enif_* calls operate on a freshly allocated msg_env.
     unsafe {

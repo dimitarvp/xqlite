@@ -41,6 +41,10 @@ defmodule Xqlite.NIF.AuthorizerTest do
     {:savepoint, "", "SAVEPOINT s"},
     {:recursive, "", "WITH RECURSIVE c AS (SELECT 1 UNION SELECT * FROM c) SELECT * FROM c"}
   ]
+  @optimize_kinds ~w(pragma analyze read select insert update delete create_table function
+    transaction savepoint create_index drop_table reindex attach detach)a
+  @analyzable "CREATE TABLE o(a); CREATE INDEX o_a ON o(a); INSERT INTO o VALUES (1), (2);"
+  @stat1 "CREATE TABLE u(a); CREATE INDEX u_a ON u(a); INSERT INTO u VALUES (1); ANALYZE u;"
 
   for_each_opener "authorizer" do
     setup %{conn: conn} do
@@ -121,6 +125,15 @@ defmodule Xqlite.NIF.AuthorizerTest do
       end
     end
 
+    test "optimize answers each deny kind as its doc lists", context do
+      for {setup, stops} <- [{"", ~w(insert update create_table)a}, {@stat1, [:delete]}] do
+        denied = ~w(pragma analyze read select transaction)a ++ stops
+        expected = Map.new(@optimize_kinds, &{&1, if(&1 in denied, do: :denied, else: :ok)})
+        answers = Map.new(@optimize_kinds, &{&1, optimize_under_deny(context, setup, &1)})
+        assert answers == %{expected | function: :code_1}
+      end
+    end
+
     test "optimize runs the PRAGMA alone with query_only on", %{conn: conn} do
       {:ok, _} = NIF.execute(conn, "PRAGMA query_only = 1", [])
       assert :ok = Xqlite.optimize(conn)
@@ -174,10 +187,8 @@ defmodule Xqlite.NIF.AuthorizerTest do
       :ok = Xqlite.set_authorizer(conn, [:delete])
       :ok = Xqlite.set_authorizer(conn, [:insert])
 
-      # DELETE is allowed again under the replacement list...
       assert {:ok, 1} = NIF.execute(conn, "DELETE FROM t WHERE id = 1", [])
 
-      # ...while INSERT is now the denied action.
       assert {:error, {:authorization_denied, _, _}} =
                NIF.execute(conn, "INSERT INTO t(id, name) VALUES (2, 'b')", [])
     end
@@ -186,7 +197,6 @@ defmodule Xqlite.NIF.AuthorizerTest do
       assert {:error, {:invalid_authorizer_action, :bogus}} =
                Xqlite.set_authorizer(conn, [:delete, :bogus])
 
-      # Validation is atomic: with nothing installed, DELETE still works.
       assert {:ok, 1} = NIF.execute(conn, "DELETE FROM t WHERE id = 1", [])
     end
 
@@ -197,11 +207,9 @@ defmodule Xqlite.NIF.AuthorizerTest do
 
       :ok = Xqlite.set_authorizer(conn, [:delete])
 
-      # Denied on `conn`...
       assert {:error, {:authorization_denied, _, _}} =
                NIF.execute(conn, "DELETE FROM t WHERE id = 1", [])
 
-      # ...but the independent `other` connection is untouched.
       assert {:ok, 1} = NIF.execute(other, "DELETE FROM u WHERE id = 1", [])
 
       :ok = NIF.close(other)
@@ -287,10 +295,6 @@ defmodule Xqlite.NIF.AuthorizerTest do
     end
   end
 
-  # -------------------------------------------------------------------
-  # Edge cases unrelated to connection mode
-  # -------------------------------------------------------------------
-
   test "set/remove on a closed connection returns the closed-connection error" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     :ok = NIF.close(conn)
@@ -306,5 +310,18 @@ defmodule Xqlite.NIF.AuthorizerTest do
     assert :ok = Xqlite.optimize(conn)
     assert [{:row, [2]}, :done] = [NIF.stmt_step(read), NIF.stmt_step(read)]
     assert :ok = NIF.stmt_finalize(read)
+  end
+
+  defp optimize_under_deny(context, setup, kind) do
+    {mod, fun, args} = Xqlite.TestUtil.find_opener_mfa!(context)
+    {:ok, conn} = apply(mod, fun, args)
+    :ok = NIF.execute_batch(conn, @analyzable <> setup)
+    :ok = Xqlite.set_authorizer(conn, [kind])
+
+    case {Xqlite.optimize(conn), NIF.close(conn)} do
+      {{:error, {:authorization_denied, 23, _message}}, :ok} -> :denied
+      {{:error, {:sqlite_failure, 1, 1, _message}}, :ok} -> :code_1
+      {other, :ok} -> other
+    end
   end
 end

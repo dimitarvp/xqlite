@@ -159,6 +159,29 @@ answers its syntax error.
   use `Xqlite.put_busy_timeout/2`.
 - [A shared handle serializes](gotchas.md#give-each-process-its-own-connection-a-shared-handle-serializes):
   open one connection per process.
+- **Calls waiting for a lock hold a dirty I/O thread.** A call waiting for its
+  connection's mutex, or for a lock another connection holds, keeps one of the
+  VM's dirty I/O threads (10 by default), which every connection and the VM's
+  file operations share: once that many calls wait at once, every other
+  connection and file read waits too. Keep the calls that can wait at once below
+  that count, or raise it with the `+SDio` emulator flag.
+- `Xqlite.last_insert_rowid/1` is SQLite's own value and keeps a rowid through a
+  rollback: after a statement that inserted rows and then failed, or a
+  rolled-back transaction, it can name a row the table no longer holds. Take the
+  rowids an insert made from its `RETURNING` rows.
+- A `RETURNING` write runs before its column names are checked again: when
+  another connection, or for `Xqlite.stream/4` the same one, changes the table
+  between the write's prepare and its first step so that the result columns
+  change, `Xqlite.query/4` and `Xqlite.stream/4`
+  answer `{:error, {:columns_changed, _}}`, or `{:column_name_not_utf8, _}`, after
+  the write ran, and in autocommit mode it is committed. Nothing is lost, but a
+  caller that retries on this error writes again: read the table first, or run
+  such a write inside a transaction and roll back on this error.
+- When SQLite declines `Xqlite.close/1`, the connection stays open without its
+  update, commit and rollback hooks, its progress handler (progress hooks and
+  cancel tokens) and its authorizer, which rusqlite removed before asking SQLite
+  to close. Close it again rather than go on using it; only a statement or backup
+  a loaded extension keeps open makes SQLite decline.
 - xqlite releases the handles the garbage collector frees on one release
   thread for all connections, or in the call that holds the handle's
   connection, before that call returns. A release that commits a write in
@@ -196,10 +219,14 @@ answers its syntax error.
   generated column's `default_value`, user-defined functions, and the
   limits SQLite itself sets (one writer per file, no network access, no
   row-level locks, no schemas).
-- A raw `PRAGMA wal_autocheckpoint` statement takes the callback that WAL
-  subscribers use; set the value with `Xqlite.Pragma.put/3` instead, as the
+- A raw `PRAGMA wal_autocheckpoint = N` statement takes the callback that WAL
+  subscribers use, and `Xqlite.Pragma.get/2` and `XqliteNIF.get_pragma/2` keep
+  answering the library's threshold while SQLite checkpoints at that N, or never
+  for 0 or less; set the value with `Xqlite.Pragma.put/3` instead, as the
   README's [Transaction lifecycle hooks](../README.md#transaction-lifecycle-hooks)
   says.
-- The authorizer decides on the action kind alone and can only deny: see
+- The authorizer decides on the action kind alone and can only deny, and a deny
+  of `:function` answers an error with SQLite's code 1, not
+  `{:authorization_denied, _, _}`: see
   [Restricting untrusted SQL](security.md#restricting-untrusted-sql-the-authorizer)
   in the Security guide.

@@ -1334,12 +1334,11 @@ pub(crate) fn is_misuse(error: &XqliteError) -> bool {
     }
 }
 
-/// Classify a failed `sqlite3_prepare_v2` the way rusqlite's own `prepare`
-/// does, so the raw-FFI prepare sites and `query`/`execute` agree on one SQL
-/// string. A failed `sqlite3_step` classifies here too: SQLite clears the error
-/// offset when a step fails, so the answer is the one rusqlite's `step` gives,
-/// except a step whose re-prepare fails, which answers the compile error with
-/// its offset.
+/// Classify a failed `sqlite3_prepare_v2` as rusqlite's own `prepare` does, which still
+/// compiles the transaction, schema-reader and PRAGMA-read SQL, so both paths answer a
+/// compile error alike. A failed `sqlite3_step` classifies here too: SQLite clears the
+/// error offset when a step fails, so the answer is the one rusqlite's `step` gives,
+/// except a step whose re-prepare fails, which answers the compile error with its offset.
 ///
 /// # Safety
 /// The caller must hold the connection Mutex, and `db` must be the live handle

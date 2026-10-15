@@ -45,8 +45,6 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
         {:ok, conn: ro_conn, db_path: db_path}
       end
 
-      # --- Read Operations ---
-
       test "SELECT succeeds", %{conn: ro_conn} do
         assert {:ok, %{columns: ["id", "data"], rows: [[1, "sample data"]], num_rows: 1}} =
                  NIF.query(
@@ -70,8 +68,6 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
         assert {:ok, columns} = NIF.schema_columns(ro_conn, @test_table_name)
         assert length(columns) == 2
       end
-
-      # --- Write Operations (must fail) ---
 
       test "INSERT fails with :read_only_database, carrying the extended code", %{
         conn: ro_conn
@@ -121,15 +117,11 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
       test "commit after begin with no writes succeeds", %{conn: ro_conn} do
         assert :ok = NIF.begin(ro_conn)
         assert :ok = NIF.commit(ro_conn)
-
-        # Verify connection left the transaction
         assert :ok = NIF.begin(ro_conn)
         assert :ok = NIF.rollback(ro_conn)
       end
     end
   end
-
-  # --- open_readonly-specific edge cases ---
 
   test "open_readonly on nonexistent file fails" do
     assert {:error, {:cannot_open_database, _, _, _}} =
@@ -189,5 +181,61 @@ defmodule Xqlite.NIF.ReadOnlyDbTest do
       assert {:ok, 1} = NIF.execute(conn, "INSERT INTO scratch VALUES (1)", [])
       NIF.close(conn)
     end
+  end
+
+  test "query_only on a shared cache stops neither PRAGMA query_only = 0 nor a journal-mode change" do
+    db = "file:#{tmp_db_path("ro_query_only")}?cache=shared"
+    {:ok, rw} = NIF.open(db)
+    :ok = NIF.execute_batch(rw, "PRAGMA journal_mode = wal; CREATE TABLE s (id);")
+    {:ok, ro} = Xqlite.open_readonly(db)
+    assert {:ok, %{rows: [[1]]}} = NIF.query(ro, "PRAGMA query_only", [])
+    pragmas = ["PRAGMA journal_mode = delete", "PRAGMA query_only = 0"]
+    :ok = Xqlite.set_authorizer(ro, [:pragma])
+    refused = Enum.map(pragmas, &NIF.execute(ro, &1, []))
+    assert Enum.all?(refused, &match?({:error, {:authorization_denied, 23, _}}, &1))
+    :ok = Xqlite.remove_authorizer(ro)
+    assert {:ok, %{rows: [["delete"]]}} = NIF.query(ro, "PRAGMA journal_mode = delete", [])
+    assert {:ok, %{rows: [["delete"]]}} = NIF.query(rw, "PRAGMA journal_mode", [])
+    assert {:ok, 0} = NIF.execute(ro, "PRAGMA query_only = 0", [])
+    assert {:ok, 1} = NIF.execute(ro, "INSERT INTO s VALUES (1)", [])
+    assert {:ok, %{rows: [[1]]}} = NIF.query(rw, "SELECT id FROM s", [])
+    Enum.each([ro, rw], &NIF.close/1)
+  end
+
+  test "a read-only open meets a writer's uncommitted schema change with 262" do
+    db = "file:ro_locked_#{System.unique_integer([:positive])}?cache=shared"
+    {:ok, rw} = NIF.open_in_memory(db)
+    :ok = NIF.execute_batch(rw, "CREATE TABLE s (id); BEGIN; CREATE TABLE z (x);")
+    assert {:error, {:cannot_open_database, ^db, 262, _}} = Xqlite.open_in_memory_readonly(db)
+    :ok = NIF.execute_batch(rw, "COMMIT;")
+    assert {:ok, ro} = Xqlite.open_in_memory_readonly(db)
+    Enum.each([ro, rw], &NIF.close/1)
+  end
+
+  test "ATTACH and VACUUM INTO reach files as the known-limitations guide says" do
+    [file, none, made, kept, shared, rwc, plain] = Enum.map(1..7, &tmp_db_path("reach_#{&1}"))
+    {:ok, mem} = Xqlite.open_in_memory_readonly()
+    :ok = NIF.execute_batch(mem, "ATTACH 'file:#{file}?mode=rwc' AS x; CREATE TABLE x.t (a);")
+    :ok = NIF.execute_batch(mem, "DETACH x; ATTACH 'file:#{file}?mode=rw' AS y;")
+    assert {:ok, 1} = NIF.execute(mem, "INSERT INTO y.t VALUES (7)", [])
+    :ok = NIF.execute_batch(mem, "VACUUM INTO '#{none}'; VACUUM INTO 'file:#{made}?mode=rwc';")
+    {:ok, ro} = Xqlite.open_readonly(file)
+    :ok = Xqlite.set_authorizer(ro, [:pragma])
+    assert {:ok, 0} = NIF.execute(ro, "VACUUM INTO '#{kept}'", [])
+    :ok = Xqlite.set_authorizer(ro, [:attach])
+    denied = NIF.execute_batch(ro, "VACUUM INTO '#{none}'")
+    assert {:error, {:authorization_denied, 23, _}} = denied
+    {:ok, rw} = NIF.open("file:#{shared}?cache=shared")
+    :ok = NIF.execute_batch(rw, "CREATE TABLE s (id);")
+    {:ok, joined} = Xqlite.open("file:#{shared}?mode=ro&cache=shared")
+    assert {:ok, 1} = NIF.execute(joined, "INSERT INTO s VALUES (1)", [])
+    {:ok, named} = NIF.open_in_memory("reach_#{System.unique_integer([:positive])}")
+    :ok = NIF.execute_batch(named, "ATTACH '#{none}' AS a; CREATE TABLE a.t (x);")
+    :ok = NIF.execute_batch(named, "ATTACH 'file:#{rwc}?mode=rwc' AS b; CREATE TABLE b.t (x);")
+    {:ok, rw_memory} = Xqlite.open_in_memory()
+    :ok = NIF.execute_batch(rw_memory, "ATTACH '#{plain}' AS a; CREATE TABLE a.t (x);")
+    exists = Enum.map([none, made, kept, rwc, plain], &File.exists?/1)
+    assert exists == [false, true, true, true, true]
+    Enum.each([mem, ro, rw, joined, named, rw_memory], &NIF.close/1)
   end
 end

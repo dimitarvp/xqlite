@@ -92,8 +92,8 @@ pub(crate) unsafe fn install_callback(conn: &Connection, list: &HookList<UpdateS
 ///
 /// # Safety
 ///
-/// See `busy_handler::send_busy_to_pid` for the OTP 26.1 NULL-env
-/// invariant. All data is copied into a fresh msg_env; no references
+/// Sends with a NULL `caller_env`, as "Sending from a callback" in
+/// `hook_util`'s module doc covers. All data is copied into a fresh msg_env; no references
 /// retained across the call.
 unsafe fn send_update_to_pid(
     pid: &LocalPid,

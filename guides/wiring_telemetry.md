@@ -42,9 +42,11 @@ counts).
   integer **nanosecond** count. Convert at handler time (`/1_000` for
   µs, `/1_000_000` for ms). Counts such as `rows_returned`, `pages`
   and `retries` ride in the same map and are not times.
-* **Time source:** `System.monotonic_time(:nanosecond)`. Stable
-  across NTP drift; consumers convert to wall-clock at handler time
-  if needed.
+* **Time source:** `System.monotonic_time(:nanosecond)` for every
+  measurement but `system_time`, which is
+  `System.system_time(:nanosecond)`, and `elapsed`, which the NIF
+  measures with a monotonic clock in whole milliseconds. Stable across
+  NTP drift; consumers convert to wall-clock at handler time if needed.
 * **Identifiers:** raw refs (`reference()`) for connections, tokens,
   streams. No abstraction layer — map at attach time if you need
   stable IDs.
@@ -137,11 +139,11 @@ per-connection, so it takes no `conn`.
 |---|---|---|
 | `[:xqlite, :hook, :commit]` | a transaction commits on the bridged connection | `:conn`, `:tag` |
 | `[:xqlite, :hook, :rollback]` | a transaction rolls back | `:conn`, `:tag` |
-| `[:xqlite, :hook, :update]` | a row is inserted, updated or deleted | `:conn`, `:tag`, `:action`, `:db_name`, `:table`, `:rowid`; `:db_name` and `:table` hold the names' bytes, which need not be UTF-8: a handler that treats them as strings checks them first (`String.valid?/1`), since the `telemetry` library detaches a handler that raises |
+| `[:xqlite, :hook, :update]` | SQLite reports a row change to the update hook (`XqliteNIF.register_update_hook/2` says which it does not) | `:conn`, `:tag`, `:action`, `:db_name`, `:table`, `:rowid`; `:db_name` and `:table` hold the names' bytes, which need not be UTF-8: a handler that treats them as strings checks them first (`String.valid?/1`), since the `telemetry` library detaches a handler that raises |
 | `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:conn`, `:tag`, `:db_name`, the name's bytes, which need not be UTF-8 (check it as for `:update`); measurement `pages` |
-| `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:tag`, `:hook_tag`; measurements `count`, `elapsed` |
+| `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:conn`, `:tag`, `:hook_tag`; measurements `count`, `elapsed` |
 | `[:xqlite, :hook, :busy]` | the connection meets a lock another one holds | `:conn`, `:tag`; measurements `retries`, `elapsed` |
-| `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:tag`, `:code`, `:base_code`, `:message` |
+| `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:tag`, `:code`, `:base_code`, `:message`, the bytes SQLite wrote, which need not be UTF-8 (check it as for `:update`) |
 
 Only the *observer* half of busy handling is bridged. The retry
 policy stays a single slot per connection and is set with

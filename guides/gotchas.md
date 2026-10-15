@@ -342,7 +342,12 @@ one-shot call is first checked after it has ended; a signal that lands then
 changes nothing, and the call answers its normal result with the write in
 place. SQLite also checks while it compiles a statement, but xqlite lets the
 compile finish: a signal during a long compile takes effect once the
-statement runs.
+statement runs. A signal does not end a wait for a lock another connection
+holds: SQLite makes no check while it waits, so the wait lasts until the lock
+frees or `Xqlite.put_busy_timeout/2` or the busy policy gives up, and the call
+then answers `{:error, {:database_busy_or_locked, 5, _}}`. When the lock frees
+first, the statement runs and the signal takes effect at SQLite's next check,
+as above.
 
 A signal that stops a write while it runs undoes more than that statement.
 SQLite rolls back the whole transaction, a `BEGIN` you issued included, and
@@ -493,7 +498,10 @@ the typed `Xqlite.Pragma.put(conn, :busy_timeout, ms)` /
 `XqliteNIF.set_pragma/3`. Every spelling is covered, including
 `PRAGMA busy_timeout(N)`, a quoted name, a `main.` or `temp.` prefix, and a
 value of `0` or less — SQLite treats anything at or below zero as "stop
-waiting" and drops the callback just as destructively.
+waiting" and drops the callback just as destructively. A statement that also
+fails to compile for another reason, such as `PRAGMA busy_timeout = 7 garbage`,
+answers that error instead, `{:error, {:sql_input_error, _}}`, and writes
+nothing either.
 
 Reading is untouched: `PRAGMA busy_timeout` in SQL still works and reads `0`
 while the slot is held, because SQLite zeroes the stored value whenever a
@@ -505,8 +513,7 @@ or empty. With the slot empty the raw PRAGMA is accepted as before.
 ### A busy retry and the WAL autocheckpoint pin the connection
 
 Two by-design operations hold a connection's mutex across a blocking call, so
-while they run, *other operations on the same connection wait* (other
-connections are never affected):
+while they run, *other operations on the same connection wait*:
 
 - A busy retry policy's `:sleep_ms` sleeps on the mutex-holding thread between
   attempts. Budget `sleep_ms × max_retries` as the time the connection can be
@@ -547,8 +554,22 @@ if one process is mid-way through a slow operation on the shared handle, another
 process calling even a trivial reader on the same handle **blocks for the slow
 operation's entire duration**. That block now sits on a dirty scheduler rather
 than a normal one, so it no longer degrades unrelated normal-scheduler work — but
-the caller still waits, and enough concurrent blocked calls can saturate the
-dirty-scheduler pool.
+the caller still waits, and it holds one of the VM's dirty I/O threads (10 by
+default; the `+SDio` emulator flag sets the count) while it waits, as does a call
+waiting for a lock another connection holds. Every other connection and the VM's
+file operations use the same threads: once that many calls wait at once, calls on
+other connections and file reads wait too, and the lock holder's own commit waits
+for a free thread, so the waits run out their budget and answer
+`{:error, {:database_busy_or_locked, 5, _}}`. Keep the calls that can wait at once
+(every pooled connection, plus every process sharing one) below the dirty I/O
+thread count, or raise the count with `+SDio`.
+
+The transaction belongs to the connection, not to the process that began it: when
+that process exits or crashes, the transaction stays open, every later statement on
+the connection, from any process, runs inside it, a write answering as it would in
+autocommit mode, and `Xqlite.close/1` rolls it all back. `Xqlite.autocommit/1`
+answers `{:ok, false}` while it is open; any process that shares the connection can
+end it with `Xqlite.commit/1` or `Xqlite.rollback/1`.
 
 The fix is the design: don't share a connection handle between processes for
 concurrency. Open one connection per process (or use a pool of independent

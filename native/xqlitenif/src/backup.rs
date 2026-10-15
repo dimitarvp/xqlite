@@ -120,7 +120,7 @@ fn run(
 /// for the code.
 fn rejected_step(code: c_int) -> XqliteError {
     // SAFETY: sqlite3_errstr reads no connection; it answers a pointer to a
-    // static string, or NULL for a code it has no text for.
+    // static string, "unknown error" for a code SQLite has no text for.
     let text = unsafe { ffi::sqlite3_errstr(code) };
     let message = (!text.is_null()).then(|| {
         // SAFETY: a non-NULL answer points to a static NUL-terminated string.

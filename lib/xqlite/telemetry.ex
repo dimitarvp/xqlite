@@ -37,7 +37,8 @@ defmodule Xqlite.Telemetry do
       `retries`, `count`) ride in the same map and are not times.
       Convert to microseconds (`/1_000`) or milliseconds
       (`/1_000_000`) at handler time.
-    * **Time source:** **`System.monotonic_time(:nanosecond)`**, not
+    * **Time source:** **`System.monotonic_time(:nanosecond)`**, `system_time`
+      (`System.system_time(:nanosecond)`) and `elapsed` aside, not
       `:os.system_time/0`. Stable across NTP adjustments and clock
       changes; consumers map to wall-clock at handler time if needed.
     * **Identifiers:** raw refs (`reference()`) for connections,
@@ -98,8 +99,8 @@ defmodule Xqlite.Telemetry do
                           error_reason, wall_time_ns, rows_produced,
                           scan_count}
 
-  `wall_time_ns` is SQLite's own nanosecond measurement of the executed
-  statement (from `EXPLAIN ANALYZE`). `:cancellable?` is `true` iff
+  `wall_time_ns` is the time the NIF measured around the statement's steps
+  with a monotonic clock. `:cancellable?` is `true` iff
   the call was given cancel tokens through `:cancel_tokens`. `changes` is
   `sqlite3_changes()` read beside the rows; it is `nil` on error.
   `params_count` counts the proper prefix of
@@ -267,7 +268,8 @@ defmodule Xqlite.Telemetry do
   for distinguishing connections in dashboards. `:hook_tag`, only on
   the progress event, is the tag passed to
   `Xqlite.register_progress_hook/3`. `:elapsed` is a nanosecond count,
-  converted from the milliseconds SQLite reports.
+  converted from the whole milliseconds the NIF measured with a monotonic clock, since the busy
+  event's first callback for `:busy` and since the hook's registration for `:progress`.
 
   See `bridge/2` and `unbridge/1` for the registration API. Bridge
   is implemented on top of the same multi-subscriber primitives that

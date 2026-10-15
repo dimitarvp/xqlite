@@ -72,7 +72,7 @@ Two modules: `Xqlite` for high-level helpers, `XqliteNIF` for direct NIF access.
 - **PRAGMAs:** `Xqlite.Pragma` -- typed schema with validation for 53 PRAGMAs, 34 of them writable. `Xqlite.Pragma.put/4` and the connection options of `open/2` share one value check (one exception: `open/2` also takes `busy_timeout: :infinity`, stored as 2_147_483_647 ms), so a value a PRAGMA cannot take is rejected rather than quietly replaced by SQLite's fallback, and a write SQLite answers with another value is `{:error, {:pragma_not_applied, _}}`; the PRAGMAs that act are functions: `optimize/1`, `shrink_memory/1`, `wal_checkpoint/3`
 - **Type extensions:** bidirectional encode/decode; nine built in -- `DateTime`, `Date`, `Time`, `NaiveDateTime`, `JSON` (plain maps/lists), `UUID` (canonical text to a compact 16-byte blob), `Instant` and `Duration` (int64 nanoseconds, encode-only), and `Decimal` (encode-only, needs the optional `:decimal` dep). The chain runs on `query/4`, `execute/4`, `stream/4`, `bind/3` and `explain_analyze/4`. An extension that claims a value but cannot store it -- a `Decimal` that is `NaN` or `Infinity`, a map holding bytes that are not valid UTF-8 -- fails the call with `{:error, {:type_extension_refused, %{position: n, extension: mod, reason: why}}}` instead of writing a word or a wrong value
 - **Hooks (all multi-subscriber):** update (`{:xqlite_update, action, db, table, rowid}`), commit, rollback, WAL (`{:xqlite_wal, db_name, pages}`), progress ticks with per-subscriber decimation, global SQLite log hook; single-slot busy retry policy (`set_busy_policy/2`) plus any number of busy observers receiving `{:xqlite_busy, ...}`
-- **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, extended_code, msg}`. xqlite shares the slot: while the busy slot is held it adds two rules of its own, so a `busy_timeout` write is rejected as `{:busy_timeout_write_refused, %{policy: _, observers: _}}` and its own `PRAGMA busy_timeout` read passes a `:pragma` deny
+- **Authorizer:** single-slot deny-list via `set_authorizer/2` / `remove_authorizer/1` -- rejects chosen action kinds (`:select`, `:delete`, `:pragma`, `:create_table`, ...) at statement-prepare time; denials surface as `{:authorization_denied, extended_code, msg}`, except a denied `:function`, which SQLite reports as a code-1 error (see `set_authorizer/2`). xqlite shares the slot: while the busy slot is held it adds two rules of its own, so a `busy_timeout` write is rejected as `{:busy_timeout_write_refused, %{policy: _, observers: _}}` and its own `PRAGMA busy_timeout` read passes a `:pragma` deny
 - **Manual statement lifecycle:** `prepare/2`, `bind/3` (positional or named), `step/1`, `multi_step/2`, `reset/1`, `clear_bindings/1`, `column_names/1`, `finalize/1` -- prepare once, rebind in a loop, consume partially; GC finalizes abandoned statements
 - **Telemetry (opt-in):** compile-time-flagged `:telemetry` events for every operation (spans with nanosecond timings), cancellation lifecycle events, and a bridge that re-emits hook fan-outs as `[:xqlite, :hook, :*]` -- see the "Wiring xqlite telemetry" guide
 - **Serialize / deserialize:** atomic in-memory snapshots to/from binary
@@ -155,8 +155,11 @@ WAL subscribers coexist with automatic checkpointing: SQLite's
 wal_hook slot and its built-in autocheckpoint are mutually exclusive
 at the C level, so xqlite's master callback emulates the checkpoint
 itself at the configured `wal_autocheckpoint` threshold. Set that
-PRAGMA through `Xqlite.Pragma.put/3` (raw-SQL `PRAGMA wal_autocheckpoint`
-bypasses the repair and silently steals the hook slot).
+PRAGMA through `Xqlite.Pragma.put/3` (raw-SQL
+`PRAGMA wal_autocheckpoint = N` bypasses the repair and silently steals
+the hook slot, and `Xqlite.Pragma.get/2` and `XqliteNIF.get_pragma/2`
+keep answering the library's threshold while SQLite checkpoints at the N
+the statement set, or never for 0 or less).
 
 ### Busy contention -- a retry policy, plus any number of observers
 

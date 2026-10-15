@@ -78,6 +78,10 @@ here is optional on a bump that changes the bundled SQLite version.
      `SQLITE_*` action codes in `sqlite3.h` with those arms,
    - `sqlite3_changes`/`total_changes` stickiness (the
      `query_with_changes` contract),
+   - `SQLITE_CONFIG_LOG` staying an option `sqlite3_config` takes at any time
+     and storing the log callback and its argument as two separate stores:
+     `log_hook.rs:register` installs the callback while other threads may run
+     SQLite, and its `SAFETY` comment rests on both,
    - where SQLite calls the progress handler and when a statement counts
      as running, which cancellation rests on (`progress_dispatch.rs`,
      `cancel.rs`): the handler runs at certain jumps (a loop's bottom, a
