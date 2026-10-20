@@ -154,11 +154,15 @@ plainly, because they shape what the authorizer can and cannot promise:
 
 One caveat with security relevance: denying `:pragma` also disables
 `Xqlite.Pragma.get/2`, `Xqlite.Pragma.put/3`, `Xqlite.optimize/1`,
-`Xqlite.shrink_memory/1` and the schema-introspection helpers, since those
-run `PRAGMA` statements. Deny it only when you intend to lock those paths
-out too. `Xqlite.optimize/1` is stopped by more kinds than `:pragma`, since
-the `ANALYZE` it runs is authorized too; its doc lists them. A deny of
-`:attach` also stops `VACUUM`, which attaches a temporary database of its own.
+`Xqlite.shrink_memory/1`, `XqliteNIF.changeset_apply/3` and the
+schema-introspection helpers, since those run `PRAGMA` statements. Deny it
+only when you intend to lock those paths out too. `Xqlite.optimize/1` is
+stopped by more kinds than `:pragma`, since the `ANALYZE` it runs is
+authorized too; its doc lists them. A deny of `:transaction` also stops
+`XqliteNIF.changeset_apply/3` outside a transaction on a connection that can
+write, since it opens its own transaction there with `BEGIN IMMEDIATE`; its
+doc says when. A deny of `:attach` also stops `VACUUM`, which attaches a
+temporary database of its own.
 
 Three reads slip past a `:pragma` deny, because none runs a `PRAGMA`
 statement for SQLite to reject:

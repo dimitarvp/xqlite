@@ -765,10 +765,13 @@ defmodule XqliteNIF do
 
   Modes:
   - `:deferred` — acquires locks lazily (default SQLite behavior)
-  - `:immediate` — acquires a write lock immediately (fails fast on contention)
-  - `:exclusive` — acquires an exclusive lock (blocks readers too)
+  - `:immediate` — takes the write lock at once, waiting for it as the busy timeout or the busy
+    policy says
+  - `:exclusive` — as `:immediate`; outside WAL mode it also keeps other connections from reading
 
   Returns `:ok` on success.
+  Returns `{:error, :statement_mid_run}` outside a transaction while a statement of this
+  connection that SQLite counts as a write is mid-run, and begins nothing; see `Xqlite.begin/2`.
   Returns `{:error, reason}` if a transaction cannot be started (e.g., if one
   is already active on this connection, or due to other SQLite errors).
   Returns `{:error, {:invalid_transaction_mode, mode}}` for any other atom.
@@ -785,8 +788,8 @@ defmodule XqliteNIF do
   `conn` is the database connection resource.
 
   Returns `:ok` on success, `{:error, :no_transaction}` when no transaction
-  is open and `{:error, :statement_mid_run}` while a write of this
-  connection is mid-run. That answer, a deferred foreign key and a lock
+  is open and `{:error, :statement_mid_run}` while a statement of this connection that SQLite
+  counts as a write is mid-run. That answer, a deferred foreign key and a lock
   leave the transaction open for a repair and another commit, or for
   `rollback/1`.
   """
@@ -817,8 +820,8 @@ defmodule XqliteNIF do
   `name` is a string identifier for the savepoint. Savepoint names can be reused,
   and a new savepoint with an existing name will hide the older one.
 
-  Returns `:ok` on success, `{:error, :statement_mid_run}` while a write of
-  this connection is mid-run, and `{:error, reason}` on any other failure.
+  Returns `:ok` on success, `{:error, :statement_mid_run}` while a statement of this connection
+  that SQLite counts as a write is mid-run, and `{:error, reason}` on any other failure.
   """
   @spec savepoint(conn :: Xqlite.conn(), name :: String.t()) ::
           :ok | Xqlite.error()
@@ -854,8 +857,8 @@ defmodule XqliteNIF do
   `conn` is the database connection resource.
   `name` is the string identifier of an existing savepoint.
 
-  Returns `:ok` on success, `{:error, :statement_mid_run}` while a write of
-  this connection is mid-run.
+  Returns `:ok` on success, `{:error, :statement_mid_run}` while a statement of this connection
+  that SQLite counts as a write is mid-run.
   Returns `{:error, reason}` on failure (e.g., if the named savepoint does not
   exist, or other SQLite errors).
   """
@@ -2323,6 +2326,24 @@ defmodule XqliteNIF do
   `{:error, {:sqlite_failure, 4, 4, _}}`. With the target's key checks off
   (`Xqlite.disable_foreign_key_enforcement/1`, outside a transaction only) such a
   changeset commits. Every apply turns the connection's `defer_foreign_keys` off.
+
+  In autocommit, on a connection that can write, the apply takes the write lock of every attached
+  database first, not only main's (a file attached with `mode=ro` gets only a read lock), and
+  commits in the same call, rolling back on any failure, a busy commit included. A lock another
+  connection holds, even on a database the changeset never writes or for an empty changeset, is
+  waited for as `Xqlite.put_busy_timeout/2` or the busy policy says, busy observers hear the wait,
+  and a wait that runs out answers `{:error, {:database_busy_or_locked, 5, message}}`. A
+  `:transaction` deny stops the apply there, and so does a statement of this connection that
+  SQLite counts as a write while it is mid-run, answering `{:error, :statement_mid_run}`. A schema
+  `Xqlite.deserialize/4` loaded with `read_only: true` counts as writable, since SQLite's
+  `sqlite3_db_readonly` answers 0 for it: the apply answers
+  `{:error, {:read_only_database, 8, message}}` there, an empty changeset included.
+
+  A read of this connection mid-run does not stop the apply, but SQLite never waits for the lock
+  once a transaction has read, so another connection's lock is then answered at once. The same
+  holds inside a transaction you opened, where the apply reads the table's definition before its
+  first write: open it with `Xqlite.begin(conn, :immediate)` to wait first. On a connection
+  opened read-only, or with `query_only` on, the apply takes no lock first.
   """
   @spec changeset_apply(
           conn :: Xqlite.conn(),

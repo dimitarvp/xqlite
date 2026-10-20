@@ -685,6 +685,7 @@ defmodule Xqlite.NIF.SessionTest do
         :ok = fk_target(conn, deferral, present)
         assert {:ok, _} = NIF.set_pragma(conn, "foreign_keys", checks)
         answer = NIF.changeset_apply(conn, changeset_for("sess_fk_c", children), strategy)
+        assert {:ok, true} = NIF.autocommit(conn)
         {:ok, %{rows: rows}} = NIF.query(conn, "SELECT * FROM sess_fk_c ORDER BY id", [])
         kind = with {:error, {:constraint_violation, kind, _}} <- answer, do: kind
         holds = not checks or Enum.all?(parents, &(&1 in present))
@@ -697,6 +698,7 @@ defmodule Xqlite.NIF.SessionTest do
       :ok = fk_target(conn, "DEFERRABLE INITIALLY DEFERRED", [])
       answer = NIF.changeset_apply(conn, changeset_for("sess_fk_c", [[10, 1]]), :omit)
       assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = answer
+      assert {:ok, true} = NIF.autocommit(conn)
       assert {:ok, %{rows: []}} = NIF.query(conn, "SELECT * FROM sess_fk_c", [])
       :ok = NIF.execute_batch(conn, "BEGIN; INSERT INTO sess_fk_c VALUES (5, 99);")
 
@@ -708,6 +710,26 @@ defmodule Xqlite.NIF.SessionTest do
       commit = NIF.execute_batch(conn, "COMMIT;")
       assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = commit
       :ok = NIF.execute_batch(conn, "ROLLBACK;")
+    end
+
+    test "an apply outside a transaction answers :statement_mid_run beside a write mid-run and runs beside a read",
+         %{conn: conn} do
+      tables = "CREATE TABLE r (id INTEGER PRIMARY KEY, pid); CREATE TABLE w (n);"
+      :ok = NIF.execute_batch(conn, tables <> "INSERT INTO w VALUES (zeroblob(4));")
+      run = fn -> NIF.changeset_apply(conn, changeset_for("r", [[1, 1]]), :omit) end
+      {:ok, insert} = NIF.stmt_prepare(conn, "INSERT INTO w VALUES (1), (2) RETURNING n")
+      {:row, [1]} = NIF.stmt_step(insert)
+      {:ok, blob} = NIF.blob_open(conn, "main", "w", "n", 1, false)
+      assert {:error, :statement_mid_run} = run.()
+      assert {:ok, %{rows: [[2]], done: true}} = NIF.stmt_multi_step(insert, 10)
+      assert [:ok, {:error, :statement_mid_run}] = [NIF.stmt_finalize(insert), run.()]
+      assert :ok = NIF.blob_close(blob)
+      {:ok, read} = NIF.stmt_prepare(conn, "SELECT n FROM w")
+      {:row, _} = NIF.stmt_step(read)
+      assert :ok = run.()
+      assert {:ok, %{rows: [[1], [2]], done: true}} = NIF.stmt_multi_step(read, 10)
+      assert :ok = NIF.stmt_finalize(read)
+      assert {:ok, %{rows: [[1, 1]]}} = NIF.query(conn, "SELECT * FROM r", [])
     end
   end
 
@@ -744,6 +766,17 @@ defmodule Xqlite.NIF.SessionTest do
     NIF.close(conn)
 
     assert {:error, _} = NIF.changeset_apply(conn, <<>>, :omit)
+  end
+
+  test "a :transaction deny stops an apply on a connection that can write, not on a read-only one or one with query_only on" do
+    {:ok, read_only} = Xqlite.open_in_memory_readonly()
+    [{:ok, writable}, {:ok, query_only}] = for _ <- 1..2, do: NIF.open_in_memory(":memory:")
+    :ok = NIF.execute_batch(query_only, "PRAGMA query_only = 1;")
+    conns = [writable, read_only, query_only]
+    for conn <- conns, do: :ok = Xqlite.set_authorizer(conn, [:transaction])
+    answers = Enum.map(conns, &NIF.changeset_apply(&1, "", :omit))
+    assert [{:error, {:authorization_denied, 23, _}}, :ok, :ok] = answers
+    for conn <- conns, do: :ok = NIF.close(conn)
   end
 
   # Regression: a session whose *connection* is closed while the session is

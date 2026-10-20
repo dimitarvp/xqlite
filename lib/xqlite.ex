@@ -3221,6 +3221,13 @@ defmodule Xqlite do
   dies it stays open, every later statement on the connection, from any process, runs inside it,
   a write answering as it would in autocommit mode; `close/1` rolls it all back; `autocommit/1`
   answers `{:ok, false}` until a process sharing the connection commits it or rolls it back.
+
+  Outside a transaction, while a statement of this connection that SQLite counts as a write is
+  mid-run (a write, or a `PRAGMA journal_mode` or `wal_checkpoint`, stepped but not yet run to its
+  end or reset; a blob open for writing), it answers `{:error, :statement_mid_run}` and begins
+  nothing: SQLite would take that write into the new transaction, and a `rollback/1` would undo
+  rows the writer was told were written. A read mid-run does not stop it. A `BEGIN` sent as SQL is
+  not checked.
   """
   @spec begin(conn(), term()) :: :ok | error()
   def begin(conn, mode \\ :deferred)
@@ -3250,8 +3257,9 @@ defmodule Xqlite do
   Commits the current transaction. Emits `[:xqlite, :transaction, :commit]`.
 
   With no transaction open it answers `{:error, :no_transaction}`, and while
-  a write of this connection is mid-run (a write stepped but not yet run to
-  its end or reset, a blob open for writing) `{:error, :statement_mid_run}`.
+  a statement of this connection that SQLite counts as a write is mid-run (a write, or a
+  `PRAGMA journal_mode` or `wal_checkpoint`, stepped but not yet run to its end or reset; a blob
+  open for writing) `{:error, :statement_mid_run}`.
   That answer, a deferred foreign key still broken and another connection's
   lock all leave the transaction open: repair and commit again, or call
   `rollback/1`. `autocommit/1` tells whether a transaction is open.
@@ -3313,7 +3321,7 @@ defmodule Xqlite do
   @doc """
   Creates a savepoint with the given name. Emits
   `[:xqlite, :savepoint, :create]`. Answers `{:error, :statement_mid_run}`
-  while a write of this connection is mid-run, as `commit/1` does.
+  while a statement of this connection that SQLite counts as a write is mid-run, as `commit/1` does.
   """
   @spec savepoint(conn(), String.t()) :: :ok | error()
   def savepoint(conn, name) when is_binary(name) do
@@ -3337,8 +3345,8 @@ defmodule Xqlite do
 
   @doc """
   Releases a savepoint. Emits `[:xqlite, :savepoint, :release]`.
-  Answers `{:error, :statement_mid_run}` while a write of this connection is
-  mid-run, as `commit/1` does.
+  Answers `{:error, :statement_mid_run}` while a statement of this connection that SQLite counts
+  as a write is mid-run, as `commit/1` does.
   """
   @spec release_savepoint(conn(), String.t()) :: :ok | error()
   def release_savepoint(conn, name) when is_binary(name) do

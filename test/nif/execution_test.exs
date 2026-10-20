@@ -88,6 +88,11 @@ defmodule Xqlite.NIF.ExecutionTest do
     {:blob, blob}
   end
 
+  defp start_child(conn, {:idle, sql}) do
+    {:ok, stmt} = NIF.stmt_prepare(conn, sql)
+    {:idle, stmt}
+  end
+
   defp finish_child({:stmt, stmt}) do
     {:ok, %{rows: rows, done: true}} = NIF.stmt_multi_step(stmt, 1000)
     :ok = NIF.stmt_finalize(stmt)
@@ -101,6 +106,7 @@ defmodule Xqlite.NIF.ExecutionTest do
   end
 
   defp finish_child({:blob, blob}), do: NIF.blob_close(blob)
+  defp finish_child({:idle, stmt}), do: NIF.stmt_finalize(stmt)
 
   defp setup_named_table(conn, table_name \\ "exec_test") do
     create_sql = "CREATE TABLE #{table_name} #{@exec_test_columns_sql};"
@@ -588,6 +594,47 @@ defmodule Xqlite.NIF.ExecutionTest do
           finished = finish_child(running)
           :ok = if txn?, do: NIF.execute_batch(conn, "COMMIT"), else: :ok
           assert {child, sql, [finished | Enum.drop(state(conn), 2)]} == {child, sql, ends}
+        end
+      end
+
+      test "the anchor: begin answers :statement_mid_run beside a write mid-run, which keeps its rows",
+           %{conn: conn} do
+        :ok = NIF.execute_batch(conn, @mid_run_tables)
+        insert = start_child(conn, {:stmt, @insert_five})
+        assert {:error, :statement_mid_run} = Xqlite.begin(conn, :deferred)
+        assert {:error, :statement_mid_run} = NIF.begin(conn, :immediate)
+        assert {:error, :no_transaction} = Xqlite.rollback(conn)
+        assert {finish_child(insert), state(conn)} == {4, [0, 0, 5, @zeros]}
+      end
+
+      property "begin outside a transaction answers :statement_mid_run exactly beside a write mid-run, and every child ends whole",
+               %{conn: conn} do
+        :ok = NIF.execute_batch(conn, "PRAGMA journal_mode = MEMORY; PRAGMA synchronous = 0;")
+        child_ends = [{{:idle, @insert_five}, [:ok]} | @mid_run]
+
+        check all(
+                children <- list_of(member_of(child_ends), max_length: 3),
+                begin <- member_of([&Xqlite.begin/2, &NIF.begin/2]),
+                mode <- member_of([:deferred, :immediate, :exclusive]),
+                txn? <- boolean(),
+                max_runs: 2_000
+              ) do
+          {kinds, ends} = Enum.unzip(children)
+          :ok = NIF.execute_batch(conn, @mid_run_tables <> if(txn?, do: "BEGIN;", else: ""))
+          running = Enum.map(kinds, &start_child(conn, &1))
+          w = Enum.count(kinds, &(&1 in [{:stmt, @insert_five}, {:stream, @insert_five}]))
+          bytes = if {:blob, :write} in kinds, do: "abcdefgh", else: @zeros
+          got = [begin.(conn, mode) | if(txn?, do: [], else: [NIF.rollback(conn)])]
+
+          case {txn?, w > 0 or bytes != @zeros} do
+            {true, _} -> assert [{:error, {:sqlite_failure, 1, 1, _}}] = got
+            {_, true} -> assert [{:error, :statement_mid_run}, {:error, :no_transaction}] = got
+            {_, false} -> assert [:ok, :ok] = got
+          end
+
+          finished = Enum.map(running, &finish_child/1)
+          :ok = if txn?, do: NIF.execute_batch(conn, "COMMIT"), else: :ok
+          assert {finished, state(conn)} == {Enum.map(ends, &hd/1), [0, 0, 5 * w, bytes]}
         end
       end
 

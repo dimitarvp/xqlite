@@ -2,6 +2,7 @@ use crate::atoms;
 use crate::connection::{self, Orphan, XqliteConn};
 use crate::error::XqliteError;
 use crate::release;
+use crate::transaction::{self, TransactionMode};
 use rusqlite::Connection;
 use rusqlite::session::{ConflictAction, ConflictType, Session};
 use rustler::{Resource, ResourceArc, resource_impl};
@@ -168,7 +169,34 @@ pub(crate) fn to_owned_binary(
     Ok(binary)
 }
 
+/// SQLite never waits for the write lock once a transaction has read, and the apply reads first.
 pub(crate) fn apply_changeset(
+    conn: &Connection,
+    bytes: &[u8],
+    strategy: ConflictAction,
+) -> Result<(), XqliteError> {
+    let query_only = || conn.pragma_query_value(None, "query_only", |row| row.get(0));
+    match conn.is_autocommit() && !conn.is_readonly(rusqlite::MAIN_DB)? && !query_only()? {
+        true => apply_locked(conn, bytes, strategy),
+        false => apply_in_place(conn, bytes, strategy),
+    }
+}
+
+fn apply_locked(
+    conn: &Connection,
+    bytes: &[u8],
+    strategy: ConflictAction,
+) -> Result<(), XqliteError> {
+    transaction::begin(conn, TransactionMode::Immediate)?;
+    let applied =
+        apply_in_place(conn, bytes, strategy).and_then(|()| transaction::commit(conn));
+    if applied.is_err() {
+        let _ = transaction::rollback(conn);
+    }
+    applied
+}
+
+fn apply_in_place(
     conn: &Connection,
     bytes: &[u8],
     strategy: ConflictAction,

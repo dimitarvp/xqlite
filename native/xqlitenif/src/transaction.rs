@@ -33,10 +33,16 @@ impl TransactionMode {
     }
 }
 
+/// SQLite's `BEGIN` takes a write still running in autocommit into the new transaction, where a
+/// rollback undoes it; a running read is not at risk.
 pub(crate) fn begin(conn: &Connection, mode: TransactionMode) -> Result<(), XqliteError> {
-    conn.execute(mode.as_sql(), [])
-        .map(|_| ())
-        .map_err(XqliteError::from)
+    match conn.is_autocommit() && write_mid_run(conn) {
+        true => Err(XqliteError::StatementMidRun),
+        false => conn
+            .execute(mode.as_sql(), [])
+            .map(|_| ())
+            .map_err(XqliteError::from),
+    }
 }
 
 pub(crate) fn commit(conn: &Connection) -> Result<(), XqliteError> {

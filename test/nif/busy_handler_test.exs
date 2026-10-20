@@ -160,6 +160,33 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert {:error, :connection_closed} = Xqlite.optimize(probe)
   end
 
+  for journal <- [:delete, :wal] do
+    test "changeset_apply waits for the write lock as the busy settings say, #{journal} journal",
+         %{path: path} do
+      {holder, probe, apply_two} = changeset_pair(path, unquote(journal))
+      {:ok, _handle} = Xqlite.register_busy_observer(probe, self())
+      {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
+      assert {:error, {:database_busy_or_locked, 5, _}} = apply_two.()
+      assert_received {:xqlite_busy, 0, _}
+      assert {:ok, true} = Xqlite.autocommit(probe)
+      {:ok, 0} = NIF.execute(holder, "ROLLBACK", [])
+      assert :ok = apply_two.()
+      assert {:ok, %{rows: [[2]]}} = NIF.query(holder, "SELECT count(*) FROM t", [])
+      for conn <- [holder, probe], do: :ok = NIF.close(conn)
+    end
+  end
+
+  test "changeset_apply rolls back when its commit cannot take the lock", %{path: path} do
+    {holder, probe, apply_two} = changeset_pair(path, :delete)
+    :ok = NIF.execute_batch(holder, "BEGIN; SELECT count(*) FROM t")
+    assert {:error, {:database_busy_or_locked, 5, _}} = apply_two.()
+    assert {:ok, true} = Xqlite.autocommit(probe)
+    :ok = NIF.execute_batch(holder, "ROLLBACK")
+    assert :ok = apply_two.()
+    assert {:ok, %{rows: [[2]]}} = NIF.query(holder, "SELECT count(*) FROM t", [])
+    for conn <- [holder, probe], do: :ok = NIF.close(conn)
+  end
+
   test "observers fire over a zero busy timeout; caller sees immediate busy",
        %{path: path} do
     test_pid = self()
@@ -862,6 +889,19 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
+  end
+
+  defp changeset_pair(path, journal) do
+    {{:ok, holder}, {:ok, probe}} = {Xqlite.open(path, journal_mode: journal), NIF.open(path)}
+    {:ok, 0} = NIF.execute(holder, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", [])
+    {:ok, session} = NIF.session_new(holder)
+    :ok = NIF.session_attach(session, :all)
+    {:ok, 2} = NIF.execute(holder, "INSERT INTO t VALUES (1, 'a'), (2, 'b')", [])
+    {:ok, changeset} = NIF.session_changeset(session)
+    :ok = NIF.session_delete(session)
+    {:ok, 2} = NIF.execute(holder, "DELETE FROM t", [])
+    :ok = Xqlite.put_busy_timeout(probe, 0)
+    {holder, probe, fn -> NIF.changeset_apply(probe, changeset, :omit) end}
   end
 
   defp write_form("PRAGMA busy_timeout = -5" = form, _value), do: {form, 0}
