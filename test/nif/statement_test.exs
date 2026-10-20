@@ -1,9 +1,24 @@
 defmodule Xqlite.NIF.StatementTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Xqlite.ConnCase
 
   alias XqliteNIF, as: NIF
+
+  @release_schema """
+  PRAGMA journal_mode = MEMORY;
+  PRAGMA synchronous = OFF;
+  CREATE TABLE IF NOT EXISTS p (id INTEGER PRIMARY KEY);
+  CREATE TABLE IF NOT EXISTS c (id INTEGER PRIMARY KEY,
+    pid INTEGER REFERENCES p (id) DEFERRABLE INITIALLY DEFERRED, v);
+  CREATE TABLE IF NOT EXISTS q (id INTEGER PRIMARY KEY);
+  DELETE FROM c; DELETE FROM p; DELETE FROM q;
+  INSERT INTO p VALUES (1), (2);
+  INSERT INTO c VALUES (1, 1, 'a'), (2, 2, 'b');
+  """
+
+  @doomed "INSERT INTO c (pid) VALUES (99), (98) RETURNING id"
 
   for_each_opener "statement" do
     setup %{conn: conn} do
@@ -507,6 +522,82 @@ defmodule Xqlite.NIF.StatementTest do
     end
   end
 
+  for_each_opener "release" do
+    setup %{conn: conn} = context do
+      {mod, fun, args} = Xqlite.TestUtil.find_opener_mfa!(context)
+      {:ok, twin} = apply(mod, fun, args)
+      on_exit(fn -> NIF.close(twin) end)
+      Enum.each([conn, twin], &reseed/1)
+      %{twin: twin}
+    end
+
+    test "finalize answers the failed commit of a write stopped after a step", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, @doomed)
+      assert {:row, [_]} = Xqlite.step(stmt)
+
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+               Xqlite.finalize(stmt)
+
+      assert :ok = Xqlite.finalize(stmt)
+      assert {:ok, %{rows: [[0]]}} = Xqlite.query(conn, "SELECT count(*) FROM c WHERE pid > 2")
+    end
+
+    test "reset answers the failed commit and the statement runs again", %{conn: conn} do
+      {:ok, stmt} = Xqlite.prepare(conn, @doomed)
+      assert {:row, [_]} = Xqlite.step(stmt)
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} = Xqlite.reset(stmt)
+      assert {:row, [_]} = Xqlite.step(stmt)
+
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+               Xqlite.finalize(stmt)
+    end
+
+    test "a release after a failed step or after the end answers :ok", %{conn: conn} do
+      {:ok, dup} = Xqlite.prepare(conn, "INSERT INTO p (id) VALUES (1) RETURNING id")
+      assert {:error, {:constraint_violation, :constraint_primary_key, _}} = Xqlite.step(dup)
+      assert :ok = Xqlite.reset(dup)
+      assert :ok = Xqlite.finalize(dup)
+      {:ok, orphan} = Xqlite.prepare(conn, "INSERT INTO c (pid) VALUES (99) RETURNING id")
+      assert {:row, [_]} = Xqlite.step(orphan)
+
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+               Xqlite.step(orphan)
+
+      assert :ok = Xqlite.finalize(orphan)
+    end
+
+    test "rows after rollback describe changes that are gone", %{conn: conn} do
+      :ok = Xqlite.begin(conn)
+
+      {:ok, stmt} =
+        Xqlite.prepare(conn, "INSERT INTO q (id) VALUES (10), (11), (12) RETURNING id")
+
+      assert {:row, [10]} = Xqlite.step(stmt)
+      assert :ok = Xqlite.rollback(conn)
+      assert [{:row, [11]}, {:row, [12]}, :done] = for(_ <- 1..3, do: Xqlite.step(stmt))
+      assert :ok = Xqlite.finalize(stmt)
+      assert {:ok, %{rows: [[0]]}} = Xqlite.query(conn, "SELECT count(*) FROM q")
+    end
+
+    property "a release answers the run it ends as a run to the end answers it",
+             %{conn: conn, twin: twin} do
+      check all(write <- release_write(), path <- release_path(), max_runs: 2_000) do
+        Enum.each([conn, twin], &reseed/1)
+        {sql, params} = release_sql(write)
+        seed = tables(twin)
+        oracle = class(Xqlite.execute(twin, sql, params))
+        answers = release(path, conn, sql, params)
+
+        failed =
+          for {:error, why} = e <- answers, !match?({:utf8_error, _, _}, why), do: class(e)
+
+        assert failed == if(oracle != :ok and stepped?(path), do: [oracle], else: [])
+        assert tables(conn) == if(stepped?(path), do: tables(twin), else: seed)
+        if path == :rollback, do: assert(Enum.count(answers, &row?/1) == returned(write))
+      end
+    end
+  end
+
   test "statement ops after connection close: closed error, cached names, finalize :ok" do
     {:ok, conn} = NIF.open_in_memory(":memory:")
     {:ok, stmt} = Xqlite.prepare(conn, "SELECT 1 AS one")
@@ -577,5 +668,100 @@ defmodule Xqlite.NIF.StatementTest do
   defp seed(conn, n) do
     values = Enum.map_join(1..n, ", ", fn i -> "(#{i}, 'v#{i}')" end)
     :ok = NIF.execute_batch(conn, "INSERT INTO items (id, label) VALUES #{values};")
+  end
+
+  defp reseed(conn), do: :ok = NIF.execute_batch(conn, @release_schema)
+
+  # A child of parent 99 and a deleted parent with a child fail at the commit; X'FF'
+  # read back as TEXT is a row that cannot be read.
+  defp release_write do
+    pid = member_of([1, 2, 99])
+    v = member_of(["", "a'b", "x\0y", <<0xFF>>])
+
+    one_of([
+      tuple({constant(:insert), list_of(tuple({pid, v}), min_length: 1, max_length: 3)}),
+      tuple({constant(:update), integer(0..3), pid, v}),
+      tuple({constant(:delete), member_of([1, 2, 3])})
+    ])
+  end
+
+  defp release_path do
+    one_of([
+      tuple({member_of([:finalize, :reset, :stream_close]), integer(0..4)}),
+      member_of([:query, :rollback])
+    ])
+  end
+
+  defp release_sql({:insert, rows}) do
+    values = Enum.map_join(rows, ", ", fn _row -> "(?, CAST(? AS TEXT))" end)
+
+    {"INSERT INTO c (pid, v) VALUES #{values} RETURNING id, v",
+     Enum.flat_map(rows, &Tuple.to_list/1)}
+  end
+
+  defp release_sql({:update, k, pid, v}),
+    do:
+      {"UPDATE c SET pid = ?, v = CAST(? AS TEXT) WHERE id <= ? RETURNING id, v", [pid, v, k]}
+
+  defp release_sql({:delete, id}), do: {"DELETE FROM p WHERE id = ? RETURNING id", [id]}
+
+  defp release({:stream_close, k}, conn, sql, params) do
+    {:ok, stream} = NIF.stream_open(conn, sql, params)
+
+    fetched =
+      if k > 0, do: [NIF.stream_fetch(stream, k), NIF.stream_fetch(stream, 1)], else: []
+
+    fetched ++ [NIF.stream_close(stream)]
+  end
+
+  defp release({ending, k}, conn, sql, params) do
+    stmt = bound(conn, sql, params)
+    steps(stmt, k) ++ [apply(Xqlite, ending, [stmt]), Xqlite.finalize(stmt)]
+  end
+
+  defp release(:query, conn, sql, params), do: [NIF.query(conn, sql, params)]
+
+  defp release(:rollback, conn, sql, params) do
+    :ok = Xqlite.begin(conn)
+    stmt = bound(conn, sql, params)
+    first = Xqlite.step(stmt)
+    :ok = Xqlite.rollback(conn)
+    later = if first == :done, do: [], else: steps(stmt, 4)
+    [first | later] ++ [Xqlite.finalize(stmt)]
+  end
+
+  defp bound(conn, sql, params) do
+    {:ok, stmt} = Xqlite.prepare(conn, sql)
+    :ok = Xqlite.bind(stmt, params)
+    stmt
+  end
+
+  # Steps until the run ends; a row that cannot be read is a row stepped past.
+  defp steps(_stmt, 0), do: []
+
+  defp steps(stmt, k) do
+    answer = Xqlite.step(stmt)
+    if row?(answer), do: [answer | steps(stmt, k - 1)], else: [answer]
+  end
+
+  defp row?({:row, _}), do: true
+  defp row?({:error, {:utf8_error, _, _}}), do: true
+  defp row?(_ended), do: false
+
+  defp stepped?({_ending, k}), do: k > 0
+  defp stepped?(:query), do: true
+  defp stepped?(:rollback), do: false
+
+  defp returned({:insert, rows}), do: length(rows)
+  defp returned({:update, k, _pid, _v}), do: min(k, 2)
+  defp returned({:delete, id}), do: if(id < 3, do: 1, else: 0)
+
+  defp class({:ok, _}), do: :ok
+  defp class({:error, {:constraint_violation, kind, _}}), do: kind
+  defp class({:error, why}), do: why
+
+  defp tables(db) do
+    for sql <- ["SELECT id, pid, hex(v) FROM c ORDER BY id", "SELECT id FROM p ORDER BY id"],
+        do: NIF.query(db, sql, [])
   end
 end

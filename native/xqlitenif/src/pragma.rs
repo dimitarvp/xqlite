@@ -43,10 +43,21 @@ pub(crate) fn get<'a>(
 ) -> Result<Term<'a>, XqliteError> {
     let pragma_name = validate_name(pragma_name)?;
     let read_sql = format!("PRAGMA {pragma_name};");
-    match conn.query_row(&read_sql, [], |row| row.get::<usize, Value>(0)) {
-        Ok(value) => encode_val(env, value),
-        Err(RusqliteError::QueryReturnedNoRows) => Ok(atoms::no_value().to_term(env)),
-        Err(e) => Err(pragma_exec_error(pragma_name.to_string(), e)),
+    let exec_error = |e| pragma_exec_error(pragma_name.to_string(), e);
+    let mut stmt = conn.prepare(&read_sql).map_err(exec_error)?;
+    let valued = stmt.column_count() > 0;
+    let writes = !stmt.readonly();
+    let mut rows = stmt.query([]).map_err(exec_error)?;
+    let first = rows.next().map_err(exec_error)?.filter(|_row| valued);
+    let value = first
+        .map(|row| row.get::<usize, Value>(0))
+        .transpose()
+        .map_err(exec_error)?;
+    // A PRAGMA that writes, as incremental_vacuum does, commits as it ends.
+    while writes && rows.next()?.is_some() {}
+    match value {
+        Some(value) => encode_val(env, value),
+        None => Ok(atoms::no_value().to_term(env)),
     }
 }
 
@@ -66,12 +77,14 @@ pub(crate) fn set<'a>(
     let mut write_stmt = conn
         .prepare(&write_sql)
         .map_err(|e| pragma_exec_error(pragma_name.to_string(), e))?;
+    let valued = write_stmt.column_count() > 0;
+    let writes = !write_stmt.readonly();
     let mut rows = write_stmt.query([])?;
-    match rows.next()? {
-        Some(row) => {
-            let value: Value = row.get(0)?;
-            encode_val(env, value)
-        }
+    let first = rows.next()?.filter(|_row| valued);
+    let value = first.map(|row| row.get::<usize, Value>(0)).transpose()?;
+    while writes && rows.next()?.is_some() {}
+    match value {
+        Some(value) => encode_val(env, value),
         None => Ok(rustler::types::atom::nil().encode(env)),
     }
 }

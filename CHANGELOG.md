@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`reset/1` and `XqliteNIF.stmt_reset/1` can answer an error**, when the
+  reset ends a write whose commit fails.
+- **`XqliteNIF.blob_close/1` answers the failure of a read or write SQLite
+  failed before it**, since the close rolled that transaction back.
 - **`Xqlite.Pragma.get/2,3,4` returns every row of `integrity_check` and
   `quick_check` as a list, on every form.** Without a number it returned
   SQLite's first row alone, as a string, and with a `:db_name` it raised
@@ -697,6 +701,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Finalizing, resetting or closing a handle answers a commit that fails
+  there.** A write statement stopped after a step, a stream over one and a
+  read-write blob commit their write, in autocommit mode, when they end.
+  `finalize/1`, `reset/1`, `XqliteNIF.stream_close/1` and
+  `XqliteNIF.blob_close/1` discarded the result of that commit and answered
+  `:ok` when it failed — a deferred foreign key, a lock in rollback-journal
+  mode, a full disk — though SQLite had rolled the write back. They now
+  answer the error a step to the end answers; a statement whose last step
+  answered no row, one SQLite refused as busy included, still answers `:ok`.
+- **A query or stream fetch stopped by an unreadable row answers a failed
+  commit instead.** When a `RETURNING` write's commit failed after the call
+  met a row it could not read, the call answered the read error and the docs
+  said the write stayed committed; it now answers the commit's error.
+- **A write left to the garbage collector no longer stalls other releases.**
+  When its commit met another connection's lock, its release waited out the
+  busy timeout on the one release thread, holding up every other
+  connection's releases, and SQLite then rolled it back; it is now rolled
+  back at once, and the connection's rollback hook hears it.
+- **`XqliteNIF.get_pragma/2` and `XqliteNIF.set_pragma/3` run a PRAGMA that
+  writes to its end.** `incremental_vacuum` read through `get_pragma/2`
+  freed one page, answered `{:error, {:cannot_execute_pragma, _, _}}` (its
+  rows have no column), and lost the commit when another connection's read
+  kept it from the file; `set_pragma(conn, "incremental_vacuum", n)` freed
+  one page whatever `n` and answered `{:error, {:invalid_column_index, 0}}`.
+  Both now free every page asked and answer `:no_value` or `nil`, or the
+  busy error with nothing freed. A PRAGMA that only reads is still read to
+  its first row.
+- **`begin/2` answers `{:error, :statement_mid_run}` beside a write of its
+  connection that is mid-run.** While another process had a write of the
+  connection stepped but not finished, such as an `INSERT … RETURNING`
+  stepped once, `Xqlite.begin/2` and `XqliteNIF.begin/2` answered `:ok` in
+  every mode, and SQLite took that write into the new transaction: the write
+  still finished without an error, and a `rollback/1` from the process that
+  began erased its rows. Outside a transaction, while a statement of the
+  connection that SQLite counts as a write, or a blob open for writing, is
+  mid-run, `begin/2` now begins nothing and answers
+  `{:error, :statement_mid_run}`, as `commit/1` and `savepoint/2` do. A read
+  mid-run does not stop it, and inside a transaction it answers as before. A
+  `BEGIN` sent as SQL is not checked; the known-limitations guide says so.
+- **`XqliteNIF.changeset_apply/3` waits for a locked database as the busy
+  timeout or the busy policy says.** The apply reads the table's definition
+  before its first write, and SQLite never waits for the write lock once a
+  transaction has read, so while another connection held the write lock it
+  answered `{:error, {:database_busy_or_locked, 5, _}}` at once, or code 517
+  in WAL mode, whatever the busy settings, and busy observers heard nothing;
+  under a steady writer it could fail every time. In autocommit, on a
+  connection that can write, it now takes the write lock first and commits
+  in the same call, rolling back on any failure, a busy commit included,
+  which used to leave the apply's own transaction open. So it also waits
+  behind another connection's write for an empty changeset, and behind
+  another connection's write on any attached database, which it never
+  writes, answering `{:error, {:database_busy_or_locked, 5, _}}` when that
+  wait runs out; a deny of `:transaction` stops it; and while a statement of
+  the connection that SQLite counts as a write is mid-run it answers
+  `{:error, :statement_mid_run}`, where it answered
+  `{:error, {:database_busy_or_locked, 5, _}}`. A failed apply now sends
+  `{:xqlite_rollback}` to rollback-hook subscribers, where it sent
+  `{:xqlite_commit}`, and an empty one sends `{:xqlite_commit}`. Inside a
+  transaction, and on a read-only connection or one with `query_only` on, it
+  runs as before.
 - **A busy observer's handle is never issued twice on one connection.**
   Handles started again from 0 each time the last observer left with no
   policy set, so a handle already unregistered could name a later

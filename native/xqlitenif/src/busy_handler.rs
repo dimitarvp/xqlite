@@ -337,6 +337,30 @@ pub(crate) fn kept_timeout(handle: &XqliteConn) -> Option<u64> {
     unsafe { current.as_ref() }.map(|state| state.fallback_timeout_ms)
 }
 
+/// Runs `release` with no busy handler, so a commit it ends never waits on a
+/// lock, then puts back the one there was. Callers hold the connection Mutex.
+pub(crate) fn without_wait(conn: &Connection, handle: &XqliteConn, release: impl FnOnce()) {
+    let slot = handle.callback_boxes.busy.load(Ordering::Acquire);
+    let timeout = match slot.is_null() {
+        true => read_busy_timeout(conn, &handle.busy_flags).and_then(busy_timeout_c_int),
+        false => Ok(0),
+    };
+    match timeout {
+        // SAFETY: the caller holds the Mutex, which keeps a non-null slot from being reclaimed.
+        Ok(ms) => unsafe {
+            ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut());
+            release();
+            match slot.is_null() {
+                true => ffi::sqlite3_busy_timeout(conn.handle(), ms),
+                false => {
+                    ffi::sqlite3_busy_handler(conn.handle(), Some(busy_callback), slot.cast())
+                }
+            };
+        },
+        Err(_unread) => release(),
+    }
+}
+
 /// Register an observer pid; returns its unregistration handle.
 /// Installs the callback if the slot was empty. Callers must hold the
 /// connection Mutex.

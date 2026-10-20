@@ -22,6 +22,7 @@ defmodule Xqlite.NIF.ChildDropTest do
     {:ok, _} = Xqlite.execute(a, "CREATE TABLE t (x)")
     {:ok, _} = Xqlite.execute(a, "INSERT INTO t VALUES ('seed')")
     {:ok, _} = Xqlite.execute(a, "ATTACH DATABASE ?1 AS aux", [aux])
+    {:ok, _} = Xqlite.execute(a, "PRAGMA aux.auto_vacuum = INCREMENTAL")
     {:ok, _} = Xqlite.execute(a, "CREATE TABLE aux.u (x, b)")
     {:ok, _} = Xqlite.execute(a, "INSERT INTO aux.u VALUES (1, x'00'), (2, x'00')")
     # `aux` keeps the rollback journal: a read of `a`'s there holds a lock `c` meets.
@@ -59,13 +60,98 @@ defmodule Xqlite.NIF.ChildDropTest do
     assert {:ok, %Xqlite.Result{changes: 1}} = collect_while_a_waits(a, b)
   end
 
-  test "a write collected while idle commits once the reader is gone", %{a: a, c: c} do
+  test "a collected write that meets a lock is rolled back at once", %{a: a, c: c} do
+    {:ok, _} = NIF.register_rollback_hook(a, self())
     reader = c |> prepare("SELECT x FROM u") |> step()
     Process.put(:children, [child(a, {:write, "aux.u"})])
     collect(:children)
+    assert_receive {:xqlite_rollback}, 5_000
     :ok = NIF.stmt_finalize(reader)
     assert {:ok, :none} = Xqlite.txn_state(a, "aux")
-    assert {:ok, %{rows: [[1]]}} = Xqlite.query(c, "SELECT count(*) FROM u WHERE x = 'w'")
+    assert {:ok, %{rows: [[0]]}} = Xqlite.query(c, "SELECT count(*) FROM u WHERE x = 'w'")
+  end
+
+  for ending <- [:finalize, :stream_close, :reset, :blob_close] do
+    test "#{ending} answers the commit a reader keeps from the file", %{a: a, c: c} do
+      :ok = Xqlite.put_busy_timeout(a, 100)
+      reader = c |> prepare("SELECT x FROM u") |> step()
+      assert {:error, {:database_busy_or_locked, 5, _}} = end_write(a, unquote(ending))
+      :ok = NIF.stmt_finalize(reader)
+
+      assert {:ok, %{rows: [[1, "00"], [2, "00"]]}} =
+               Xqlite.query(c, "SELECT x, hex(b) FROM u")
+    end
+  end
+
+  for sql <- ["INSERT INTO u (x) VALUES ('w') RETURNING x", "PRAGMA incremental_vacuum"] do
+    test "a reset after a busy step SQLite keeps for a retry answers :ok: #{sql}", %{
+      a: a,
+      c: c
+    } do
+      :ok = Xqlite.begin(a, :immediate)
+      :ok = Xqlite.put_busy_timeout(c, 0)
+      stmt = prepare(c, unquote(sql))
+      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.step(stmt)
+      assert :ok = Xqlite.reset(stmt)
+      assert :ok = Xqlite.finalize(stmt)
+      :ok = Xqlite.rollback(a)
+    end
+  end
+
+  test "a reset that ends a vacuum's row answers the commit a reader keeps out", %{a: a, c: c} do
+    free = free_pages(c)
+    :ok = Xqlite.put_busy_timeout(c, 0)
+    reader = a |> prepare("SELECT x FROM aux.u") |> step()
+    vacuum = prepare(c, "PRAGMA incremental_vacuum")
+    assert {:row, []} = Xqlite.step(vacuum)
+    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.reset(vacuum)
+    :ok = Xqlite.finalize(vacuum)
+    :ok = NIF.stmt_finalize(reader)
+    assert freelist(c) == free
+  end
+
+  test "get_pragma runs a vacuum to its end and answers a commit a reader keeps out",
+       %{a: a, c: c} do
+    free = free_pages(c)
+    :ok = Xqlite.put_busy_timeout(c, 0)
+    reader = a |> prepare("SELECT x FROM aux.u") |> step()
+    assert {:error, {:database_busy_or_locked, 5, _}} = NIF.get_pragma(c, "incremental_vacuum")
+    assert freelist(c) == free
+    :ok = NIF.stmt_finalize(reader)
+    assert {:ok, :no_value} = NIF.get_pragma(c, "incremental_vacuum")
+    assert freelist(c) == 0
+  end
+
+  test "set_pragma runs a vacuum to its end and answers a commit a reader keeps out",
+       %{a: a, c: c} do
+    free = free_pages(c)
+    :ok = Xqlite.put_busy_timeout(c, 0)
+    reader = a |> prepare("SELECT x FROM aux.u") |> step()
+
+    assert {:error, {:database_busy_or_locked, 5, _}} =
+             NIF.set_pragma(c, "incremental_vacuum", 2)
+
+    assert freelist(c) == free
+    :ok = NIF.stmt_finalize(reader)
+    assert {:ok, nil} = NIF.set_pragma(c, "incremental_vacuum", 2)
+    assert freelist(c) == free - 2
+  end
+
+  test "a busy step over two databases wrote nothing, so reset and finalize answer :ok",
+       %{a: a, c: c} do
+    trigger =
+      "CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO aux.u (x) VALUES (new.x); END"
+
+    {:ok, _} = Xqlite.execute(a, trigger)
+    :ok = Xqlite.put_busy_timeout(a, 0)
+    :ok = Xqlite.begin(c, :immediate)
+    stmt = prepare(a, "INSERT INTO t VALUES (1)")
+    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.step(stmt)
+    assert :ok = Xqlite.reset(stmt)
+    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.step(stmt)
+    assert :ok = Xqlite.finalize(stmt)
+    :ok = Xqlite.rollback(c)
+    assert {:ok, %{rows: [[0]]}} = Xqlite.query(a, "SELECT count(*) FROM t WHERE x = 1")
   end
 
   test "a write collected on an idle connection lets the next writer in", %{a: a, b: b} do
@@ -105,6 +191,85 @@ defmodule Xqlite.NIF.ChildDropTest do
       assert {:ok, %{rows: [[^grown]]}} = Xqlite.query(b, "SELECT count(*) FROM t")
       assert {:ok, :none} = Xqlite.txn_state(a, "aux")
     end
+  end
+
+  property "a release no caller asked for never waits and keeps the busy setup", %{a: a, c: c} do
+    {:ok, _} = NIF.register_rollback_hook(c, self())
+
+    check all(
+            timeout <- member_of([0, 20, 60_000]),
+            policy <- boolean(),
+            observer <- boolean(),
+            held <- boolean(),
+            max_runs: 2_000,
+            max_shrinking_steps: 0
+          ) do
+      :ok = Xqlite.put_busy_timeout(c, timeout)
+      if policy, do: :ok = Xqlite.set_busy_policy(c, max_retries: 3, sleep_ms: 1)
+      watch = if observer, do: c |> Xqlite.register_busy_observer(self()) |> ok()
+      reader = if held, do: a |> prepare("SELECT x FROM aux.u") |> step()
+      {:ok, %{rows: [[before]]}} = Xqlite.query(c, "SELECT count(*) FROM u WHERE x = 'w'")
+      Process.put(:children, [child(c, {:write, "u"})])
+      collect(:children)
+      if held, do: assert_receive({:xqlite_rollback}, 5_000)
+      if held, do: :ok = NIF.stmt_finalize(reader)
+      grown = before + if(held, do: 0, else: 1)
+
+      assert {:ok, %{rows: [[^grown]]}} =
+               Xqlite.query(c, "SELECT count(*) FROM u WHERE x = 'w'")
+
+      refute_received {:xqlite_rollback}
+      assert {:ok, ^timeout} = Xqlite.get_busy_timeout(c)
+      if observer, do: contend(a, c, policy)
+      :ok = Xqlite.remove_busy_policy(c)
+      if observer, do: :ok = Xqlite.unregister_busy_observer(c, watch)
+    end
+  end
+
+  # `a`'s write lock on aux.db sends `c`'s insert into its busy handler until the rollback.
+  defp contend(a, c, policy) do
+    :ok = Xqlite.begin(a, :immediate)
+    insert = Task.async(fn -> Xqlite.execute(c, "INSERT INTO u (x) VALUES ('c')") end)
+    assert_receive {:xqlite_busy, _, _}, 5_000
+    if policy, do: assert_receive({:xqlite_busy, _, _}, 5_000)
+    :ok = Xqlite.rollback(a)
+    Task.await(insert, 10_000)
+    flush_busy()
+  end
+
+  defp end_write(a, :finalize), do: a |> child({:write, "aux.u"}) |> NIF.stmt_finalize()
+
+  defp end_write(a, :stream_close) do
+    stream = a |> NIF.stream_open("INSERT INTO aux.u (x) VALUES ('w') RETURNING x", []) |> ok()
+    stream |> fetch(1) |> NIF.stream_close()
+  end
+
+  defp end_write(a, :reset) do
+    stmt = child(a, {:write, "aux.u"})
+    answer = NIF.stmt_reset(stmt)
+    :ok = NIF.stmt_finalize(stmt)
+    answer
+  end
+
+  defp end_write(a, :blob_close) do
+    blob = a |> NIF.blob_open("aux", "u", "b", 1, false) |> ok()
+    :ok = NIF.blob_write(blob, 0, <<1>>)
+    NIF.blob_close(blob)
+  end
+
+  defp free_pages(c) do
+    :ok =
+      NIF.execute_batch(
+        c,
+        "INSERT INTO u VALUES (0, zeroblob(40000)); DELETE FROM u WHERE x = 0;"
+      )
+
+    freelist(c)
+  end
+
+  defp freelist(conn) do
+    {:ok, %{rows: [[pages]]}} = Xqlite.query(conn, "PRAGMA freelist_count")
+    pages
   end
 
   # `a`'s insert waits on `b`'s write lock, holding `a`'s lock, while the children go.

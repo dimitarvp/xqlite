@@ -5,6 +5,12 @@ defmodule Xqlite.NIF.StreamTest do
 
   alias XqliteNIF, as: NIF
 
+  @fk_tables """
+  CREATE TABLE p (id INTEGER PRIMARY KEY);
+  CREATE TABLE c (id INTEGER PRIMARY KEY,
+    pid INTEGER REFERENCES p (id) DEFERRABLE INITIALLY DEFERRED, v);
+  """
+
   for {type_tag, prefix, _opener_mfa_ignored_here} <- connection_openers() do
     describe "#{prefix} streaming" do
       @describetag type_tag
@@ -333,6 +339,46 @@ defmodule Xqlite.NIF.StreamTest do
                  NIF.stream_fetch(handle, 10)
 
         assert :ok == NIF.stream_close(handle)
+      end
+
+      test "stream_close answers the failed commit of the write it ends", %{conn: conn} do
+        :ok = NIF.execute_batch(conn, @fk_tables)
+
+        {:ok, stream} =
+          NIF.stream_open(conn, "INSERT INTO c (pid) VALUES (99), (98) RETURNING id", [])
+
+        assert {:ok, %{rows: [[_]]}} = NIF.stream_fetch(stream, 1)
+
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+                 NIF.stream_close(stream)
+
+        assert :done = NIF.stream_fetch(stream, 1)
+      end
+
+      test "a read stopped by an unreadable row answers the failed commit instead", %{
+        conn: conn
+      } do
+        :ok = NIF.execute_batch(conn, @fk_tables)
+        bad = "INSERT INTO c (pid, v) VALUES (99, CAST(X'FF' AS TEXT)) RETURNING v"
+
+        later =
+          "INSERT INTO c (pid, v) VALUES (99, 'ok'), (99, CAST(X'FF' AS TEXT)) RETURNING v"
+
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+                 NIF.query(conn, bad, [])
+
+        {:ok, first} = NIF.stream_open(conn, bad, [])
+
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+                 NIF.stream_fetch(first, 1)
+
+        {:ok, second} = NIF.stream_open(conn, later, [])
+        assert {:ok, %{rows: [["ok"]]}} = NIF.stream_fetch(second, 2)
+
+        assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+                 NIF.stream_fetch(second, 2)
+
+        assert {:ok, %{rows: [[0]]}} = NIF.query(conn, "SELECT count(*) FROM c", [])
       end
     end
   end

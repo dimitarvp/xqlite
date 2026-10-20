@@ -616,6 +616,12 @@ defmodule Xqlite do
   `:ok`. A session is not covered — delete sessions before closing (see
   `XqliteNIF.session_delete/1`).
 
+  A statement that holds a row, a stream not read to its end and a read-write
+  blob end their run there: in autocommit mode a write commits there, and when
+  that commit fails SQLite rolls it back while close still answers `:ok`.
+  Finalize or close such handles first: `finalize/1`,
+  `XqliteNIF.stream_close/1` and `XqliteNIF.blob_close/1` answer the failure.
+
   SQLite can decline to free the handle, which answers
   `{:error, {:database_busy_or_locked, code, message}}`. The drain has
   already run by then, so that answer never means "nothing happened": every
@@ -1392,8 +1398,9 @@ defmodule Xqlite do
   SQLite makes every change of a `RETURNING` write before it hands back the
   first row, so a row that cannot be read (TEXT that is not valid UTF-8,
   `{:error, {:utf8_error, column, message}}`) leaves the write in place:
-  committed in autocommit mode, pending inside a transaction, where
-  `rollback/1` undoes it.
+  committed in autocommit mode, unless that commit fails, when SQLite rolls the
+  write back and the call answers the commit's error instead; pending inside a
+  transaction, where `rollback/1` undoes it.
 
   Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
@@ -1879,7 +1886,11 @@ defmodule Xqlite do
   the whole write when it ends before its last row: a consumer that stops
   early (`Enum.take/2`), and a fetch that ends on an error — a value that is
   not valid UTF-8, a value an extension rejects on decode — in every
-  `:on_error` mode. In autocommit mode the write is committed then; inside a
+  `:on_error` mode. In autocommit mode the write is committed then, unless the
+  commit fails, which rolls it back: a fetch that ended on an error answers the
+  commit's error through `:on_error`, and when the consumer stopped early the
+  close logs it and puts it in the `:close_error` field of the
+  `[:xqlite, :stream, :close]` event. Inside a
   transaction it stays pending, and `rollback/1` undoes it. A cancel rolls
   the write back, but only when SQLite checks the token before the
   statement finishes, as `:cancel_tokens` above says. The steps after the
@@ -2233,8 +2244,10 @@ defmodule Xqlite do
   Resets a prepared statement so it can be stepped from the start again.
 
   Bindings are preserved (SQLite semantics); use `clear_bindings/1` to drop
-  them to NULL. Always returns `:ok` for a live statement — `sqlite3_reset`'s
-  return code echoes the most recent step error, not the reset itself.
+  them to NULL. Answers `:ok`, except when the reset ends a write a step left
+  holding a row: in autocommit mode the write commits here, and a commit that
+  fails answers the error a step to the end would have answered, the write
+  rolled back. The statement is reset either way.
 
   An unreadable-value error a batch held back is dropped here: the run it
   belonged to is over. After a step that failed outright a reset changes
@@ -2287,8 +2300,13 @@ defmodule Xqlite do
   finalization over relying on garbage collection, and finalize before
   closing the owning connection (see `prepare/2`).
 
+  Finalizing a write a step left holding a row ends its run here: in autocommit
+  mode it commits here, and a commit that fails answers the error a step to the
+  end would have answered, the write rolled back. The statement is finalized
+  either way; any other answers `:ok`.
+
   An unreadable-value error a batch held back is dropped with the statement:
-  this answers the lifecycle result, never a leftover value error.
+  this answers the end of the run, never a leftover value error.
   """
   @spec finalize(stmt()) :: :ok | error()
   def finalize(stmt), do: XqliteNIF.stmt_finalize(stmt)
@@ -3266,8 +3284,11 @@ defmodule Xqlite do
   foreign key or a lock, and a constraint error under the default `ABORT`,
   roll nothing back, so neither sends `{:xqlite_rollback}` to
   `XqliteNIF.register_rollback_hook/2` subscribers; a rollback SQLite
-  performs itself (`INSERT OR ROLLBACK`, a cancelled write) sends it without
-  passing through here.
+  performs itself (`INSERT OR ROLLBACK`, a cancelled write, an autocommit write
+  whose own commit fails as its statement or blob ends) sends it without
+  passing through here. The rows a `RETURNING` write hands out describe changes
+  final only once it commits: a write still running after a rollback keeps
+  handing out its rows.
   """
   @spec rollback(conn()) :: :ok | error()
   def rollback(conn) do

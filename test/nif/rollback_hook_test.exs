@@ -235,6 +235,14 @@ defmodule Xqlite.NIF.RollbackHookTest do
 
         :ok = NIF.unregister_rollback_hook(conn, h)
       end
+
+      test "close ends a write stopped after a step and its failed commit fires the hook",
+           %{conn: conn} do
+        stmt = doomed_write(conn)
+        assert :ok = NIF.close(conn)
+        assert_receive {:xqlite_rollback}, 1_000
+        assert :ok = NIF.stmt_finalize(stmt)
+      end
     end
   end
 
@@ -281,6 +289,21 @@ defmodule Xqlite.NIF.RollbackHookTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # A child of a parent that does not exist fails at the commit, after the row.
+  defp doomed_write(conn) do
+    :ok =
+      NIF.execute_batch(conn, """
+      CREATE TABLE p (id INTEGER PRIMARY KEY);
+      CREATE TABLE c (id INTEGER PRIMARY KEY,
+        pid INTEGER REFERENCES p (id) DEFERRABLE INITIALLY DEFERRED);
+      """)
+
+    {:ok, _} = NIF.register_rollback_hook(conn, self())
+    {:ok, stmt} = NIF.stmt_prepare(conn, "INSERT INTO c (pid) VALUES (99) RETURNING id")
+    {:row, _} = NIF.stmt_step(stmt)
+    stmt
+  end
 
   defp spawn_collector do
     spawn(fn -> collector_loop([]) end)

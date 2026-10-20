@@ -429,6 +429,26 @@ defmodule Xqlite.NIF.BlobTest do
       assert :ok = NIF.blob_close(blob)
     end
 
+    test "blob_close answers the commit of every write it ends", %{conn: conn} do
+      :ok =
+        NIF.execute_batch(conn, """
+        CREATE TABLE bl_p (id INTEGER PRIMARY KEY);
+        CREATE TABLE bl_c (id INTEGER PRIMARY KEY,
+          pid INTEGER REFERENCES bl_p (id) DEFERRABLE INITIALLY DEFERRED, data BLOB);
+        INSERT INTO bl_p VALUES (1);
+        INSERT INTO bl_c VALUES (1, 1, zeroblob(4));
+        """)
+
+      {:ok, blob} = NIF.blob_open(conn, "main", "bl_c", "data", 1, false)
+      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO bl_c (pid) VALUES (99)", [])
+      assert :ok = NIF.blob_write(blob, 0, <<1>>)
+
+      assert {:error, {:constraint_violation, :constraint_foreign_key, _}} =
+               NIF.blob_close(blob)
+
+      assert {:ok, %{rows: [["00000000"]]}} = NIF.query(conn, "SELECT hex(data) FROM bl_c", [])
+    end
+
     property "an ended blob handle answers the abort from every later call", %{conn: conn} do
       assert {:ok, _} = NIF.set_pragma(conn, "journal_mode", "MEMORY")
       assert {:ok, _} = NIF.set_pragma(conn, "synchronous", "OFF")

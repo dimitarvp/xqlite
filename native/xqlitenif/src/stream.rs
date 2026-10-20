@@ -50,7 +50,7 @@ impl XqliteStream {
     pub(crate) fn take_and_finalize_atomic_stmt(&self) -> Result<(), XqliteError> {
         // A closed stream answers `:done`, never a leftover error.
         let _ = self.take_pending_error();
-        take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc)
+        take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc, || true)
     }
 
     pub(crate) fn take_pending_error(&self) -> Option<XqliteError> {
@@ -81,9 +81,15 @@ impl XqliteStream {
 /// locking first is what keeps a finalize from running against a handle close
 /// has already freed. It also keeps any other thread out of `sqlite3_step` on
 /// this connection while the statement goes away.
+///
+/// `answer_end`, read under that lock, says whether the end call's code is
+/// answered: a statement answers it only when its last step answered a row, a
+/// stream always, since it releases on every failed step and so holds a row or
+/// never stepped when it is closed.
 pub(crate) fn take_and_finalize_raw(
     atomic_raw_stmt: &Arc<AtomicPtr<ffi::sqlite3_stmt>>,
     conn_resource_arc: &ResourceArc<XqliteConn>,
+    answer_end: impl FnOnce() -> bool,
 ) -> Result<(), XqliteError> {
     // A null cell means the statement is already gone — finalized by an
     // earlier call, by the stream's own exhaustion, or by the connection's
@@ -96,7 +102,10 @@ pub(crate) fn take_and_finalize_raw(
         // SAFETY: the connection Mutex is held for the whole release, so no
         // other thread is inside a `sqlite3_*` call on this connection, and
         // the cell holds a statement prepared on it.
-        unsafe { conn_resource_arc.release_child(&child) }
+        unsafe {
+            let db = ffi::sqlite3_db_handle(atomic_raw_stmt.load(Ordering::Acquire));
+            conn_resource_arc.release_child(&child, db, answer_end())
+        }
     }
 }
 
@@ -113,7 +122,10 @@ pub(crate) unsafe fn finalize_stream_stmt_locked(
 ) -> Result<(), XqliteError> {
     let child = ChildHandle::Stmt(Arc::clone(&stream.atomic_raw_stmt));
     // SAFETY: forwarded from this function's own contract.
-    unsafe { stream.conn_resource_arc.release_child(&child) }
+    unsafe {
+        let db = ffi::sqlite3_db_handle(stream.atomic_raw_stmt.load(Ordering::Acquire));
+        stream.conn_resource_arc.release_child(&child, db, true)
+    }
 }
 
 impl Drop for XqliteStream {
@@ -143,6 +155,12 @@ impl From<StepFailure> for XqliteError {
             StepFailure::Unreadable(error) => error,
         }
     }
+}
+
+/// Whether a step left the statement holding a row: it answered one, readable or not.
+#[inline]
+pub(crate) fn stepped_to_row<T>(stepped: &Result<Option<T>, StepFailure>) -> bool {
+    matches!(stepped, Ok(Some(_)) | Err(StepFailure::Unreadable(_)))
 }
 
 /// Steps a prepared statement once and returns the row data if available.

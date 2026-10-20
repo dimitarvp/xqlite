@@ -885,7 +885,7 @@ fn stmt_bind<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'a> {
-    use crate::stream::process_single_step;
+    use crate::stream::{process_single_step, stepped_to_row};
 
     let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
         // Behind the liveness check the lock did: a finalized statement, and
@@ -899,10 +899,13 @@ fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
         // on at the row after the one SQLite stepped past.
         match stmt_handle.take_pending_error() {
             Some(pending) => Err(pending),
-            // SAFETY: with_live_stmt holds the connection mutex and proved
-            // stmt_ptr live.
-            None => unsafe { process_single_step(env, stmt_ptr, db_handle) }
-                .map_err(XqliteError::from),
+            None => {
+                // SAFETY: with_live_stmt holds the connection mutex and proved
+                // stmt_ptr live.
+                let stepped = unsafe { process_single_step(env, stmt_ptr, db_handle) };
+                stmt_handle.set_holds_row(stepped_to_row(&stepped));
+                stepped.map_err(XqliteError::from)
+            }
         }
     });
 
@@ -941,7 +944,7 @@ fn stmt_multi_step_impl<'a>(
     batch_size: i64,
     token_bools: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Term<'a> {
-    use crate::stream::{StepFailure, process_single_step};
+    use crate::stream::{StepFailure, process_single_step, stepped_to_row};
 
     if batch_size < 1 {
         let details = map_new(env)
@@ -992,7 +995,9 @@ fn stmt_multi_step_impl<'a>(
         for _ in 0..batch_size {
             // SAFETY: with_live_stmt holds the connection mutex and proved
             // stmt_ptr live.
-            match unsafe { process_single_step(env, stmt_ptr, db_handle) } {
+            let stepped = unsafe { process_single_step(env, stmt_ptr, db_handle) };
+            stmt_handle.set_holds_row(stepped_to_row(&stepped));
+            match stepped {
                 Ok(Some(row_terms)) => rows.push(row_terms),
                 Ok(None) => {
                     done = true;
@@ -1040,18 +1045,19 @@ fn stmt_multi_step_impl<'a>(
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn stmt_reset(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'_> {
-    let result = stmt_handle.with_live_stmt(|stmt_ptr, _db_handle| {
+    let result = stmt_handle.with_live_stmt(|stmt_ptr, db_handle| {
         // The statement starts from the top, so an error held back from an
         // earlier batch belongs to a run that is over.
         let _ = stmt_handle.take_pending_error();
+        let holds_row = stmt_handle.take_holds_row();
 
         // SAFETY: with_live_stmt holds the connection mutex and proved
-        // stmt_ptr live. sqlite3_reset's return code echoes the most recent
-        // step error rather than reporting the reset itself — resetting a
-        // stepped-to-error statement is legal — so it is deliberately not
-        // treated as a failure here.
-        unsafe { ffi::sqlite3_reset(stmt_ptr) };
-        Ok(())
+        // stmt_ptr live.
+        let ended = unsafe { statement::end_run(db_handle, stmt_ptr, ffi::sqlite3_reset) };
+        match holds_row {
+            true => ended,
+            false => Ok(()),
+        }
     });
     singular_ok_or_error_tuple(env, result)
 }
@@ -1334,9 +1340,11 @@ fn stream_fetch_impl<'a>(
                     // answered at once and its batch's rows go with it.
                     Err(e) => {
                         stream_definitively_exhausted = true;
-                        // SAFETY: conn_lock_guard is held for the whole loop. The
-                        // registry result is dropped in favour of the step error.
-                        let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
+                        // SAFETY: conn_lock_guard is held for the whole loop.
+                        let e = match unsafe { finalize_stream_stmt_locked(&stream_handle) } {
+                            Ok(()) | Err(XqliteError::LockError(_)) => e,
+                            Err(commit) => commit,
+                        };
 
                         // A cancellation discards the batch, as the stream's
                         // contract says. Any other error hands back the rows

@@ -242,12 +242,19 @@ pub(crate) fn close(blob_handle: &XqliteBlob) -> Result<(), XqliteError> {
     if blob_handle.blob.load(Ordering::Acquire).is_null() {
         Ok(())
     } else {
-        let _conn_guard = blob_handle.conn_resource_arc.lock_conn()?;
+        let conn_guard = blob_handle.conn_resource_arc.lock_conn()?;
         let child = ChildHandle::Blob(Arc::clone(&blob_handle.blob));
         // SAFETY: the connection Mutex is held for the whole release, so no
         // concurrent `sqlite3_*` runs on this db, and the cell holds a blob
         // opened on it.
-        unsafe { blob_handle.conn_resource_arc.release_child(&child) }
+        unsafe {
+            let db = conn_guard
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |conn| conn.handle());
+            blob_handle
+                .conn_resource_arc
+                .release_child(&child, db, true)
+        }
     }
 }
 
@@ -297,16 +304,16 @@ where
     })
 }
 
-/// Builds an `XqliteError` from a non-OK blob result code, classified exactly as
+/// Builds an `XqliteError` from a non-OK result code, classified exactly as
 /// rusqlite's `decode_result` would: read `sqlite3_errmsg` off the db handle,
 /// then route through `XqliteError::from`.
 ///
 /// # Safety
 ///
-/// `db` must be the valid `sqlite3*` owning the blob, held under the connection
+/// `db` must be the valid `sqlite3*` that answered `rc`, held under the connection
 /// Mutex for the duration of this call.
 #[inline]
-unsafe fn blob_error(db: *mut ffi::sqlite3, rc: c_int) -> XqliteError {
+pub(crate) unsafe fn blob_error(db: *mut ffi::sqlite3, rc: c_int) -> XqliteError {
     // SAFETY: `db` is valid under the connection Mutex; `sqlite3_errmsg` returns
     // an internal buffer valid until the next API call, and we copy immediately.
     let message = unsafe {

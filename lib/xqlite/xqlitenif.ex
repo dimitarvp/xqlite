@@ -216,8 +216,8 @@ defmodule XqliteNIF do
   SQLite makes every change of a `RETURNING` write before it hands back the
   first row. A row this library cannot read, TEXT that is not valid UTF-8,
   answers `{:error, {:utf8_error, column, message}}` with no rows, and the
-  write stays: committed in autocommit mode, pending inside a transaction,
-  where `rollback/1` undoes it.
+  write stays: committed in autocommit mode, or pending inside a transaction,
+  where `rollback/1` undoes it; `Xqlite.query/4` says what a failed commit answers.
 
   A string holding a second statement after the first is rejected with
   `{:error, :multiple_statements}`, and nothing in it runs and no setting changes.
@@ -615,6 +615,8 @@ defmodule XqliteNIF do
   `stmt_finalize/1`, `stream_close/1` and `blob_close/1` return `:ok`. A
   session is not covered — call `session_delete/1` before closing.
 
+  A write a child left mid-run ends with the close, as `Xqlite.close/1` says.
+
   It is safe to call `close/1` multiple times on the same connection resource;
   subsequent calls are no-ops and will also return `:ok`.
 
@@ -677,7 +679,9 @@ defmodule XqliteNIF do
   first compile option, not the whole list. A PRAGMA that answers a list is
   read through `Xqlite.Pragma.get/2,3`, which knows which ones do, or through
   `XqliteNIF.query/3` with the PRAGMA as its SQL, which gives the rows
-  unchanged.
+  unchanged. A PRAGMA that writes runs to its end before the call answers, so it
+  has committed: `incremental_vacuum` frees every page it can and answers
+  `:no_value`, or the busy error when another connection's read keeps it out.
 
   Note: Some PRAGMAs require an argument to read (e.g., `PRAGMA table_info(table_name)`).
   This function cannot read those: a name may hold only letters, digits and
@@ -745,7 +749,10 @@ defmodule XqliteNIF do
   Any other value is formatted and handed to SQLite, which parses what it can
   of it and reports success even when it stored its own fallback instead. `Xqlite.Pragma.put/4`
   checks the value against the PRAGMA's definition first and rejects what it
-  cannot take; use it unless you mean to reach SQLite unchecked.
+  cannot take; use it unless you mean to reach SQLite unchecked. A PRAGMA that
+  writes runs to its end before the call answers, so it has committed:
+  `incremental_vacuum` frees every page asked and answers `nil`, or the busy error
+  when another connection's read keeps it out.
   """
   @spec set_pragma(conn :: Xqlite.conn(), name :: String.t(), value :: term()) ::
           {:ok, term()} | Xqlite.error()
@@ -1578,6 +1585,9 @@ defmodule XqliteNIF do
       in the statement has run by then, and the statement is finalized, which commits the write
       in autocommit mode.
 
+  A finalize after a failed read that ends a write commits it in autocommit
+  mode, and a commit that fails is the error answered or held back instead.
+
   `Xqlite.stream/4` drives all of this; use it unless you are stepping the
   stream by hand.
   """
@@ -1630,8 +1640,9 @@ defmodule XqliteNIF do
 
   `stream_handle` is the opaque resource returned by `stream_open/3`.
 
-  Returns `:ok` if successful, or `{:error, reason}` if an error occurs during
-  finalization (rare). A term that is no stream handle raises `ArgumentError`.
+  Returns `:ok`, or, when the close ends a write the stream had not read to its
+  end, the error of a commit that fails there, the write rolled back; the
+  stream is closed either way. A term that is no stream handle raises `ArgumentError`.
   """
   @spec stream_close(stream_handle :: reference()) :: :ok | Xqlite.error()
   def stream_close(_stream_handle), do: err()
@@ -1777,9 +1788,9 @@ defmodule XqliteNIF do
 
   Most users want `Xqlite.reset/1`. Bindings are preserved (SQLite
   semantics) — use `stmt_clear_bindings/1` to drop them — so a statement
-  that was bound stays runnable across a reset. The return code of
-  `sqlite3_reset` echoes the most recent step error rather than reporting
-  the reset itself, so this returns `:ok` for any live statement.
+  that was bound stays runnable across a reset. It answers `:ok` unless it
+  ends a write a step left holding a row and the commit there fails, as
+  `Xqlite.reset/1` says.
   """
   @spec stmt_reset(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
   def stmt_reset(_stmt), do: err()
@@ -1828,7 +1839,9 @@ defmodule XqliteNIF do
   handle at once. Closing the connection finalizes every statement still
   open on it: every later step, bind, reset and clear answers
   `{:error, :connection_closed}`, this answers `:ok`, and
-  `stmt_column_names/1` answers the names captured at prepare.
+  `stmt_column_names/1` answers the names captured at prepare. Finalizing a
+  write a step left holding a row answers a commit that fails there, as
+  `Xqlite.finalize/1` says.
   """
   @spec stmt_finalize(stmt :: Xqlite.stmt()) :: :ok | Xqlite.error()
   def stmt_finalize(_stmt), do: err()
@@ -2007,9 +2020,11 @@ defmodule XqliteNIF do
 
       {:xqlite_rollback}
 
-  A commit that fails on a deferred foreign key or a lock, and a constraint
+  A `commit/1` that fails on a deferred foreign key or a lock, and a constraint
   error under `ABORT`, roll nothing back and send nothing; neither does
-  `close/1` when it rolls an open transaction back.
+  `close/1` when it rolls an open transaction back. In autocommit mode a write
+  whose own commit fails as its statement or blob ends is rolled back whole by
+  SQLite and sends it too, from whichever call or thread ended it.
 
   Note: SQLite does not invoke this callback for `ROLLBACK TO
   SAVEPOINT` operations — only for outer-transaction rollbacks.
@@ -2418,6 +2433,12 @@ defmodule XqliteNIF do
   close, `blob_read/3`, `blob_write/3`, `blob_size/1` and `blob_reopen/2` answer
   `{:error, :blob_closed}` while the connection is open and `{:error, :connection_closed}`
   once it is closed; `close/1` closes every blob of the connection.
+
+  Closing a read-write blob ends its write: in autocommit mode it commits here,
+  with every write its connection made while the blob was open, and a commit
+  that fails rolls them back and answers that error. After a read or write SQLite
+  failed, the close answers that failure again; a handle SQLite already ended
+  answers `:ok`. The handle is closed either way.
   """
   @spec blob_close(blob :: reference()) :: :ok | Xqlite.error()
   def blob_close(_blob), do: err()

@@ -42,11 +42,15 @@ pub(crate) fn core_query<'a>(
         stream::bind_params(env, held.as_ptr(), db, params_term)?;
 
         let mut rows = Vec::new();
-        while let Some(row) =
-            stream::step_under_names(env, held.as_ptr(), db, &columns, rows.is_empty())?
-        {
-            rows.push(row);
-        }
+        let read = loop {
+            match stream::step_under_names(env, held.as_ptr(), db, &columns, rows.is_empty()) {
+                Ok(Some(row)) => rows.push(row),
+                Ok(None) => break Ok(()),
+                Err(e) => break Err(e),
+            }
+        };
+        held.finish()?;
+        read?;
 
         Ok(XqliteQueryResult {
             num_rows: rows.len(),

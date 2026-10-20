@@ -1,6 +1,7 @@
 use crate::atoms;
 use crate::authorizer::{ActionKind, AuthorizerState};
-use crate::busy_handler::{BusySlotFlags, BusySlotState};
+use crate::blob;
+use crate::busy_handler::{self, BusySlotFlags, BusySlotState};
 use crate::cancel::XqliteCancelToken;
 use crate::commit_hook::{self, CommitSubscriber};
 use crate::error::XqliteError;
@@ -9,6 +10,7 @@ use crate::progress_dispatch::{self, ProgressDispatch};
 use crate::release;
 use crate::rollback_hook::{self, RollbackSubscriber};
 use crate::session::OrphanSession;
+use crate::statement;
 use crate::update_hook::{self, UpdateSubscriber};
 use crate::util::encode_text;
 use crate::wal_hook::{self, WalDispatch};
@@ -16,7 +18,6 @@ use rusqlite::ffi;
 use rusqlite::{Connection, Error as RusqliteError};
 use rustler::{Encoder, Env, Resource, ResourceArc, Term, resource_impl, types::map::map_new};
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -52,27 +53,30 @@ impl ChildHandle {
     /// or holds it poisoned, which keeps every other thread out of SQLite on
     /// that connection, or owns its `Connection` as a dropped connection's
     /// close job does — and the cell holds null or a handle SQLite created
-    /// on that same connection.
-    pub(crate) unsafe fn release(&self) {
-        match self {
-            ChildHandle::Stmt(cell) => {
-                let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
-                if !ptr.is_null() {
-                    // SAFETY: the swap gives exclusive ownership of `ptr`, and no
-                    // other thread is in SQLite (fn contract). `sqlite3_finalize`
-                    // echoes the statement's last evaluation error and destroys it
-                    // either way; that error already reached the caller at step
-                    // time, so it is deliberately discarded here.
-                    let _ = unsafe { ffi::sqlite3_finalize(ptr) };
+    /// on `db`.
+    pub(crate) unsafe fn release(&self, db: *mut ffi::sqlite3) -> Result<(), XqliteError> {
+        // SAFETY: the swap gives the handle to this call alone, and no other thread
+        // is in SQLite (fn contract); SQLite frees the handle whatever it answers.
+        unsafe {
+            match self {
+                ChildHandle::Stmt(cell) => {
+                    let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                    match ptr.is_null() {
+                        true => Ok(()),
+                        false => statement::end_run(db, ptr, ffi::sqlite3_finalize),
+                    }
                 }
-            }
-            ChildHandle::Blob(cell) => {
-                let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
-                if !ptr.is_null() {
-                    // SAFETY: as above; `sqlite3_blob_close`'s flush result is
-                    // discarded for the same reason — the blob is destroyed
-                    // whatever it returns.
-                    let _ = unsafe { ffi::sqlite3_blob_close(ptr) };
+                ChildHandle::Blob(cell) => {
+                    let ptr = cell.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                    let rc = match ptr.is_null() {
+                        true => ffi::SQLITE_OK,
+                        false => ffi::sqlite3_blob_close(ptr),
+                    };
+                    // SQLite ended an aborted handle before, and every call since answered that.
+                    match rc == ffi::SQLITE_OK || rc & 0xFF == ffi::SQLITE_ABORT {
+                        true => Ok(()),
+                        false => Err(blob::blob_error(db, rc)),
+                    }
                 }
             }
         }
@@ -160,21 +164,30 @@ impl XqliteConn {
         Ok(())
     }
 
-    /// Releases one child handle and forgets it.
+    /// Releases one child handle and forgets it. The end call's code is answered
+    /// only when `answer_end` holds: a statement whose last step answered no row
+    /// has no write to commit, so that code repeats what a step answered.
     ///
     /// # Safety
     ///
     /// As `ChildHandle::release`: the caller holds this connection's Mutex
     /// for the whole call, or holds it poisoned.
-    pub(crate) unsafe fn release_child(&self, child: &ChildHandle) -> Result<(), XqliteError> {
+    pub(crate) unsafe fn release_child(
+        &self,
+        child: &ChildHandle,
+        db: *mut ffi::sqlite3,
+        answer_end: bool,
+    ) -> Result<(), XqliteError> {
         // SAFETY: forwarded from this function's own contract.
-        unsafe { child.release() };
-        let mut children = self
-            .children
-            .lock()
-            .map_err(|e| XqliteError::LockError(e.to_string()))?;
-        children.remove(&child.key());
-        Ok(())
+        let released = unsafe { child.release(db) };
+        let forgotten = self.children.lock().map(|mut children| {
+            children.remove(&child.key());
+        });
+        let ended = match answer_end {
+            true => released,
+            false => Ok(()),
+        };
+        ended.and(forgotten.map_err(|e| XqliteError::LockError(e.to_string())))
     }
 
     /// Releases every child handle still registered on this connection.
@@ -183,14 +196,14 @@ impl XqliteConn {
     ///
     /// As `ChildHandle::release`: the caller holds this connection's Mutex
     /// for the whole call.
-    unsafe fn release_children(&self) -> Result<(), XqliteError> {
+    unsafe fn release_children(&self, db: *mut ffi::sqlite3) -> Result<(), XqliteError> {
         let mut children = self
             .children
             .lock()
             .map_err(|e| XqliteError::LockError(e.to_string()))?;
         for (_key, child) in children.drain() {
             // SAFETY: forwarded from this function's own contract.
-            unsafe { child.release() };
+            let _ = unsafe { child.release(db) };
         }
         Ok(())
     }
@@ -214,24 +227,23 @@ impl XqliteConn {
     ///
     /// # Safety
     ///
-    /// The caller holds this connection's Mutex, and `open` says whether the slot
-    /// holds the `Connection`.
-    unsafe fn release_orphans(&self, open: bool) {
+    /// The caller holds this connection's Mutex, and `conn` is what the slot holds.
+    unsafe fn release_orphans(&self, conn: Option<&Connection>) {
         let orphans = std::mem::take(&mut *self.queue());
-        for orphan in orphans {
-            match orphan {
-                Orphan::Child(child) => {
-                    // SAFETY: forwarded from this function's own contract.
-                    if let Err(e) = unsafe { self.release_child(&child) } {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "[xqlite] Error releasing a collected handle: {e:?}"
-                        );
+        if let Some(conn) = conn
+            && !orphans.is_empty()
+        {
+            busy_handler::without_wait(conn, self, || {
+                for orphan in orphans {
+                    match orphan {
+                        Orphan::Child(child) => {
+                            // SAFETY: forwarded from this function's own contract.
+                            _ = unsafe { self.release_child(&child, conn.handle(), true) }
+                        }
+                        Orphan::Session(session) => drop(ManuallyDrop::into_inner(session.0)),
                     }
                 }
-                Orphan::Session(session) if open => drop(ManuallyDrop::into_inner(session.0)),
-                Orphan::Session(_closed) => {}
-            }
+            });
         }
     }
 
@@ -241,7 +253,7 @@ impl XqliteConn {
         while !self.queue().is_empty() {
             match self.conn.try_lock() {
                 // SAFETY: `guard` holds the connection Mutex.
-                Ok(guard) => unsafe { self.release_orphans(guard.is_some()) },
+                Ok(guard) => unsafe { self.release_orphans(guard.as_ref()) },
                 Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => break,
             }
         }
@@ -263,7 +275,7 @@ impl<'a> ConnGuard<'a> {
         guard: MutexGuard<'a, Option<Connection>>,
     ) -> Self {
         // SAFETY: `guard` holds the connection Mutex.
-        unsafe { conn.release_orphans(guard.is_some()) };
+        unsafe { conn.release_orphans(guard.as_ref()) };
         let guard = ManuallyDrop::new(guard);
         ConnGuard { conn, guard }
     }
@@ -287,7 +299,7 @@ impl Drop for ConnGuard<'_> {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             // SAFETY: `guard` still holds the connection Mutex.
-            unsafe { self.conn.release_orphans(self.guard.is_some()) };
+            unsafe { self.conn.release_orphans(self.guard.as_ref()) };
         }
         // SAFETY: the guard is dropped here, once, and never read again.
         unsafe { ManuallyDrop::drop(&mut self.guard) };
@@ -470,11 +482,11 @@ pub(crate) fn close_connection(handle: &ResourceArc<XqliteConn>) -> Result<(), X
     match conn_guard.as_ref() {
         // Second close is a no-op: the first one emptied the registry.
         None => Ok(()),
-        Some(_) => {
+        Some(conn) => {
             // SAFETY: the connection Mutex is held for the whole drain, so no
             // other thread is inside a `sqlite3_*` call on this handle, and
             // every registered cell holds null or a handle opened on it.
-            unsafe { handle.release_children()? };
+            unsafe { handle.release_children(conn.handle())? };
             free_handle(&mut conn_guard)
         }
     }

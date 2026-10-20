@@ -129,6 +129,12 @@ answers its syntax error.
 - [Delete sessions before the connection](gotchas.md#delete-sessions-before-the-connection):
   a session still referenced when its connection closes leaks one small
   object.
+- Inside a transaction opened with a plain `Xqlite.begin/2`,
+  `XqliteNIF.changeset_apply/3` answers a lock another connection holds at
+  once, whatever `busy_timeout` or the busy policy says: the apply reads
+  before it writes, and SQLite does not wait for the write lock once a
+  transaction has read. Open the transaction with
+  `Xqlite.begin(conn, :immediate)`.
 
 ## Values
 
@@ -159,6 +165,12 @@ answers its syntax error.
   use `Xqlite.put_busy_timeout/2`.
 - [A shared handle serializes](gotchas.md#give-each-process-its-own-connection-a-shared-handle-serializes):
   open one connection per process.
+- A `BEGIN` sent as SQL, through any function but a batch (`Xqlite.execute_batch/3`,
+  `XqliteNIF.execute_batch/2`), is not checked the way `Xqlite.begin/2` is: while
+  another process has a write of the same connection stepped but not finished, the
+  `BEGIN` succeeds, SQLite takes that write into the new transaction, and a
+  `ROLLBACK` then undoes rows the writer was told were written. Open transactions
+  with `Xqlite.begin/2`, which answers `{:error, :statement_mid_run}` in that state.
 - **Calls waiting for a lock hold a dirty I/O thread.** A call waiting for its
   connection's mutex, or for a lock another connection holds, keeps one of the
   VM's dirty I/O threads (10 by default), which every connection and the VM's
@@ -183,17 +195,27 @@ answers its syntax error.
   to close. Close it again rather than go on using it; only a statement or backup
   a loaded extension keeps open makes SQLite decline.
 - xqlite releases the handles the garbage collector frees on one release
-  thread for all connections, or in the call that holds the handle's
-  connection, before that call returns. A release that commits a write in
-  rollback-journal mode (a write statement stopped after a step, or a
-  read-write blob) can wait in that connection's busy handler: on the
-  release thread, releases for other idle connections wait behind it; in a
-  call, that call answers only after it. A connection dropped without
-  `close/1` runs its WAL checkpoint on the release thread. A release
-  finishes after the collection returns, so another connection can meet the
-  handle's lock right after the collection. Where release latency matters,
-  finalize, close and delete handles yourself, and close connections with
-  `close/1`.
+  thread for all connections, or in a call on the handle's connection, before
+  that call returns, and a release never waits on a lock. A write statement
+  stopped after a step, a stream not read to its end, or a read-write blob
+  that you leave to the collector commits its write, in autocommit mode, when
+  it is released; when another connection holds a lock that commit needs (in
+  rollback-journal mode, any reader of the file), SQLite rolls the write back
+  at once, and only the connection's rollback-hook subscribers hear it, as
+  `{:xqlite_rollback}`. A connection dropped without `close/1` runs its WAL
+  checkpoint on the release thread. A release finishes after the collection
+  returns, so another connection can meet the handle's lock right after the
+  collection. Finalize your write statements, close streams and blobs, and
+  close connections with `close/1` yourself.
+- A write statement stopped after a step (an `INSERT … RETURNING` whose rows
+  you did not read to the end, through `prepare/2` or a stream) and a
+  read-write blob keep their write uncommitted until they end, and in
+  autocommit mode so does every write their connection makes meanwhile.
+  `finalize/1`, `reset/1`, `XqliteNIF.stream_close/1` and
+  `XqliteNIF.blob_close/1` end them and answer a commit that fails there.
+  When `close/1` ends such a handle, no call answers: SQLite rolls the writes
+  back, and only the connection's rollback-hook subscribers hear it, as
+  `{:xqlite_rollback}`. End such handles yourself.
 - [After a blob call answers code 4, close the handle](gotchas.md#after-a-blob-call-answers-code-4-close-the-handle):
   SQLite has ended it; open a new one.
 

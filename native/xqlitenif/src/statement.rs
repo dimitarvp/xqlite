@@ -213,6 +213,12 @@ impl PreparedStmt {
         self.ptr = std::ptr::null_mut();
         released
     }
+
+    pub(crate) fn finish(self) -> Result<(), XqliteError> {
+        let stmt = self.release();
+        // SAFETY: as in `drop`, and `release` gave the statement to this call alone.
+        unsafe { end_run(ffi::sqlite3_db_handle(stmt), stmt, ffi::sqlite3_finalize) }
+    }
 }
 
 impl Drop for PreparedStmt {
@@ -226,6 +232,29 @@ impl Drop for PreparedStmt {
         // what `release` is for — and this runs once, the pointer being nulled
         // as it is taken.
         unsafe { ffi::sqlite3_finalize(self.ptr) };
+    }
+}
+
+/// Ends `stmt`'s run with `end` and answers its code only when that ended the
+/// connection's write transaction, a commit or rollback run there; any other
+/// code repeats what a step already answered.
+///
+/// # Safety
+/// The caller holds the connection Mutex, and `stmt` is a live statement of `db`.
+pub(crate) unsafe fn end_run(
+    db: *mut ffi::sqlite3,
+    stmt: *mut ffi::sqlite3_stmt,
+    end: unsafe extern "C" fn(*mut ffi::sqlite3_stmt) -> c_int,
+) -> Result<(), XqliteError> {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe {
+        let writing = || ffi::sqlite3_txn_state(db, std::ptr::null()) == ffi::SQLITE_TXN_WRITE;
+        let before = writing();
+        let rc = end(stmt);
+        match before && !writing() && rc != ffi::SQLITE_OK {
+            true => Err(crate::blob::blob_error(db, rc)),
+            false => Ok(()),
+        }
     }
 }
 
@@ -328,6 +357,10 @@ pub(crate) struct XqliteStatement {
     /// nothing bound as NULL and runs the statement anyway, which is what the
     /// flag is here to refuse.
     parameters_set: AtomicBool,
+
+    /// Whether the last step answered a row, readable or not: the one state in
+    /// which a reset or finalize ends a write, so its code is answered only then.
+    holds_row: AtomicBool,
 }
 
 #[rustler::resource_impl]
@@ -347,7 +380,16 @@ impl XqliteStatement {
             column_names,
             parameter_count,
             parameters_set: AtomicBool::new(parameter_count == 0),
+            holds_row: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn set_holds_row(&self, held: bool) {
+        self.holds_row.store(held, Ordering::Release);
+    }
+
+    pub(crate) fn take_holds_row(&self) -> bool {
+        self.holds_row.swap(false, Ordering::AcqRel)
     }
 
     /// A bind that got as far as SQLite, and `clear_bindings`, both leave the
@@ -381,10 +423,11 @@ impl XqliteStatement {
     }
 
     pub(crate) fn take_and_finalize(&self) -> Result<(), XqliteError> {
-        // A finalized statement answers its lifecycle error, never a
-        // leftover value error.
+        // The run is over: the error a batch held back goes with it.
         let _ = self.take_pending_error();
-        take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc)
+        take_and_finalize_raw(&self.atomic_raw_stmt, &self.conn_resource_arc, || {
+            self.take_holds_row()
+        })
     }
 
     pub(crate) fn take_pending_error(&self) -> Option<XqliteError> {
