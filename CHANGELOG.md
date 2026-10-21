@@ -822,6 +822,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:error, {:database_locked, map}}` for a table lock, as any statement
   does, and `open/2`, `Xqlite.Pragma.get/2` and `Xqlite.Pragma.put/3` wait
   for it as the busy settings say.
+- **A statement naming a table or column another connection made waits for
+  the lock.** Each connection keeps a copy of the schema, and before SQLite
+  answers an error an old copy could cause, such as a table or column the
+  copy lacks, it checks the real schema; when that check met another
+  connection's lock, SQLite answered from the old copy, so a pooled
+  connection that had not seen a migration's new table answered
+  `{:error, {:no_such_table, name}}`, or a no-such-column error, at once
+  while a writer held the lock. Such a statement now answers
+  `{:error, {:database_busy, %{retry: :call}}}`, and the `Xqlite` functions
+  wait and run it again against the real schema.
 - **The statement after a busy answer waits as the busy settings say.**
   SQLite does not ask a busy handler that gave up again until the next
   statement steps, so the prepare right after a busy step answered busy at

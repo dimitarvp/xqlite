@@ -555,6 +555,17 @@ fn judge<R>(
                 sql,
             }
         }
+        // Another answer SQLite gave after asking: `schemaIsValid` skips its check on a busy
+        // read lock, and the cached schema answered (sqlite3.c:148275-148280). A batch's is
+        // made in `query.rs:core_execute_batch`, with the text still to run.
+        answered if asked && crate::error::is_sqlite_answer(&answered) => {
+            XqliteError::DatabaseBusy {
+                code: ffi::SQLITE_BUSY,
+                message: "database is locked".to_owned(),
+                retry: Retry::Call,
+                sql: None,
+            }
+        }
         judged => judged,
     })
 }

@@ -1,6 +1,6 @@
 use crate::busy_handler;
 use crate::connection::{XqliteConn, XqliteQueryResult};
-use crate::error::XqliteError;
+use crate::error::{Retry, XqliteError};
 use crate::statement::{self, PreparedStmt};
 use crate::stream;
 use rusqlite::{Connection, ffi};
@@ -143,7 +143,18 @@ pub(crate) fn core_execute_batch(
             let _ = statement::execute_batch(db, "ROLLBACK", &[], |_| Ok(()));
         }
 
-        result.map_err(|mut error| {
+        result.map_err(|error| {
+            // As `connection::judge` does, but here, where the text still to run is known.
+            let asked = handle.is_some_and(|handle| handle.busy_flags.asked());
+            let mut error = match asked && crate::error::is_sqlite_answer(&error) {
+                true => XqliteError::DatabaseBusy {
+                    code: ffi::SQLITE_BUSY,
+                    message: "database is locked".to_owned(),
+                    retry: Retry::Unjudged,
+                    sql: None,
+                },
+                false => error,
+            };
             if let (XqliteError::DatabaseBusy { sql, .. }, Some(_)) = (&mut error, handle) {
                 *sql = sql_batch.get(resume..).map(str::to_owned);
             }

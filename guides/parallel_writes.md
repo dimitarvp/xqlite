@@ -71,7 +71,11 @@ No wait for a SQLite lock holds a VM thread. Three steps make that so:
    every connection as it opens. When a call meets a lock that waiting
    could clear, SQLite asks that callback whether to wait; the callback
    notes the question and says no, so SQLite answers `SQLITE_BUSY` to the
-   call at once. When waiting could not clear the lock, SQLite answers at
+   call at once, except in its check of the connection's copy of the schema
+   (see below the table in the next section), which it finishes on that
+   copy; xqlite then answers the busy error, `retry: :call`, in place of the
+   error that follows, a batch's with the text still to run. When waiting
+   could not clear the lock, SQLite answers at
    once without asking.
 2. **The answer says what the call left behind.** In the same native call
    xqlite decides what can run again, and answers
@@ -146,7 +150,7 @@ What `retry` says:
 | `begin(conn, :immediate)` or `:exclusive` | yes | `retry: :call`; no transaction is open |
 | `begin(conn, :deferred)`, `savepoint/2`, `rollback/1`, `rollback_to_savepoint/2` | never meet a lock | — |
 | `commit/1`, and `release_savepoint/2` of the outermost savepoint | yes; only rollback-journal mode makes a commit wait, for the readers | `retry: :call` with the transaction still open; in rollback-journal mode it keeps new readers out until you commit again or roll back |
-| one statement in autocommit mode: `query/4`, `execute/4`, `explain_analyze/4`, `prepare/2`, `Xqlite.Pragma.get/2` and `Xqlite.Pragma.put/3`, the schema readers, `optimize/1`, `serialize/2`, `enable_strict_table/2` | yes | `retry: :call`; SQLite rolled back whatever the call did |
+| one statement in autocommit mode: `query/4`, `execute/4`, `explain_analyze/4`, `prepare/2` (its check of the real schema included), `Xqlite.Pragma.get/2` and `Xqlite.Pragma.put/3`, the schema readers, `optimize/1`, `serialize/2`, `enable_strict_table/2` | yes | `retry: :call`; SQLite rolled back whatever the call did |
 | a statement inside a transaction, on a database the transaction has not touched yet (the first statement after `begin(conn, :deferred)`, the first use of an attached file) | yes | `retry: :call`; the transaction is as it was |
 | a write inside a transaction that has already read that database | no | `retry: :transaction`, at once |
 | `execute_batch/3` | yes, statement by statement | the statements before the busy one stay, unless the batch opened its own transaction, which it rolls back; the answer's `sql` holds the text still to run, and `execute_batch/3` resumes there |
@@ -160,6 +164,12 @@ What `retry` says:
 | `wal_checkpoint/3` with `:passive` | never | the busy error at once |
 | `open/2` (its PRAGMAs, a journal-mode change among them) | yes | the busy error |
 | any call that meets `SQLITE_LOCKED`, a table lock of the same connection or of a shared cache | never | `{:error, {:database_locked, %{code: _, message: _}}}` |
+
+Each connection keeps a copy of the schema. Before SQLite answers an error
+an old copy could cause, such as a table or column the copy lacks, it
+checks the real schema; when that check meets another connection's lock,
+the call answers `:database_busy` with `retry: :call` instead, and the
+waiting functions run the statement again against the real schema.
 
 One busy answer is no lock at all: SQLite refuses a `COMMIT`, a `RELEASE`
 or a `SAVEPOINT` while a write of the same connection is still running,

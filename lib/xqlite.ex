@@ -177,6 +177,13 @@ defmodule Xqlite do
   the statement wrote it, quotes included, and `:index_exists` prints the
   resolved name. The quoting is SQLite's own, not this library's.
 
+  Each connection keeps a copy of the schema. Before SQLite answers an error
+  an old copy could cause, such as a table or column the copy lacks, it checks
+  the real schema; when that check meets another connection's lock, the answer
+  is `:database_busy` with `retry: :call`, never `:no_such_table`,
+  `:schema_changed` or another error of the old copy, and the waiting functions
+  run the statement again against the real schema.
+
   Three of them carry what could not be used as it was given.
   `:invalid_blob_bytes` names the term found in a wrapper's `bytes`, one of
   the atoms `Xqlite.Blob` lists. `:unknown_pragma` carries the caller's own

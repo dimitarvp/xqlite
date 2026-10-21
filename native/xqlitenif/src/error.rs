@@ -1359,6 +1359,24 @@ pub(crate) fn is_sqlite_auth(err: &RusqliteError) -> bool {
     (extended_code & 0xFF) == ffi::SQLITE_AUTH
 }
 
+/// True for an error SQLite itself answered, other than a busy, a table lock or a cancel.
+pub(crate) fn is_sqlite_answer(error: &XqliteError) -> bool {
+    matches!(
+        error,
+        XqliteError::ReadOnlyDatabase { .. }
+            | XqliteError::TooBig { .. }
+            | XqliteError::SchemaChanged { .. }
+            | XqliteError::AuthorizationDenied { .. }
+            | XqliteError::ConstraintViolation { .. }
+            | XqliteError::NoSuchTable { .. }
+            | XqliteError::NoSuchIndex { .. }
+            | XqliteError::TableExists { .. }
+            | XqliteError::IndexExists { .. }
+            | XqliteError::SqliteFailure { .. }
+            | XqliteError::SqlInputError { .. }
+    )
+}
+
 /// rusqlite makes `SqlInputError` for code 1 only, so `sqlite_error` sees every busy and locked.
 pub(crate) fn is_sqlite_busy_or_locked(err: &RusqliteError) -> bool {
     let primary_code = err.sqlite_error().map(|error| error.extended_code & 0xFF);
