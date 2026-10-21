@@ -812,6 +812,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination at once, with `retry: :transaction`. `backup_with_progress/4` sends a
   `:busy` progress message for each attempt that met a lock, before it copies
   again.
+- **A PRAGMA that meets a lock answers the busy error.** A PRAGMA that met
+  another connection's lock while SQLite read the schema to prepare it, and
+  one read through `XqliteNIF.get_pragma/2` that met it at its first step,
+  answered `{:error, {:cannot_execute_pragma, name, _}}`, which no call
+  waits for: `open/2` failed at once on a file another connection held while
+  it switched the journal mode to WAL, or under `locking_mode = EXCLUSIVE`.
+  Such a PRAGMA now answers `{:error, {:database_busy, map}}`, or
+  `{:error, {:database_locked, map}}` for a table lock, as any statement
+  does, and `open/2`, `Xqlite.Pragma.get/2` and `Xqlite.Pragma.put/3` wait
+  for it as the busy settings say.
 - **The statement after a busy answer waits as the busy settings say.**
   SQLite does not ask a busy handler that gave up again until the next
   statement steps, so the prepare right after a busy step answered busy at

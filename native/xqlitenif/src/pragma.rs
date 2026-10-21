@@ -22,11 +22,10 @@ fn invalid_name(name: &[u8]) -> XqliteError {
     XqliteError::InvalidPragmaName(name.to_vec())
 }
 
-// A PRAGMA runs SQL, so an installed authorizer can veto it with SQLITE_AUTH.
-// That denial carries its own structured variant; surface it instead of
-// flattening it into the generic `CannotExecutePragma` wrapper.
+// A lock is the caller's to wait for, and an authorizer's denial carries its own variant:
+// both keep the error their code makes, never `CannotExecutePragma`'s message text.
 fn pragma_exec_error(pragma: String, err: RusqliteError) -> XqliteError {
-    if error::is_sqlite_auth(&err) {
+    if error::is_sqlite_auth(&err) || error::is_sqlite_busy_or_locked(&err) {
         XqliteError::from(err)
     } else {
         XqliteError::CannotExecutePragma {

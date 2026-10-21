@@ -146,7 +146,7 @@ What `retry` says:
 | `begin(conn, :immediate)` or `:exclusive` | yes | `retry: :call`; no transaction is open |
 | `begin(conn, :deferred)`, `savepoint/2`, `rollback/1`, `rollback_to_savepoint/2` | never meet a lock | — |
 | `commit/1`, and `release_savepoint/2` of the outermost savepoint | yes; only rollback-journal mode makes a commit wait, for the readers | `retry: :call` with the transaction still open; in rollback-journal mode it keeps new readers out until you commit again or roll back |
-| one statement in autocommit mode: `query/4`, `execute/4`, `explain_analyze/4`, `prepare/2`, the PRAGMA and schema readers, `optimize/1`, `serialize/2`, `enable_strict_table/2` | yes | `retry: :call`; SQLite rolled back whatever the call did |
+| one statement in autocommit mode: `query/4`, `execute/4`, `explain_analyze/4`, `prepare/2`, `Xqlite.Pragma.get/2` and `Xqlite.Pragma.put/3`, the schema readers, `optimize/1`, `serialize/2`, `enable_strict_table/2` | yes | `retry: :call`; SQLite rolled back whatever the call did |
 | a statement inside a transaction, on a database the transaction has not touched yet (the first statement after `begin(conn, :deferred)`, the first use of an attached file) | yes | `retry: :call`; the transaction is as it was |
 | a write inside a transaction that has already read that database | no | `retry: :transaction`, at once |
 | `execute_batch/3` | yes, statement by statement | the statements before the busy one stay, unless the batch opened its own transaction, which it rolls back; the answer's `sql` holds the text still to run, and `execute_batch/3` resumes there |

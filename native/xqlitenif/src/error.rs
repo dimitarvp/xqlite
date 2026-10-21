@@ -1359,6 +1359,12 @@ pub(crate) fn is_sqlite_auth(err: &RusqliteError) -> bool {
     (extended_code & 0xFF) == ffi::SQLITE_AUTH
 }
 
+/// rusqlite makes `SqlInputError` for code 1 only, so `sqlite_error` sees every busy and locked.
+pub(crate) fn is_sqlite_busy_or_locked(err: &RusqliteError) -> bool {
+    let primary_code = err.sqlite_error().map(|error| error.extended_code & 0xFF);
+    matches!(primary_code, Some(ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED))
+}
+
 /// True when SQLite answered a misuse of the C API. The bind path asks,
 /// because that is the one refusal SQLite makes before it touches a parameter.
 pub(crate) fn is_misuse(error: &XqliteError) -> bool {

@@ -203,7 +203,11 @@ defmodule Xqlite do
   binary whose bytes are not UTF-8, in the argument or in a `:db_name`).
 
   `:cannot_execute_pragma` carries the name of the PRAGMA — the name alone,
-  never the statement built around it — and why it could not run.
+  never the statement built around it — and why it could not run. A PRAGMA
+  that meets a lock answers `:database_busy` or `:database_locked` instead, as
+  any statement does, so `open/2` applying its options, `Xqlite.Pragma.get/2`
+  and `Xqlite.Pragma.put/3` wait for a busy database as the busy timeout or
+  busy policy says.
   `:pragma_not_applied` is a PRAGMA write SQLite answered with another value,
   `in_force` in the form `Xqlite.Pragma.get/2` reads; `:unexpected_value` a
   number no mode of a mode PRAGMA names, and `:strict_violations` what
