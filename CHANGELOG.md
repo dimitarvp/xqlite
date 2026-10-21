@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Xqlite.retry_busy/3` waits for a lock the way every `Xqlite` function
+  does.** It runs a function, usually a raw `XqliteNIF` call, and while that
+  call answers `{:error, {:database_busy, %{retry: :call}}}` it sleeps in the
+  calling process, as the connection's busy timeout or busy policy says, and
+  runs the call again. It takes a connection, a prepared statement or a
+  stream handle, and a `:cancel_tokens` option; it answers the first answer
+  that is not such a busy error, the last busy answer with its `:retries`
+  and `:elapsed_ms` filled in once the busy settings give up, or
+  `{:error, :operation_cancelled}`.
+- **`XqliteNIF.busy_delay/4`**, the raw step `retry_busy/3` takes between
+  two attempts. Each call records one retry, sends
+  `{:xqlite_busy, retries, elapsed_ms}` to every busy observer and answers
+  `{:ok, delay_ms}`, the sleep before the next attempt, or `{:ok, :give_up}`
+  once the busy policy or the busy timeout is spent; a signalled cancel
+  token answers `{:error, :operation_cancelled}` and sends nothing.
+- **A Parallel writes guide.** `guides/parallel_writes.md` says what SQLite
+  allows when many processes write to one database file, how xqlite waits
+  for the write lock, which calls wait and which answer at once, what to
+  choose, what was measured, and what to expect from a sustained heavy
+  write load.
 - **`cancel_tokens: nil` means no token**, as `[]` does, on `query/4`,
   `execute/4`, `execute_batch/3`, `multi_step/3`, `stream/4` and
   `backup_with_progress/4`, where it returned `{:error,
@@ -54,6 +74,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A call waits for a lock in its own process.** When a call meets a lock
+  another connection holds, SQLite now answers at once, and the call waits
+  in the process that made it, sleeping between attempts as the
+  connection's busy timeout or busy policy says. No VM thread is held while
+  it waits, and the connection is free for other calls while the process
+  sleeps. `put_busy_timeout/2`, `set_busy_policy/2` and `open/2`'s
+  `:busy_timeout` keep their meaning; a policy's `:max_retries` and
+  `:max_elapsed_ms` bound the wait of one call. A call made through
+  `XqliteNIF` directly no longer waits: it answers the busy error at once;
+  run it through `Xqlite.retry_busy/3` to wait.
+- **The busy error is a map.** `{:database_busy_or_locked, code, message}`
+  becomes `{:database_busy, %{code: _, message: _, retry: _, retries: _,
+  elapsed_ms: _}}`, `code` being SQLite's extended code. `retry` says what
+  can run again: `:call`, nothing of the call remains; `:transaction`, roll
+  back and run the transaction again; `:none`, running the same call again
+  is no remedy: SQLite rolled back a write that had handed back rows, or
+  the answer came from a finalize, a reset or a close, `close/1` included.
+  `retries` and `elapsed_ms` describe the wait the call gave up after, both
+  0 on a raw call. A batch's answer also carries `sql`, the text still to
+  run, when `retry` is `:call`. SQLite's table-lock answers (code 6 and its
+  extended codes) become `{:database_locked, %{code: _, message: _}}` and
+  never wait. `XqliteNIF.busy_delay/4` answers an argument it cannot read
+  with `{:invalid_busy_delay_argument, %{argument: :handle | :retries |
+  :elapsed_ms, value: term}}`.
+- **`PRAGMA busy_timeout = N` sent as SQL sets the connection's busy
+  timeout, as `put_busy_timeout/2` does.** It was refused with
+  `{:error, {:busy_timeout_write_refused, _}}` while a busy policy or
+  observer was installed (see Removed). xqlite takes the connection's busy
+  callback back in the same call, so the new timeout is waited out in the
+  calling process too. `Xqlite.Pragma.put(conn, :busy_timeout, ms)` and
+  `XqliteNIF.set_pragma(conn, "busy_timeout", ms)` work in every case.
+  `PRAGMA busy_timeout` read in SQL answers 0 on every connection;
+  `get_busy_timeout/1` answers the wait.
+- **Busy observers hear the waits.** `{:xqlite_busy, retries, elapsed_ms}`
+  is sent once per retry while a call waits, `retries` counting that call's
+  busy answers before this one and `elapsed_ms` the time since its first. A
+  raw call that answers busy without waiting sends nothing, and the release
+  thread sends none.
+- **`step/1` and `multi_step/3` that meet a lock before handing back a row
+  reset the statement and keep its bindings**, so a bind after the busy
+  answer is taken. The statement used to keep its run for a retry, and a
+  bind or `clear_bindings/1` then answered `{:error, :statement_mid_run}`.
+  Both wait for the lock first, as the busy settings say.
+- **A `:full`, `:restart` or `:truncate` checkpoint that waits holds the
+  checkpoint lock only during each attempt**, so another connection can
+  checkpoint meanwhile, where its checkpoint answered the busy error until
+  the waiting one ended.
+- **In rollback-journal mode, a write in autocommit mode beside steady
+  readers is much slower.** A commit must wait until every reader of the
+  file has finished. SQLite's wait inside the call kept new readers out
+  meanwhile; now each attempt whose commit meets readers is rolled back and
+  runs again from the calling process, so a steady stream of new readers
+  can keep it out for its whole busy budget. On the test machine one writer
+  beside 4 steady readers fell from 1 696 to 21 writes per second, and
+  beside 16 from 795 to 1. Write
+  inside `begin(conn, :immediate)` and `commit/1`, where a commit that
+  waits keeps its transaction and keeps new readers out, or use WAL mode,
+  the default, which this does not affect.
+- **In rollback-journal mode, a write that had handed back rows answers at
+  once when its commit meets a reader.** A write you step yourself with
+  `step/1` or `multi_step/3`, or stream, commits at its end; when another
+  connection reads the file at that moment, SQLite rolls the write back and
+  the call answers `{:error, {:database_busy, %{retry: :none}}}` at once,
+  where it waited for the reader as the busy settings said. Run such writes
+  inside a transaction, or use WAL mode.
 - **`reset/1` and `XqliteNIF.stmt_reset/1` can answer an error**, when the
   reset ends a write whose commit fails.
 - **`XqliteNIF.blob_close/1` answers the failure of a read or write SQLite
@@ -662,6 +747,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The `{:busy_timeout_write_refused, %{policy: _, observers: _}}`
+  error.** A `busy_timeout` write sent as SQL now sets the connection's busy
+  timeout (see Changed), so nothing answers it.
 - **`Xqlite.query_cancellable/4,5`, `query_with_changes_cancellable/4,5`,
   `execute_cancellable/4,5`, `execute_batch_cancellable/3` and
   `multi_step_cancellable/3`.** Use `query/4`, `execute/4`,
@@ -701,6 +789,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Waiting calls no longer hold the VM's threads.** Each call that waited
+  for a lock slept on one of the VM's dirty I/O threads (10 by default),
+  which every connection and the VM's file operations share. With that
+  many calls waiting at once, every other connection and every file read
+  stopped, the lock holder's own commit could not run, and the waits ended
+  in busy errors for writes that would have succeeded, or, under a long
+  busy policy, never ended. Measured with 11 processes, each on its own
+  connection, writing ten rows per transaction to one WAL file: before,
+  50 rows per second, every other connection and file read in the node
+  paused for 5.3 s, and 3 writes a run (up to 7) answered busy; now
+  80 970 rows per second, pauses of 12.5 ms, and no busy answer.
+- **A cancel token ends a lock wait.** A token signalled while its call
+  waits for a lock now ends the call with `{:error, :operation_cancelled}`
+  within one sleep; nothing of the call has run. It was read only after
+  the wait.
+- **More calls wait as the busy settings say.** A journal-mode change, a
+  backup or restore right after a busy answer, a backup whose destination
+  another connection holds, and a `:full`, `:restart` or `:truncate`
+  checkpoint now wait like any other call; a `:passive` checkpoint still
+  never waits. Inside your own transaction, a backup answers a lock on its
+  destination at once, with `retry: :transaction`. `backup_with_progress/4` sends a
+  `:busy` progress message for each attempt that met a lock, before it copies
+  again.
+- **The statement after a busy answer waits as the busy settings say.**
+  SQLite does not ask a busy handler that gave up again until the next
+  statement steps, so the prepare right after a busy step answered busy at
+  once, whatever the busy timeout; xqlite now puts its busy callback back
+  at the start of the next call.
+- **A `COMMIT`, `RELEASE` or `SAVEPOINT` sent as SQL beside a write of the
+  same connection that is mid-run answers `{:error, :statement_mid_run}`**,
+  as `commit/1` does, where it answered the busy error of another
+  connection's lock. SQLite refuses it before trying any lock.
+- **A stream whose first fetch meets a lock stays open.** Its next fetch
+  starts the statement over, its column check included, where it answered
+  `:done`, as if the statement had run to its end with no rows, though it
+  never ran.
 - **Finalizing, resetting or closing a handle answers a commit that fails
   there.** A write statement stopped after a step, a stream over one and a
   read-write blob commit their write, in autocommit mode, when they end.

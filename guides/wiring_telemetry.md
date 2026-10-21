@@ -142,7 +142,7 @@ per-connection, so it takes no `conn`.
 | `[:xqlite, :hook, :update]` | SQLite reports a row change to the update hook (`XqliteNIF.register_update_hook/2` says which it does not) | `:conn`, `:tag`, `:action`, `:db_name`, `:table`, `:rowid`; `:db_name` and `:table` hold the names' bytes, which need not be UTF-8: a handler that treats them as strings checks them first (`String.valid?/1`), since the `telemetry` library detaches a handler that raises |
 | `[:xqlite, :hook, :wal]` | a commit appends frames to the WAL | `:conn`, `:tag`, `:db_name`, the name's bytes, which need not be UTF-8 (check it as for `:update`); measurement `pages` |
 | `[:xqlite, :hook, :progress]` | every `n`th SQLite VM step | `:conn`, `:tag`, `:hook_tag`; measurements `count`, `elapsed` |
-| `[:xqlite, :hook, :busy]` | the connection meets a lock another one holds | `:conn`, `:tag`; measurements `retries`, `elapsed` |
+| `[:xqlite, :hook, :busy]` | a call on the connection waiting for a lock another connection holds retries, once per retry | `:conn`, `:tag`; measurements `retries`, `elapsed` |
 | `[:xqlite, :hook, :log]` | SQLite writes a diagnostic (global) | `:tag`, `:code`, `:base_code`, `:message`, the bytes SQLite wrote, which need not be UTF-8 (check it as for `:update`) |
 
 Only the *observer* half of busy handling is bridged. The retry

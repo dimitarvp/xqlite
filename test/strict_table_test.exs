@@ -922,7 +922,7 @@ defmodule Xqlite.StrictTableTest do
         assert {:ok, other} = Xqlite.open(path, journal_mode: unquote(mode))
         assert :ok = NIF.execute_batch(other, unquote(holder))
 
-        assert {{:error, {:database_busy_or_locked, 5, _}}, {:ok, :ok}} =
+        assert {{:error, {:database_busy, %{code: 5}}}, {:ok, :ok}} =
                  rebuild_while(conn, fn -> {Xqlite.begin(conn), Xqlite.rollback(conn)} end)
 
         refute strict?(conn, "t")

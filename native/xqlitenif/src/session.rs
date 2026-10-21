@@ -112,16 +112,14 @@ where
     // connection Mutex. Acquire it first (order conn -> session, matching
     // `close`), prove the connection open, then take the per-session guard.
     let conn_guard = session_handle.conn_resource_arc.lock_conn()?;
-    if conn_guard.is_none() {
-        return Err(XqliteError::ConnectionClosed);
-    }
+    let conn = conn_guard.as_ref().ok_or(XqliteError::ConnectionClosed)?;
     let guard = session_handle
         .session
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
     match guard.as_ref() {
         Some(session) => {
-            connection::with_busy_timeout_rule(&session_handle.conn_resource_arc, || {
+            connection::rearm_and_judge(conn, &session_handle.conn_resource_arc, || {
                 func(session)
             })
         }
@@ -138,16 +136,14 @@ where
     F: FnOnce(&mut Session<'static>) -> Result<R, XqliteError>,
 {
     let conn_guard = session_handle.conn_resource_arc.lock_conn()?;
-    if conn_guard.is_none() {
-        return Err(XqliteError::ConnectionClosed);
-    }
+    let conn = conn_guard.as_ref().ok_or(XqliteError::ConnectionClosed)?;
     let mut guard = session_handle
         .session
         .lock()
         .map_err(|e| XqliteError::LockError(e.to_string()))?;
     match guard.as_mut() {
         Some(session) => {
-            connection::with_busy_timeout_rule(&session_handle.conn_resource_arc, || {
+            connection::rearm_and_judge(conn, &session_handle.conn_resource_arc, || {
                 func(session)
             })
         }

@@ -77,14 +77,7 @@ defmodule Xqlite.NIF.ProgressHookTest do
         draw = one_of([constant(:register), constant(:all), integer(0..12)])
 
         check all(steps <- list_of(draw, max_length: 12), max_runs: 2000) do
-          Enum.reduce(steps ++ [:all], {[], []}, fn step, model ->
-            {live, _issued} = next = observe(conn, step, model)
-            held = %{policy: false, observers: length(live)}
-            answer = NIF.execute(conn, "PRAGMA busy_timeout = 100", [])
-            assert answer == {:error, {:busy_timeout_write_refused, held}} or live == []
-            assert match?({:ok, _}, answer) or live != []
-            next
-          end)
+          Enum.reduce(steps ++ [:all], {[], []}, &observe(conn, &1, &2))
         end
       end
     end

@@ -114,10 +114,19 @@ answers its syntax error.
 
 ## Backup and restore
 
-- [A backup or restore right after a busy answer does not wait](gotchas.md#a-backup-or-restore-right-after-a-busy-answer-does-not-wait):
-  SQLite restarts its busy handler's count only when a statement runs, so
-  run one first; on a shared cache, a lock another connection holds is
-  answered at once.
+- On a shared cache, `Xqlite.restore/3` answers a lock another connection
+  of the cache holds at once, as `{:error, {:database_locked, %{code: 262,
+  message: _}}}`: SQLite asks no busy handler for a shared-cache table
+  lock, and xqlite never waits on a locked answer. Run the restore again
+  once the other connection is done, or open the connection without a
+  shared cache.
+- Inside your own transaction, `Xqlite.backup/3` and
+  `Xqlite.backup_with_progress/4` answer a lock another connection holds on
+  the destination at once, as `{:error, {:database_busy, %{retry:
+  :transaction}}}`: the destination's connection is the backup's own and
+  asks xqlite nothing, and inside a transaction xqlite reads such an answer
+  as one that only a new transaction clears. Run the backup outside a
+  transaction to wait for that lock as the busy settings say.
 
 ## Sessions and changesets
 
@@ -131,10 +140,10 @@ answers its syntax error.
   object.
 - Inside a transaction opened with a plain `Xqlite.begin/2`,
   `XqliteNIF.changeset_apply/3` answers a lock another connection holds at
-  once, whatever `busy_timeout` or the busy policy says: the apply reads
-  before it writes, and SQLite does not wait for the write lock once a
-  transaction has read. Open the transaction with
-  `Xqlite.begin(conn, :immediate)`.
+  once, as `{:error, {:database_busy, %{retry: :transaction}}}`, even
+  through `Xqlite.retry_busy/3`: the apply reads before it writes, and
+  SQLite does not wait for the write lock once a transaction has read.
+  Open the transaction with `Xqlite.begin(conn, :immediate)`.
 
 ## Values
 
@@ -157,12 +166,15 @@ answers its syntax error.
 
 ## Transactions, cancellation and contention
 
+- [Parallel writes on the BEAM](parallel_writes.md): a call that meets
+  another connection's lock waits in its own process; the guide says which
+  calls wait, which answer at once, and what each busy answer leaves.
 - [A write cancelled while it runs rolls back the whole transaction](gotchas.md#a-write-cancelled-while-it-runs-rolls-back-the-whole-transaction):
   SQLite's own rule; a `BEGIN` you issued goes with it.
 - [Cancel tokens are single-use](gotchas.md#cancel-tokens-are-single-use):
   create a fresh token per operation.
-- [A `busy_timeout` write is rejected while the busy slot is held](gotchas.md#a-busy_timeout-write-is-rejected-while-the-busy-slot-is-held):
-  use `Xqlite.put_busy_timeout/2`.
+- [`PRAGMA busy_timeout` read in SQL answers 0](gotchas.md#pragma-busy_timeout-read-in-sql-answers-0):
+  read the wait with `Xqlite.get_busy_timeout/1`.
 - [A shared handle serializes](gotchas.md#give-each-process-its-own-connection-a-shared-handle-serializes):
   open one connection per process.
 - A `BEGIN` sent as SQL, through any function but a batch (`Xqlite.execute_batch/3`,
@@ -171,12 +183,33 @@ answers its syntax error.
   `BEGIN` succeeds, SQLite takes that write into the new transaction, and a
   `ROLLBACK` then undoes rows the writer was told were written. Open transactions
   with `Xqlite.begin/2`, which answers `{:error, :statement_mid_run}` in that state.
-- **Calls waiting for a lock hold a dirty I/O thread.** A call waiting for its
-  connection's mutex, or for a lock another connection holds, keeps one of the
-  VM's dirty I/O threads (10 by default), which every connection and the VM's
-  file operations share: once that many calls wait at once, every other
-  connection and file read waits too. Keep the calls that can wait at once below
-  that count, or raise it with the `+SDio` emulator flag.
+- **A call waiting for another process's call on the same connection holds
+  a dirty I/O thread.** A wait for a lock never does: a call that meets
+  another connection's lock waits in its own process. But a connection used
+  by several processes runs their calls one at a time, and a call waiting
+  for the connection keeps one of the VM's dirty I/O threads (10 by
+  default) until the call ahead of it ends, so long statements on a shared
+  connection can fill them: with the default 10 threads, nine processes
+  waiting for one connection behind a 1.5 s call stalled every other
+  connection and file read in the node for 1.4 s, in 20 of 20 runs; eight
+  stalled nothing. Give each process its own connection, or raise the
+  count with the `+SDio` emulator flag.
+- In rollback-journal mode, a write in autocommit mode whose commit meets
+  readers is rolled back and run again from the start at each attempt, so
+  a steady stream of new readers can keep it waiting for its whole busy
+  budget: on the test machine one writer beside 4 steady readers made 21
+  writes per second, against 1 696 while SQLite's wait inside the call kept
+  new readers out. Use WAL mode, the default, or write inside
+  `begin(conn, :immediate)` and `commit/1`: a commit that waits keeps its
+  transaction and keeps new readers out until it succeeds. The
+  [Parallel writes](parallel_writes.md#rollback-journal-mode) guide has the
+  numbers.
+- In rollback-journal mode, a write that has handed back rows, through
+  `Xqlite.step/1`, `Xqlite.multi_step/3` or a stream, and a read-write blob
+  commit when they end. If another connection reads the file at that
+  moment, SQLite rolls the write back and the call that ended it answers
+  `{:error, {:database_busy, %{retry: :none}}}` at once, without waiting.
+  Run such writes inside a transaction, or use WAL mode.
 - `Xqlite.last_insert_rowid/1` is SQLite's own value and keeps a rowid through a
   rollback: after a statement that inserted rows and then failed, or a
   rolled-back transaction, it can name a row the table no longer holds. Take the

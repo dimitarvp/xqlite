@@ -228,41 +228,15 @@ defmodule Xqlite.NIF.AuthorizerTest do
                NIF.query(conn, "PRAGMA busy_timeout = 1500", [])
     end
 
-    test "while the slot is held the busy_timeout write answers the slot, the rest the user",
+    test "a busy_timeout write the user's rules allow sets the kept timeout, the rest is theirs",
          %{conn: conn} do
-      {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
       :ok = Xqlite.set_authorizer(conn, [:insert])
-
-      assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-               NIF.query(conn, "PRAGMA busy_timeout = 1500", [])
-
-      assert {:error, {:authorization_denied, _, _}} =
-               NIF.execute(conn, "INSERT INTO t(id, name) VALUES (2, 'b')", [])
-    end
-
-    test "removing the user's rules while the slot is held keeps the busy_timeout rule",
-         %{conn: conn} do
-      {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
-      :ok = Xqlite.set_authorizer(conn, [:insert])
-      :ok = Xqlite.remove_authorizer(conn)
-
-      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO t(id, name) VALUES (2, 'b')", [])
-
-      assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-               NIF.query(conn, "PRAGMA busy_timeout = 1500", [])
-    end
-
-    test "emptying the slot with no user rules leaves the connection unrestricted",
-         %{conn: conn} do
-      {:ok, handle} = Xqlite.register_busy_observer(conn, self())
-
-      assert {:error, {:busy_timeout_write_refused, _}} =
-               NIF.query(conn, "PRAGMA busy_timeout = 1500", [])
-
-      :ok = Xqlite.unregister_busy_observer(conn, handle)
-
-      assert {:ok, 1} = NIF.execute(conn, "INSERT INTO t(id, name) VALUES (2, 'b')", [])
       assert {:ok, %{rows: [[1500]]}} = NIF.query(conn, "PRAGMA busy_timeout = 1500", [])
+      assert {:ok, 1500} = Xqlite.get_busy_timeout(conn)
+      insert = "INSERT INTO t(id, name) VALUES (2, 'b')"
+      assert {:error, {:authorization_denied, _, _}} = NIF.execute(conn, insert, [])
+      :ok = Xqlite.remove_authorizer(conn)
+      assert {:ok, 1} = NIF.execute(conn, insert, [])
     end
 
     for {kind, setup, sql} <- @per_code do

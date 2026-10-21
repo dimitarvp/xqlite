@@ -527,7 +527,7 @@ defmodule Xqlite.NIF.SerializeTest do
       :ok =
         NIF.execute_batch(holder, "PRAGMA locking_mode = EXCLUSIVE; INSERT INTO t VALUES (1);")
 
-      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.serialize(conn, "held")
+      assert {:error, {:database_busy, %{code: 5}}} = Xqlite.serialize(conn, "held")
       :ok = NIF.close(holder)
     end
 

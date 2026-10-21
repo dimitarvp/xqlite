@@ -48,7 +48,7 @@ pub(crate) fn begin(conn: &Connection, mode: TransactionMode) -> Result<(), Xqli
 pub(crate) fn commit(conn: &Connection) -> Result<(), XqliteError> {
     match conn.is_autocommit() {
         true => Err(XqliteError::NoTransaction),
-        false => execute_classifying_busy(conn, "COMMIT;"),
+        false => run_sql(conn, "COMMIT;"),
     }
 }
 
@@ -65,7 +65,7 @@ pub(crate) fn rollback(conn: &Connection) -> Result<(), XqliteError> {
 pub(crate) fn savepoint(conn: &Connection, name: &str) -> Result<(), XqliteError> {
     let quoted_name = quote_identifier(name)?;
     let sql = format!("SAVEPOINT {quoted_name};");
-    execute_classifying_busy(conn, &sql)
+    run_sql(conn, &sql)
 }
 
 pub(crate) fn rollback_to_savepoint(conn: &Connection, name: &str) -> Result<(), XqliteError> {
@@ -79,21 +79,16 @@ pub(crate) fn rollback_to_savepoint(conn: &Connection, name: &str) -> Result<(),
 pub(crate) fn release_savepoint(conn: &Connection, name: &str) -> Result<(), XqliteError> {
     let quoted_name = quote_identifier(name)?;
     let sql = format!("RELEASE SAVEPOINT {quoted_name};");
-    execute_classifying_busy(conn, &sql)
+    run_sql(conn, &sql)
 }
 
-fn execute_classifying_busy(conn: &Connection, sql: &str) -> Result<(), XqliteError> {
-    match conn.execute(sql, []).map_err(XqliteError::from) {
-        // SQLite tests for a running write, a blob open for writing included,
-        // before it tries the lock, so one means the busy answer is the caller's own.
-        Err(XqliteError::DatabaseBusyOrLocked { .. }) if write_mid_run(conn) => {
-            Err(XqliteError::StatementMidRun)
-        }
-        other => other.map(|_| ()),
-    }
+fn run_sql(conn: &Connection, sql: &str) -> Result<(), XqliteError> {
+    conn.execute(sql, []).map(|_| ()).map_err(XqliteError::from)
 }
 
-fn write_mid_run(conn: &Connection) -> bool {
+/// SQLite tests for a running write, a blob open for writing included, before
+/// it tries a lock, so with one a busy answer is the caller's own.
+pub(crate) fn write_mid_run(conn: &Connection) -> bool {
     // SAFETY: the caller holds the connection Mutex, so `handle()` is the live
     // `sqlite3*` and no other call can change its statement list during the walk.
     unsafe {

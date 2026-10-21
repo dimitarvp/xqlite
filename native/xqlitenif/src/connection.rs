@@ -4,13 +4,14 @@ use crate::blob;
 use crate::busy_handler::{self, BusySlotFlags, BusySlotState};
 use crate::cancel::XqliteCancelToken;
 use crate::commit_hook::{self, CommitSubscriber};
-use crate::error::XqliteError;
+use crate::error::{Retry, XqliteError};
 use crate::hook_util::{self, HookList};
 use crate::progress_dispatch::{self, ProgressDispatch};
 use crate::release;
 use crate::rollback_hook::{self, RollbackSubscriber};
 use crate::session::OrphanSession;
 use crate::statement;
+use crate::transaction;
 use crate::update_hook::{self, UpdateSubscriber};
 use crate::util::encode_text;
 use crate::wal_hook::{self, WalDispatch};
@@ -230,20 +231,16 @@ impl XqliteConn {
     /// The caller holds this connection's Mutex, and `conn` is what the slot holds.
     unsafe fn release_orphans(&self, conn: Option<&Connection>) {
         let orphans = std::mem::take(&mut *self.queue());
-        if let Some(conn) = conn
-            && !orphans.is_empty()
-        {
-            busy_handler::without_wait(conn, self, || {
-                for orphan in orphans {
-                    match orphan {
-                        Orphan::Child(child) => {
-                            // SAFETY: forwarded from this function's own contract.
-                            _ = unsafe { self.release_child(&child, conn.handle(), true) }
-                        }
-                        Orphan::Session(session) => drop(ManuallyDrop::into_inner(session.0)),
+        if let Some(conn) = conn {
+            for orphan in orphans {
+                match orphan {
+                    Orphan::Child(child) => {
+                        // SAFETY: forwarded from this function's own contract.
+                        _ = unsafe { self.release_child(&child, conn.handle(), true) }
                     }
+                    Orphan::Session(session) => drop(ManuallyDrop::into_inner(session.0)),
                 }
-            });
+            }
         }
     }
 
@@ -338,8 +335,6 @@ impl Drop for XqliteConn {
 /// job frees it after the close.
 #[derive(Debug, Default)]
 pub(crate) struct CallbackBoxes {
-    /// The busy slot: a single retry policy plus any number of observers, one
-    /// C callback serving both. Installed lazily, removed when both empty.
     pub(crate) busy: AtomicPtr<BusySlotState>,
     pub(crate) authorizer: AtomicPtr<AuthorizerState>,
 }
@@ -455,6 +450,7 @@ pub(crate) fn handle_open_result(
                     }
                     commit_hook::install_callback(conn_ref, commit_hook_list)?;
                     rollback_hook::install_callback(conn_ref, rollback_hook_list)?;
+                    busy_handler::install(conn_ref, &handle)?;
                 }
             }
             Ok(handle)
@@ -509,32 +505,58 @@ fn free_handle(conn_slot: &mut Option<Connection>) -> Result<(), XqliteError> {
     }
 }
 
-/// Runs `func` and names the denial the busy slot caused: while the slot is
-/// held, xqlite's own authorizer rule rejects a `busy_timeout` write, and the
-/// caller hears that instead of the generic authorization error. Every path
-/// that can prepare SQL goes through here, so the two are never confused.
-/// Callers hold the connection Mutex for the whole call.
+/// Re-arms around `func`, then judges; every path preparing SQL passes here, under the Mutex.
 #[inline]
-pub(crate) fn with_busy_timeout_rule<F, R>(
+pub(crate) fn rearm_and_judge<F, R>(
+    conn: &Connection,
     handle: &XqliteConn,
     func: F,
 ) -> Result<R, XqliteError>
 where
     F: FnOnce() -> Result<R, XqliteError>,
 {
-    handle.busy_flags.clear_write_refused();
+    busy_handler::rearm(conn, handle)?;
     let result = func();
-    let refused = handle.busy_flags.take_write_refused();
+    judge(conn, handle, result)
+}
 
-    match result {
-        Err(XqliteError::AuthorizationDenied { .. }) if refused => {
-            Err(XqliteError::BusyTimeoutWriteRefused {
-                policy: handle.busy_flags.policy(),
-                observers: handle.busy_flags.observers(),
-            })
+fn judge<R>(
+    conn: &Connection,
+    handle: &XqliteConn,
+    result: Result<R, XqliteError>,
+) -> Result<R, XqliteError> {
+    let asked = handle.busy_flags.asked();
+    // Only an allocation failure in the PRAGMA read, or a misuse SQLite cannot answer on a
+    // live connection, fails here; the flags stay set and the next call's re-arm tries again.
+    _ = busy_handler::rearm(conn, handle);
+
+    result.map_err(|error| match error {
+        // SQLite's "statements in progress" to a COMMIT or RELEASE beside this connection's
+        // own running write, given without asking (sqlite3.c:100503-100512, :100379-100386).
+        XqliteError::DatabaseBusy { .. } if !asked && transaction::write_mid_run(conn) => {
+            XqliteError::StatementMidRun
         }
-        other => other,
-    }
+        // `classify_sqlite_error`'s SQLITE_BUSY, not yet decided.
+        XqliteError::DatabaseBusy {
+            code,
+            message,
+            retry: Retry::Unjudged,
+            sql,
+        } => {
+            let retry = match conn.is_autocommit() || asked {
+                true => Retry::Call,
+                false => Retry::Transaction,
+            };
+            let sql = sql.filter(|_| retry == Retry::Call);
+            XqliteError::DatabaseBusy {
+                code,
+                message,
+                retry,
+                sql,
+            }
+        }
+        judged => judged,
+    })
 }
 
 #[inline]
@@ -547,7 +569,7 @@ where
 {
     let conn_guard = handle.lock_conn()?;
     match conn_guard.as_ref() {
-        Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
+        Some(conn) => rearm_and_judge(conn, handle, || func(conn)),
         None => Err(XqliteError::ConnectionClosed),
     }
 }
@@ -562,7 +584,11 @@ where
 {
     let mut conn_guard = handle.lock_conn()?;
     match conn_guard.as_mut() {
-        Some(conn) => with_busy_timeout_rule(handle, || func(conn)),
+        Some(conn) => {
+            busy_handler::rearm(conn, handle)?;
+            let result = func(conn);
+            judge(conn, handle, result)
+        }
         None => Err(XqliteError::ConnectionClosed),
     }
 }
@@ -599,7 +625,7 @@ mod tests {
         let (conn, err) = conn.close().expect_err("a close SQLite refuses");
         assert!(matches!(
             XqliteError::from(err),
-            XqliteError::DatabaseBusyOrLocked { .. }
+            XqliteError::DatabaseBusy { .. }
         ));
 
         // SAFETY: `stmt` is the statement prepared above on `conn`, which is
@@ -641,7 +667,7 @@ mod tests {
             let conn = guard.as_ref().expect("an open connection");
             crate::authorizer::set(conn, &handle, HashSet::new()).expect("an authorizer");
             let witness = CountOnDrop(Arc::clone(&handle.busy_flags), Arc::clone(&recorded));
-            let hook = move || witness.0.slot_held();
+            let hook = move || witness.0.asked();
             conn.commit_hook(Some(hook)).expect("a commit hook");
             Arc::strong_count(&handle.busy_flags)
         };

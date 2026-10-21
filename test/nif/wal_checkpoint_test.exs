@@ -60,22 +60,5 @@ defmodule Xqlite.NIF.WalCheckpointTest do
         assert log >= 0 and done >= 0
       end
     end
-
-    # A FULL checkpoint holds the checkpoint lock while it waits on the reader,
-    # through the busy handler: the observer's first message says it is waiting.
-    test "a checkpoint lock held elsewhere is the busy error", %{conn: conn, path: path} do
-      [reader, holder, probe] = for _ <- 1..3, {:ok, other} <- [Xqlite.open(path)], do: other
-      on_exit(fn -> Enum.each([reader, holder, probe], &NIF.close/1) end)
-      :ok = Xqlite.begin(reader)
-      {:ok, _} = Xqlite.query(reader, "SELECT count(*) FROM t")
-      {:ok, _} = Xqlite.execute(conn, "INSERT INTO t VALUES (2)")
-      {:ok, _} = Xqlite.register_busy_observer(holder, self())
-      full = Task.async(fn -> Xqlite.wal_checkpoint(holder, :full) end)
-
-      assert_receive {:xqlite_busy, _, _}, 5_000
-      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.wal_checkpoint(probe)
-      :ok = Xqlite.rollback(reader)
-      assert {:ok, _} = Task.await(full, 10_000)
-    end
   end
 end

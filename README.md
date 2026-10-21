@@ -93,13 +93,14 @@ The examples below assume an open `conn` with this `users` table.
 - **Diagnostics**: `explain_analyze/4`, `connection_stats/1` (SQLite's `sqlite3_db_status` counters), `compile_options/1`, `sqlite_version/0`, `autocommit/1`, `txn_state/2`, `changes/1`, `total_changes/1` and `last_insert_rowid/1`.
 - **Results**: `Xqlite.Result` implements the `Table.Reader` protocol of the [table](https://hex.pm/packages/table) package, so [Explorer](https://hexdocs.pm/explorer/Explorer.DataFrame.html#new/2) and [Kino](https://hexdocs.pm/kino/Kino.DataTable.html#new/2) take a result as it is.
 
-Errors are `{:error, reason}` tuples whose `reason` is an atom or a tagged tuple with structured fields, such as `{:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}` or `{:read_only_database, code, message}`. The `Xqlite.error_reason` type lists 91 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback. Match on the tags and fields, not on message text.
+Errors are `{:error, reason}` tuples whose `reason` is an atom or a tagged tuple with structured fields, such as `{:constraint_violation, :constraint_unique, %{table: ..., columns: [...], ...}}` or `{:read_only_database, code, message}`. The `Xqlite.error_reason` type lists 92 typed reason variants, including twelve SQLite constraint subtypes plus a generic fallback. Match on the tags and fields, not on message text.
 
 ## Guides
 
 - [Gotchas](guides/gotchas.md): behaviour that is defined but surprising, and what to do about it.
 - [Security](guides/security.md): the trust boundary, extensions, the authorizer, and where the crash-safety guarantee ends.
 - [Known limitations](guides/known_limitations.md): every limitation the library documents, with what to do instead.
+- [Parallel writes on the BEAM](guides/parallel_writes.md): many processes writing to one database, how a call waits for the write lock, and what to expect from heavy writes.
 - [Wiring xqlite telemetry](guides/wiring_telemetry.md): the events, the hook bridge, and sample handlers.
 - [Full-text search with FTS5](guides/full_text_search.md).
 - [Spatial data with SpatiaLite](guides/spatialite.md).
@@ -193,7 +194,7 @@ SQLite gives each connection one WAL callback, and its automatic checkpoint uses
 :ok = Xqlite.set_busy_policy(conn, max_retries: 50, max_elapsed_ms: 5_000, sleep_ms: 10)
 
 {:ok, handle} = Xqlite.register_busy_observer(conn, self())
-# Each call SQLite makes to the busy handler sends {:xqlite_busy, retries_so_far, elapsed_ms}.
+# Each retry of a call waiting for a lock sends {:xqlite_busy, retries_so_far, elapsed_ms}.
 
 :ok = Xqlite.unregister_busy_observer(conn, handle)
 :ok = Xqlite.remove_busy_policy(conn)
@@ -202,7 +203,7 @@ SQLite gives each connection one WAL callback, and its automatic checkpoint uses
 
 When another connection holds a lock a statement needs, the policy decides whether to retry or give up, by count and by time for each wait. A connection has one policy, because two retry decisions cannot be combined. Observers only watch: any number of them, with or without a policy, and `Xqlite.Telemetry.bridge/2` can turn their messages into `[:xqlite, :hook, :busy]` events.
 
-The policy and the observers share SQLite's one busy handler per connection. While either holds it, a statement that writes `busy_timeout` is rejected as it is prepared, because SQLite would replace the handler with its own. `Xqlite.put_busy_timeout/2` changes the wait in every case, and `Xqlite.get_busy_timeout/1` reads it. Installing a policy or an observer keeps the `busy_timeout` that was set, and the connection waits that long whenever no policy is set.
+A call that meets a lock waits in the process that made it, sleeping between attempts, so a waiting call holds no VM thread and the connection stays free for other calls. A raw `XqliteNIF` call answers the busy error at once; `Xqlite.retry_busy/3` waits for it the same way. `Xqlite.put_busy_timeout/2`, or `PRAGMA busy_timeout = N` sent as SQL, sets the wait, and `Xqlite.get_busy_timeout/1` reads it; the connection waits that long whenever no policy is set.
 
 ### Online backup with progress and cancellation
 
@@ -283,7 +284,7 @@ Use snapshots to copy a database between processes or nodes, or to clone an in-m
 
 A connection is one SQLite connection behind a Rust `Mutex`. Any process can use it, and calls on it run one at a time. rusqlite opens SQLite connections with `SQLITE_OPEN_NO_MUTEX`, which turns off SQLite's own per-connection mutex, and the Rust `Mutex` serializes access instead ([Security](guides/security.md#thread-safety-model)).
 
-SQLite lets one writer at a time write to a database file. In WAL mode, the default here, readers keep reading while it writes ([SQLite: Write-Ahead Logging](https://www.sqlite.org/wal.html)). For parallel work, open one connection per process, or keep a pool of connections, as the Ecto adapter does.
+SQLite lets one writer at a time write to a database file. In WAL mode, the default here, readers keep reading while it writes ([SQLite: Write-Ahead Logging](https://www.sqlite.org/wal.html)). For parallel work, open one connection per process, or keep a pool of connections, as the Ecto adapter does. A call that meets another connection's lock waits in its own process and holds no VM thread; [Parallel writes on the BEAM](guides/parallel_writes.md) says which calls wait and what each busy answer means.
 
 Calls that touch a connection run on dirty schedulers, so a slow query does not hold up the BEAM's normal schedulers. A process that shares a connection with a slow query still waits for it ([Gotchas](guides/gotchas.md#concurrency-and-busy-handling)).
 

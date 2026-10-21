@@ -194,8 +194,9 @@ fn image_pragma(pragma: Option<(&[u8], Option<&[u8]>)>) -> bool {
 }
 
 /// The answer for one action code, `pragma` holding a PRAGMA's name and value:
-/// xqlite's own reads and the busy slot's rules about `busy_timeout` first,
-/// then the kinds the caller denied.
+/// xqlite's own reads first, then the kinds the caller denied. A `busy_timeout`
+/// write the caller allows is noted, so the call takes the busy slot back from
+/// the handler SQLite installs as it compiles the statement.
 fn decide(
     code: c_int,
     pragma: Option<(&[u8], Option<&[u8]>)>,
@@ -204,10 +205,13 @@ fn decide(
 ) -> c_int {
     match busy_timeout_action(pragma) {
         Some(BusyTimeout::Read) if flags.reading_own_pragma() => ffi::SQLITE_OK,
-        Some(BusyTimeout::Write) if flags.slot_held() => {
-            flags.note_write_refused();
-            ffi::SQLITE_DENY
-        }
+        Some(BusyTimeout::Write) => match user_decision(code, denied) {
+            ffi::SQLITE_OK => {
+                flags.note_timeout_written();
+                ffi::SQLITE_OK
+            }
+            denial => denial,
+        },
         None if flags.reading_own_pragma() && image_pragma(pragma) => ffi::SQLITE_OK,
         _ => user_decision(code, denied),
     }
@@ -297,9 +301,10 @@ fn store_denied(
     Ok(())
 }
 
-/// Install or clear the connection's single authorizer so it carries what is
-/// asked of it now: the caller's denied kinds, the busy slot's rules, or
-/// neither. Callers must hold the connection Mutex.
+/// Install the connection's single authorizer with the caller's denied kinds
+/// now; every connection carries one, for the busy slot. SQLite expires every
+/// prepared statement on this call, which `deserialize` relies on after a
+/// load. Callers must hold the connection Mutex.
 pub(crate) fn sync(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
     let denied = {
         let guard = handle
@@ -309,10 +314,7 @@ pub(crate) fn sync(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteE
         guard.clone()
     };
 
-    match (denied, handle.busy_flags.slot_held()) {
-        (None, false) => clear(conn, handle),
-        (user_denied, _) => install(conn, handle, user_denied.unwrap_or_default()),
-    }
+    install(conn, handle, denied.unwrap_or_default())
 }
 
 fn install(
@@ -326,15 +328,6 @@ fn install(
         AuthorizerState { denied, flags },
         |state| register(conn, state),
     )
-}
-
-/// Clear any installed authorizer and free its box. Idempotent. SQLite expires
-/// every prepared statement on this call even with nothing installed, which
-/// `deserialize` relies on after a load. Callers must hold the connection Mutex.
-fn clear(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
-    hook_util::uninstall_hook(&handle.callback_boxes.authorizer, || {
-        register(conn, std::ptr::null_mut())
-    })
 }
 
 /// Point SQLite's authorizer at `state`, or clear it for a null `state`, and

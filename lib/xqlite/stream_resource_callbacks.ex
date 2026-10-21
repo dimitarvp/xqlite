@@ -69,7 +69,9 @@ defmodule Xqlite.StreamResourceCallbacks do
   end
 
   defp open_stream(conn, sql, params, opts, on_error) do
-    case NIF.stream_open(conn, sql, params) do
+    open = fn -> NIF.stream_open(conn, sql, params) end
+
+    case Xqlite.retry_busy(conn, open, cancel_tokens: Keyword.get(opts, :cancel_tokens)) do
       {:ok, handle} ->
         case NIF.stream_get_columns(handle) do
           {:ok, columns} ->
@@ -206,7 +208,11 @@ defmodule Xqlite.StreamResourceCallbacks do
   defp fetch_rows(acc) do
     fetch_started_at = Xqlite.Telemetry.monotonic_time()
 
-    case NIF.stream_fetch_cancellable(acc.handle, acc.batch_size, acc.cancel_tokens) do
+    fetch = fn ->
+      NIF.stream_fetch_cancellable(acc.handle, acc.batch_size, acc.cancel_tokens)
+    end
+
+    case Xqlite.retry_busy(acc.handle, fetch, cancel_tokens: acc.cancel_tokens) do
       {:ok, %{rows: rows}} ->
         {mapped_rows, decode_error} =
           map_rows_to_maps(rows, acc.columns, acc.type_extensions, [])

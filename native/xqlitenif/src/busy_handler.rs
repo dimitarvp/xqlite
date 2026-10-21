@@ -8,31 +8,21 @@ use rustler::sys::{
     enif_alloc_env, enif_free_env, enif_make_int64, enif_make_tuple_from_array, enif_send,
 };
 use rustler::types::LocalPid;
-use std::cell::Cell;
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// What the busy slot holds and whether xqlite runs a PRAGMA of its own, shared
-/// with the authorizer callback and with the error mapping in `connection.rs`.
-/// Every write happens under the connection Mutex; the callback reads these
-/// while SQLite compiles a statement, inside a call made under that Mutex too.
+/// Every write happens under the connection Mutex; the callbacks write and read
+/// these inside a call made under that Mutex too.
 #[derive(Debug, Default)]
 pub(crate) struct BusySlotFlags {
-    slot_held: AtomicBool,
     internal_read: AtomicBool,
-    write_refused: AtomicBool,
-    policy: AtomicBool,
-    observers: AtomicUsize,
+    timeout_written: AtomicBool,
+    asked: AtomicBool,
     observer_handles: AtomicU64,
 }
 
 impl BusySlotFlags {
-    #[inline]
-    pub(crate) fn slot_held(&self) -> bool {
-        self.slot_held.load(Ordering::Relaxed)
-    }
-
     #[inline]
     pub(crate) fn reading_own_pragma(&self) -> bool {
         self.internal_read.load(Ordering::Relaxed)
@@ -48,39 +38,18 @@ impl BusySlotFlags {
     }
 
     #[inline]
-    pub(crate) fn note_write_refused(&self) {
-        self.write_refused.store(true, Ordering::Relaxed);
+    pub(crate) fn note_timeout_written(&self) {
+        self.timeout_written.store(true, Ordering::Relaxed);
     }
 
-    pub(crate) fn clear_write_refused(&self) {
-        self.write_refused.store(false, Ordering::Relaxed);
-    }
-
-    pub(crate) fn take_write_refused(&self) -> bool {
-        self.write_refused.swap(false, Ordering::Relaxed)
-    }
-
-    pub(crate) fn policy(&self) -> bool {
-        self.policy.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn observers(&self) -> usize {
-        self.observers.load(Ordering::Relaxed)
+    pub(crate) fn asked(&self) -> bool {
+        self.asked.load(Ordering::Relaxed)
     }
 
     fn next_observer_handle(&self) -> u64 {
         self.observer_handles
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1)
-    }
-
-    fn set_slot_held(&self, held: bool) {
-        self.slot_held.store(held, Ordering::Relaxed);
-    }
-
-    fn publish(&self, policy: bool, observers: usize) {
-        self.policy.store(policy, Ordering::Relaxed);
-        self.observers.store(observers, Ordering::Relaxed);
     }
 }
 
@@ -93,27 +62,20 @@ pub(crate) struct BusyPolicy {
     pub(crate) sleep_ms: u64,
 }
 
-/// State kept alive while the busy callback is installed on a connection:
-/// an optional retry policy plus any number of observer subscribers.
+/// The busy slot, xqlite's from the open to the close.
 ///
 /// Allocated via `Box::into_raw`, stored as a raw pointer in
-/// `XqliteConn.callback_boxes`, and reclaimed on mutation, by `Drop`, or
-/// when the slot empties (no policy, no observers → callback removed).
+/// `XqliteConn.callback_boxes`, and reclaimed on mutation or by `Drop`.
 ///
 /// Mutation concurrency: every mutator runs under the connection Mutex,
 /// and the C callback only ever runs inside `sqlite3_step`/friends —
 /// which also hold that Mutex — so a mutation can never race a callback
 /// read. Plain snapshot-build-swap is sufficient; no copy-on-write list.
-/// The callback also resets `start` (an interior-mutable `Cell`) at the
-/// beginning of each busy event; that write is serialised by the same
-/// Mutex, so it never races a mutator or another callback.
 pub(crate) struct BusySlotState {
     policy: Option<BusyPolicy>,
     observers: Vec<(u64, LocalPid)>,
-    start: Cell<Instant>,
-    /// The `busy_timeout` the slot keeps: the one it displaced on taking SQLite's
-    /// busy callback (which zeroes it), or the one `set_timeout` set since; 0 for none.
     fallback_timeout_ms: u64,
+    flags: Arc<BusySlotFlags>,
 }
 
 impl std::fmt::Debug for BusySlotState {
@@ -125,11 +87,9 @@ impl std::fmt::Debug for BusySlotState {
     }
 }
 
-/// The C callback SQLite invokes on SQLITE_BUSY. Fans
-/// `{:xqlite_busy, retries, elapsed_ms}` out to every observer, then
-/// applies the policy: retry (1) or surface SQLITE_BUSY (0). With no
-/// policy installed it falls back to emulating the `busy_timeout` the
-/// slot displaced, which is 0 (give up at once) unless one was set.
+/// The C callback SQLite invokes before it answers SQLITE_BUSY. It notes that
+/// SQLite asked and answers 0, so the call answers busy at once and the
+/// process that made it waits instead (`delay`).
 ///
 /// # Safety
 ///
@@ -138,7 +98,7 @@ impl std::fmt::Debug for BusySlotState {
 /// passed to `sqlite3_busy_handler`, and the connection Mutex held by the
 /// stepping caller, or a dropped connection's close job owning the
 /// `Connection`, excludes concurrent mutation.
-unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_int {
+unsafe extern "C" fn busy_callback(user_data: *mut c_void, _count: c_int) -> c_int {
     // Guard the body against a future panic: this callback is registered
     // via raw `ffi::sqlite3_busy_handler`, so — unlike rusqlite's own busy
     // trampoline — nothing catches a panic before it unwinds into SQLite's
@@ -149,35 +109,8 @@ unsafe extern "C" fn busy_callback(user_data: *mut c_void, count: c_int) -> c_in
         // install; mutators hold the same connection Mutex as the caller
         // driving this callback, so the pointee cannot be reclaimed mid-read.
         let state = unsafe { &*(user_data as *const BusySlotState) };
-
-        let retries = count as u32;
-        // SQLite starts a fresh busy event at count == 0; reset the elapsed
-        // clock there so `max_elapsed_ms` is a per-event budget (matching
-        // `max_retries`), not an absolute ceiling from the slot's install.
-        if retries == 0 {
-            state.start.set(Instant::now());
-        }
-        let elapsed_ms = state.start.get().elapsed().as_millis() as u64;
-
-        for (_handle, pid) in &state.observers {
-            // SAFETY: see `send_busy_to_pid`. All data is copied into a fresh
-            // msg_env; we never retain references across the call.
-            unsafe {
-                send_busy_to_pid(pid, retries, elapsed_ms);
-            }
-        }
-
-        let delay = match &state.policy {
-            None => fallback_delay_ms(retries, state.fallback_timeout_ms),
-            Some(policy) => policy_delay_ms(policy, retries, elapsed_ms),
-        };
-        match delay {
-            None => 0,
-            Some(delay_ms) => {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                1
-            }
-        }
+        state.flags.asked.store(true, Ordering::Relaxed);
+        0
     })
 }
 
@@ -212,10 +145,10 @@ fn fallback_delay_ms(retries: u32, timeout_ms: u64) -> Option<u64> {
     }
 }
 
-/// Read the connection's current `busy_timeout`, the value the slot is about
-/// to displace. The flag around the read tells the authorizer callback that
-/// this PRAGMA is xqlite's own, so a caller who denies `:pragma` cannot hide
-/// the wait their connection had.
+/// Read the connection's `busy_timeout`: the one it opened with, or the one a
+/// `PRAGMA busy_timeout` written as SQL just set. The flag around the read
+/// tells the authorizer callback that this PRAGMA is xqlite's own, so a caller
+/// who denies `:pragma` cannot hide the wait their connection has.
 fn read_busy_timeout(conn: &Connection, flags: &BusySlotFlags) -> Result<u64, XqliteError> {
     let read = flags.own_read(|| {
         conn.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
@@ -232,28 +165,6 @@ pub(crate) fn busy_timeout_c_int(timeout_ms: u64) -> Result<c_int, XqliteError> 
         pragma: atoms::busy_timeout(),
         value: timeout_ms,
     })
-}
-
-fn apply_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
-    let ms = busy_timeout_c_int(timeout_ms)?;
-    // SAFETY: caller holds the connection Mutex; `conn.handle()` yields
-    // the raw db pointer for that locked connection.
-    let rc = unsafe { ffi::sqlite3_busy_timeout(conn.handle(), ms) };
-    if rc == ffi::SQLITE_OK {
-        Ok(())
-    } else {
-        Err(ffi_rc_to_error(conn, "sqlite3_busy_timeout", rc))
-    }
-}
-
-/// Hand the timeout the slot keeps back to SQLite's own handler as the slot
-/// empties. Callers must hold the connection Mutex.
-fn restore_busy_timeout(conn: &Connection, timeout_ms: u64) -> Result<(), XqliteError> {
-    if timeout_ms == 0 {
-        return Ok(());
-    }
-
-    apply_busy_timeout(conn, timeout_ms)
 }
 
 /// Send `{:xqlite_busy, retries, elapsed_ms}` to `pid`. Fire-and-forget.
@@ -281,54 +192,88 @@ unsafe fn send_busy_to_pid(pid: &LocalPid, retries: u32, elapsed_ms: u64) {
     }
 }
 
-/// Set (or replace) the retry policy. Installs the callback if the slot
-/// was empty. Callers must hold the connection Mutex.
+/// Takes the busy slot as the connection opens, with the timeout it has
+/// (rusqlite opens every connection with 5000 ms), and puts on the authorizer
+/// that notices a `busy_timeout` written as SQL. Callers hold the connection Mutex.
+pub(crate) fn install(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
+    authorizer::sync(conn, handle)?;
+    handle.busy_flags.note_timeout_written();
+    rearm(conn, handle)
+}
+
+/// One retry of a waiting call, as `XqliteNIF.busy_delay/4` says; callers hold the Mutex.
+pub(crate) fn delay(handle: &XqliteConn, retries: u32, elapsed_ms: u64) -> Option<u64> {
+    let current = handle.callback_boxes.busy.load(Ordering::Acquire);
+    // SAFETY: a non-null slot pointer always points to a live BusySlotState;
+    // the connection Mutex the caller holds excludes its reclamation.
+    let state = unsafe { current.as_ref() }?;
+    for (_handle, pid) in &state.observers {
+        // SAFETY: see `send_busy_to_pid`; this runs inside a DirtyIo NIF.
+        unsafe { send_busy_to_pid(pid, retries, elapsed_ms) };
+    }
+    match &state.policy {
+        None => fallback_delay_ms(retries, state.fallback_timeout_ms),
+        Some(policy) => policy_delay_ms(policy, retries, elapsed_ms),
+    }
+}
+
+/// Puts xqlite's callback back in a usable state: once it answered, SQLite asks
+/// it again only from the next statement's step on, and a `PRAGMA busy_timeout`
+/// written as SQL swapped in SQLite's own sleeping handler, whose timeout the
+/// slot keeps from then on. Callers hold the connection Mutex.
+pub(crate) fn rearm(conn: &Connection, handle: &XqliteConn) -> Result<(), XqliteError> {
+    let flags = &handle.busy_flags;
+    let written = flags.timeout_written.load(Ordering::Relaxed);
+    if written || flags.asked() {
+        let mut next = snapshot(handle);
+        if written {
+            next.fallback_timeout_ms = read_busy_timeout(conn, flags)?;
+        }
+        swap_in(conn, handle, next)?;
+        flags.timeout_written.store(false, Ordering::Relaxed);
+        flags.asked.store(false, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Set (or replace) the retry policy. Callers must hold the connection Mutex.
 pub(crate) fn set_policy(
     conn: &Connection,
     handle: &XqliteConn,
     policy: BusyPolicy,
 ) -> Result<(), XqliteError> {
-    let mut next = snapshot(&handle.callback_boxes.busy);
+    let mut next = snapshot(handle);
     next.policy = Some(policy);
     swap_in(conn, handle, next)
 }
 
-/// Remove the retry policy, keeping any observers. Empties and removes
-/// the callback when no observers remain. Safe to call with no policy
-/// installed. Callers must hold the connection Mutex.
+/// Remove the retry policy, keeping any observers and the timeout. Safe to
+/// call with no policy installed. Callers must hold the connection Mutex.
 pub(crate) fn remove_policy(
     conn: &Connection,
     handle: &XqliteConn,
 ) -> Result<(), XqliteError> {
-    let mut next = snapshot(&handle.callback_boxes.busy);
+    let mut next = snapshot(handle);
     next.policy = None;
     swap_in(conn, handle, next)
 }
 
-/// Set the busy timeout the connection keeps, leaving any retry policy in
-/// place. A held slot keeps it: our callback waits it out when no policy
-/// decides, and emptying the slot hands it to SQLite's own handler. With
-/// the slot empty SQLite's own handler takes it at once. Callers must hold
-/// the connection Mutex.
+/// Set the busy timeout the slot keeps, leaving any retry policy in place:
+/// a waiting call spends it once no policy decides. Callers must hold the
+/// connection Mutex.
 pub(crate) fn set_timeout(
     conn: &Connection,
     handle: &XqliteConn,
     timeout_ms: u64,
 ) -> Result<(), XqliteError> {
     busy_timeout_c_int(timeout_ms)?;
-    let mut next = snapshot(&handle.callback_boxes.busy);
-
-    if next.policy.is_none() && next.observers.is_empty() {
-        apply_busy_timeout(conn, timeout_ms)
-    } else {
-        next.fallback_timeout_ms = timeout_ms;
-        swap_in(conn, handle, next)
-    }
+    let mut next = snapshot(handle);
+    next.fallback_timeout_ms = timeout_ms;
+    swap_in(conn, handle, next)
 }
 
-/// The busy timeout a held slot keeps, or `None` while the slot is empty
-/// and SQLite's own handler holds the wait. Callers must hold the
-/// connection Mutex.
+/// The busy timeout the slot keeps, `None` only before the open took the
+/// slot. Callers must hold the connection Mutex.
 pub(crate) fn kept_timeout(handle: &XqliteConn) -> Option<u64> {
     let current = handle.callback_boxes.busy.load(Ordering::Acquire);
     // SAFETY: a non-null slot pointer always points to a live
@@ -337,39 +282,14 @@ pub(crate) fn kept_timeout(handle: &XqliteConn) -> Option<u64> {
     unsafe { current.as_ref() }.map(|state| state.fallback_timeout_ms)
 }
 
-/// Runs `release` with no busy handler, so a commit it ends never waits on a
-/// lock, then puts back the one there was. Callers hold the connection Mutex.
-pub(crate) fn without_wait(conn: &Connection, handle: &XqliteConn, release: impl FnOnce()) {
-    let slot = handle.callback_boxes.busy.load(Ordering::Acquire);
-    let timeout = match slot.is_null() {
-        true => read_busy_timeout(conn, &handle.busy_flags).and_then(busy_timeout_c_int),
-        false => Ok(0),
-    };
-    match timeout {
-        // SAFETY: the caller holds the Mutex, which keeps a non-null slot from being reclaimed.
-        Ok(ms) => unsafe {
-            ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut());
-            release();
-            match slot.is_null() {
-                true => ffi::sqlite3_busy_timeout(conn.handle(), ms),
-                false => {
-                    ffi::sqlite3_busy_handler(conn.handle(), Some(busy_callback), slot.cast())
-                }
-            };
-        },
-        Err(_unread) => release(),
-    }
-}
-
 /// Register an observer pid; returns its unregistration handle.
-/// Installs the callback if the slot was empty. Callers must hold the
-/// connection Mutex.
+/// Callers must hold the connection Mutex.
 pub(crate) fn register_observer(
     conn: &Connection,
     handle: &XqliteConn,
     pid: LocalPid,
 ) -> Result<u64, XqliteError> {
-    let mut next = snapshot(&handle.callback_boxes.busy);
+    let mut next = snapshot(handle);
     let observer_handle = handle.busy_flags.next_observer_handle();
     next.observers.push((observer_handle, pid));
     swap_in(conn, handle, next)?;
@@ -377,36 +297,32 @@ pub(crate) fn register_observer(
 }
 
 /// Unregister an observer by handle. Idempotent — an unknown handle is a
-/// no-op. Empties and removes the callback when nothing remains.
-/// Callers must hold the connection Mutex.
+/// no-op. Callers must hold the connection Mutex.
 pub(crate) fn unregister_observer(
     conn: &Connection,
     handle: &XqliteConn,
     observer_handle: u64,
 ) -> Result<(), XqliteError> {
-    let mut next = snapshot(&handle.callback_boxes.busy);
+    let mut next = snapshot(handle);
     next.observers.retain(|(h, _pid)| *h != observer_handle);
     swap_in(conn, handle, next)
 }
 
-/// Clone the current slot contents (or a fresh empty state), preserving
-/// the current `start` instant across mutations. The
-/// callback resets `start` at each busy event's first callback, so a
-/// mutation mid-contention keeps that event's clock rather than restarting
-/// it.
+/// Clone the current slot contents, or a fresh state before the open took
+/// the slot.
 ///
 /// Callers must hold the connection Mutex — that is what makes the raw
 /// read of the current pointee sound (no concurrent reclaim, no
 /// concurrent callback).
-fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
-    let current = slot.load(Ordering::Acquire);
+fn snapshot(handle: &XqliteConn) -> BusySlotState {
+    let current = handle.callback_boxes.busy.load(Ordering::Acquire);
 
     if current.is_null() {
         BusySlotState {
             policy: None,
             observers: Vec::new(),
-            start: Cell::new(Instant::now()),
             fallback_timeout_ms: 0,
+            flags: Arc::clone(&handle.busy_flags),
         }
     } else {
         // SAFETY: non-null slot pointers always point to a live
@@ -415,109 +331,35 @@ fn snapshot(slot: &AtomicPtr<BusySlotState>) -> BusySlotState {
         BusySlotState {
             policy: state.policy.clone(),
             observers: state.observers.clone(),
-            start: Cell::new(state.start.get()),
             fallback_timeout_ms: state.fallback_timeout_ms,
+            flags: Arc::clone(&state.flags),
         }
     }
 }
 
-/// Swap the derived state in: empty states clear the C callback, restore
-/// the kept timeout and clear the slot; non-empty states (re-)register
-/// the callback pointing at the new allocation, remembering the timeout
-/// they displace when the slot was empty. Both paths reclaim the previous
-/// allocation and leave the connection's authorizer matching the result.
+/// Swap the derived state in: register the callback pointing at the new
+/// allocation, which also resets SQLite's count of its answers, then reclaim
+/// the previous allocation.
 fn swap_in(
     conn: &Connection,
     handle: &XqliteConn,
-    mut next: BusySlotState,
+    next: BusySlotState,
 ) -> Result<(), XqliteError> {
-    let slot = &handle.callback_boxes.busy;
-    let has_policy = next.policy.is_some();
-    let observer_count = next.observers.len();
-
-    if !has_policy && observer_count == 0 {
-        // Nothing of ours is installed, so the C slot holds SQLite's own
-        // timeout handler (or nothing): clearing it would destroy that.
-        if slot.load(Ordering::Acquire).is_null() {
-            return Ok(());
+    hook_util::install_hook(&handle.callback_boxes.busy, next, |new_ptr| {
+        // SAFETY: caller holds the connection Mutex; `conn.handle()`
+        // yields the raw db pointer for that locked connection.
+        let rc = unsafe {
+            ffi::sqlite3_busy_handler(
+                conn.handle(),
+                Some(busy_callback),
+                new_ptr as *mut c_void,
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(ffi_rc_to_error(conn, "sqlite3_busy_handler", rc));
         }
-
-        hook_util::uninstall_hook(slot, || {
-            // SAFETY: caller holds the connection Mutex. Passing None+null
-            // clears any registered handler; calling with no handler
-            // installed is valid.
-            let rc = unsafe {
-                ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut())
-            };
-            if rc != ffi::SQLITE_OK {
-                return Err(ffi_rc_to_error(conn, "sqlite3_busy_handler", rc));
-            }
-            Ok(())
-        })?;
-
-        restore_busy_timeout(conn, next.fallback_timeout_ms)?;
-        handle.busy_flags.set_slot_held(false);
-        handle.busy_flags.publish(false, 0);
-        authorizer::sync(conn, handle)
-    } else {
-        let was_empty = slot.load(Ordering::Acquire).is_null();
-
-        if was_empty {
-            handle.busy_flags.set_slot_held(true);
-            match take_slot(conn, handle) {
-                Ok(displaced) => next.fallback_timeout_ms = displaced,
-                Err(e) => {
-                    give_slot_back(conn, handle);
-                    return Err(e);
-                }
-            }
-        }
-
-        let installed = hook_util::install_hook(slot, next, |new_ptr| {
-            // SAFETY: caller holds the connection Mutex; `conn.handle()`
-            // yields the raw db pointer for that locked connection.
-            let rc = unsafe {
-                ffi::sqlite3_busy_handler(
-                    conn.handle(),
-                    Some(busy_callback),
-                    new_ptr as *mut c_void,
-                )
-            };
-            if rc != ffi::SQLITE_OK {
-                return Err(ffi_rc_to_error(conn, "sqlite3_busy_handler", rc));
-            }
-            Ok(())
-        });
-
-        match installed {
-            Ok(()) => {
-                handle.busy_flags.publish(has_policy, observer_count);
-                Ok(())
-            }
-            Err(e) => {
-                if was_empty {
-                    give_slot_back(conn, handle);
-                }
-                Err(e)
-            }
-        }
-    }
-}
-
-/// Put the authorizer the held slot needs on the connection, then read the
-/// `busy_timeout` the slot is about to displace — in that order, so the read
-/// is the one xqlite is allowed to make. Callers must hold the connection
-/// Mutex.
-fn take_slot(conn: &Connection, handle: &XqliteConn) -> Result<u64, XqliteError> {
-    authorizer::sync(conn, handle)?;
-    read_busy_timeout(conn, &handle.busy_flags)
-}
-
-/// Undo `take_slot` when the slot was not taken after all. The authorizer's
-/// own answer is dropped: the caller must hear why the take failed.
-fn give_slot_back(conn: &Connection, handle: &XqliteConn) {
-    handle.busy_flags.set_slot_held(false);
-    let _ = authorizer::sync(conn, handle);
+        Ok(())
+    })
 }
 
 pub(crate) fn ffi_rc_to_error(conn: &Connection, what: &str, rc: c_int) -> XqliteError {

@@ -188,17 +188,8 @@ defmodule Xqlite.ArgumentValidationLawTest do
 
       assert {:ok, _} = NIF.set_pragma(conn, "busy_timeout", 0)
       assert {:ok, _} = NIF.set_pragma(conn, "busy_timeout", 2_147_483_647)
-      {:ok, handle} = Xqlite.register_busy_observer(conn, self())
-      held = Enum.map([-1, :infinity, 100], &NIF.set_pragma(conn, "busy_timeout", &1))
-      tags = for {:error, {tag, _details}} <- held, do: tag
-
-      assert tags == [
-               :invalid_pragma_value,
-               :invalid_pragma_value,
-               :busy_timeout_write_refused
-             ]
-
-      :ok = Xqlite.unregister_busy_observer(conn, handle)
+      assert {:ok, 100} = NIF.set_pragma(conn, "busy_timeout", 100)
+      assert {:ok, 100} = NIF.get_pragma(conn, "busy_timeout")
       assert {:ok, size} = NIF.get_pragma(conn, "cache_size")
       assert {:error, {:cannot_execute_pragma, _, _}} = NIF.set_pragma(conn, "cache_size", nil)
       assert {:ok, ^size} = NIF.get_pragma(conn, "cache_size")

@@ -88,6 +88,7 @@ defmodule Xqlite.MixProject do
         "guides/security.md",
         "guides/gotchas.md",
         "guides/known_limitations.md",
+        "guides/parallel_writes.md",
         "guides/wiring_telemetry.md",
         "guides/full_text_search.md",
         "guides/spatialite.md"

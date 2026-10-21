@@ -75,7 +75,10 @@ defmodule Xqlite.NIF.ChildDropTest do
     test "#{ending} answers the commit a reader keeps from the file", %{a: a, c: c} do
       :ok = Xqlite.put_busy_timeout(a, 100)
       reader = c |> prepare("SELECT x FROM u") |> step()
-      assert {:error, {:database_busy_or_locked, 5, _}} = end_write(a, unquote(ending))
+
+      assert {:error, {:database_busy, %{code: 5, retry: :none}}} =
+               end_write(a, unquote(ending))
+
       :ok = NIF.stmt_finalize(reader)
 
       assert {:ok, %{rows: [[1, "00"], [2, "00"]]}} =
@@ -91,7 +94,7 @@ defmodule Xqlite.NIF.ChildDropTest do
       :ok = Xqlite.begin(a, :immediate)
       :ok = Xqlite.put_busy_timeout(c, 0)
       stmt = prepare(c, unquote(sql))
-      assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.step(stmt)
+      assert {:error, {:database_busy, %{code: 5}}} = Xqlite.step(stmt)
       assert :ok = Xqlite.reset(stmt)
       assert :ok = Xqlite.finalize(stmt)
       :ok = Xqlite.rollback(a)
@@ -104,7 +107,7 @@ defmodule Xqlite.NIF.ChildDropTest do
     reader = a |> prepare("SELECT x FROM aux.u") |> step()
     vacuum = prepare(c, "PRAGMA incremental_vacuum")
     assert {:row, []} = Xqlite.step(vacuum)
-    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.reset(vacuum)
+    assert {:error, {:database_busy, %{code: 5, retry: :none}}} = Xqlite.reset(vacuum)
     :ok = Xqlite.finalize(vacuum)
     :ok = NIF.stmt_finalize(reader)
     assert freelist(c) == free
@@ -115,7 +118,7 @@ defmodule Xqlite.NIF.ChildDropTest do
     free = free_pages(c)
     :ok = Xqlite.put_busy_timeout(c, 0)
     reader = a |> prepare("SELECT x FROM aux.u") |> step()
-    assert {:error, {:database_busy_or_locked, 5, _}} = NIF.get_pragma(c, "incremental_vacuum")
+    assert {:error, {:database_busy, %{code: 5}}} = NIF.get_pragma(c, "incremental_vacuum")
     assert freelist(c) == free
     :ok = NIF.stmt_finalize(reader)
     assert {:ok, :no_value} = NIF.get_pragma(c, "incremental_vacuum")
@@ -128,7 +131,7 @@ defmodule Xqlite.NIF.ChildDropTest do
     :ok = Xqlite.put_busy_timeout(c, 0)
     reader = a |> prepare("SELECT x FROM aux.u") |> step()
 
-    assert {:error, {:database_busy_or_locked, 5, _}} =
+    assert {:error, {:database_busy, %{code: 5}}} =
              NIF.set_pragma(c, "incremental_vacuum", 2)
 
     assert freelist(c) == free
@@ -146,9 +149,9 @@ defmodule Xqlite.NIF.ChildDropTest do
     :ok = Xqlite.put_busy_timeout(a, 0)
     :ok = Xqlite.begin(c, :immediate)
     stmt = prepare(a, "INSERT INTO t VALUES (1)")
-    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.step(stmt)
+    assert {:error, {:database_busy, %{code: 5}}} = Xqlite.step(stmt)
     assert :ok = Xqlite.reset(stmt)
-    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.step(stmt)
+    assert {:error, {:database_busy, %{code: 5}}} = Xqlite.step(stmt)
     assert :ok = Xqlite.finalize(stmt)
     :ok = Xqlite.rollback(c)
     assert {:ok, %{rows: [[0]]}} = Xqlite.query(a, "SELECT count(*) FROM t WHERE x = 1")

@@ -28,11 +28,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     "PRAGMA busy_timeout = -5"
   ]
 
-  # The wait each generated case starts from. Small, so a contended write
-  # with no policy is over in milliseconds; not zero, so putting it back is
-  # visible.
-  @remembered_ms 5
-
   setup do
     {:ok, path: tmp_db_path("busy")}
   end
@@ -66,7 +61,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     probe_task =
       Task.async(fn ->
-        NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+        Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
       end)
 
     # Let the probe hit SQLITE_BUSY and retry a few times, then release.
@@ -77,7 +72,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert is_integer(first_retries) and first_retries >= 0
     assert is_integer(first_elapsed) and first_elapsed >= 0
 
-    assert {:ok, 1} = Task.await(probe_task, 1_000)
+    assert {:ok, %Xqlite.Result{changes: 1}} = Task.await(probe_task, 1_000)
 
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
@@ -89,7 +84,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
       prime_contention(path, max_retries: 3, max_elapsed_ms: 500, sleep_ms: 10)
 
     # Don't release. The insert should give up.
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     assert match?({:error, _}, result)
 
@@ -106,7 +101,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
       prime_contention(path, max_retries: 1_000, max_elapsed_ms: 40, sleep_ms: 10)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
@@ -122,8 +117,8 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {holder, probe} =
       prime_contention(path, max_retries: 1_000, max_elapsed_ms: 50, sleep_ms: 5_000)
 
-    assert {:error, {:database_busy_or_locked, 5, _}} =
-             NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    assert {:error, {:database_busy, %{code: 5}}} =
+             Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     {:messages, messages} = Process.info(self(), :messages)
     assert {:xqlite_busy, 1, elapsed_ms} = List.last(messages)
@@ -148,7 +143,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.put_busy_timeout(probe, 0)
     {:ok, _handle} = Xqlite.register_busy_observer(probe, self())
     {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
-    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.optimize(probe)
+    assert {:error, {:database_busy, %{code: 5}}} = Xqlite.optimize(probe)
     assert_received {:xqlite_busy, 0, _}
     assert {:ok, true} = Xqlite.autocommit(probe)
     {:ok, 0} = NIF.execute(holder, "ROLLBACK", [])
@@ -166,7 +161,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
       {holder, probe, apply_two} = changeset_pair(path, unquote(journal))
       {:ok, _handle} = Xqlite.register_busy_observer(probe, self())
       {:ok, 0} = NIF.execute(holder, "BEGIN IMMEDIATE", [])
-      assert {:error, {:database_busy_or_locked, 5, _}} = apply_two.()
+      assert {:error, {:database_busy, %{code: 5}}} = apply_two.()
       assert_received {:xqlite_busy, 0, _}
       assert {:ok, true} = Xqlite.autocommit(probe)
       {:ok, 0} = NIF.execute(holder, "ROLLBACK", [])
@@ -179,7 +174,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
   test "changeset_apply rolls back when its commit cannot take the lock", %{path: path} do
     {holder, probe, apply_two} = changeset_pair(path, :delete)
     :ok = NIF.execute_batch(holder, "BEGIN; SELECT count(*) FROM t")
-    assert {:error, {:database_busy_or_locked, 5, _}} = apply_two.()
+    assert {:error, {:database_busy, %{code: 5}}} = apply_two.()
     assert {:ok, true} = Xqlite.autocommit(probe)
     :ok = NIF.execute_batch(holder, "ROLLBACK")
     assert :ok = apply_two.()
@@ -199,7 +194,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
@@ -219,7 +214,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.remove_busy_policy(probe)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
@@ -249,7 +244,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.unregister_busy_observer(probe, handle)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
@@ -279,7 +274,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     # With the tight policy we should give up fast (≤ 1 retry × 5 ms).
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
     assert match?({:error, _}, result)
@@ -305,7 +300,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, first_handle} = Xqlite.register_busy_observer(probe, first)
     {:ok, _second_handle} = Xqlite.register_busy_observer(probe, second)
 
-    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    {:error, _} = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     refute Enum.empty?(get_collected(first))
     refute Enum.empty?(get_collected(second))
@@ -313,7 +308,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.unregister_busy_observer(probe, first_handle)
     first_count = length(get_collected(first))
 
-    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    {:error, _} = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     assert length(get_collected(first)) == first_count
     refute Enum.empty?(get_collected(second))
@@ -337,7 +332,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, _handle} = Xqlite.register_busy_observer(probe, dead)
 
     # Should not blow up — enif_send to a dead pid is a no-op.
-    assert match?({:error, _}, NIF.execute(probe, "INSERT INTO t VALUES (1)", []))
+    assert match?({:error, _}, Xqlite.execute(probe, "INSERT INTO t VALUES (1)"))
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
     :ok = NIF.close(holder)
@@ -362,7 +357,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, read} = NIF.stmt_prepare(writer, "SELECT id FROM t")
     {:row, _} = NIF.stmt_step(read)
     {:ok, idle_write} = NIF.stmt_prepare(writer, "UPDATE t SET id = id")
-    assert {:error, {:database_busy_or_locked, 5, _}} = Xqlite.commit(writer)
+    assert {:error, {:database_busy, %{code: 5}}} = Xqlite.commit(writer)
     assert [{:row, _}, :ok] = [NIF.stmt_step(read), NIF.stmt_finalize(idle_write)]
     :ok = NIF.close(reader)
   end
@@ -386,7 +381,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.set_busy_policy(probe, max_retries: 3, sleep_ms: 5)
     {:ok, _handle} = Xqlite.register_busy_observer(probe, forwarder)
 
-    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    {:error, _} = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     assert_receive {:forwarded_busy, {:xqlite_busy, _, _}}, 500
 
@@ -423,7 +418,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.set_busy_policy(probe, max_retries: 10, sleep_ms: 5)
     {:ok, _handle} = Xqlite.register_busy_observer(probe, collector)
 
-    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    {:error, _} = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     events = get_collected(collector)
     assert length(events) > 1, "need multiple retries to test monotonicity"
@@ -459,7 +454,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     probe_task =
       Task.async(fn ->
-        NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+        Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
       end)
 
     # First callback of the fresh contention: retries == 0, and its elapsed_ms is
@@ -472,7 +467,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert second_retries >= 1
 
     {:ok, _} = NIF.execute(holder, "COMMIT", [])
-    assert {:ok, 1} = Task.await(probe_task, 5_000)
+    assert {:ok, %Xqlite.Result{changes: 1}} = Task.await(probe_task, 5_000)
 
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
@@ -490,7 +485,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     handler_id = attach_capture([[:xqlite, :hook, :busy]])
 
-    {:error, _} = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    {:error, _} = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
     assert_receive {:telemetry_event, [:xqlite, :hook, :busy], measurements, metadata}, 500
     assert is_integer(measurements.retries)
@@ -517,10 +512,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
-    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert {:error, {:database_busy, _}} = result
 
     assert elapsed >= 250 and elapsed < 2_500,
            "waited #{elapsed} ms, expected about 300 and never the 5000 ms default"
@@ -575,10 +570,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     {:ok, _handle} = Xqlite.register_busy_observer(probe, test_pid)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
-    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert {:error, {:database_busy, _}} = result
     assert elapsed >= 30 and elapsed < 2_500, "waited #{elapsed} ms, expected about 60"
     assert_receive {:xqlite_busy, _, _}, 2_000
 
@@ -600,10 +595,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.put_busy_timeout(probe, 300)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
-    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert {:error, {:database_busy, _}} = result
 
     assert elapsed >= 250 and elapsed < 2_500,
            "waited #{elapsed} ms, expected about 300"
@@ -640,14 +635,13 @@ defmodule Xqlite.NIF.BusyHandlerTest do
   end
 
   test "put_busy_timeout/2 leaves the retry policy in place", %{path: path} do
-    {:ok, probe} = NIF.open(path)
-    :ok = Xqlite.set_busy_policy(probe, max_retries: 0)
+    {holder, probe} = prime_contention(path, max_retries: 0)
     :ok = Xqlite.put_busy_timeout(probe, 300)
 
-    assert {:error, {:busy_timeout_write_refused, %{policy: true, observers: 0}}} =
-             NIF.set_pragma(probe, "busy_timeout", 1)
+    assert {:error, {:database_busy, %{retries: 0}}} =
+             Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
-    :ok = NIF.close(probe)
+    close_contended_pair(holder, probe)
   end
 
   test "busy_timeout refuses a value past SQLite's 32-bit limit", %{path: path} do
@@ -679,10 +673,10 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.put_busy_timeout(probe, 0)
 
     before_ms = System.monotonic_time(:millisecond)
-    result = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    result = Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
     elapsed = System.monotonic_time(:millisecond) - before_ms
 
-    assert {:error, {:database_busy_or_locked, _code, _msg}} = result
+    assert {:error, {:database_busy, _}} = result
     assert elapsed < 1_000, "waited #{elapsed} ms, expected no wait at all"
     assert_receive {:xqlite_busy, _, _}, 2_000
 
@@ -694,26 +688,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.close(probe)
   end
 
-  test "a raw busy_timeout write is rejected while an observer holds the slot",
-       %{path: path} do
-    {:ok, probe} = NIF.open(path)
-
-    :ok = Xqlite.put_busy_timeout(probe, 300)
-    {:ok, handle} = Xqlite.register_busy_observer(probe, self())
-
-    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-             Xqlite.query(probe, "PRAGMA busy_timeout = 1500")
-
-    assert {:ok, %Xqlite.Result{rows: [[0]]}} = Xqlite.query(probe, "PRAGMA busy_timeout")
-    assert {:ok, 300} = Xqlite.get_busy_timeout(probe)
-
-    :ok = Xqlite.unregister_busy_observer(probe, handle)
-    assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
-
-    :ok = NIF.close(probe)
-  end
-
-  property "a busy_timeout write is rejected in every spelling the slot is held for",
+  property "a busy_timeout write in every spelling sets the kept timeout, the callback stays",
            %{path: path} do
     {holder, probe} = open_contended_pair(path)
 
@@ -725,109 +700,38 @@ defmodule Xqlite.NIF.BusyHandlerTest do
             max_runs: 2_000
           ) do
       {sql, applied} = write_form(form, value)
-      :ok = Xqlite.put_busy_timeout(probe, @remembered_ms)
       handles = take_slot(probe, has_policy, observer_count)
+      assert {:ok, %Xqlite.Result{}} = Xqlite.query(probe, sql)
+      assert {:ok, ^applied} = Xqlite.get_busy_timeout(probe)
+      assert {:ok, %Xqlite.Result{rows: [[0]]}} = Xqlite.query(probe, "PRAGMA busy_timeout")
+      :ok = NIF.execute_batch(probe, "BEGIN")
+      insert = NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
 
-      case has_policy or observer_count > 0 do
-        true ->
-          assert {:error,
-                  {:busy_timeout_write_refused,
-                   %{policy: ^has_policy, observers: ^observer_count}}} =
-                   Xqlite.query(probe, sql)
+      assert [{:error, {:database_busy, %{retry: :call}}}, :ok] = [
+               insert,
+               Xqlite.rollback(probe)
+             ]
 
-          assert {:ok, %Xqlite.Result{rows: [[0]]}} =
-                   Xqlite.query(probe, "PRAGMA busy_timeout")
-
-          witness_observers(probe, observer_count)
-          empty_slot(probe, has_policy, handles)
-
-          assert {:ok, %Xqlite.Result{rows: [[@remembered_ms]]}} =
-                   Xqlite.query(probe, "PRAGMA busy_timeout")
-
-        false ->
-          assert {:ok, %Xqlite.Result{}} = Xqlite.query(probe, sql)
-
-          assert {:ok, %Xqlite.Result{rows: [[^applied]]}} =
-                   Xqlite.query(probe, "PRAGMA busy_timeout")
-      end
+      empty_slot(probe, has_policy, handles)
     end
 
     close_contended_pair(holder, probe)
   end
 
-  test "execute_batch rejects the write and keeps what ran before it", %{path: path} do
+  test "execute_batch, prepare and the typed put set the timeout the slot keeps",
+       %{path: path} do
     {:ok, conn} = NIF.open(path)
+    {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
     :ok = NIF.execute_batch(conn, "CREATE TABLE t(id INTEGER)")
-    :ok = Xqlite.set_busy_policy(conn, max_retries: 0, max_elapsed_ms: 0, sleep_ms: 0)
-
     batch = "INSERT INTO t VALUES (1); PRAGMA busy_timeout = 5; INSERT INTO t VALUES (2)"
+    assert [:ok, {:ok, 5}] = [Xqlite.execute_batch(conn, batch), Xqlite.get_busy_timeout(conn)]
+    {:ok, stmt} = Xqlite.prepare(conn, "PRAGMA busy_timeout = 1500")
+    assert [{:ok, 1500}, :ok] = [Xqlite.get_busy_timeout(conn), Xqlite.finalize(stmt)]
 
-    assert {:error, {:busy_timeout_write_refused, %{policy: true, observers: 0}}} =
-             Xqlite.execute_batch(conn, batch)
-
-    assert {:ok, %Xqlite.Result{rows: [[1]]}} = Xqlite.query(conn, "SELECT id FROM t")
-
-    :ok = NIF.close(conn)
-  end
-
-  test "prepare and the typed put are rejected while the slot is held", %{path: path} do
-    {:ok, conn} = NIF.open(path)
-
-    :ok = Xqlite.put_busy_timeout(conn, 300)
-    {:ok, handle} = Xqlite.register_busy_observer(conn, self())
-
-    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-             Xqlite.prepare(conn, "PRAGMA busy_timeout = 1500")
-
-    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-             Xqlite.Pragma.put(conn, :busy_timeout, 1500)
-
-    :ok = Xqlite.unregister_busy_observer(conn, handle)
-    assert :ok = Xqlite.Pragma.put(conn, :busy_timeout, 1500)
-
-    :ok = NIF.close(conn)
-  end
-
-  test "a statement prepared before the slot was taken is rejected at its next step",
-       %{path: path} do
-    {:ok, conn} = NIF.open(path)
-
-    :ok = Xqlite.put_busy_timeout(conn, 300)
-    {:ok, stmt} = NIF.stmt_prepare(conn, "PRAGMA busy_timeout = 1500")
-    {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
-
-    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-             NIF.stmt_step(stmt)
-
-    :ok = NIF.stmt_finalize(stmt)
-    :ok = NIF.close(conn)
-  end
-
-  test "a stream opened before the slot was taken is rejected at its next fetch",
-       %{path: path} do
-    {:ok, conn} = NIF.open(path)
-
-    :ok = Xqlite.put_busy_timeout(conn, 300)
-    {:ok, stream} = NIF.stream_open(conn, "PRAGMA busy_timeout = 1500", [])
-    {:ok, _handle} = Xqlite.register_busy_observer(conn, self())
-
-    assert {:error, {:busy_timeout_write_refused, %{policy: false, observers: 1}}} =
-             NIF.stream_fetch(stream, 1)
-
-    :ok = NIF.stream_close(stream)
-    :ok = NIF.close(conn)
-  end
-
-  test "a rejected write does not colour the next statement on the connection",
-       %{path: path} do
-    {:ok, conn} = NIF.open(path)
-
-    :ok = Xqlite.set_busy_policy(conn, max_retries: 0, max_elapsed_ms: 0, sleep_ms: 0)
-
-    assert {:error, {:busy_timeout_write_refused, _}} =
-             Xqlite.query(conn, "PRAGMA busy_timeout = 1500")
-
-    assert {:ok, %Xqlite.Result{rows: [[1]]}} = Xqlite.query(conn, "SELECT 1")
+    assert [:ok, {:ok, 700}] = [
+             Xqlite.Pragma.put(conn, :busy_timeout, 700),
+             NIF.get_pragma(conn, "busy_timeout")
+           ]
 
     :ok = NIF.close(conn)
   end
@@ -844,11 +748,11 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert {:ok, handle} = Xqlite.register_busy_observer(probe, self())
 
-    assert {:error, {:database_busy_or_locked, _code, _msg}} =
-             NIF.execute(probe, "INSERT INTO t VALUES (1)", [])
+    assert {:error, {:database_busy, _}} =
+             Xqlite.execute(probe, "INSERT INTO t VALUES (1)")
 
-    # The callback fires a second time only when a wait is remembered: with
-    # nothing remembered it fires once, at retry 0, and gives up.
+    # A second retry comes only when a wait is kept: with none kept the
+    # call gives up at retry 0.
     assert_receive {:xqlite_busy, 1, _}, 5_000
 
     :ok = Xqlite.remove_authorizer(probe)
@@ -901,7 +805,8 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = NIF.session_delete(session)
     {:ok, 2} = NIF.execute(holder, "DELETE FROM t", [])
     :ok = Xqlite.put_busy_timeout(probe, 0)
-    {holder, probe, fn -> NIF.changeset_apply(probe, changeset, :omit) end}
+    apply = fn -> NIF.changeset_apply(probe, changeset, :omit) end
+    {holder, probe, fn -> Xqlite.retry_busy(probe, apply) end}
   end
 
   defp write_form("PRAGMA busy_timeout = -5" = form, _value), do: {form, 0}
@@ -933,24 +838,6 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
   defp remove_policy_if(probe, true), do: Xqlite.remove_busy_policy(probe)
   defp remove_policy_if(_probe, false), do: :ok
-
-  defp witness_observers(_probe, 0), do: :ok
-
-  defp witness_observers(probe, observer_count) do
-    assert {:error, {:database_busy_or_locked, _code, _msg}} =
-             Xqlite.query(probe, "INSERT INTO t VALUES (1)")
-
-    for _ <- 1..observer_count, do: assert_receive({:xqlite_busy, _, _}, 5_000)
-    drain_busy()
-  end
-
-  defp drain_busy do
-    receive do
-      {:xqlite_busy, _, _} -> drain_busy()
-    after
-      0 -> :ok
-    end
-  end
 
   defp spawn_collector do
     spawn(fn -> collector_loop([]) end)

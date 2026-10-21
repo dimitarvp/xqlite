@@ -175,6 +175,27 @@ pub(crate) fn invalid_pragma_value<'a>(
     }
 }
 
+pub(crate) fn invalid_busy_delay_argument<'a>(
+    env: Env<'a>,
+    argument: Atom,
+    value: Term<'a>,
+) -> Term<'a> {
+    let map = map_new(env)
+        .map_put(atoms::argument(), argument)
+        .and_then(|map| map.map_put(atoms::value(), value));
+    tagged_map(env, atoms::invalid_busy_delay_argument(), map)
+}
+
+fn tagged_map<'a>(env: Env<'a>, tag: Atom, map: rustler::NifResult<Term<'a>>) -> Term<'a> {
+    match map {
+        Ok(map) => (tag, map).encode(env),
+        Err(_) => XqliteError::InternalEncodingError {
+            context: "Failed map create for a structured error".to_string(),
+        }
+        .encode(env),
+    }
+}
+
 /// The map carries `position` only where the value came out of a list; a
 /// PRAGMA value is judged on its own and answers an empty map.
 fn encode_integer_out_of_range(env: Env<'_>, position: Option<usize>) -> Term<'_> {
@@ -221,6 +242,16 @@ pub(crate) enum ListRefusal {
     NotAList,
     ImproperTail,
     BadElement { position: usize },
+}
+
+/// What a busy answer leaves to run again. `connection::judge` decides `Unjudged`; a commit
+/// inside a finalize or a stream or blob close never meets it and reads `:none`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Retry {
+    Unjudged,
+    Call,
+    Transaction,
+    RowsHandedBack,
 }
 
 #[derive(Debug, Clone)]
@@ -358,10 +389,17 @@ pub(crate) enum XqliteError {
         pragma: String,
         reason: String,
     },
-    DatabaseBusyOrLocked {
-        // SQLITE_BUSY / SQLITE_LOCKED — the extended code discriminates
-        // BUSY (5) from LOCKED (6) and their sub-codes (BUSY_SNAPSHOT, …).
-        extended_code: i32,
+    DatabaseBusy {
+        // SQLITE_BUSY and its extended codes (BUSY_RECOVERY, BUSY_SNAPSHOT, …);
+        // `sql` is the batch text still to run, for `execute_batch`.
+        code: i32,
+        message: String,
+        retry: Retry,
+        sql: Option<String>,
+    },
+    DatabaseLocked {
+        // SQLITE_LOCKED and its extended codes: a table lock no wait clears.
+        code: i32,
         message: String,
     },
     OperationCancelled,
@@ -411,12 +449,6 @@ pub(crate) enum XqliteError {
     AuthorizationDenied {
         extended_code: i32,
         message: String,
-    },
-    BusyTimeoutWriteRefused {
-        // SQLITE_AUTH raised by xqlite's own rule: a `busy_timeout` write
-        // while the busy slot holds a policy or observers.
-        policy: bool,
-        observers: usize,
     },
 
     InvalidColumnIndex(usize),
@@ -630,11 +662,9 @@ impl Display for XqliteError {
             XqliteError::CannotExecutePragma { pragma, reason } => {
                 write!(f, "Cannot execute PRAGMA '{pragma}': {reason}")
             }
-            XqliteError::DatabaseBusyOrLocked {
-                extended_code: _,
-                message,
-            } => {
-                write!(f, "Database busy or locked: {message}")
+            XqliteError::DatabaseBusy { message, .. } => write!(f, "Database busy: {message}"),
+            XqliteError::DatabaseLocked { message, .. } => {
+                write!(f, "Database locked: {message}")
             }
             XqliteError::OperationCancelled => {
                 write!(f, "Database operation was cancelled")
@@ -682,12 +712,6 @@ impl Display for XqliteError {
                 message,
             } => {
                 write!(f, "Authorization denied: {message}")
-            }
-            XqliteError::BusyTimeoutWriteRefused { policy, observers } => {
-                write!(
-                    f,
-                    "busy_timeout write rejected: the busy slot is held (policy: {policy}, observers: {observers})"
-                )
             }
             XqliteError::CannotOpenDatabase {
                 path,
@@ -917,10 +941,37 @@ impl Encoder for XqliteError {
             XqliteError::CannotExecutePragma { pragma, reason } => {
                 (atoms::cannot_execute_pragma(), pragma, reason).encode(env)
             }
-            XqliteError::DatabaseBusyOrLocked {
-                extended_code,
+            XqliteError::DatabaseBusy {
+                code,
                 message,
-            } => (atoms::database_busy_or_locked(), extended_code, message).encode(env),
+                retry,
+                sql,
+            } => {
+                let retry = match retry {
+                    Retry::Call => atoms::call(),
+                    Retry::Transaction => atoms::transaction(),
+                    Retry::Unjudged | Retry::RowsHandedBack => atoms::none(),
+                };
+                // A raw call waits for nothing, so `retries` and `elapsed_ms` read 0
+                // until `Xqlite.retry_busy/3` fills them in.
+                let map = map_new(env)
+                    .map_put(atoms::code(), code)
+                    .and_then(|map| map.map_put(atoms::message(), message.as_str()))
+                    .and_then(|map| map.map_put(atoms::retry(), retry))
+                    .and_then(|map| map.map_put(atoms::retries(), 0))
+                    .and_then(|map| map.map_put(atoms::elapsed_ms(), 0))
+                    .and_then(|map| match sql {
+                        Some(sql) => map.map_put(atoms::sql(), sql.as_str()),
+                        None => Ok(map),
+                    });
+                tagged_map(env, atoms::database_busy(), map)
+            }
+            XqliteError::DatabaseLocked { code, message } => {
+                let map = map_new(env)
+                    .map_put(atoms::code(), code)
+                    .and_then(|map| map.map_put(atoms::message(), message.as_str()));
+                tagged_map(env, atoms::database_locked(), map)
+            }
             XqliteError::OperationCancelled => atoms::operation_cancelled().encode(env),
             XqliteError::CannotRestoreReadOnly => {
                 (atoms::cannot_restore(), atoms::read_only_connection()).encode(env)
@@ -970,21 +1021,6 @@ impl Encoder for XqliteError {
                 extended_code,
                 message,
             } => (atoms::authorization_denied(), extended_code, message).encode(env),
-            XqliteError::BusyTimeoutWriteRefused { policy, observers } => {
-                let map_result = map_new(env)
-                    .map_put(atoms::policy(), policy)
-                    .and_then(|map| map.map_put(atoms::observers(), observers));
-                match map_result {
-                    Ok(map) => (atoms::busy_timeout_write_refused(), map).encode(env),
-                    Err(_) => {
-                        let err = XqliteError::InternalEncodingError {
-                            context: "Failed map create for BusyTimeoutWriteRefused"
-                                .to_string(),
-                        };
-                        err.encode(env)
-                    }
-                }
-            }
             XqliteError::CannotOpenDatabase {
                 path,
                 code,
@@ -1397,8 +1433,14 @@ fn classify_sqlite_error(ffi_err: ffi::Error, message_string: String) -> XqliteE
             message: message_string,
         },
         ffi::SQLITE_INTERRUPT => XqliteError::OperationCancelled,
-        ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED => XqliteError::DatabaseBusyOrLocked {
-            extended_code: ffi_err.extended_code,
+        ffi::SQLITE_BUSY => XqliteError::DatabaseBusy {
+            code: ffi_err.extended_code,
+            message: message_string,
+            retry: Retry::Unjudged,
+            sql: None,
+        },
+        ffi::SQLITE_LOCKED => XqliteError::DatabaseLocked {
+            code: ffi_err.extended_code,
             message: message_string,
         },
         ffi::SQLITE_SCHEMA => XqliteError::SchemaChanged {

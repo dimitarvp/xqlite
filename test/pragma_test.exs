@@ -321,7 +321,7 @@ defmodule XqlitePragmaTest do
       assert :ok = Xqlite.set_authorizer(db, [:pragma])
       assert {:error, {:unknown_pragma, nil}} = P.get(db, nil)
       assert {:error, {:unknown_pragma, nil}} = P.put(db, nil, 1)
-      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
+      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :user_version)
     end
 
     # Denying the `:pragma` action turns any PRAGMA that really reaches SQLite
@@ -336,7 +336,7 @@ defmodule XqlitePragmaTest do
       assert {:error, {:unknown_pragma, :no_such_pragma}} =
                P.get(db, :no_such_pragma, "arg")
 
-      assert {:error, {:authorization_denied, _code, _msg}} = P.get(db, :busy_timeout)
+      assert {:error, {:authorization_denied, _code, _msg}} = P.get(db, :user_version)
     end
 
     # SQLite folds a PRAGMA name by ASCII letters alone. The Kelvin sign
@@ -588,7 +588,7 @@ defmodule XqlitePragmaTest do
 
       # The denying authorizer turns any PRAGMA that really reaches SQLite
       # into an authorization error, so the refusals above built nothing.
-      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
+      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :user_version)
     end
 
     property "the third argument is options too, and is judged the same way", %{db: db} do
@@ -868,7 +868,7 @@ defmodule XqlitePragmaTest do
 
       # The denying authorizer turns any PRAGMA that really reaches SQLite
       # into an authorization error, so the refusals above built nothing.
-      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :busy_timeout)
+      assert {:error, {:authorization_denied, _code, _message}} = P.get(db, :user_version)
     end
   end
 

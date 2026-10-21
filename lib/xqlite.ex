@@ -322,7 +322,6 @@ defmodule Xqlite do
                byte_size: non_neg_integer(),
                blob_size: non_neg_integer()
              }}
-          | {:busy_timeout_write_refused, %{policy: boolean(), observers: non_neg_integer()}}
           | {:cannot_convert_atom_to_string, String.t()}
           | {:cannot_execute, String.t()}
           | {:cannot_execute_pragma, String.t(), String.t()}
@@ -331,7 +330,16 @@ defmodule Xqlite do
           | {:column_name_not_utf8, %{column: non_neg_integer(), name: binary()}}
           | {:columns_changed, %{expected: [String.t()], live: [String.t()]}}
           | {:constraint_violation, constraint_kind(), constraint_details()}
-          | {:database_busy_or_locked, integer(), String.t()}
+          | {:database_busy,
+             %{
+               :code => integer(),
+               :message => String.t(),
+               :retry => :call | :transaction | :none,
+               :retries => non_neg_integer(),
+               :elapsed_ms => non_neg_integer(),
+               optional(:sql) => String.t()
+             }}
+          | {:database_locked, %{code: integer(), message: String.t()}}
           | {:duplicate_column_name, String.t()}
           | {:duplicate_parameter_name, String.t()}
           | {:expected_keyword_list, list_refusal()}
@@ -345,6 +353,7 @@ defmodule Xqlite do
           | {:invalid_authorizer_action, atom()}
           | {:invalid_batch_size, %{provided: term(), minimum: 1}}
           | {:invalid_blob_bytes, %{position: pos_integer(), type: atom()}}
+          | {:invalid_busy_delay_argument, %{argument: atom(), value: term()}}
           | {:invalid_cancel_tokens, list_refusal()}
           | {:invalid_checkpoint_mode, term()}
           | {:invalid_column_index, non_neg_integer()}
@@ -623,12 +632,12 @@ defmodule Xqlite do
   `XqliteNIF.stream_close/1` and `XqliteNIF.blob_close/1` answer the failure.
 
   SQLite can decline to free the handle, which answers
-  `{:error, {:database_busy_or_locked, code, message}}`. The drain has
+  `{:error, {:database_busy, %{code: 5, retry: :none}}}`. The drain has
   already run by then, so that answer never means "nothing happened": every
   prepared statement, stream and blob is finalized, and the connection —
   still open — can be closed again, and should be: rusqlite removed its update, commit and
   rollback hooks, its progress handler (progress hooks, cancel tokens) and its authorizer (your
-  deny list, the rejection of `busy_timeout` writes) before asking SQLite to close. Only a
+  deny list) before asking SQLite to close. Only a
   statement or backup a loaded extension keeps open makes SQLite decline; it is
   SQLite's own report, passed on rather than discarded.
 
@@ -742,7 +751,7 @@ defmodule Xqlite do
     Enum.reduce_while(@pragma_order, :ok, fn key, :ok ->
       value = Keyword.fetch!(validated, key)
 
-      case XqliteNIF.set_pragma(conn, Atom.to_string(key), value) do
+      case retry_busy(conn, fn -> XqliteNIF.set_pragma(conn, Atom.to_string(key), value) end) do
         {:ok, _} -> {:cont, :ok}
         {:error, _} = err -> {:halt, err}
       end
@@ -786,9 +795,10 @@ defmodule Xqlite do
   @spec check_strict_violations(conn(), String.t()) ::
           {:ok, [map()]} | error()
   def check_strict_violations(conn, table) when is_binary(table) do
-    with {:ok, _object, columns} <- strict_target(conn, table) do
-      strict_violations(conn, table, columns)
-    end
+    retry_busy(conn, fn ->
+      with {:ok, _object, columns} <- strict_target(conn, table),
+           do: strict_violations(conn, table, columns)
+    end)
   end
 
   # SQLite resolves an unqualified name in `temp` before `main`, and in `main`
@@ -820,7 +830,7 @@ defmodule Xqlite do
   defp resolve_object(conn, table) do
     folded = String.downcase(table, :ascii)
 
-    with {:ok, objects} <- schema_list_objects(conn, :all) do
+    with {:ok, objects} <- XqliteNIF.schema_list_objects(conn, :all) do
       objects
       |> Enum.filter(fn object -> String.downcase(object.name, :ascii) == folded end)
       |> resolved_object(table)
@@ -910,8 +920,7 @@ defmodule Xqlite do
   connection's lock from its first statement to its last. A process that
   shares the connection waits for the whole rebuild, so what it sends runs
   before the rebuild or after it, never inside the rebuild's transaction. That
-  wait covers the copy, the index builds and any wait for another connection's
-  lock, each up to the connection's `busy_timeout`, and no cancel token stops
+  wait covers the copy and the index builds, and no cancel token stops
   the call. A step that fails, a `COMMIT` that answers busy included, rolls the
   transaction back and leaves the table as it was. When that `ROLLBACK` itself
   fails, which only running out of memory causes, the transaction stays open,
@@ -984,9 +993,10 @@ defmodule Xqlite do
   """
   @spec enable_strict_table(conn(), String.t()) :: :ok | {:error, term()}
   def enable_strict_table(conn, table) when is_binary(table) do
-    with {:ok, object, columns} <- strict_target(conn, table) do
-      convert_to_strict(conn, object, columns)
-    end
+    retry_busy(conn, fn ->
+      with {:ok, object, columns} <- strict_target(conn, table),
+           do: convert_to_strict(conn, object, columns)
+    end)
   end
 
   defp convert_to_strict(_conn, %Xqlite.Schema.SchemaObjectInfo{strict: true}, _columns),
@@ -1402,6 +1412,13 @@ defmodule Xqlite do
   write back and the call answers the commit's error instead; pending inside a
   transaction, where `rollback/1` undoes it.
 
+  When another connection holds a lock the statement needs, the call waits in your process as the
+  busy timeout or policy says, then answers `{:error, {:database_busy, %{retry: :call, …}}}`:
+  nothing of the call remains. Inside a transaction that has already read the database, a write
+  meeting another writer answers `retry: :transaction` at once: roll back and run the transaction
+  again, or open transactions that write with `begin(conn, :immediate)`. A `COMMIT` or `RELEASE`
+  SQLite refuses beside this connection's running write answers `{:error, :statement_mid_run}`.
+
   Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
   `{:error, {:invalid_parameter_count, %{expected: _, provided: _}}}` before a
@@ -1424,7 +1441,7 @@ defmodule Xqlite do
   `{:error, {:column_name_not_utf8, %{column: index, name: bytes}}}` for the
   first such column; a CTE column list renames columns by position,
   `WITH s(a, b) AS (SELECT * FROM t) SELECT * FROM s`. An authorizer on the
-  connection (`set_authorizer/2`, a busy policy or a busy observer) changes
+  connection (`set_authorizer/2`) changes
   neither answer, except that a statement it denies answers
   `{:error, {:authorization_denied, 23, message}}` at prepare, as a deny of
   `:read` or `:select` does for a `SELECT` of such a column, that CTE
@@ -1457,7 +1474,7 @@ defmodule Xqlite do
       rolls back the whole transaction, as `create_cancel_token/0` describes. Any other value that
       is no live token, or a list holding one, returns
       `{:error, {:invalid_cancel_tokens, _}}` before the statement runs.
-      A call waiting for another connection's lock reads its tokens only once that wait ends.
+      A call waiting for another connection's lock reads them before each attempt and sleep.
   """
   @spec query(conn(), String.t(), list() | keyword(), keyword()) ::
           {:ok, Xqlite.Result.t()} | error()
@@ -1486,8 +1503,9 @@ defmodule Xqlite do
   end
 
   defp run_query(conn, sql, bound_params, extensions, tokens, start_md) do
-    with {:ok, map} <-
-           XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens),
+    query = fn -> XqliteNIF.query_with_changes_cancellable(conn, sql, bound_params, tokens) end
+
+    with {:ok, map} <- retry_busy(conn, query, cancel_tokens: tokens),
          {:ok, result} <- decode_result_rows(map, extensions) do
       {{:ok, result},
        Map.merge(start_md, %{
@@ -1520,7 +1538,7 @@ defmodule Xqlite do
 
   For DML statements, `changes` contains the number of affected rows. A
   statement that returns rows runs to its end with its rows dropped, so an
-  `INSERT ... RETURNING` answers its count here; `query/4` reads the rows.
+  `INSERT ... RETURNING` answers its count here; `query/4` reads the rows and says how locks wait.
 
   Parameters, one rule on every function: a plain list is positional (`?1`, `?2`,
   …) and its length must be the statement's own parameter count, otherwise
@@ -1579,7 +1597,9 @@ defmodule Xqlite do
   end
 
   defp run_execute(conn, sql, bound_params, tokens, start_md) do
-    case XqliteNIF.execute_cancellable(conn, sql, bound_params, tokens) do
+    execute = fn -> XqliteNIF.execute_cancellable(conn, sql, bound_params, tokens) end
+
+    case retry_busy(conn, execute, cancel_tokens: tokens) do
       {:ok, affected} ->
         result = %Xqlite.Result{
           columns: [],
@@ -1642,7 +1662,8 @@ defmodule Xqlite do
   again. A transaction open before the call stays open with the batch's
   earlier statements in it, and so does one the batch opens after
   committing the caller's (`COMMIT; BEGIN; ...`). When that `ROLLBACK`
-  itself fails, the transaction stays open and `autocommit/1` says so.
+  itself fails, the transaction stays open and `autocommit/1` says so. After a lock wait as in
+  `query/4` the batch goes on from the statement that met the lock, or from its own `BEGIN`.
 
   Outside a transaction, beside a statement, stream or blob of the connection mid-run, the
   batch answers `{:error, :statement_mid_run}` and runs nothing: that statement's write would
@@ -1730,7 +1751,7 @@ defmodule Xqlite do
   end
 
   defp run_explain_analyze(conn, sql, bound_params, start_md) do
-    case XqliteNIF.explain_analyze(conn, sql, bound_params) do
+    case retry_busy(conn, fn -> XqliteNIF.explain_analyze(conn, sql, bound_params) end) do
       {:ok, map} ->
         report = Xqlite.ExplainAnalyze.from_map(map)
 
@@ -1897,7 +1918,8 @@ defmodule Xqlite do
   first only hand out rows SQLite already holds, so the statement can
   finish first: with the token signalled once the first row came back, the
   stream over a one-row write, or over a two-row write read in one batch,
-  ends with no error, and the write stays, committed or pending as above.
+  ends with no error, and the write stays, committed or pending as above. A lock waits as in
+  `query/4` until a row came back; after that a busy commit answers `retry: :none` (`:on_error`).
 
   Parameters follow `query/4`'s rule. A plain list is positional (`?1`,
   `?2`, …) and its length must be the statement's own parameter count;
@@ -2036,7 +2058,7 @@ defmodule Xqlite do
   """
   @spec prepare(conn(), String.t()) :: {:ok, stmt()} | error()
   def prepare(conn, sql) when is_binary(sql) do
-    XqliteNIF.stmt_prepare(conn, sql)
+    retry_busy(conn, fn -> XqliteNIF.stmt_prepare(conn, sql) end)
   end
 
   @doc """
@@ -2133,9 +2155,9 @@ defmodule Xqlite do
   changes nothing. What that rerun answers depends on the failure — the
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
-  stops on such an error rather than stepping on. The exception is a step
-  rejected as busy while taking or committing its lock: SQLite keeps that run
-  for a retry, so the statement stays mid-run and the next step carries on.
+  stops on such an error rather than stepping on. A step that meets another connection's lock
+  before the run handed back a row is reset, its bindings kept, and waits as in `query/4`; once
+  a write handed back rows, a busy commit at its end rolls it back: `retry: :none`, at once.
 
   A statement that takes parameters is rejected until something sets them:
   before a successful `bind/3` the answer is
@@ -2155,7 +2177,7 @@ defmodule Xqlite do
   decoded form.
   """
   @spec step(stmt()) :: {:row, [sqlite_value()]} | :done | error()
-  def step(stmt), do: XqliteNIF.stmt_step(stmt)
+  def step(stmt), do: retry_busy(stmt, fn -> XqliteNIF.stmt_step(stmt) end)
 
   @doc """
   Advances a prepared statement up to `batch_size` rows.
@@ -2205,9 +2227,7 @@ defmodule Xqlite do
   changes nothing. What that rerun answers depends on the failure — the
   `abs()` overflow hands back the rows before the bad one and then the error
   again, a trigger's `RAISE` answers the error and never a row — so a caller
-  stops on such an error rather than stepping on. The exception is a step
-  rejected as busy while taking or committing its lock: SQLite keeps that run
-  for a retry, so the statement stays mid-run and the next step carries on.
+  stops on such an error rather than stepping on. A lock is met as in `step/1`.
 
   A statement that takes parameters is rejected until something sets them:
   before a successful `bind/3` the answer is
@@ -2236,8 +2256,11 @@ defmodule Xqlite do
   def multi_step(stmt, batch_size, opts \\ []) when is_integer(batch_size) do
     with :ok <- judge_options(opts, [:cancel_tokens]),
          tokens = Keyword.get(opts, :cancel_tokens, []),
-         :ok <- validate_cancel_tokens(tokens),
-         do: XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, List.wrap(tokens))
+         :ok <- validate_cancel_tokens(tokens) do
+      tokens = List.wrap(tokens)
+      step = fn -> XqliteNIF.stmt_multi_step_cancellable(stmt, batch_size, tokens) end
+      retry_busy(stmt, step, cancel_tokens: tokens)
+    end
   end
 
   @doc """
@@ -2251,9 +2274,7 @@ defmodule Xqlite do
 
   An unreadable-value error a batch held back is dropped here: the run it
   belonged to is over. After a step that failed outright a reset changes
-  nothing — the statement was already back at the top — unless SQLite
-  rejected the step as busy: it keeps that run for a retry, and a reset gives
-  it up.
+  nothing: the statement was already back at the top.
   """
   @spec reset(stmt()) :: :ok | error()
   def reset(stmt), do: XqliteNIF.stmt_reset(stmt)
@@ -2262,8 +2283,7 @@ defmodule Xqlite do
   Clears all parameter bindings on a prepared statement back to NULL.
 
   A statement that takes parameters and is mid-run — a step has answered a
-  row, or was rejected as busy while taking or committing its lock (SQLite
-  keeps that run for a retry), and neither `:done`, another failure nor a
+  row, and neither `:done`, another failure nor a
   `reset/1` has followed — is rejected with
   `{:error, :statement_mid_run}`, and keeps the values it was bound. SQLite
   itself allows the call there and would release the values in place, which
@@ -2332,9 +2352,7 @@ defmodule Xqlite do
   opened read-only, a `:transaction` deny, or a write lock another connection
   holds on any attached database, after twice the busy timeout. The unused
   temp schema, and an empty schema attached through SQLite's `memdb` VFS,
-  answer `{:error, :no_pages}` and write nothing. For a schema with pages, a
-  lock another connection holds answers `{:error, {:database_busy_or_locked,
-  code, message}}` once the busy timeout runs out. A `:pragma` deny does not
+  answer `{:error, :no_pages}` and write nothing. A `:pragma` deny does not
   stop the call: the `PRAGMA page_count` it runs is its own.
   """
   @spec serialize(conn(), String.t()) :: {:ok, binary()} | error()
@@ -2342,7 +2360,7 @@ defmodule Xqlite do
     start_md = %{conn: conn, schema: schema}
 
     span_with_stop_metadata [:xqlite, :serialize], start_md do
-      case XqliteNIF.serialize(conn, schema) do
+      case retry_busy(conn, fn -> XqliteNIF.serialize(conn, schema) end) do
         {:ok, bin} = ok ->
           {ok,
            Map.merge(start_md, %{
@@ -2442,14 +2460,10 @@ defmodule Xqlite do
   Copies the named schema (default `"main"`) to the file at `dest_path`. The
   destination is created or overwritten, in one step inside one read transaction of the
   source, which no other connection's commit restarts: in rollback-journal mode a commit
-  waits for the whole copy, answering `{:error, {:database_busy_or_locked, 5, _}}` if its
+  waits for the whole copy, answering `{:error, {:database_busy, _}}` if its
   busy timeout ends first; in WAL mode others read and write, and the WAL grows meanwhile.
 
-  A lock another connection holds on this connection's database waits as
-  this connection's `busy_timeout` or busy policy says. A lock on the
-  destination file, or a write transaction open on this connection, answers
-  `{:error, {:database_busy_or_locked, code, message}}` at once. A
-  destination SQLite cannot open, or a name it gives no file for — `""`,
+  A destination SQLite cannot open, or a name it gives no file for — `""`,
   `":memory:"` or another in-memory name — answers
   `{:error, {:cannot_open_database, dest_path, code, message}}` and writes
   nothing.
@@ -2465,7 +2479,7 @@ defmodule Xqlite do
     start_md = %{conn: conn, schema: schema, dest_path: dest_path}
 
     span_with_stop_metadata [:xqlite, :backup], start_md do
-      case XqliteNIF.backup(conn, schema, dest_path) do
+      case retry_busy(conn, fn -> XqliteNIF.backup(conn, schema, dest_path) end) do
         :ok = ok ->
           byte_size_after =
             case File.stat(dest_path) do
@@ -2511,10 +2525,7 @@ defmodule Xqlite do
   answers `{:error, :no_pages}`, and a connection `open_readonly/1` or
   `open_in_memory_readonly/1` opened answers
   `{:error, {:cannot_restore, :read_only_connection}}` on every schema, temp
-  included; neither changes anything. A lock another connection holds on this
-  connection's database waits as this connection's `busy_timeout` or busy
-  policy says; a lock on the source file answers
-  `{:error, {:database_busy_or_locked, code, message}}` at once.
+  included; neither changes anything.
   """
   @spec restore(conn(), String.t(), String.t()) :: :ok | error()
   def restore(conn, src_path, schema \\ "main")
@@ -2522,7 +2533,7 @@ defmodule Xqlite do
     start_md = %{conn: conn, schema: schema, src_path: src_path}
 
     span_with_stop_metadata [:xqlite, :restore], start_md do
-      case XqliteNIF.restore(conn, schema, src_path) do
+      case retry_busy(conn, fn -> XqliteNIF.restore(conn, schema, src_path) end) do
         :ok = ok ->
           {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
@@ -2617,8 +2628,8 @@ defmodule Xqlite do
   Returns `{:ok, %{log_pages, checkpointed_pages, busy}}` on success. A
   database that is not in WAL mode as this connection sees it returns
   `{:error, :not_in_wal_mode}`, and so does a WAL database this connection
-  has not read yet. A checkpoint lock another connection holds returns
-  `{:error, {:database_busy_or_locked, 5, message}}`.
+  has not read yet. `:full`, `:restart` and `:truncate` run again while the answer says
+  `busy: true`, as the busy settings say; `:passive` never waits: a lock answers busy at once.
 
   Any other `mode` returns `{:error, {:invalid_checkpoint_mode, mode}}` and a
   `schema` that is not a string `{:error, {:invalid_schema_name, schema}}`; a
@@ -2632,8 +2643,10 @@ defmodule Xqlite do
       when mode in [:passive, :full, :restart, :truncate] and is_binary(schema) do
     start_md = %{conn: conn, mode: mode, schema: schema}
 
+    checkpoint = fn -> XqliteNIF.wal_checkpoint(conn, mode, schema) end
+
     span_with_stop_metadata [:xqlite, :wal_checkpoint], start_md do
-      case XqliteNIF.wal_checkpoint(conn, mode, schema) do
+      case if(mode == :passive, do: checkpoint.(), else: retry_busy(conn, checkpoint)) do
         {:ok, result} = ok ->
           {ok,
            Map.merge(start_md, %{
@@ -2670,7 +2683,7 @@ defmodule Xqlite do
   database first, not only main's (a file attached with `mode=ro` gets only a read lock), even
   with nothing to analyze, and rolls back on any
   failure: a lock another connection holds waits as `put_busy_timeout/2` or the busy policy
-  says, observers hear it, then it answers `{:error, {:database_busy_or_locked, 5, message}}`;
+  says, observers hear it, then it answers `{:error, {:database_busy, _}}`;
   a statement, stream or blob of the connection mid-run answers `{:error, :statement_mid_run}`.
   A schema `deserialize/4` loaded with `read_only: true` counts as writable, since SQLite's
   `sqlite3_db_readonly` answers 0 for it: the call takes that path there, answering
@@ -2680,7 +2693,7 @@ defmodule Xqlite do
   the transaction with `begin(conn, :immediate)` to take the lock first.
   """
   @spec optimize(conn()) :: :ok | error()
-  def optimize(conn), do: XqliteNIF.optimize(conn)
+  def optimize(conn), do: retry_busy(conn, fn -> XqliteNIF.optimize(conn) end)
 
   @doc """
   Runs `PRAGMA shrink_memory`, which frees the cache memory the connection
@@ -2719,32 +2732,12 @@ defmodule Xqlite do
   Another key, or a number past 2^32 - 1 (`:max_retries`) or 2^64 - 1 (the
   other two), answers `{:error, {:invalid_option, _}}` and installs nothing.
 
-  > #### Note — a busy sleep pins the connection {: .info}
+  > #### Note — the wait happens in your process {: .info}
   >
-  > `sleep_ms` sleeps on the thread holding the connection mutex, so while
-  > a retry waits, that connection is pinned: other operations on the
-  > *same* connection block until the sleep-and-retry resolves. Every call on a connection holds
-  > one of the VM's dirty I/O threads (10 by default, set with the `+SDio` emulator flag) while
-  > it waits for the connection's mutex or another connection's lock; every other connection and
-  > the VM's file operations share them, so once that many calls wait at once those wait too, the
-  > lock holder's commit waits for a thread, and the waits run out their budget and answer
-  > `{:error, {:database_busy_or_locked, 5, _}}`. Keep the calls that can wait at once (every
-  > pooled connection, plus every process sharing one) below that count, or raise it. Budget
-  > `sleep_ms` × `max_retries` accordingly.
-
-  > #### Note — a raw PRAGMA busy_timeout write is rejected here {: .info}
-  >
-  > While a policy or at least one observer is installed, a statement
-  > that writes `busy_timeout` — `PRAGMA busy_timeout = N` in any
-  > spelling, `XqliteNIF.set_pragma(conn, "busy_timeout", ms)`, or
-  > `Xqlite.Pragma.put(conn, :busy_timeout, ms)` — fails as it is *prepared*
-  > with `{:error, {:busy_timeout_write_refused, %{policy: boolean,
-  > observers: count}}}`. It would otherwise replace our C callback with
-  > SQLite's built-in one and silence the policy and every observer.
-  > Values of `0` or less are rejected the same way: SQLite treats them
-  > as "stop waiting" and drops the callback too. Reading `PRAGMA
-  > busy_timeout` is still allowed, and reads `0` while the slot is
-  > held; `get_busy_timeout/1` and `put_busy_timeout/2` read and set the wait.
+  > When a call meets a lock another connection holds, SQLite answers at once and the call waits
+  > in the process that made it, sleeping between attempts as this policy says. No VM thread
+  > waits, and the connection stays free for other calls while the process sleeps. A call made
+  > through `XqliteNIF` directly never waits; run it through `retry_busy/3`.
   """
   @spec set_busy_policy(conn(), keyword()) :: :ok | error()
   def set_busy_policy(conn, opts \\ []) do
@@ -2770,7 +2763,7 @@ defmodule Xqlite do
   @doc """
   Registers a busy-contention observer on the connection.
 
-  Every `SQLITE_BUSY` callback invocation sends
+  Every retry of a call waiting for a lock on this connection sends, from that call's process,
 
       {:xqlite_busy, retries_so_far, elapsed_ms}
 
@@ -2780,31 +2773,8 @@ defmodule Xqlite do
   subscribe with `hooks: [:busy]` to re-emit deliveries as
   `[:xqlite, :hook, :busy]` telemetry.
 
-  > #### Note — an observer takes the connection's single busy slot {: .info}
-  >
-  > SQLite gives a connection one busy callback, and an observer takes
-  > it. Observing does not change how long the connection waits: with
-  > no policy installed, the callback keeps waiting up to the busy timeout the slot keeps: the
-  > one in effect when the slot was taken (5000 ms on a connection whose timeout you never set)
-  > or the one `put_busy_timeout/2` set since, and unregistering the last observer hands that
-  > timeout back to SQLite's own handler. The value is read through
-  > `PRAGMA busy_timeout` as the slot is taken; that read is xqlite's
-  > own and passes even an authorizer that denies `:pragma`. While the
-  > slot is held, `PRAGMA busy_timeout` reads `0` — SQLite zeroes it
-  > whenever a callback is installed — even though the wait still
-  > applies.
-
-  > #### Note — a raw PRAGMA busy_timeout write is rejected here {: .info}
-  >
-  > While at least one observer (or a policy) holds the slot, a
-  > statement that writes `busy_timeout` fails as it is *prepared* with
-  > `{:error, {:busy_timeout_write_refused, %{policy: boolean,
-  > observers: count}}}`, whether it is raw SQL in any spelling or
-  > `XqliteNIF.set_pragma(conn, "busy_timeout", ms)`. It would
-  > otherwise replace our C callback with SQLite's built-in one and
-  > silence every observer. `put_busy_timeout/2` goes through the slot
-  > instead: it keeps your observers and applies the new timeout
-  > through them.
+  The connection's single busy slot is xqlite's from the open on; observing does not change how
+  long a call waits, and a raw `XqliteNIF` call that answers busy without waiting sends nothing.
   """
   @spec register_busy_observer(conn(), pid()) :: {:ok, non_neg_integer()} | error()
   def register_busy_observer(conn, pid) when is_pid(pid) do
@@ -2825,17 +2795,11 @@ defmodule Xqlite do
 
   @doc """
   Sets how long the connection waits on a locked database, going
-  through the xqlite busy slot.
+  through the xqlite busy slot. The wait happens in the calling process, between attempts, on
+  SQLite's own schedule of growing sleeps, from 1 ms up to 100 ms.
 
   The busy retry policy stays in place: while one is set it decides the
-  wait, and `ms` applies once `remove_busy_policy/1` runs. Without one:
-
-    * With busy observers registered, the slot stays theirs and the
-      timeout applies through it: observers keep receiving
-      `{:xqlite_busy, …}` messages, the connection waits up to `ms` on
-      SQLite's own retry schedule, and unregistering the last observer
-      keeps this timeout.
-    * With no observers, SQLite's own timeout handler takes the slot.
+  wait, and `ms` applies once `remove_busy_policy/1` runs.
 
   `ms` is the timeout in milliseconds. `0` disables the timeout entirely
   (SQLite returns `SQLITE_BUSY` immediately on contention). SQLite stores
@@ -2846,12 +2810,7 @@ defmodule Xqlite do
   and `open_in_memory/1` answers `{:error, {:invalid_option, %{key: :busy_timeout, value: ms,
   reason: :invalid_value}}}` for it, except `:infinity`, which they take as 2_147_483_647.
 
-  This function always works, slot held or not, and no authorizer is
-  consulted. A raw
-  `PRAGMA busy_timeout = N`, or `XqliteNIF.set_pragma(conn,
-  "busy_timeout", ms)`, is rejected while the slot is held — see
-  `set_busy_policy/2` — because it would replace our C callback with
-  SQLite's built-in one and silence the policy and every observer.
+  It runs no SQL, so no authorizer is consulted; a `PRAGMA busy_timeout = N` in SQL sets it too.
   """
   @spec put_busy_timeout(conn(), non_neg_integer()) :: :ok | error()
   def put_busy_timeout(conn, ms) do
@@ -2861,13 +2820,74 @@ defmodule Xqlite do
   end
 
   @doc """
-  Reads the busy timeout the connection keeps, in milliseconds, also while a
-  retry policy or an observer holds the busy slot, as
-  `Xqlite.Pragma.get/2` does. `PRAGMA busy_timeout` read in SQL (`query/4`,
-  `stream/4`, a prepared statement) answers `0` while the slot is held.
+  Reads the busy timeout the connection keeps, in milliseconds, as `Xqlite.Pragma.get/2` does.
+  `PRAGMA busy_timeout` read in SQL (`query/4`, `stream/4`, a prepared statement) answers `0`.
   """
   @spec get_busy_timeout(conn()) :: {:ok, non_neg_integer()} | error()
   def get_busy_timeout(conn), do: Xqlite.Pragma.get(conn, :busy_timeout)
+
+  @doc """
+  Runs `call`, and while it answers `{:error, {:database_busy, %{retry: :call}}}`,
+  waits in the calling process and runs it again, as the connection's busy timeout
+  or busy policy says.
+
+  Every function here that runs SQL waits this way. A raw `XqliteNIF` call never
+  waits; wrap it to wait the same:
+  `Xqlite.retry_busy(conn, fn -> XqliteNIF.execute(conn, sql, []) end)`. `handle`
+  is the connection `call` runs on, or a statement or stream of it. Before each
+  sleep `XqliteNIF.busy_delay/4` sends `{:xqlite_busy, retries, elapsed_ms}` to
+  every busy observer, the clock starting at the first busy answer; the sleep
+  holds no VM thread and leaves the connection free for other calls.
+
+  The answer is the first one that is not such a busy error; the last busy answer,
+  its `:retries` and `:elapsed_ms` filled in, once the busy settings give up; or
+  `{:error, :operation_cancelled}` when a token of `:cancel_tokens`, judged as in
+  `query/4`, is signalled during the wait. `retry: :transaction` and
+  `retry: :none` answer at once: running the call again unchanged cannot succeed.
+  """
+  @spec retry_busy(conn() | stmt() | reference(), (-> answer), keyword()) ::
+          answer | error()
+        when answer: term()
+  def retry_busy(handle, call, opts \\ []) when is_function(call, 0) do
+    with :ok <- judge_options(opts, [:cancel_tokens]),
+         tokens = Keyword.get(opts, :cancel_tokens, []),
+         :ok <- validate_cancel_tokens(tokens) do
+      call.() |> busy_wait(handle, fn _busy -> call.() end, List.wrap(tokens), {0, nil})
+    end
+  end
+
+  defp busy_wait(answer, handle, call, tokens, tries) do
+    case answer do
+      {:error, {:database_busy, %{retry: :call} = busy}} ->
+        give_up = &{:error, {:database_busy, Map.merge(busy, &1)}}
+        pause({handle, call, busy}, tokens, tries, give_up)
+
+      # `XqliteNIF.wal_checkpoint/3` in `:full`, `:restart` or `:truncate` mode, unfinished.
+      {:ok, %{busy: true, checkpointed_pages: _}} ->
+        pause({handle, call, answer}, tokens, tries, fn _counts -> answer end)
+
+      # Every other answer of `call` is final, `retry: :transaction` and `:none` included.
+      done ->
+        done
+    end
+  end
+
+  defp pause({handle, call, last}, tokens, {retries, started}, give_up) do
+    now = System.monotonic_time(:millisecond)
+    elapsed_ms = now - (started || now)
+
+    case XqliteNIF.busy_delay(handle, retries, elapsed_ms, tokens) do
+      {:ok, :give_up} ->
+        give_up.(%{retries: retries, elapsed_ms: elapsed_ms})
+
+      {:ok, delay_ms} ->
+        Process.sleep(delay_ms)
+        last |> call.() |> busy_wait(handle, call, tokens, {retries + 1, started || now})
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
 
   @doc """
   Installs a deny-list authorizer on the connection.
@@ -2892,14 +2912,9 @@ defmodule Xqlite do
   Single slot per connection: a second call replaces the previous list, and
   `remove_authorizer/1` clears it. Both are idempotent.
 
-  xqlite shares that slot. While a busy policy or a busy observer is
-  installed (see `set_busy_policy/2`), the connection carries one authorizer
-  holding both your list and two rules of xqlite's own: a statement writing
-  `busy_timeout` is rejected with `{:error, {:busy_timeout_write_refused,
-  _}}` whatever your list says, and xqlite's own `PRAGMA busy_timeout` read
-  is allowed even when you deny `:pragma`. Your rules are unchanged for every
-  other action, and removing your list while the slot is held leaves those
-  two rules in place.
+  xqlite shares that slot: every connection carries one authorizer with your list and two rules
+  of xqlite's own. A `busy_timeout` write your list allows sets the kept timeout, and xqlite's own
+  `PRAGMA busy_timeout` read passes a `:pragma` deny. Removing your list leaves those two rules.
 
   ## Limits (v1)
 
@@ -2929,8 +2944,7 @@ defmodule Xqlite do
   doc lists them); an `:attach` deny also stops `VACUUM`, which attaches a temporary database.
 
   Three reads slip past that deny, because none runs a `PRAGMA` statement for
-  SQLite to deny: `Xqlite.Pragma.get(conn, :busy_timeout)` while a busy policy or
-  observer holds the busy slot, which answers the timeout the slot keeps,
+  SQLite to deny: `Xqlite.Pragma.get(conn, :busy_timeout)`, answering the timeout the slot keeps,
   `Xqlite.Pragma.get(conn, :wal_autocheckpoint)`, whose value comes
   from xqlite's own WAL callback rather than from SQLite (writing it is still
   denied), and `get_create_sql/2`, a `SELECT` over `sqlite_schema` that obeys
@@ -2964,8 +2978,7 @@ defmodule Xqlite do
   @doc """
   Removes any authorizer installed on the connection.
 
-  Safe to call when none is installed (no-op). After removal no action kind is denied, but while
-  a busy policy or observer is set, a statement writing `busy_timeout` is still rejected.
+  Safe to call when none is installed (no-op). After removal no action kind is denied.
 
   No telemetry is emitted.
   """
@@ -3063,10 +3076,10 @@ defmodule Xqlite do
   runs. A write cancelled while it runs rolls back the whole transaction, an
   explicit one included, and turns autocommit back on; a cancelled read rolls
   back nothing. See "A write cancelled while it runs rolls back the whole
-  transaction" in the Gotchas guide. A signal does not end a wait for a lock another connection
-  holds: SQLite makes no check while it waits, so the wait lasts until the lock frees or
-  `put_busy_timeout/2` or the busy policy gives up, and the call then answers the busy error. When
-  the lock frees first, the statement runs and the signal takes effect at SQLite's next check.
+  transaction" in the Gotchas guide. A call waiting for a lock reads its tokens before each
+  attempt and each sleep: a signal ends the wait with `{:error, :operation_cancelled}` within
+  one sleep (at most 100 ms on the busy timeout's schedule, `:sleep_ms` under a policy), and
+  nothing of the call has run.
   """
   @spec create_cancel_token() :: {:ok, reference()} | error()
   def create_cancel_token do
@@ -3151,7 +3164,13 @@ defmodule Xqlite do
   end
 
   defp run_execute_batch_cancellable(conn, sql_batch, tokens, start_md) do
-    case XqliteNIF.execute_batch_cancellable(conn, sql_batch, tokens) do
+    batch = fn sql -> XqliteNIF.execute_batch_cancellable(conn, sql, tokens) end
+    resume = fn busy -> busy |> Map.get(:sql, sql_batch) |> batch.() end
+
+    sql_batch
+    |> batch.()
+    |> busy_wait(conn, resume, tokens, {0, nil})
+    |> case do
       :ok = ok ->
         {ok, Map.merge(start_md, %{result_class: :ok, error_reason: nil})}
 
@@ -3190,7 +3209,10 @@ defmodule Xqlite do
   SQLite starts a stepped copy again from the first page whenever another connection
   commits to the source between two steps (`remaining` grows again in the messages), so
   under a steady writer it may never end; `pages_per_step: 2_147_483_647` copies every
-  page in one step, as `backup/3` does, and sends one progress message.
+  page in one step, as `backup/3` does, and sends one progress message. A step that
+  meets another connection's lock sends `%{status: :busy, remaining: nil, total: nil}`;
+  the call then waits in your process as the busy settings say and copies again from
+  the first page, so `:busy` messages can precede the `:copied` ones.
   """
   @spec backup_with_progress(conn(), String.t(), pid(), keyword()) :: :ok | error()
   def backup_with_progress(conn, dest_path, pid, opts \\ []) do
@@ -3199,7 +3221,13 @@ defmodule Xqlite do
          :ok <- validate_cancel_tokens(tokens),
          {:ok, pages} <- pages_per_step(opts),
          {:ok, schema} <- option_value(opts, :schema, "main", &is_binary/1) do
-      XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages, List.wrap(tokens))
+      tokens = List.wrap(tokens)
+
+      copy = fn ->
+        XqliteNIF.backup_with_progress(conn, schema, dest_path, pid, pages, tokens)
+      end
+
+      retry_busy(conn, copy, cancel_tokens: tokens)
     end
   end
 
@@ -3215,7 +3243,8 @@ defmodule Xqlite do
   `:exclusive`). Emits `[:xqlite, :transaction, :begin]` telemetry.
 
   Any other term in the `mode` position returns
-  `{:error, {:invalid_transaction_mode, mode}}` and starts nothing.
+  `{:error, {:invalid_transaction_mode, mode}}` and starts nothing. `:immediate` and `:exclusive`
+  take the write lock at once and wait for it in your process as the busy settings say.
 
   The transaction belongs to the connection, not to the process that began it: if that process
   dies it stays open, every later statement on the connection, from any process, runs inside it,
@@ -3233,7 +3262,7 @@ defmodule Xqlite do
   def begin(conn, mode \\ :deferred)
 
   def begin(conn, mode) when mode in [:deferred, :immediate, :exclusive] do
-    case XqliteNIF.begin(conn, mode) do
+    case retry_busy(conn, fn -> XqliteNIF.begin(conn, mode) end) do
       :ok = ok ->
         emit(
           [:xqlite, :transaction, :begin],
@@ -3262,11 +3291,13 @@ defmodule Xqlite do
   open for writing) `{:error, :statement_mid_run}`.
   That answer, a deferred foreign key still broken and another connection's
   lock all leave the transaction open: repair and commit again, or call
-  `rollback/1`. `autocommit/1` tells whether a transaction is open.
+  `rollback/1`. `autocommit/1` tells whether a transaction is open. `commit/1` first waits for
+  that lock in your process as the busy settings say; when they give up the transaction is still
+  open, and in rollback-journal mode it keeps new readers out until you commit again or roll back.
   """
   @spec commit(conn()) :: :ok | error()
   def commit(conn) do
-    case XqliteNIF.commit(conn) do
+    case retry_busy(conn, fn -> XqliteNIF.commit(conn) end) do
       :ok = ok ->
         emit(
           [:xqlite, :transaction, :commit],
@@ -3350,7 +3381,7 @@ defmodule Xqlite do
   """
   @spec release_savepoint(conn(), String.t()) :: :ok | error()
   def release_savepoint(conn, name) when is_binary(name) do
-    case XqliteNIF.release_savepoint(conn, name) do
+    case retry_busy(conn, fn -> XqliteNIF.release_savepoint(conn, name) end) do
       :ok = ok ->
         emit(
           [:xqlite, :savepoint, :release],
@@ -3543,7 +3574,7 @@ defmodule Xqlite do
   Wraps `XqliteNIF.schema_databases/1`. No telemetry is emitted.
   """
   @spec schema_databases(conn()) :: {:ok, [Xqlite.Schema.DatabaseInfo.t()]} | error()
-  def schema_databases(conn), do: XqliteNIF.schema_databases(conn)
+  def schema_databases(conn), do: retry_busy(conn, fn -> XqliteNIF.schema_databases(conn) end)
 
   @doc """
   Lists tables, views, and virtual tables as
@@ -3556,7 +3587,7 @@ defmodule Xqlite do
   @spec schema_list_objects(conn(), String.t() | :all) ::
           {:ok, [Xqlite.Schema.SchemaObjectInfo.t()]} | error()
   def schema_list_objects(conn, schema \\ "main") when is_binary(schema) or schema == :all,
-    do: XqliteNIF.schema_list_objects(conn, schema)
+    do: retry_busy(conn, fn -> XqliteNIF.schema_list_objects(conn, schema) end)
 
   @doc """
   Returns column details for a table or view as
@@ -3568,7 +3599,7 @@ defmodule Xqlite do
   @spec schema_columns(conn(), String.t()) ::
           {:ok, [Xqlite.Schema.ColumnInfo.t()]} | error()
   def schema_columns(conn, table_name) when is_binary(table_name),
-    do: XqliteNIF.schema_columns(conn, table_name)
+    do: retry_busy(conn, fn -> XqliteNIF.schema_columns(conn, table_name) end)
 
   @doc """
   Returns the foreign keys defined on a table as
@@ -3579,7 +3610,7 @@ defmodule Xqlite do
   @spec schema_foreign_keys(conn(), String.t()) ::
           {:ok, [Xqlite.Schema.ForeignKeyInfo.t()]} | error()
   def schema_foreign_keys(conn, table_name) when is_binary(table_name),
-    do: XqliteNIF.schema_foreign_keys(conn, table_name)
+    do: retry_busy(conn, fn -> XqliteNIF.schema_foreign_keys(conn, table_name) end)
 
   @doc """
   Returns all indexes on a table as `Xqlite.Schema.IndexInfo` structs
@@ -3591,7 +3622,7 @@ defmodule Xqlite do
   @spec schema_indexes(conn(), String.t()) ::
           {:ok, [Xqlite.Schema.IndexInfo.t()]} | error()
   def schema_indexes(conn, table_name) when is_binary(table_name),
-    do: XqliteNIF.schema_indexes(conn, table_name)
+    do: retry_busy(conn, fn -> XqliteNIF.schema_indexes(conn, table_name) end)
 
   @doc """
   Returns the columns of an index as `Xqlite.Schema.IndexColumnInfo`
@@ -3602,7 +3633,7 @@ defmodule Xqlite do
   @spec schema_index_columns(conn(), String.t()) ::
           {:ok, [Xqlite.Schema.IndexColumnInfo.t()]} | error()
   def schema_index_columns(conn, index_name) when is_binary(index_name),
-    do: XqliteNIF.schema_index_columns(conn, index_name)
+    do: retry_busy(conn, fn -> XqliteNIF.schema_index_columns(conn, index_name) end)
 
   @doc """
   Returns the `CREATE ...` SQL for a schema object as recorded in main's
@@ -3614,7 +3645,7 @@ defmodule Xqlite do
   """
   @spec get_create_sql(conn(), String.t()) :: {:ok, String.t() | nil} | error()
   def get_create_sql(conn, object_name) when is_binary(object_name),
-    do: XqliteNIF.get_create_sql(conn, object_name)
+    do: retry_busy(conn, fn -> XqliteNIF.get_create_sql(conn, object_name) end)
 
   # Counts the list's proper prefix by hand: `length/1` raises on a list whose
   # tail is not a list, and this runs for the telemetry metadata before the

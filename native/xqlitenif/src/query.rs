@@ -1,5 +1,5 @@
 use crate::busy_handler;
-use crate::connection::XqliteQueryResult;
+use crate::connection::{XqliteConn, XqliteQueryResult};
 use crate::error::XqliteError;
 use crate::statement::{self, PreparedStmt};
 use crate::stream;
@@ -115,9 +115,11 @@ pub(crate) fn core_execute<'a>(
 /// opened itself — autocommit on before the call and off after — rolls that
 /// transaction back before answering. A transaction open before the call stays
 /// the caller's, and a ROLLBACK that fails leaves the transaction open under
-/// the batch's own error.
+/// the batch's own error. A caller's batch (`handle` given) answers busy with `sql`, the
+/// text to run again.
 pub(crate) fn core_execute_batch(
     conn: &Connection,
+    handle: Option<&XqliteConn>,
     sql_batch: &str,
     tokens: &[Arc<AtomicBool>],
 ) -> Result<(), XqliteError> {
@@ -125,17 +127,28 @@ pub(crate) fn core_execute_batch(
     if autocommit_before {
         crate::progress_dispatch::require_idle(conn)?;
     }
+    let mut resume = 0;
     // SAFETY: the caller holds the connection Mutex for the whole call, and
     // `handle()` is the live `sqlite3*` that Mutex guards.
     unsafe {
         let db = conn.handle();
-        let result = statement::execute_batch(db, sql_batch, tokens);
+        let result = statement::execute_batch(db, sql_batch, tokens, |rest| {
+            if conn.is_autocommit() || !autocommit_before {
+                resume = sql_batch.len().saturating_sub(rest.len());
+            }
+            handle.map_or(Ok(()), |handle| busy_handler::rearm(conn, handle))
+        });
 
         if result.is_err() && autocommit_before && !conn.is_autocommit() {
-            let _ = statement::execute_batch(db, "ROLLBACK", &[]);
+            let _ = statement::execute_batch(db, "ROLLBACK", &[], |_| Ok(()));
         }
 
-        result
+        result.map_err(|mut error| {
+            if let (XqliteError::DatabaseBusy { sql, .. }, Some(_)) = (&mut error, handle) {
+                *sql = sql_batch.get(resume..).map(str::to_owned);
+            }
+            error
+        })
     }
 }
 
@@ -199,14 +212,14 @@ pub(crate) fn strict_rebuild(
         };
         let begin =
             "PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON; BEGIN IMMEDIATE";
-        let result = statement::execute_batch(db, begin, &[])
+        let result = statement::execute_batch(db, begin, &[], |_| Ok(()))
             .and_then(|()| require_unchanged(conn, schema, table, schema_version, stored))
             .and_then(|()| statements.iter().try_for_each(run))
-            .and_then(|()| statement::execute_batch(db, "COMMIT", &[]));
+            .and_then(|()| statement::execute_batch(db, "COMMIT", &[], |_| Ok(())));
         if result.is_err() && !conn.is_autocommit() {
-            let _ = statement::execute_batch(db, "ROLLBACK", &[]);
+            let _ = statement::execute_batch(db, "ROLLBACK", &[], |_| Ok(()));
         }
-        result.and(statement::execute_batch(db, &restore, &[]))
+        result.and(statement::execute_batch(db, &restore, &[], |_| Ok(())))
     }
 }
 

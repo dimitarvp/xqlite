@@ -313,7 +313,7 @@ defmodule Xqlite.NIF.BackupTest do
         :ok = NIF.execute_batch(holder, "BEGIN EXCLUSIVE")
         blocked = NIF.backup(own, "main", tmp_db_path("blocked"))
         {micros, answer} = :timer.tc(fn -> NIF.restore(own, "main", path) end)
-        assert {:error, {:database_busy_or_locked, 5, _}} = answer
+        assert {:error, {:database_busy, %{code: 5}}} = answer
         assert answer == blocked
         assert micros < 150_000
         Enum.each([holder, own], &NIF.close/1)
@@ -327,7 +327,7 @@ defmodule Xqlite.NIF.BackupTest do
 
         for call <- [&NIF.backup(conn, "main", &1), progress, restore] do
           {micros, answer} = :timer.tc(call, [path])
-          assert {:error, {:database_busy_or_locked, 5, _}} = answer
+          assert {:error, {:database_busy, %{code: 5}}} = answer
           assert micros < 2_000_000
         end
 
@@ -442,7 +442,7 @@ defmodule Xqlite.NIF.BackupTest do
       assert :ok = Xqlite.backup_with_progress(src, dest2, self(), pages_per_step: 2 ** 31 - 1)
       assert_copied(cells, dest2)
       assert_received {:xqlite_backup_progress, %{status: :copied, remaining: 0}}
-      refute_received {:xqlite_backup_progress, _}
+      refute_received {:xqlite_backup_progress, %{status: :copied}}
       if unquote(journal) == :wal, do: assert_restored(path, cells)
       :atomics.put(cells, 2, 1)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 60_000
@@ -484,7 +484,10 @@ defmodule Xqlite.NIF.BackupTest do
   defp commit_until_stopped(writer, cells, test_pid) do
     # Counted before the insert: another connection can see the row before execute returns.
     commits = :atomics.add_get(cells, 1, 1)
-    {:ok, 1} = NIF.execute(writer, "INSERT INTO t (v) VALUES ('w')", [])
+
+    {:ok, %Xqlite.Result{changes: 1}} =
+      Xqlite.execute(writer, "INSERT INTO t (v) VALUES ('w')")
+
     if commits == 1, do: send(test_pid, :first_commit)
 
     case :atomics.get(cells, 2) == 0 and commits < 50_000 do

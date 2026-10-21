@@ -1080,7 +1080,8 @@ defmodule Xqlite.Pragma do
     with {:ok, checked} <- check_value(key_atom, val),
          {:ok, options} <- check_options(key_atom, [], opts),
          :ok <- known_schema(db, options[:db_name]),
-         {:ok, row} <- put_checked(db, key_atom, checked, options) do
+         {:ok, row} <-
+           Xqlite.retry_busy(db, fn -> put_checked(db, key_atom, checked, options) end) do
       applied(key_atom, val, checked, row)
     end
   end
@@ -1118,7 +1119,7 @@ defmodule Xqlite.Pragma do
   defp do_pragma_read(db, key, opts) do
     case Keyword.get(opts, :db_name) do
       nil ->
-        XqliteNIF.get_pragma(db, to_string(key))
+        Xqlite.retry_busy(db, fn -> XqliteNIF.get_pragma(db, to_string(key)) end)
 
       db_name when key in [:busy_timeout, :wal_autocheckpoint] ->
         {:error, invalid_argument(key, {:db_name, db_name}, :invalid_options)}
@@ -1126,7 +1127,7 @@ defmodule Xqlite.Pragma do
       db_name ->
         sql = "PRAGMA #{quote_name(db_name)}.#{key};"
 
-        case XqliteNIF.query(db, sql, []) do
+        case Xqlite.retry_busy(db, fn -> XqliteNIF.query(db, sql, []) end) do
           {:ok, %{rows: [[value]]}} -> {:ok, value}
           {:ok, %{rows: []}} -> {:ok, :no_value}
           {:error, _} = err -> err
@@ -1140,7 +1141,7 @@ defmodule Xqlite.Pragma do
       |> pragma_prefix()
       |> pragma_sql(key, arg)
 
-    db |> XqliteNIF.query(sql, []) |> query_to_pragma_result()
+    db |> Xqlite.retry_busy(fn -> XqliteNIF.query(db, sql, []) end) |> query_to_pragma_result()
   end
 
   defp pragma_sql(prefix, key, nil), do: "PRAGMA #{prefix}#{key};"

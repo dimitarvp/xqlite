@@ -200,9 +200,9 @@ defmodule Xqlite.NIF.BackupProgressTest do
           NIF.cancel_operation(token)
         end)
 
-        assert {:error, {:database_busy_or_locked, code, _}} = NIF.backup(conn, "main", path)
+        assert {:error, {:database_busy, %{code: code}}} = NIF.backup(conn, "main", path)
 
-        assert {:error, {:database_busy_or_locked, ^code, _}} =
+        assert {:error, {:database_busy, %{code: ^code}}} =
                  NIF.backup_with_progress(conn, "main", path, self(), 1, [token])
 
         assert_received {:xqlite_backup_progress, %{status: :busy, remaining: nil, total: nil}}
@@ -217,8 +217,8 @@ defmodule Xqlite.NIF.BackupProgressTest do
         backup = Task.async(fn -> NIF.backup_with_progress(src, "main", path, me, 1, []) end)
         assert_receive {:xqlite_backup_progress, %{status: :copied}}
         {:ok, holder} = NIF.open(src_path)
-        {:ok, 0} = NIF.execute(holder, "BEGIN EXCLUSIVE", [])
-        assert {:error, {:database_busy_or_locked, _, _}} = Task.await(backup)
+        :ok = Xqlite.begin(holder, :exclusive)
+        assert {:error, {:database_busy, _}} = Task.await(backup)
         assert_receive {:xqlite_backup_progress, %{status: :busy, remaining: n, total: total}}
         assert is_integer(n) and n > 0 and total > n
         Enum.each([holder, src], &NIF.close/1)
@@ -229,7 +229,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         {:ok, writer} = NIF.open(dest)
         :ok = NIF.execute_batch(writer, "BEGIN IMMEDIATE")
         answer = NIF.backup_with_progress(conn, "main", dest, self(), 1, [])
-        assert {:error, {:database_busy_or_locked, 262, _}} = answer
+        assert {:error, {:database_locked, %{code: 262}}} = answer
         assert_received {:xqlite_backup_progress, %{status: :busy, remaining: nil, total: nil}}
         NIF.close(writer)
       end

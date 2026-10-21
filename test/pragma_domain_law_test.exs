@@ -325,8 +325,8 @@ defmodule Xqlite.PragmaDomainLawTest do
     db = fresh()
     :ok = NIF.execute_batch(db, "PRAGMA #{name} = #{value};")
 
-    case Xqlite.query(db, "PRAGMA #{name};", []) do
-      {:ok, %{rows: [[read_back]]}} -> read_back == value
+    case NIF.get_pragma(db, to_string(name)) do
+      {:ok, read_back} -> read_back == value
       _no_row -> false
     end
   end

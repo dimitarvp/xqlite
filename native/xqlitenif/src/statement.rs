@@ -135,7 +135,8 @@ fn blank_len(rest: &[u8]) -> Option<usize> {
 /// the batch costs time linear in its length. The tokens are read once a
 /// statement is compiled and before its first step, so a signal stops the
 /// batch before the next statement and text after the last one is never
-/// answered as cancelled.
+/// answered as cancelled. `before_each` runs with the text still to run before
+/// every statement is compiled.
 ///
 /// # Safety
 /// The caller holds the connection Mutex for the whole call, and `db` is that
@@ -144,6 +145,7 @@ pub(crate) unsafe fn execute_batch(
     db: *mut ffi::sqlite3,
     sql: &str,
     tokens: &[Arc<AtomicBool>],
+    mut before_each: impl FnMut(&str) -> Result<(), XqliteError>,
 ) -> Result<(), XqliteError> {
     let c_sql = CString::new(sql).map_err(|_| XqliteError::NulErrorInString)?;
     let mut tail: *const c_char = c_sql.as_ptr();
@@ -152,6 +154,7 @@ pub(crate) unsafe fn execute_batch(
         let rest = sql
             .get((tail as usize).wrapping_sub(c_sql.as_ptr() as usize)..)
             .unwrap_or(sql);
+        before_each(rest)?;
         let mut raw_stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
 
         // SAFETY: `db` is live and its Mutex is held (fn contract). `tail`
@@ -255,6 +258,34 @@ pub(crate) unsafe fn end_run(
             true => Err(crate::blob::blob_error(db, rc)),
             false => Ok(()),
         }
+    }
+}
+
+/// A busy step of an idle statement left nothing done, so it is reset, bindings kept; after
+/// rows were handed back it is a commit SQLite answered by rolling the write back.
+///
+/// # Safety
+/// The caller holds the connection Mutex, and when `idle`, `stmt` is a live statement of it.
+pub(crate) unsafe fn busy_step(
+    error: XqliteError,
+    stmt: *mut ffi::sqlite3_stmt,
+    idle: bool,
+) -> XqliteError {
+    match (error, idle) {
+        (XqliteError::DatabaseBusy { code, message, .. }, false) => {
+            XqliteError::DatabaseBusy {
+                code,
+                message,
+                retry: error::Retry::RowsHandedBack,
+                sql: None,
+            }
+        }
+        (busy @ XqliteError::DatabaseBusy { .. }, true) => {
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { ffi::sqlite3_reset(stmt) };
+            busy
+        }
+        (failed, _idle) => failed,
     }
 }
 
@@ -471,7 +502,7 @@ impl XqliteStatement {
         // Connection alive (and the connection exclusively ours) for the
         // whole duration of `f`.
         let db = unsafe { conn.handle() };
-        connection::with_busy_timeout_rule(&self.conn_resource_arc, || f(ptr, db))
+        connection::rearm_and_judge(conn, &self.conn_resource_arc, || f(ptr, db))
     }
 }
 
@@ -509,7 +540,9 @@ mod tests {
             let answer = unsafe {
                 let flag = Arc::as_ptr(&token) as *mut c_void;
                 ffi::sqlite3_progress_handler(conn.handle(), 1, Some(signal), flag);
-                execute_batch(conn.handle(), batch, std::slice::from_ref(&token))
+                execute_batch(conn.handle(), batch, std::slice::from_ref(&token), |_| {
+                    Ok(())
+                })
             };
             let rows: i64 = conn
                 .query_row("SELECT count(*) FROM t", [], |row| row.get(0))

@@ -6,7 +6,7 @@
 
 use crate::cancel::XqliteCancelToken;
 use crate::connection::{CallbackBoxes, ChildHandle, Orphan, XqliteConn};
-use rusqlite::{Connection, ffi};
+use rusqlite::Connection;
 use rustler::ResourceArc;
 use std::mem::ManuallyDrop;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -71,10 +71,6 @@ impl Job {
             Job::Drain(conn) => conn.release_queued(),
             Job::Close(close) => {
                 let (conn, boxes, orphans) = *close;
-                // SAFETY: the job owns the Connection. Without a busy handler no release waits.
-                unsafe {
-                    ffi::sqlite3_busy_handler(conn.handle(), None, std::ptr::null_mut())
-                };
                 for orphan in orphans {
                     match orphan {
                         // SAFETY: the job owns the Connection every queued handle was opened on.

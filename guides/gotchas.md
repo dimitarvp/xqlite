@@ -331,9 +331,9 @@ call before its statement runs, as long as that statement has not started:
 the one-shot calls such as `Xqlite.execute/4` with `:cancel_tokens`,
 `Xqlite.multi_step/3` on a statement not started or finished, and
 a stream's first fetch. Nothing is written then, and a transaction you opened
-stays as it was. A statement already mid-run is stepped, one that SQLite keeps
-running after `SQLITE_BUSY` included, and so is every statement once it
-starts: a signal takes effect at SQLite's next progress check, and SQLite
+stays as it was. A statement already mid-run is stepped, and so is every
+statement once it starts: a signal takes effect at SQLite's next progress
+check, and SQLite
 does not check on a clock. It checks at certain jumps (the bottom of a loop,
 a trigger's entry, the end of a statement's setup) and at the end of every
 step, once at least 8 VM instructions have run since the last check, counting
@@ -342,12 +342,10 @@ one-shot call is first checked after it has ended; a signal that lands then
 changes nothing, and the call answers its normal result with the write in
 place. SQLite also checks while it compiles a statement, but xqlite lets the
 compile finish: a signal during a long compile takes effect once the
-statement runs. A signal does not end a wait for a lock another connection
-holds: SQLite makes no check while it waits, so the wait lasts until the lock
-frees or `Xqlite.put_busy_timeout/2` or the busy policy gives up, and the call
-then answers `{:error, {:database_busy_or_locked, 5, _}}`. When the lock frees
-first, the statement runs and the signal takes effect at SQLite's next check,
-as above.
+statement runs. A signal also ends a wait for a lock another connection
+holds: the call waits in your process, between attempts, and its tokens are
+read before each sleep and before each attempt, so the call answers
+`{:error, :operation_cancelled}` within one sleep, with nothing of it run.
 
 A signal that stops a write while it runs undoes more than that statement.
 SQLite rolls back the whole transaction, a `BEGIN` you issued included, and
@@ -370,7 +368,8 @@ SQLite keeps the transaction open when a `COMMIT` fails on a deferred
 foreign key that is still broken, on a lock another connection holds, or on
 a write of the same connection that is still mid-run. `Xqlite.commit/1`
 answers the error — `{:constraint_violation, :constraint_foreign_key, _}`,
-`{:database_busy_or_locked, 5, _}` or `:statement_mid_run` — and rolls
+`{:database_busy, %{retry: :call}}` once the busy settings give up, or
+`:statement_mid_run` — and rolls
 nothing back: the writes and the locks stay, and no `{:xqlite_rollback}`
 message is sent. Repair and commit again, or call `Xqlite.rollback/1`.
 `Xqlite.autocommit/1` answers `{:ok, false}` while the transaction is open.
@@ -448,84 +447,79 @@ and open a new one.
 
 ## Concurrency and busy handling
 
-### A busy policy's two ceilings are both per busy event
+### A busy policy's two ceilings bound one call's wait
 
-`Xqlite.set_busy_policy/2` takes two independent give-up ceilings, and both are
-scoped to a single busy event — each resets at the start of every fresh
-contention:
+`Xqlite.set_busy_policy/2` takes two independent give-up ceilings, and both
+are scoped to the wait of one call: each starts again for every call that
+meets a lock.
 
-- **`:max_retries`** caps SQLite's retry count for the current busy event.
-- **`:max_elapsed_ms`** caps the wall-clock time spent retrying the current busy
-  event. Its clock resets on the first callback of each new contention — it is
-  *not* an absolute ceiling measured from when the policy was installed.
+- **`:max_retries`** caps how many times the call runs again after a busy
+  answer.
+- **`:max_elapsed_ms`** caps the wall-clock time the call spends waiting.
+  Its clock starts at the call's first busy answer — it is *not* an
+  absolute ceiling measured from when the policy was installed — and no
+  sleep runs past it: the last sleep is cut to what is left.
 
-The effective per-event budget is whichever fires first: roughly
+The effective budget of one call is whichever fires first: roughly
 `sleep_ms × max_retries`, capped at `max_elapsed_ms`. A long-lived, pooled
-connection — the always-open handles an Ecto-style adapter keeps — gets its full
-budget on *every* contention, no matter how long it has been open. Size
-`:max_retries` and `:sleep_ms` to the retry count and per-attempt pause you want,
-and `:max_elapsed_ms` as the hard wall-time cap per contention.
+connection — the always-open handles an Ecto-style adapter keeps — gets its
+full budget on *every* call that waits, no matter how long it has been open.
+The wait runs in the calling process, so a long budget costs that process's
+time and nothing else. Size `:max_retries` and `:sleep_ms` to the retry
+count and per-attempt pause you want, and `:max_elapsed_ms` as the hard
+wall-time cap per call.
 
 ```elixir
 # 1000 retries × 5 ms is the retry budget; max_elapsed_ms caps it at 400 ms of
-# wall time per contention. The clock resets on each new busy event, so this
+# wall time per call. The clock starts at each call's first busy answer, so this
 # behaves identically whether the connection is fresh or has been open for hours.
 :ok = Xqlite.set_busy_policy(conn, max_retries: 1_000, max_elapsed_ms: 400, sleep_ms: 5)
 ```
 
-### A `busy_timeout` write is rejected while the busy slot is held
+### `PRAGMA busy_timeout` read in SQL answers 0
 
-SQLite has exactly **one** busy-handler slot per connection. xqlite uses it for
-both the busy retry policy (`Xqlite.set_busy_policy/2`) and the busy observers
-(`Xqlite.register_busy_observer/2`) — both ride that single C callback. A
-`PRAGMA busy_timeout = N` installs SQLite's *built-in* sleep-and-retry handler
-into that same slot, overwriting xqlite's, which would stop the retry policy
-applying and silence every registered observer.
+SQLite has exactly **one** busy-handler slot per connection, and xqlite
+takes it on every connection as the connection opens: the busy policy
+(`Xqlite.set_busy_policy/2`), the busy observers
+(`Xqlite.register_busy_observer/2`) and the busy timeout all live behind
+that one callback, which answers SQLite at once so that a call waits in its
+own process. SQLite zeroes the timeout it stores whenever another callback
+holds the slot, so `PRAGMA busy_timeout` read in SQL answers `0` on every
+connection. `Xqlite.get_busy_timeout/1` answers the wait the connection
+keeps, and so do `Xqlite.Pragma.get(conn, :busy_timeout)` and
+`XqliteNIF.get_pragma(conn, "busy_timeout")`.
 
-So while a policy or at least one observer is installed, xqlite rejects that
-write. It fails as the statement is *prepared* — SQLite applies the PRAGMA
-during code generation, so `Xqlite.prepare/2` alone would already have done the
-damage — and the call answers
+Writing works every way. `Xqlite.put_busy_timeout/2`, `open/2`'s
+`:busy_timeout`, `Xqlite.Pragma.put(conn, :busy_timeout, ms)`,
+`XqliteNIF.set_pragma(conn, "busy_timeout", ms)` and a
+`PRAGMA busy_timeout = N` sent as SQL, in any spelling, all set the wait the
+connection keeps. For the PRAGMA, SQLite applies the value as it compiles
+the statement and puts its own sleeping handler in the slot; xqlite takes
+the slot back with the new value in the same call, before the next
+statement runs, so the wait still happens in the calling process. The
+statement's own row answers `N`, and a value of `0` or less means no wait.
+Like every PRAGMA SQLite applies while compiling, the write takes effect
+even when a syntax error follows it in the same statement, as in
+`PRAGMA busy_timeout = 7 garbage`, which answers
+`{:error, {:sql_input_error, _}}` and still sets the wait (see
+[Known limitations](known_limitations.md#a-pragma-stays-applied-when-a-syntax-error-follows-it)).
+A deny of `:pragma` (`Xqlite.set_authorizer/2`) stops every form that sends
+the PRAGMA with the authorization error; `put_busy_timeout/2` sends none and
+still works.
 
-```elixir
-{:error, {:busy_timeout_write_refused, %{policy: true, observers: 0}}}
-```
+### The WAL autocheckpoint pins the connection
 
-The map says what is holding the slot. Every path that prepares SQL on the
-connection reports it the same way: `query/4`, `execute/4`, `execute_batch/3`
-(the statements before the rejected one have run), `prepare/2`, `stream/4`, and
-the typed `Xqlite.Pragma.put(conn, :busy_timeout, ms)` /
-`XqliteNIF.set_pragma/3`. Every spelling is covered, including
-`PRAGMA busy_timeout(N)`, a quoted name, a `main.` or `temp.` prefix, and a
-value of `0` or less — SQLite treats anything at or below zero as "stop
-waiting" and drops the callback just as destructively. A statement that also
-fails to compile for another reason, such as `PRAGMA busy_timeout = 7 garbage`,
-answers that error instead, `{:error, {:sql_input_error, _}}`, and writes
-nothing either.
-
-Reading is untouched: `PRAGMA busy_timeout` in SQL still works and reads `0`
-while the slot is held, because SQLite zeroes the stored value whenever a
-callback is installed; `Xqlite.get_busy_timeout/1` answers the timeout the slot
-keeps. To change it, use `Xqlite.put_busy_timeout/2` — it goes through the slot,
-keeps your observers and your retry policy, and works whether the slot is held
-or empty. With the slot empty the raw PRAGMA is accepted as before.
-
-### A busy retry and the WAL autocheckpoint pin the connection
-
-Two by-design operations hold a connection's mutex across a blocking call, so
-while they run, *other operations on the same connection wait*:
-
-- A busy retry policy's `:sleep_ms` sleeps on the mutex-holding thread between
-  attempts. Budget `sleep_ms × max_retries` as the time the connection can be
-  pinned during contention.
-- In WAL mode, xqlite's emulated autocheckpoint runs a passive checkpoint — real
-  file I/O — inside its WAL hook on the committing thread, with the mutex held.
-
-Neither is a bug; both are simply where SQLite invokes the callback. They are
-called out because a long `:sleep_ms` or a large checkpoint can make a *shared*
-connection feel stalled to its other callers. The [Security](security.md)
-guide's "Thread-safety model" section is the canonical home for this — it
-explains the per-connection mutex model that these two cases sit inside.
+In WAL mode, xqlite's emulated autocheckpoint runs a passive checkpoint —
+real file I/O — inside its WAL hook on the committing thread, with the
+connection's mutex held, so while it runs *other operations on the same
+connection wait*. It is not a bug; it is simply where SQLite invokes the
+callback. It is called out because a large checkpoint can make a *shared*
+connection feel stalled to its other callers. A busy wait does not pin the
+connection: a call that meets another connection's lock sleeps in its own
+process between attempts and holds the mutex only while an attempt runs.
+The [Security](security.md) guide's "Thread-safety model" section is the
+canonical home for this — it explains the per-connection mutex model this
+case sits inside.
 
 ### Give each process its own connection — a shared handle serializes
 
@@ -555,13 +549,14 @@ process calling even a trivial reader on the same handle **blocks for the slow
 operation's entire duration**. That block now sits on a dirty scheduler rather
 than a normal one, so it no longer degrades unrelated normal-scheduler work — but
 the caller still waits, and it holds one of the VM's dirty I/O threads (10 by
-default; the `+SDio` emulator flag sets the count) while it waits, as does a call
-waiting for a lock another connection holds. Every other connection and the VM's
-file operations use the same threads: once that many calls wait at once, calls on
-other connections and file reads wait too, and the lock holder's own commit waits
-for a free thread, so the waits run out their budget and answer
-`{:error, {:database_busy_or_locked, 5, _}}`. Keep the calls that can wait at once
-(every pooled connection, plus every process sharing one) below the dirty I/O
+default; the `+SDio` emulator flag sets the count) while it waits. A call waiting
+for a lock another connection holds does not: it waits in its own process, between
+attempts, and no call keeps the connection while it waits for a lock. Every other
+connection and the VM's file operations use the same threads, so once that many
+callers wait for busy shared connections at once, calls on other connections and
+file reads wait too: with the default 10 threads, nine processes waiting for one
+connection behind a 1.5 s call stalled every other connection and file read in the
+node for 1.4 s. Keep the processes that share one connection below the dirty I/O
 thread count, or raise the count with `+SDio`.
 
 The transaction belongs to the connection, not to the process that began it: when
@@ -576,22 +571,6 @@ concurrency. Open one connection per process (or use a pool of independent
 handles). If you genuinely must share a handle, treat *every* call on it —
 including the cheap readers — as something that can block for as long as the
 longest operation currently running on that connection.
-
-### A backup or restore right after a busy answer does not wait
-
-`Xqlite.backup/3`, `Xqlite.backup_with_progress/4` and `Xqlite.restore/3` wait
-on a lock only through SQLite's busy handler, and SQLite restarts the handler's
-retry count only when a statement is prepared or run on the connection. After a
-call gave up on a lock, the next backup or restore on the same connection
-answers `{:error, {:database_busy_or_locked, 5, _}}` at once, whatever
-`busy_timeout` or the busy policy says, until a statement runs on that
-connection. To wait again, run any statement first, such as
-`Xqlite.query(conn, "SELECT 1")`: the count restarts even when that statement
-itself answers busy.
-
-On a shared cache, a lock another connection of the cache holds is answered at
-once as well: code 262 for a restore, 5 for a backup of this connection's
-database.
 
 ## Memory and binaries
 

@@ -841,7 +841,7 @@ defmodule Xqlite.TelemetryTest do
     :ok = Xqlite.set_busy_policy(probe, max_retries: 3, sleep_ms: 5)
     {:ok, bridge} = Xqlite.Telemetry.bridge(probe, hooks: [:busy], tag: :reachable)
 
-    {:error, _} = XqliteNIF.execute(probe, "INSERT INTO t VALUES (3, 'c')", [])
+    {:error, _} = Xqlite.execute(probe, "INSERT INTO t VALUES (3, 'c')")
 
     :ok = Xqlite.Telemetry.unbridge(bridge)
     {:ok, _} = XqliteNIF.execute(holder, "COMMIT", [])

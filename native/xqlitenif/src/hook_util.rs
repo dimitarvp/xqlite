@@ -6,7 +6,7 @@
 //!   `make_binary`) — used by every hook that forwards events as
 //!   `{:xqlite_*, ...}` tuples.
 //! * Single-subscriber atomic-slot lifecycle (`install_hook`,
-//!   `uninstall_hook`, `drop_hook`) — used by `busy_handler` and
+//!   `drop_hook`) — used by `busy_handler` and
 //!   `authorizer`, where the callback returns a decision and
 //!   multi-subscriber composition is ill-defined.
 //! * Multi-subscriber lists (`HookList<T>`) — used by every fan-out
@@ -185,31 +185,6 @@ where
             Err(e)
         }
     }
-}
-
-/// Uninstall a hook — clear the FFI side then reclaim the slot's box.
-///
-/// Callers must hold the connection `Mutex`. `unregister_fn` must
-/// clear the SQLite handler pointer *before* we free the box; otherwise
-/// a concurrent callback could still dereference it.
-pub(crate) fn uninstall_hook<T, F>(
-    slot: &AtomicPtr<T>,
-    unregister_fn: F,
-) -> Result<(), XqliteError>
-where
-    F: FnOnce() -> Result<(), XqliteError>,
-{
-    unregister_fn()?;
-
-    let old_ptr = slot.swap(std::ptr::null_mut(), Ordering::AcqRel);
-    if !old_ptr.is_null() {
-        // SAFETY: the SQLite handler has been cleared above; no
-        // callback can still read the old state.
-        unsafe {
-            drop(Box::from_raw(old_ptr));
-        }
-    }
-    Ok(())
 }
 
 /// Reclaim any box still held by the slot — used by `CallbackBoxes`'s `Drop`.

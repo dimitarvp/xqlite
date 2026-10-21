@@ -41,14 +41,14 @@ without the other would be a data race. Read concurrency is meant to come
 from a pool of independent handles (as the Ecto adapter does), not from
 sharing one handle across schedulers.
 
-Two by-design operations hold this mutex across a blocking call, pinning
-the connection for that call's duration. A busy retry policy's `sleep_ms`
-(`Xqlite.set_busy_policy/2`) sleeps on the mutex-holding thread between
-attempts; and in WAL mode xqlite runs the emulated autocheckpoint — a
-passive checkpoint, i.e. real file I/O — inside its WAL hook on the
-committing thread while the mutex is held. Neither is a bug (it is simply
-where SQLite invokes the callback), but both make other operations on the
-*same* connection wait.
+One by-design operation holds this mutex across a blocking call, pinning
+the connection for that call's duration: in WAL mode xqlite runs the
+emulated autocheckpoint — a passive checkpoint, i.e. real file I/O — inside
+its WAL hook on the committing thread while the mutex is held. It is not a
+bug (it is simply where SQLite invokes the callback), but it makes other
+operations on the *same* connection wait. A wait for a lock another
+connection holds does not hold the mutex: the call sleeps in its own
+process between attempts ([Parallel writes on the BEAM](parallel_writes.md)).
 
 Prepared statements, streams, and incremental-blob handles all hold a
 pointer into their connection's SQLite state, and closing the connection
@@ -170,9 +170,9 @@ statement for SQLite to reject:
 - `Xqlite.Pragma.get(conn, :wal_autocheckpoint)` still answers. xqlite's own
   WAL callback owns that setting and serves the value out of its own state.
   Writing it with `Xqlite.Pragma.put/3` does run a `PRAGMA` and is denied.
-- `Xqlite.Pragma.get(conn, :busy_timeout)` still answers while a busy policy
-  or observer holds the busy slot, from the timeout the slot keeps; with the
-  slot empty it runs a `PRAGMA` and is denied.
+- `Xqlite.Pragma.get(conn, :busy_timeout)` still answers, from the timeout
+  xqlite's busy slot keeps; xqlite holds that slot on every connection from
+  the open on.
 - `Xqlite.get_create_sql/2` still answers. It is a `SELECT` over
   `sqlite_schema`, so it obeys the `:read` and `:select` actions instead —
   deny either of those to stop it.

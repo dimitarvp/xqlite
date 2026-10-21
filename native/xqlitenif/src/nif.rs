@@ -129,7 +129,7 @@ fn execute_batch(
     sql_batch: TextArg,
 ) -> Term<'_> {
     let execution_result = connection::with_conn(&handle, |conn| {
-        query::core_execute_batch(conn, &sql_batch, &[])
+        query::core_execute_batch(conn, Some(&handle), &sql_batch, &[])
     });
     singular_ok_or_error_tuple(env, execution_result)
 }
@@ -145,7 +145,7 @@ fn optimize(env: Env<'_>, handle: ResourceArc<XqliteConn>) -> Term<'_> {
         let locked = "BEGIN IMMEDIATE; PRAGMA optimize; COMMIT";
         let no_params = rustler::types::atom::nil().to_term(env);
         match conn.is_autocommit() && !conn.is_readonly(rusqlite::MAIN_DB)? && !query_only()? {
-            true => query::core_execute_batch(conn, locked, &[]),
+            true => query::core_execute_batch(conn, None, locked, &[]),
             false => query::core_execute(env, conn, "PRAGMA optimize", no_params).map(|_| ()),
         }
     });
@@ -246,7 +246,7 @@ fn execute_batch_cancellable<'a>(
             null_mut(),
             token_bools.clone(),
         );
-        query::core_execute_batch(conn, &sql_batch, &token_bools)
+        query::core_execute_batch(conn, Some(&handle), &sql_batch, &token_bools)
     });
     singular_ok_or_error_tuple(env, execution_result)
 }
@@ -367,6 +367,53 @@ fn set_busy_timeout(env: Env<'_>, handle: ResourceArc<XqliteConn>, ms: u64) -> T
     let result =
         connection::with_conn(&handle, |conn| busy_handler::set_timeout(conn, &handle, ms));
     singular_ok_or_error_tuple(env, result)
+}
+
+/// Takes its arguments as terms: a statement or stream stands for its connection,
+/// and an argument out of its range is answered, never raised.
+#[rustler::nif(schedule = "DirtyIo")]
+fn busy_delay<'a>(
+    env: Env<'a>,
+    handle: Term<'a>,
+    retries: Term<'a>,
+    elapsed_ms: Term<'a>,
+    tokens_term: Term<'a>,
+) -> Term<'a> {
+    let refused = |argument, value| {
+        let reason = crate::error::invalid_busy_delay_argument(env, argument, value);
+        (error(), reason).encode(env)
+    };
+    let conn = handle
+        .decode::<ResourceArc<XqliteConn>>()
+        .or_else(|_| {
+            handle
+                .decode::<ResourceArc<XqliteStatement>>()
+                .map(|s| s.conn_resource_arc.clone())
+        })
+        .or_else(|_| {
+            handle
+                .decode::<ResourceArc<XqliteStream>>()
+                .map(|s| s.conn_resource_arc.clone())
+        });
+
+    match (conn, retries.decode::<u32>(), elapsed_ms.decode::<u64>()) {
+        (Err(_), _, _) => refused(atoms::handle(), handle),
+        (_, Err(_), _) => refused(atoms::retries(), retries),
+        (_, _, Err(_)) => refused(atoms::elapsed_ms(), elapsed_ms),
+        (Ok(conn), Ok(retries), Ok(elapsed_ms)) => {
+            let delay = crate::cancel::decode_tokens(tokens_term).and_then(|tokens| {
+                connection::with_conn(&conn, |_locked| {
+                    cancel_if_signalled(&tokens)?;
+                    Ok(busy_handler::delay(&conn, retries, elapsed_ms))
+                })
+            });
+            match delay {
+                Ok(Some(delay_ms)) => (ok(), delay_ms).encode(env),
+                Ok(None) => (ok(), atoms::give_up()).encode(env),
+                Err(e) => (error(), e).encode(env),
+            }
+        }
+    }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -564,8 +611,8 @@ fn get_pragma<'a>(
     connection::with_conn(&handle, |conn| {
         // SQLite reads both as 0 while our own callback holds the slot the
         // setting belongs to: wal_autocheckpoint while the master WAL hook
-        // emulates the autocheckpoint, busy_timeout while the busy slot is
-        // held. Report the value the slot keeps instead.
+        // emulates the autocheckpoint, busy_timeout always, the busy slot being
+        // xqlite's from the open on. Report the value the slot keeps instead.
         let name = pragma_name.as_slice();
         if name.eq_ignore_ascii_case(b"wal_autocheckpoint") {
             let pages = handle.wal_hook.autocheckpoint_pages.load(Ordering::Relaxed);
@@ -899,13 +946,14 @@ fn stmt_step<'a>(env: Env<'a>, stmt_handle: ResourceArc<XqliteStatement>) -> Ter
         // on at the row after the one SQLite stepped past.
         match stmt_handle.take_pending_error() {
             Some(pending) => Err(pending),
-            None => {
-                // SAFETY: with_live_stmt holds the connection mutex and proved
-                // stmt_ptr live.
-                let stepped = unsafe { process_single_step(env, stmt_ptr, db_handle) };
+            // SAFETY: with_live_stmt holds the connection mutex and proved
+            // stmt_ptr live.
+            None => unsafe {
+                let idle = ffi::sqlite3_stmt_busy(stmt_ptr) == 0;
+                let stepped = process_single_step(env, stmt_ptr, db_handle);
                 stmt_handle.set_holds_row(stepped_to_row(&stepped));
-                stepped.map_err(XqliteError::from)
-            }
+                stepped.map_err(|failed| statement::busy_step(failed.into(), stmt_ptr, idle))
+            },
         }
     });
 
@@ -980,7 +1028,8 @@ fn stmt_multi_step_impl<'a>(
 
         // SAFETY: with_live_stmt holds the connection mutex and proved
         // stmt_ptr live.
-        if unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } == 0 {
+        let idle = unsafe { ffi::sqlite3_stmt_busy(stmt_ptr) } == 0;
+        if idle {
             cancel_if_signalled(&token_bools)?;
         }
 
@@ -1004,9 +1053,13 @@ fn stmt_multi_step_impl<'a>(
                     break;
                 }
                 // The step itself failed, so no row was stepped past and the run
-                // is over, save a busy lock SQLite keeps for a retry: answer now
-                // and discard the batch's rows, exactly as a cancellation does.
-                Err(StepFailure::Failed(e)) => return Err(e),
+                // is over: answer now and discard the batch's rows, exactly as a
+                // cancellation does.
+                Err(StepFailure::Failed(e)) => {
+                    // SAFETY: with_live_stmt holds the connection mutex and proved
+                    // stmt_ptr live.
+                    return Err(unsafe { statement::busy_step(e, stmt_ptr, idle) });
+                }
                 Err(StepFailure::Unreadable(e)) => {
                     // The row is lost either way. Hand back the rows this
                     // batch had already read and hold the error for the next
@@ -1055,7 +1108,8 @@ fn stmt_reset(env: Env<'_>, stmt_handle: ResourceArc<XqliteStatement>) -> Term<'
         // stmt_ptr live.
         let ended = unsafe { statement::end_run(db_handle, stmt_ptr, ffi::sqlite3_reset) };
         match holds_row {
-            true => ended,
+            // SAFETY: as above; a statement holding a row is not idle.
+            true => ended.map_err(|e| unsafe { statement::busy_step(e, stmt_ptr, false) }),
             false => Ok(()),
         }
     });
@@ -1301,7 +1355,7 @@ fn stream_fetch_impl<'a>(
     );
 
     let fetch_outcome =
-        connection::with_busy_timeout_rule(&stream_handle.conn_resource_arc, || {
+        connection::rearm_and_judge(conn_ref, &stream_handle.conn_resource_arc, || {
             for _ in 0..batch_size {
                 let current_stmt_ptr = stream_handle.atomic_raw_stmt.load(Ordering::Acquire);
                 if current_stmt_ptr.is_null() {
@@ -1332,18 +1386,27 @@ fn stream_fetch_impl<'a>(
                         let _ = unsafe { finalize_stream_stmt_locked(&stream_handle) };
                         break;
                     }
-                    // The stream finalizes its statement on every error, so a
+                    // A busy answer before any row of the run is answered at once
+                    // with the statement reset and kept, so the next fetch starts
+                    // it over. Every other error finalizes the statement, so a
                     // failed step and a row that cannot be read are both held
                     // back the same way: there is nothing left to carry on
                     // with, and the rows already read still belong to the
                     // caller. A cancellation is the exception below — it is
                     // answered at once and its batch's rows go with it.
                     Err(e) => {
+                        let unread = fresh && fetched_rows.is_empty();
+                        // SAFETY: conn_lock_guard is held and current_stmt_ptr is live.
+                        let e = unsafe { statement::busy_step(e, current_stmt_ptr, unread) };
+                        if unread && matches!(e, XqliteError::DatabaseBusy { .. }) {
+                            return Err(e);
+                        }
                         stream_definitively_exhausted = true;
                         // SAFETY: conn_lock_guard is held for the whole loop.
                         let e = match unsafe { finalize_stream_stmt_locked(&stream_handle) } {
                             Ok(()) | Err(XqliteError::LockError(_)) => e,
-                            Err(commit) => commit,
+                            // SAFETY: not idle, so the finalized statement is never touched.
+                            Err(end) => unsafe { statement::busy_step(end, stmt_ptr, false) },
                         };
 
                         // A cancellation discards the batch, as the stream's

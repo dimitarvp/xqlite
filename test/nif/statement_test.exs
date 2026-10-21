@@ -609,7 +609,7 @@ defmodule Xqlite.NIF.StatementTest do
     assert :ok = Xqlite.finalize(stmt)
   end
 
-  test "a step refused as busy keeps its run: a bind waits and the retry writes once" do
+  test "a step refused as busy is reset with its bindings kept, and the retry writes once" do
     path = Xqlite.TestUtil.tmp_db_path("busy_step")
     {:ok, holder} = Xqlite.open(path)
     {:ok, conn} = Xqlite.open(path, busy_timeout: 0)
@@ -620,10 +620,7 @@ defmodule Xqlite.NIF.StatementTest do
     :ok = Xqlite.bind(stmt, ["x"])
     :ok = NIF.execute_batch(holder, "BEGIN IMMEDIATE;")
 
-    assert {:error, {:database_busy_or_locked, _code, _message}} = Xqlite.step(stmt)
-    assert {:error, :statement_mid_run} = Xqlite.bind(stmt, ["y"])
-    assert {:error, :statement_mid_run} = Xqlite.clear_bindings(stmt)
-
+    assert {:error, {:database_busy, %{retry: :call}}} = Xqlite.step(stmt)
     :ok = NIF.execute_batch(holder, "COMMIT;")
     assert :done = Xqlite.step(stmt)
     assert :ok = Xqlite.finalize(stmt)
