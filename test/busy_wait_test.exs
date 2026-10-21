@@ -52,7 +52,6 @@ defmodule Xqlite.BusyWaitTest do
              %{path: path} do
       {a, b} = pair(path, unquote(journal))
       {control, _} = pair(tmp_db_path("busy_wait_control"), unquote(journal))
-      {:ok, _} = Xqlite.register_busy_observer(a, self())
 
       check all(
               position <- StreamData.member_of([:autocommit, :deferred, :read]),
@@ -133,7 +132,6 @@ defmodule Xqlite.BusyWaitTest do
   property "a wait follows the busy settings, observers hear every retry, and a token ends it",
            %{path: path} do
     {a, b} = pair(path, :wal)
-    {:ok, _} = Xqlite.register_busy_observer(a, self())
     :ok = Xqlite.begin(b, :immediate)
 
     check all(
@@ -145,13 +143,12 @@ defmodule Xqlite.BusyWaitTest do
       {:ok, token} = Xqlite.create_cancel_token()
       if signal, do: later(signal, fn -> Xqlite.cancel_operation(token) end)
       started = System.monotonic_time(:millisecond)
-      answer = Xqlite.execute(a, @insert, [1], cancel_tokens: token)
+
+      {answer, ear} =
+        observed(a, fn -> Xqlite.execute(a, @insert, [1], cancel_tokens: token) end)
+
       assert System.monotonic_time(:millisecond) - started < budget + 1_000
-      heard = busy_messages()
-      assert for({retries, _} <- heard, do: retries) == Enum.to_list(0..(length(heard) - 1)//1)
-      elapsed = for {_, elapsed_ms} <- heard, do: elapsed_ms
-      assert elapsed == Enum.sort(elapsed)
-      assert_wait_answer(answer, heard, max_retries, signal)
+      assert_wait_answer(answer, ear, max_retries, signal)
       assert rows(b) == @seed
     end
   end
@@ -250,12 +247,17 @@ defmodule Xqlite.BusyWaitTest do
   test "a busy_timeout written in SQL sets the wait and keeps xqlite's callback",
        %{path: path} do
     {a, b} = pair(path, :wal)
-    {:ok, _} = Xqlite.register_busy_observer(a, self())
-    assert {:ok, %Xqlite.Result{}} = Xqlite.execute(a, "PRAGMA busy_timeout = 50")
-    assert {:ok, 50} = Xqlite.get_busy_timeout(a)
-    :ok = Xqlite.begin(b, :immediate)
-    assert {:error, {:database_busy, %{retry: :call}}} = Xqlite.execute(a, @insert, [7])
-    assert_received {:xqlite_busy, 0, _}
+
+    {answer, ear} =
+      observed(a, fn ->
+        assert {:ok, %Xqlite.Result{}} = Xqlite.execute(a, "PRAGMA busy_timeout = 50")
+        assert {:ok, 50} = Xqlite.get_busy_timeout(a)
+        :ok = Xqlite.begin(b, :immediate)
+        Xqlite.execute(a, @insert, [7])
+      end)
+
+    assert {:error, {:database_busy, %{retry: :call}}} = answer
+    assert [{0, _} | _] = hear(ear, 1)
     :ok = Xqlite.begin(a, :deferred)
     batch = "PRAGMA busy_timeout = 60; INSERT INTO t(v) VALUES (7)"
     assert {:error, {:database_busy, %{retry: :call}}} = NIF.execute_batch(a, batch)
@@ -368,29 +370,41 @@ defmodule Xqlite.BusyWaitTest do
   end
 
   defp assert_run_again(:call, {a, b, control}, {position, call, value}, again, pause) do
-    later(pause, fn -> Xqlite.commit(b) end)
-    assert :ok = again.()
+    run_again = fn ->
+      later(pause, fn -> Xqlite.commit(b) end)
+      again.()
+    end
+
+    {answer, ear} = observed(a, run_again)
+    send(ear, :stop)
+    assert :ok = answer
     :ok = leave(position, a)
     {_raw, control_call} = attempts(call, control, value, :autocommit)
     :ok = control_call.()
     assert rows(a) == rows(control)
-    busy_messages()
   end
 
   defp assert_run_again(:transaction, {a, b, _control}, _run, again, _pause) do
-    assert {:error, {:database_busy, %{retry: :transaction}}} = again.()
-    refute_received {:xqlite_busy, _, _}
+    {answer, ear} = observed(a, again)
+    assert {:error, {:database_busy, %{retry: :transaction}}} = answer
+    assert [] = hear(ear, 0)
     assert [:ok, :ok] = [Xqlite.rollback(a), Xqlite.commit(b)]
     assert rows(a) == @seed
   end
 
-  defp assert_wait_answer({:error, {:database_busy, busy}}, heard, max_retries, _signal) do
+  defp assert_wait_answer({:error, {:database_busy, busy}}, ear, max_retries, _signal) do
     assert %{retry: :call, retries: retries} = busy
-    assert {retries, retries <= max_retries} == {length(heard) - 1, true}
+    heard = hear(ear, retries + 1)
+    assert for({so_far, _} <- heard, do: so_far) == Enum.to_list(0..retries)
+    elapsed = for {_, elapsed_ms} <- heard, do: elapsed_ms
+    assert elapsed == Enum.sort(elapsed)
+    assert retries <= max_retries
   end
 
-  defp assert_wait_answer({:error, :operation_cancelled}, _heard, _max_retries, signal),
-    do: assert(is_integer(signal))
+  defp assert_wait_answer({:error, :operation_cancelled}, ear, _max_retries, signal) do
+    send(ear, :stop)
+    assert is_integer(signal)
+  end
 
   defp busy_settings do
     StreamData.one_of([
@@ -462,6 +476,33 @@ defmodule Xqlite.BusyWaitTest do
   defp finish(answer, stmt) do
     :ok = Xqlite.finalize(stmt)
     ok(answer)
+  end
+
+  # A busy message can reach its observer after the call has answered; with an observer that
+  # lives for one call, such a late message is lost instead of counted by the next run.
+  defp observed(conn, call) do
+    ear = spawn_link(fn -> listen([]) end)
+    {:ok, handle} = Xqlite.register_busy_observer(conn, ear)
+    answer = call.()
+    :ok = Xqlite.unregister_busy_observer(conn, handle)
+    {answer, ear}
+  end
+
+  defp listen(heard) do
+    receive do
+      {:xqlite_busy, retries, elapsed_ms} -> listen(heard ++ [{retries, elapsed_ms}])
+      {:hear, n, from} when length(heard) >= n -> send(from, {self(), heard})
+      :stop -> :ok
+    end
+  end
+
+  defp hear(ear, n) do
+    send(ear, {:hear, n, self()})
+    Process.send_after(ear, {:hear, 0, self()}, 1_000)
+
+    receive do
+      {^ear, heard} -> heard
+    end
   end
 
   defp busy_messages do
