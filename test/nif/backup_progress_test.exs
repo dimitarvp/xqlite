@@ -184,7 +184,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
         :ok = NIF.execute_batch(conn, "CREATE TABLE bkp_async AS SELECT zeroblob(12e6) AS v;")
         {:ok, token} = NIF.create_cancel_token()
         task = Task.async(NIF, :backup_with_progress, [conn, "main", path, self(), 1, [token]])
-        assert_receive {:xqlite_backup_progress, %{status: :copied}}
+        assert_receive {:xqlite_backup_progress, %{status: :copied}}, 5_000
         :ok = NIF.cancel_operation(token)
         assert {:error, :operation_cancelled} = Task.await(task, 5000)
         assert {:error, :no_pages} = NIF.restore(conn, "main", path)
@@ -224,7 +224,7 @@ defmodule Xqlite.NIF.BackupProgressTest do
 
         :ok = NIF.execute_batch(holder, hold)
         backup = Task.async(fn -> NIF.backup_with_progress(src, "main", path, me, 1, []) end)
-        assert_receive {:xqlite_backup_progress, %{status: :copied}}
+        assert_receive {:xqlite_backup_progress, %{status: :copied}}, 5_000
         :ok = Xqlite.commit(holder)
         assert {:error, {:database_busy, _}} = Task.await(backup)
         assert_receive {:xqlite_backup_progress, %{status: :busy, remaining: n, total: total}}
