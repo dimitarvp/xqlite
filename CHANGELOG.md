@@ -114,8 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread sends none.
 - **`step/1` and `multi_step/3` that meet a lock before handing back a row
   reset the statement and keep its bindings**, so a bind after the busy
-  answer is taken. The statement used to keep its run for a retry, and a
-  bind or `clear_bindings/1` then answered `{:error, :statement_mid_run}`.
+  answer is taken. The statement used to keep its run for a retry, so a
+  bind or `clear_bindings/1` then met a statement still mid-run (see Fixed).
   Both wait for the lock first, as the busy settings say.
 - **A `:full`, `:restart` or `:truncate` checkpoint that waits holds the
   checkpoint lock only during each attempt**, so another connection can
@@ -191,9 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that call can wait for the commit the release makes. The docs of
   `Xqlite.prepare/2`, `XqliteNIF.stmt_prepare/2` and
   `XqliteNIF.stmt_finalize/1` say so. The thread serves every connection,
-  one release after another, so a release that waits in its connection's
-  busy handler, or the close of a dropped connection, delays the releases
-  of the others. A release is no longer finished when the collection
+  one release after another, so the close of a dropped connection delays
+  the releases of the others. A release is no longer finished when the collection
   returns: another connection that meets the handle's lock right after it,
   with no busy timeout, gets a busy error. Where that matters, finalize,
   close and delete handles yourself, and close connections with
@@ -231,8 +230,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     23, _}}`;
   - with a busy policy or observer installed, a string holding a
     `busy_timeout` write and a second statement, where it returned the
-    error a `busy_timeout` write gets then, whichever statement held the
-    write; a `busy_timeout` write on its own still gets that error;
+    error a `busy_timeout` write got then, whichever statement held the
+    write; a `busy_timeout` write on its own now sets the busy timeout;
   - a string whose first statement is a PRAGMA, which is now checked
     before SQLite reads it: one that holds more and is longer than the
     connection's SQL length limit, which returned
@@ -378,8 +377,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset, or a blob open for writing. SQLite rejects them with `SQLITE_BUSY`
   then, which came back as `{:database_busy_or_locked, 5, _}`, the error a
   lock held by another connection gives, so code that retries on busy
-  retried against its own statement. A lock still returns
-  `{:database_busy_or_locked, 5, _}`; `rollback/1` and
+  retried against its own statement. A lock still returns the busy error,
+  now `{:database_busy, map}`; `rollback/1` and
   `rollback_to_savepoint/2` run whatever is mid-run.
 - **The query functions read rows through the code statements and streams
   use.** `XqliteNIF.query/3`, `query_cancellable/4`,
@@ -390,7 +389,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   step, multi_step and stream too, as it did from query; the bytes are
   unchanged.
 - **Backup progress messages are
-  `{:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}}`.**
+  `{:xqlite_backup_progress, %{remaining: r, total: t, status: :copied | :busy}}`,
+  where they were `{:xqlite_backup_progress, remaining, pagecount}`.**
   A `:busy` message sent before any step copied pages carries
   `remaining: nil, total: nil` (was `0` and `0`); a `:busy` after a copied
   step carries that step's counts.
@@ -408,9 +408,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wait, and the timeout written applies once `remove_busy_policy/1`
   runs. The new `Xqlite.get_busy_timeout/1` returns the timeout the
   connection keeps; `Xqlite.Pragma.get/2` and `XqliteNIF.get_pragma/2`
-  return it too while a busy policy or observer is installed, where they
-  returned SQLite's 0. `Xqlite.Pragma.get/3` rejects `:db_name` for
-  `busy_timeout` and `wal_autocheckpoint`.
+  return it too on every connection, xqlite holding the connection's busy
+  handler from the open on, where they returned SQLite's 0 while a busy
+  policy or observer was installed; an observer changes nothing in the
+  wait. `Xqlite.Pragma.get/3` rejects `:db_name` for `busy_timeout` and
+  `wal_autocheckpoint`.
 - **One tag for a bad option list everywhere:** `{:invalid_option, %{key,
   value, reason: :unknown_key | :duplicate_key | :invalid_value |
   :not_a_pair}}` (with `allowed` on `:unknown_key`) replaces
@@ -430,12 +432,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory;** a plain file name no longer creates a file, while an ATTACH by
   a URI naming a `mode=` still reaches the file. `":memory:"`, the name
   `Xqlite.open_in_memory/1` passes, is unchanged.
-- **`backup_with_progress/4` returns `{:error, {:database_busy_or_locked,
-  code, message}}` for a blocked step,** as `backup/3` does, instead of
-  retrying every 100 ms until a token fires.
+- **`backup_with_progress/4` returns `{:error, {:database_busy, map}}` for
+  a blocked step once the busy settings give up,** as `backup/3` does,
+  instead of retrying every 100 ms until a token fires.
 - **Seven PRAGMAs take and return typed values instead of coded
   numbers:** `cache_size` `{:pages, n}` or `{:kib, n}` (the open default
-  is now `{:kib, 64_000}`), `wal_autocheckpoint` and `cache_spill` `:off`
+  keeps its size and is now written `{:kib, 64_000}`, where it was
+  `-64_000`), `wal_autocheckpoint` and `cache_spill` `:off`
   or a count, `journal_size_limit`, `analysis_limit`, `soft_heap_limit`
   and `hard_heap_limit` `:unlimited` or a count. A bare coded number is
   rejected.
@@ -470,7 +473,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`wal_checkpoint/3` on a named database not in WAL mode returns
   `{:error, :not_in_wal_mode}`** instead of `-1` page counts, and a
   checkpoint lock another connection holds returns
-  `{:error, {:database_busy_or_locked, 5, _}}`.
+  `{:error, {:database_busy, map}}`.
 - **`connection_stats/1` reports the half SQLite defines for each
   counter.** `lookaside_hit`, `lookaside_miss_size` and
   `lookaside_miss_full` report SQLite's running totals (they read 0
@@ -806,10 +809,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wait.
 - **More calls wait as the busy settings say.** A journal-mode change, a
   backup or restore right after a busy answer, a backup whose destination
-  another connection holds, and a `:full`, `:restart` or `:truncate`
-  checkpoint now wait like any other call; a `:passive` checkpoint still
-  never waits. Inside your own transaction, a backup answers a lock on its
-  destination at once, with `retry: :transaction`. `backup_with_progress/4` sends a
+  or a restore whose source another connection holds, and a `:full`,
+  `:restart` or `:truncate` checkpoint now wait like any other call; a
+  `:passive` checkpoint still never waits. Inside your own transaction, a
+  backup answers a lock on its destination at once, with
+  `retry: :transaction`. `backup_with_progress/4` sends a
   `:busy` progress message for each attempt that met a lock, before it copies
   again.
 - **A PRAGMA that meets a lock answers the busy error.** A PRAGMA that met
@@ -884,20 +888,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{:error, :statement_mid_run}`, as `commit/1` and `savepoint/2` do. A read
   mid-run does not stop it, and inside a transaction it answers as before. A
   `BEGIN` sent as SQL is not checked; the known-limitations guide says so.
-- **`XqliteNIF.changeset_apply/3` waits for a locked database as the busy
+- **`XqliteNIF.changeset_apply/3` can wait for a locked database as the busy
   timeout or the busy policy says.** The apply reads the table's definition
   before its first write, and SQLite never waits for the write lock once a
   transaction has read, so while another connection held the write lock it
   answered `{:error, {:database_busy_or_locked, 5, _}}` at once, or code 517
   in WAL mode, whatever the busy settings, and busy observers heard nothing;
   under a steady writer it could fail every time. In autocommit, on a
-  connection that can write, it now takes the write lock first and commits
-  in the same call, rolling back on any failure, a busy commit included,
-  which used to leave the apply's own transaction open. So it also waits
-  behind another connection's write for an empty changeset, and behind
-  another connection's write on any attached database, which it never
-  writes, answering `{:error, {:database_busy_or_locked, 5, _}}` when that
-  wait runs out; a deny of `:transaction` stops it; and while a statement of
+  connection that can write, it now takes the write lock first, answering
+  `{:error, {:database_busy, map}}` at once while another connection holds
+  it, which `Xqlite.retry_busy/3` waits for, and commits in the same call,
+  rolling back on any failure, a busy commit included, which used to leave
+  the apply's own transaction open. So `retry_busy/3` also waits behind
+  another connection's write for an empty changeset, and behind another
+  connection's write on any attached database, which the apply never
+  writes, answering the busy error when that wait runs out; a deny of
+  `:transaction` stops the apply; and while a statement of
   the connection that SQLite counts as a write is mid-run it answers
   `{:error, :statement_mid_run}`, where it answered
   `{:error, {:database_busy_or_locked, 5, _}}`. A failed apply now sends
@@ -996,8 +1002,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows. The rebuild, the switch of `foreign_keys` and `legacy_alter_table`
   and their restore now run inside one call that holds the connection
   until it ends. A process sharing the connection waits for the whole
-  rebuild, including any wait for another connection's lock up to
-  `busy_timeout`, and no cancel token stops it.
+  rebuild, and no cancel token stops it.
 - **A rebuild whose `COMMIT` returns busy is rolled back.** With another
   connection reading the database in rollback-journal mode, the `COMMIT`
   returned `{:error, {:database_busy_or_locked, 5, _}}`. It left the
@@ -1185,12 +1190,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`backup/3`, `backup_with_progress/4` and `restore/3` no longer wait on
   a lock the caller did not ask to wait on.** A lock another connection
   holds on the file the library opens itself (a backup's destination, the
-  file a restore reads) returns `{:error, {:database_busy_or_locked, 5,
-  message}}` at once, where it waited rusqlite's 5 000 ms busy timeout
-  first. A lock on the caller's own database still waits as the
-  connection's `busy_timeout` or busy policy says, except in the two cases
-  the gotchas guide describes. `restore/3` no longer sleeps 200 ms on a
-  blocked step, and its busy error carries SQLite's own text for the code,
+  file a restore reads) waits as the busy settings say (see "More calls
+  wait as the busy settings say"), where it waited rusqlite's 5 000 ms busy
+  timeout first. A lock on the caller's own database still waits as the
+  connection's `busy_timeout` or busy policy says, except for a restore on
+  a shared cache, as the Known limitations guide says. `restore/3` no
+  longer sleeps 200 ms on a blocked step, and its busy error carries
+  SQLite's own text for the code,
   as the backup functions' does (it read "Error code 5: …").
   `backup_with_progress/4` now also sends its `:busy` message for a lock
   SQLite reports with an extended code, such as 262 when another connection
@@ -1329,8 +1335,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`serialize/2` returns what stopped it.** `Xqlite.serialize/2` and
   `XqliteNIF.serialize/2` returned `{:error, {:sqlite_failure, 7, 7, "out
   of memory"}}` for every failure. A lock another connection holds on a
-  schema with pages now returns `{:error, {:database_busy_or_locked, 5,
-  _}}` after one busy timeout where it waited two, and any other cause
+  schema with pages now returns `{:error, {:database_busy, map}}`, at once
+  from the raw call and after one busy timeout from `Xqlite.serialize/2`,
+  where it waited two, and any other cause
   SQLite records returns its own classified error. An empty schema whose
   first page SQLite cannot write (a zero-byte file opened read-only, a
   `:transaction` deny, a write lock on any attached database) and the
@@ -1441,17 +1448,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   misuse error.** Mid-run, `bind/3` returned
   `{:error, {:sqlite_failure, 21, 21, _}}` after walking the whole
   parameter list under the connection lock, while `clear_bindings/1`
-  returned `{:error, :statement_mid_run}`. A bind on a statement that takes
+  returned `:ok` (see below). A bind on a statement that takes
   parameters and is mid-run now returns `{:error, :statement_mid_run}`
   before it reads the list, and keeps the values bound before. After the
   run has ended (`:done` or a failed step) the bind resets the statement
   itself, so the next step reruns with the new values; `reset/1` is no
   longer needed first.
-- **Docs: a step rejected as busy keeps its run, and what a closed
-  connection leaves behind.** A step SQLite rejected as busy while taking
-  or committing its lock keeps its run for a retry (the statement stays
-  mid-run and the retry writes once), where the docs said every failed step
-  ended the run. After the connection is closed, every step, bind, reset,
+- **Docs: a step rejected as busy, and what a closed connection leaves
+  behind.** The docs said every failed step ended the run; a step SQLite
+  rejected as busy kept its run in 0.15.0, and is now reset with its
+  bindings kept when it had handed back no row (see Changed). After the
+  connection is closed, every step, bind, reset,
   clear and fetch returns `{:error, :connection_closed}`, finalize and
   `stream_close/1` return `:ok`, and the column-name calls return the names
   captured at prepare or open; `XqliteNIF.stmt_finalize/1` said the SQLite
