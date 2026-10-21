@@ -66,7 +66,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     # Let the probe hit SQLITE_BUSY and retry a few times, then release.
     Process.sleep(30)
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
 
     assert_receive {:xqlite_busy, first_retries, first_elapsed}, 500
     assert is_integer(first_retries) and first_retries >= 0
@@ -90,7 +90,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert_receive {:xqlite_busy, _, _}, 2_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -108,7 +108,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     # Should surrender reasonably close to the 40 ms cap, not 5s or 10s.
     assert elapsed < 2_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -124,7 +124,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert {:xqlite_busy, 1, elapsed_ms} = List.last(messages)
     assert elapsed_ms < 5_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -202,7 +202,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert elapsed < 1_000
     assert_receive {:xqlite_busy, _, _}, 2_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -224,7 +224,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     # The observer registered by prime_contention still fires.
     assert_receive {:xqlite_busy, _, _}, 2_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -251,7 +251,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert elapsed < 1_000
     refute_received {:xqlite_busy, _, _}
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -281,7 +281,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert elapsed < 1_000
 
     :ok = Xqlite.remove_busy_policy(probe)
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -313,7 +313,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert length(get_collected(first)) == first_count
     refute Enum.empty?(get_collected(second))
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -334,7 +334,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     # Should not blow up — enif_send to a dead pid is a no-op.
     assert match?({:error, _}, Xqlite.execute(probe, "INSERT INTO t VALUES (1)"))
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -385,7 +385,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert_receive {:forwarded_busy, {:xqlite_busy, _, _}}, 500
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -435,7 +435,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     # retries is the SQLite count param; it starts at 0 and monotonically grows.
     assert retries_sequence == Enum.sort(retries_sequence)
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -466,7 +466,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert_receive {:xqlite_busy, second_retries, _}, 2_000
     assert second_retries >= 1
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     assert {:ok, %Xqlite.Result{changes: 1}} = Task.await(probe_task, 5_000)
 
     :ok = NIF.close(holder)
@@ -495,7 +495,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     detach(handler_id)
     :ok = Xqlite.Telemetry.unbridge(bridge)
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -522,7 +522,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
 
     assert_receive {:xqlite_busy, _, _}, 2_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -577,7 +577,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     assert elapsed >= 30 and elapsed < 2_500, "waited #{elapsed} ms, expected about 60"
     assert_receive {:xqlite_busy, _, _}, 2_000
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -608,7 +608,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.unregister_busy_observer(probe, handle)
     assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -683,7 +683,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.unregister_busy_observer(probe, handle)
     assert {:ok, 0} = NIF.get_pragma(probe, "busy_timeout")
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -759,7 +759,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
     :ok = Xqlite.unregister_busy_observer(probe, handle)
     assert {:ok, 300} = NIF.get_pragma(probe, "busy_timeout")
 
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
@@ -790,7 +790,7 @@ defmodule Xqlite.NIF.BusyHandlerTest do
   end
 
   defp close_contended_pair(holder, probe) do
-    {:ok, _} = NIF.execute(holder, "COMMIT", [])
+    :ok = Xqlite.commit(holder)
     :ok = NIF.close(holder)
     :ok = NIF.close(probe)
   end
