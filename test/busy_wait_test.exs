@@ -28,10 +28,11 @@ defmodule Xqlite.BusyWaitTest do
     {holder, waiters, canary} =
       stall_setup(path, :erlang.system_info(:dirty_io_schedulers) + 1)
 
+    # Nine inputs, and each run has eleven writers wait out a real lock: 2 000 runs take minutes.
     check all(
             call <- StreamData.member_of([:insert, :transaction, :returning]),
             sleep_ms <- StreamData.integer(1..3),
-            max_runs: 2_000
+            max_runs: 100
           ) do
       policy = [max_retries: 1_000_000, max_elapsed_ms: 10_000, sleep_ms: sleep_ms]
       for conn <- waiters, do: :ok = Xqlite.set_busy_policy(conn, policy)

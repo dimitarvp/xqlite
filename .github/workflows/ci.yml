@@ -131,7 +131,7 @@ jobs:
   test:
     name: Tests
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: format_and_lint
     strategy:
       fail-fast: false
