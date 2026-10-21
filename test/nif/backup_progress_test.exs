@@ -214,10 +214,18 @@ defmodule Xqlite.NIF.BackupProgressTest do
         {:ok, src} = Xqlite.open(src_path, journal_mode: :delete, busy_timeout: 0)
         :ok = NIF.execute_batch(src, "CREATE TABLE t AS SELECT zeroblob(12e6) AS v;")
         me = self()
+        # A reserved lock lets the first step copy; the commit after it keeps the
+        # pending lock between its attempts and, in exclusive locking mode, the
+        # exclusive lock after it, so the next step meets a lock either way.
+        {:ok, holder} = NIF.open(src_path)
+
+        hold =
+          "PRAGMA locking_mode = EXCLUSIVE; BEGIN IMMEDIATE; INSERT INTO t VALUES (zeroblob(1))"
+
+        :ok = NIF.execute_batch(holder, hold)
         backup = Task.async(fn -> NIF.backup_with_progress(src, "main", path, me, 1, []) end)
         assert_receive {:xqlite_backup_progress, %{status: :copied}}
-        {:ok, holder} = NIF.open(src_path)
-        :ok = Xqlite.begin(holder, :exclusive)
+        :ok = Xqlite.commit(holder)
         assert {:error, {:database_busy, _}} = Task.await(backup)
         assert_receive {:xqlite_backup_progress, %{status: :busy, remaining: n, total: total}}
         assert is_integer(n) and n > 0 and total > n
